@@ -2,6 +2,80 @@
 
 All notable changes to the UUV (Underwater Vehicle) environment module.
 
+## [0.7.0] - 2026-01-25
+
+### Added
+- **Full Fossen model compliance**: Improved hydrodynamics to match Fossen textbook formulation
+  - Weight-buoyancy difference (W-B) for non-neutral buoyancy vehicles
+  - 3D center of buoyancy and center of gravity vectors
+  - Full Coriolis matrix C(v) = C_RB(v) + C_A(v) (rigid body + added mass)
+  - Configurable rigid body inertia for accurate C_RB computation
+
+- **Quaternion-based buoyancy calculation**: Eliminates gimbal lock issues
+  - `_compute_buoyancy_quat()`: Uses quaternion rotation instead of Euler angles
+  - Proper separation of weight force (at CoG) and buoyancy force (at CoB)
+  - Moment arms computed from force application points
+
+- **Vehicle mass support**: Configurable mass for W != B scenarios
+  - `vehicle_mass` config parameter (defaults to neutral buoyancy if None)
+  - `robot_mass` parameter in `__init__` for physics engine integration
+  - Mass randomization in domain randomization (`mass_scale` parameter)
+
+### Changed
+- **HydrodynamicsCfg**: New fields for complete Fossen model
+  - `vehicle_mass: float | None` - explicit mass (None = neutral buoyancy)
+  - `center_of_buoyancy: tuple[float, float, float]` - 3D CoB position
+  - `center_of_gravity: tuple[float, float, float]` - 3D CoG position
+  - `use_full_coriolis: bool` - enable C_RB + C_A (default: True)
+  - `rigid_body_inertia: tuple[float, float, float] | None` - I_xx, I_yy, I_zz
+  - `center_of_buoyancy_offset` deprecated (use `center_of_buoyancy` instead)
+
+- **HydrodynamicsModel**: Enhanced initialization and computation
+  - Accepts `robot_mass` from physics engine
+  - Priority: cfg.vehicle_mass > robot_mass > neutral buoyancy
+  - `randomize_parameters()`: Added `mass_scale` for mass randomization
+
+- **BlueROVHydrodynamicsCfg**: Updated with new config fields
+  - Explicit 3D center_of_buoyancy and center_of_gravity
+  - Enabled full Coriolis by default
+  - Added BlueROV2 Heavy specifications in docstring
+
+- **UUVEnv**: Passes robot mass to HydrodynamicsModel
+  - `_robot_mass` extracted before hydro model init
+  - Domain randomization now includes mass_scale
+
+### Technical Notes
+- Full Coriolis: C_RB uses skew-symmetric matrices for angular momentum coupling
+- Buoyancy: Gravity direction rotated to body frame via quat_apply_inverse
+- Backward compatible: center_of_buoyancy_offset still works (deprecated)
+
+## [0.6.0] - 2026-01-25
+
+### Changed
+- **Domain randomization strategy**: Fixed training/eval randomization logic
+  - `BlueROVTrainEnvCfg`: Now ENABLED (was disabled) - robust policy learning
+  - `BlueROVCurrentEnvCfg`: Now ENABLED with currents - full training setup
+  - `BlueROVEvalEnvCfg`: More aggressive ranges for stress testing
+- **Eval environment**: Wider randomization ranges than training for robustness testing
+  - Hydrodynamics: 0.5-1.5x (vs 0.8-1.2x in training)
+  - Thrusters: 0.7-1.3x (vs 0.9-1.1x in training)
+  - Orientation: ±45° (vs ±36° in training)
+  - Stronger ocean currents: 0.5 m/s (vs 0.3 m/s)
+
+## [0.5.3] - 2026-01-24
+
+### Added
+- **Ocean current visualization**: Bright yellow arrow showing current direction and magnitude
+  - Arrow positioned 1.0m above robot for visibility
+  - Arrow length proportional to current magnitude (1.0m - 4.0m)
+  - Thick arrow (0.4 scale) with emissive yellow color
+  - `_direction_to_quat()` helper for direction vector to quaternion conversion
+  - `get_ocean_current()` and `get_ocean_current_info()` API methods
+
+### Changed
+- `_set_debug_vis_impl()`: Now creates both goal position (red cube) and current (yellow arrow) markers
+- `_debug_vis_callback()`: Calls `_visualize_ocean_current()` in addition to goal visualization
+
 ## [0.5.2] - 2026-01-24
 
 ### Fixed

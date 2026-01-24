@@ -17,14 +17,15 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.envs.ui import BaseEnvWindow
-from isaaclab.markers import VisualizationMarkers
-from isaaclab.utils.math import subtract_frame_transforms, quat_apply_inverse, quat_from_euler_xyz, quat_mul
+
+# Pre-defined marker configs
+from isaaclab.markers import CUBOID_MARKER_CFG, VisualizationMarkers
+from isaaclab.markers.visualization_markers import VisualizationMarkersCfg
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.utils.math import quat_apply_inverse, quat_from_euler_xyz, quat_mul, subtract_frame_transforms
 
 from .hydrodynamics_model import HydrodynamicsModel
 from .uuv_env_cfg import UUVEnvCfg
-
-# Pre-defined marker config
-from isaaclab.markers import CUBOID_MARKER_CFG
 
 
 class UUVEnvWindow(BaseEnvWindow):
@@ -84,13 +85,22 @@ class UUVEnv(DirectRLEnv):
         """
         super().__init__(cfg, render_mode, **kwargs)
 
-        # Initialize hydrodynamics model
+        # Get body ID for force application (configurable body link name)
+        self._body_id = self._robot.find_bodies(self.cfg.body_link_name)[0]
+
+        # Get robot mass for normalization and hydrodynamics
+        self._robot_mass = self._robot.root_physx_view.get_masses()[0].sum()
+        self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
+        self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
+
+        # Initialize hydrodynamics model with robot mass from physics engine
         self._hydro = HydrodynamicsModel(
             num_envs=self.num_envs,
             device=self.device,
             cfg=self.cfg.hydrodynamics,
             current_cfg=self.cfg.ocean_current,
             dt=self.physics_dt,
+            robot_mass=self._robot_mass.item(),
         )
 
         # Action buffers
@@ -122,14 +132,6 @@ class UUVEnv(DirectRLEnv):
                 "alive_reward",
             ]
         }
-
-        # Get body ID for force application (configurable body link name)
-        self._body_id = self._robot.find_bodies(self.cfg.body_link_name)[0]
-
-        # Get robot mass for normalization
-        self._robot_mass = self._robot.root_physx_view.get_masses()[0].sum()
-        self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
-        self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
 
         # Build thruster allocation matrix from config
         self._allocation_matrix = torch.tensor(
@@ -226,10 +228,7 @@ class UUVEnv(DirectRLEnv):
             thrust_magnitude = self._thruster_state * self.cfg.thrusters.thrust_coefficient
 
         # Clamp to max thrust
-        thrust_magnitude = thrust_magnitude.clamp(
-            -self.cfg.thrusters.max_thrust,
-            self.cfg.thrusters.max_thrust
-        )
+        thrust_magnitude = thrust_magnitude.clamp(-self.cfg.thrusters.max_thrust, self.cfg.thrusters.max_thrust)
 
         # Apply allocation matrix to convert thruster forces to body wrench
         # wrench = allocation_matrix @ thrusts
@@ -282,12 +281,12 @@ class UUVEnv(DirectRLEnv):
         # Compile observation
         obs = torch.cat(
             [
-                self._robot.data.root_pos_w,           # 3
-                self._robot.data.root_quat_w,          # 4
-                self._robot.data.root_lin_vel_b,       # 3
-                self._robot.data.root_ang_vel_b,       # 3
-                goal_pos_b,                            # 3
-                up_b[:, :2],                           # 2 (xy components of up vector)
+                self._robot.data.root_pos_w,  # 3
+                self._robot.data.root_quat_w,  # 4
+                self._robot.data.root_lin_vel_b,  # 3
+                self._robot.data.root_ang_vel_b,  # 3
+                goal_pos_b,  # 3
+                up_b[:, :2],  # 2 (xy components of up vector)
             ],
             dim=-1,
         )
@@ -301,9 +300,7 @@ class UUVEnv(DirectRLEnv):
             Total reward tensor. Shape: (num_envs,).
         """
         # Position tracking reward (exponential)
-        distance_to_goal = torch.linalg.norm(
-            self._goal_pos_w - self._robot.data.root_pos_w, dim=1
-        )
+        distance_to_goal = torch.linalg.norm(self._goal_pos_w - self._robot.data.root_pos_w, dim=1)
         position_reward = (
             torch.exp(-distance_to_goal / self.cfg.position_reward_exp_scale)
             * self.cfg.position_reward_scale
@@ -315,7 +312,8 @@ class UUVEnv(DirectRLEnv):
         up_w = torch.tensor([[0.0, 0.0, 1.0]], device=self.device).expand(self.num_envs, -1)
         up_b = quat_apply_inverse(self._robot.data.root_quat_w, up_w)
         orientation_reward = (
-            (up_b[:, 2] + 1.0) / 2.0  # Map [-1, 1] to [0, 1]
+            (up_b[:, 2] + 1.0)
+            / 2.0  # Map [-1, 1] to [0, 1]
             * self.cfg.orientation_reward_scale
             * self.step_dt
         )
@@ -335,16 +333,12 @@ class UUVEnv(DirectRLEnv):
         # Action smoothness penalty (rate of change)
         action_rate = self._actions - self._prev_actions
         action_rate_penalty = (
-            torch.sum(torch.square(action_rate), dim=1)
-            * self.cfg.action_rate_penalty_scale
-            * self.step_dt
+            torch.sum(torch.square(action_rate), dim=1) * self.cfg.action_rate_penalty_scale * self.step_dt
         )
 
         # Action magnitude penalty (penalize large actions)
         action_magnitude_penalty = (
-            torch.sum(torch.square(self._actions), dim=1)
-            * self.cfg.action_magnitude_penalty_scale
-            * self.step_dt
+            torch.sum(torch.square(self._actions), dim=1) * self.cfg.action_magnitude_penalty_scale * self.step_dt
         )
 
         # Alive bonus
@@ -420,9 +414,7 @@ class UUVEnv(DirectRLEnv):
         self.extras["log"]["Episode_Termination/terminated"] = torch.count_nonzero(
             self.reset_terminated[env_ids]
         ).item()
-        self.extras["log"]["Episode_Termination/time_out"] = torch.count_nonzero(
-            self.reset_time_outs[env_ids]
-        ).item()
+        self.extras["log"]["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         self.extras["log"]["Metrics/final_distance_to_goal"] = final_distance.item()
 
         # Reset robot
@@ -431,9 +423,7 @@ class UUVEnv(DirectRLEnv):
 
         # Spread out resets
         if len(env_ids) == self.num_envs:
-            self.episode_length_buf = torch.randint_like(
-                self.episode_length_buf, high=int(self.max_episode_length)
-            )
+            self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
         # Reset action buffers
         self._actions[env_ids] = 0.0
@@ -445,21 +435,19 @@ class UUVEnv(DirectRLEnv):
 
         # Apply domain randomization if enabled
         if self.cfg.randomization.enable:
-            # Randomize hydrodynamic parameters
+            # Randomize hydrodynamic parameters including vehicle mass
             self._hydro.randomize_parameters(
                 env_ids=env_ids,
                 added_mass_scale=self.cfg.randomization.added_mass_scale,
                 linear_damping_scale=self.cfg.randomization.linear_damping_scale,
                 quadratic_damping_scale=self.cfg.randomization.quadratic_damping_scale,
                 volume_scale=self.cfg.randomization.volume_scale,
+                mass_scale=self.cfg.randomization.mass_scale,
             )
 
             # Randomize thrust coefficient
-            thrust_scales = (
-                torch.rand(len(env_ids), device=self.device)
-                * (self.cfg.randomization.thrust_coefficient_scale[1] - self.cfg.randomization.thrust_coefficient_scale[0])
-                + self.cfg.randomization.thrust_coefficient_scale[0]
-            )
+            tc_scale = self.cfg.randomization.thrust_coefficient_scale
+            thrust_scales = torch.rand(len(env_ids), device=self.device) * (tc_scale[1] - tc_scale[0]) + tc_scale[0]
             self._randomized_thrust_coeff[env_ids] = self.cfg.thrusters.thrust_coefficient * thrust_scales
 
             # Randomize thruster time constants
@@ -481,13 +469,10 @@ class UUVEnv(DirectRLEnv):
 
         # Sample new goal position
         goal_range = torch.tensor(self.cfg.goal_pos_range, device=self.device)
-        self._goal_pos_w[env_ids, :2] = (
-            torch.rand(len(env_ids), 2, device=self.device) * 2 - 1
-        ) * goal_range[:2]
+        self._goal_pos_w[env_ids, :2] = (torch.rand(len(env_ids), 2, device=self.device) * 2 - 1) * goal_range[:2]
         self._goal_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
         self._goal_pos_w[env_ids, 2] = (
-            torch.rand(len(env_ids), device=self.device) * goal_range[2]
-            + self.cfg.initial_height
+            torch.rand(len(env_ids), device=self.device) * goal_range[2] + self.cfg.initial_height
         )
 
         # Reset robot state
@@ -550,16 +535,154 @@ class UUVEnv(DirectRLEnv):
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Setup debug visualization."""
         if debug_vis:
+            # Goal position marker (red cube)
             if not hasattr(self, "goal_pos_visualizer"):
                 marker_cfg = CUBOID_MARKER_CFG.copy()
                 marker_cfg.markers["cuboid"].size = (0.1, 0.1, 0.1)
                 marker_cfg.prim_path = "/Visuals/Command/goal_position"
                 self.goal_pos_visualizer = VisualizationMarkers(marker_cfg)
             self.goal_pos_visualizer.set_visibility(True)
+
+            # Ocean current arrow marker (bright yellow for visibility)
+            if not hasattr(self, "current_visualizer"):
+                arrow_cfg = VisualizationMarkersCfg(
+                    prim_path="/Visuals/Command/ocean_current",
+                    markers={
+                        "arrow": sim_utils.UsdFileCfg(
+                            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                            scale=(1.0, 0.5, 0.5),  # Thicker arrow
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(1.0, 1.0, 0.0),  # Bright yellow
+                                emissive_color=(0.3, 0.3, 0.0),  # Slight glow
+                            ),
+                        )
+                    },
+                )
+                self.current_visualizer = VisualizationMarkers(arrow_cfg)
+            self.current_visualizer.set_visibility(True)
         else:
             if hasattr(self, "goal_pos_visualizer"):
                 self.goal_pos_visualizer.set_visibility(False)
+            if hasattr(self, "current_visualizer"):
+                self.current_visualizer.set_visibility(False)
 
     def _debug_vis_callback(self, event):
         """Update debug visualization."""
+        # Update goal position markers
         self.goal_pos_visualizer.visualize(self._goal_pos_w)
+
+        # Update ocean current arrows
+        self._visualize_ocean_current()
+
+    def _visualize_ocean_current(self):
+        """Visualize ocean current as arrows above robot positions.
+
+        The arrow direction indicates current flow direction, and length
+        indicates magnitude (scaled: 1 m/s = 1 meter arrow length).
+        """
+        # Get current velocity from hydrodynamics model (world frame)
+        current_vel = self._hydro._current_velocity[:, :3]  # Linear velocity only (x, y, z)
+        current_magnitude = torch.linalg.norm(current_vel, dim=1, keepdim=True)
+
+        # Skip if no current - hide arrows with zero scale
+        if current_magnitude.max() < 1e-6:
+            scales = torch.full((self.num_envs, 3), 0.001, device=self.device)
+            self.current_visualizer.visualize(
+                translations=self._robot.data.root_pos_w,
+                scales=scales,
+            )
+            return
+
+        # Normalize current direction
+        current_dir = current_vel / (current_magnitude + 1e-6)
+
+        # Compute quaternion to rotate X-axis to current direction
+        orientations = self._direction_to_quat(current_dir)
+
+        # Scale arrow: length proportional to magnitude, thick for visibility
+        # Arrow length = magnitude * 5 (so 0.3 m/s current = 1.5m arrow)
+        # Minimum length 1.0m for visibility, max 4.0m
+        arrow_length = torch.clamp(current_magnitude * 5.0, 1.0, 4.0)
+        arrow_thickness = torch.full_like(arrow_length, 0.4)  # Very thick for visibility
+        scales = torch.cat([arrow_length, arrow_thickness, arrow_thickness], dim=1)
+
+        # Position arrows above robot (1.0m offset in Z for clear visibility)
+        arrow_positions = self._robot.data.root_pos_w.clone()
+        arrow_positions[:, 2] += 1.0
+
+        self.current_visualizer.visualize(
+            translations=arrow_positions,
+            orientations=orientations,
+            scales=scales,
+        )
+
+    def _direction_to_quat(self, direction: torch.Tensor) -> torch.Tensor:
+        """Convert direction vectors to quaternions that rotate X-axis to the direction.
+
+        Args:
+            direction: Normalized direction vectors. Shape: (num_envs, 3).
+
+        Returns:
+            Quaternions (w, x, y, z). Shape: (num_envs, 4).
+        """
+        # Reference direction (X-axis)
+        x_axis = torch.tensor([[1.0, 0.0, 0.0]], device=self.device).expand(self.num_envs, -1)
+
+        # Compute rotation axis (cross product)
+        axis = torch.cross(x_axis, direction, dim=-1)
+        axis_norm = torch.linalg.norm(axis, dim=1, keepdim=True)
+
+        # Compute rotation angle (dot product)
+        cos_angle = torch.sum(x_axis * direction, dim=1, keepdim=True)
+
+        # Handle parallel and anti-parallel cases
+        parallel_mask = axis_norm.squeeze(-1) < 1e-6
+
+        # For non-parallel cases: use axis-angle to quaternion
+        axis_normalized = axis / (axis_norm + 1e-6)
+        angle = torch.acos(torch.clamp(cos_angle, -1.0, 1.0))
+        half_angle = angle / 2.0
+
+        w = torch.cos(half_angle)
+        xyz = axis_normalized * torch.sin(half_angle)
+
+        quat = torch.cat([w, xyz], dim=-1)
+
+        # For parallel case (same direction): identity quaternion
+        identity_quat = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=self.device).expand(self.num_envs, -1)
+
+        # For anti-parallel case (opposite direction): 180 degree rotation around Y or Z
+        anti_parallel_mask = parallel_mask & (cos_angle.squeeze(-1) < 0)
+        rotation_180_y = torch.tensor([[0.0, 0.0, 1.0, 0.0]], device=self.device).expand(self.num_envs, -1)
+
+        # Apply masks
+        result = torch.where(parallel_mask.unsqueeze(-1), identity_quat, quat)
+        result = torch.where(anti_parallel_mask.unsqueeze(-1), rotation_180_y, result)
+
+        return result
+
+    def get_ocean_current(self) -> torch.Tensor:
+        """Get current ocean current velocity for all environments.
+
+        Returns:
+            Ocean current velocity in world frame. Shape: (num_envs, 6).
+            Format: [vx, vy, vz, wx, wy, wz] where v is linear and w is angular.
+        """
+        return self._hydro._current_velocity.clone()
+
+    def get_ocean_current_info(self) -> dict:
+        """Get detailed ocean current information for logging/debugging.
+
+        Returns:
+            Dictionary with current statistics:
+            - linear_velocity: Mean linear current velocity (x, y, z)
+            - magnitude: Mean current magnitude
+            - max_magnitude: Maximum current magnitude across environments
+        """
+        current = self._hydro._current_velocity[:, :3]
+        magnitude = torch.linalg.norm(current, dim=1)
+        return {
+            "linear_velocity": current.mean(dim=0).cpu().tolist(),
+            "magnitude": magnitude.mean().item(),
+            "max_magnitude": magnitude.max().item(),
+        }

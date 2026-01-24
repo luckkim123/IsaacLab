@@ -20,7 +20,7 @@ from isaaclab.assets import ArticulationCfg
 from isaaclab.utils import configclass
 
 from .hydrodynamics_model import HydrodynamicsCfg, OceanCurrentCfg
-from .uuv_env_cfg import UUVEnvCfg, ThrusterCfg, DomainRandomizationCfg
+from .uuv_env_cfg import DomainRandomizationCfg, ThrusterCfg, UUVEnvCfg
 
 
 @configclass
@@ -29,6 +29,11 @@ class BlueROVHydrodynamicsCfg(HydrodynamicsCfg):
 
     Parameters are from experimental identification (MarineGym, IROS 2025).
     All values are taken from BlueROV.yaml in the MarineGym repository.
+
+    BlueROV2 Heavy specifications:
+        - Air weight: ~11.5 kg
+        - Displacement volume: 11.35 L (0.0113459 m^3)
+        - Designed for neutral buoyancy in freshwater
     """
 
     # Added mass coefficients [surge, sway, heave, roll, pitch, yaw]
@@ -40,14 +45,31 @@ class BlueROVHydrodynamicsCfg(HydrodynamicsCfg):
     # Quadratic damping coefficients
     quadratic_damping: tuple[float, ...] = (18.18, 21.66, 36.99, 1.55, 1.55, 1.55)
 
-    # Vehicle volume (m^3) - from BlueROV2 specifications
+    # Vehicle mass (kg) - BlueROV2 Heavy air weight
+    # Set to None for neutral buoyancy assumption (mass = volume * water_density)
+    vehicle_mass: float | None = None
+
+    # Vehicle volume (m^3) - from BlueROV2 specifications (11.35 L displacement)
     volume: float = 0.0113459
 
-    # Center of buoyancy offset (m) - positive means CoB above CoM
-    center_of_buoyancy_offset: float = 0.01
+    # Center of buoyancy position in body frame (m, [x, y, z])
+    # Positive z means CoB above CoG (provides passive stability)
+    center_of_buoyancy: tuple[float, float, float] = (0.0, 0.0, 0.01)
+
+    # Center of gravity position in body frame (m, [x, y, z])
+    # Assumed at body frame origin
+    center_of_gravity: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     # Water density (kg/m^3) - freshwater
     water_density: float = 997.0
+
+    # Enable full Coriolis matrix computation C(v) = C_RB(v) + C_A(v)
+    use_full_coriolis: bool = True
+
+    # Rigid body inertia for full Coriolis (kg*m^2, [I_xx, I_yy, I_zz])
+    # Estimated from added mass rotational terms * 0.5 (default if None)
+    rigid_body_inertia: tuple[float, float, float] | None = None
+
 
 # Path to BlueROV USD file (relative to this module)
 _ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
@@ -122,15 +144,36 @@ class BlueROVEnvCfg(UUVEnvCfg):
 
 @configclass
 class BlueROVCurrentEnvCfg(BlueROVEnvCfg):
-    """BlueROV environment with ocean current disturbances.
+    """BlueROV environment with ocean current disturbances and domain randomization.
 
-    This configuration adds random ocean currents for domain randomization
-    and robustness training.
+    This configuration adds random ocean currents and full domain randomization
+    for robust policy training that can handle real-world variations.
     """
 
     ocean_current: OceanCurrentCfg = OceanCurrentCfg(
         max_velocity=(0.3, 0.3, 0.1, 0.0, 0.0, 0.0),  # m/s
         noise_scale=(0.1, 0.1, 0.05, 0.0, 0.0, 0.0),
+    )
+
+    # Domain randomization for robust training
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg(
+        enable=True,
+        # Initial pose randomization
+        position_x_range=(-2.5, 2.5),
+        position_y_range=(-2.5, 2.5),
+        position_z_range=(1.5, 2.5),
+        roll_range=(-0.628, 0.628),
+        pitch_range=(-0.628, 0.628),
+        yaw_range=(0.0, 6.283),
+        # Hydrodynamic parameter randomization
+        added_mass_scale=(0.8, 1.2),
+        linear_damping_scale=(0.8, 1.2),
+        quadratic_damping_scale=(0.8, 1.2),
+        volume_scale=(0.95, 1.05),
+        mass_scale=(0.9, 1.1),
+        # Thruster randomization
+        thrust_coefficient_scale=(0.9, 1.1),
+        time_constant_scale=(0.9, 1.1),
     )
 
     # Slightly harder task with currents
@@ -140,54 +183,70 @@ class BlueROVCurrentEnvCfg(BlueROVEnvCfg):
 
 @configclass
 class BlueROVTrainEnvCfg(BlueROVEnvCfg):
-    """BlueROV training environment with minimal domain randomization.
+    """BlueROV training environment with domain randomization.
 
-    Training mode: Randomization typically disabled for stable learning.
-    Use this configuration for initial policy training.
+    Training mode: Randomization enabled for robust policy learning.
+    Domain randomization during training helps sim-to-real transfer.
     """
 
-    # Disable randomization for deterministic training
-    randomization: DomainRandomizationCfg = DomainRandomizationCfg(enable=False)
+    # Enable domain randomization for robust training
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg(
+        enable=True,
+        # Initial pose randomization
+        position_x_range=(-2.5, 2.5),
+        position_y_range=(-2.5, 2.5),
+        position_z_range=(1.5, 2.5),
+        roll_range=(-0.628, 0.628),  # ±36 degrees
+        pitch_range=(-0.628, 0.628),  # ±36 degrees
+        yaw_range=(0.0, 6.283),  # 0-360 degrees
+        # Hydrodynamic parameter randomization
+        added_mass_scale=(0.8, 1.2),
+        linear_damping_scale=(0.8, 1.2),
+        quadratic_damping_scale=(0.8, 1.2),
+        volume_scale=(0.95, 1.05),
+        mass_scale=(0.9, 1.1),
+        # Thruster randomization
+        thrust_coefficient_scale=(0.9, 1.1),
+        time_constant_scale=(0.9, 1.1),
+    )
 
 
 @configclass
 class BlueROVEvalEnvCfg(BlueROVEnvCfg):
-    """BlueROV evaluation environment with full domain randomization.
+    """BlueROV evaluation environment with extreme domain randomization.
 
-    Evaluation mode: Full randomization enabled for robustness testing.
-    Use this configuration to evaluate policy generalization.
+    Evaluation mode: More aggressive randomization than training to stress-test
+    the learned policy's robustness and generalization capability.
 
-    Randomization ranges follow MarineGym defaults:
-    - Position: XY ±2.5m, Z 1.5-2.5m
-    - Orientation: Roll/Pitch ±36°, Yaw 0-360°
-    - Hydrodynamics: Added mass/damping 0.5-1.0x, Volume 0.9-1.1x
-    - Mass: 0.8-1.2x
-    - Thrusters: 0.8-1.2x
+    Uses wider randomization ranges than training:
+    - Hydrodynamics: 0.5-1.5x (vs 0.8-1.2x in training)
+    - Thrusters: 0.7-1.3x (vs 0.9-1.1x in training)
+    - Stronger ocean currents
     """
 
-    # Enable full domain randomization for robustness evaluation
+    # Aggressive domain randomization for stress testing
     randomization: DomainRandomizationCfg = DomainRandomizationCfg(
         enable=True,
-        # Initial pose randomization (MarineGym defaults)
-        position_x_range=(-2.5, 2.5),
-        position_y_range=(-2.5, 2.5),
-        position_z_range=(1.5, 2.5),
-        roll_range=(-0.628, 0.628),    # ±36 degrees
-        pitch_range=(-0.628, 0.628),   # ±36 degrees
-        yaw_range=(0.0, 6.283),        # 0-360 degrees
-        # Hydrodynamic parameter randomization
-        added_mass_scale=(0.5, 1.0),
-        linear_damping_scale=(0.5, 1.0),
-        quadratic_damping_scale=(0.5, 1.0),
-        volume_scale=(0.9, 1.1),
-        mass_scale=(0.8, 1.2),
-        # Thruster randomization
-        thrust_coefficient_scale=(0.8, 1.2),
-        time_constant_scale=(0.8, 1.2),
+        # Initial pose randomization
+        position_x_range=(-3.0, 3.0),
+        position_y_range=(-3.0, 3.0),
+        position_z_range=(1.0, 3.0),
+        roll_range=(-0.785, 0.785),  # ±45 degrees (wider than training)
+        pitch_range=(-0.785, 0.785),  # ±45 degrees
+        yaw_range=(0.0, 6.283),  # 0-360 degrees
+        # Wider hydrodynamic parameter randomization
+        added_mass_scale=(0.5, 1.5),
+        linear_damping_scale=(0.5, 1.5),
+        quadratic_damping_scale=(0.5, 1.5),
+        volume_scale=(0.85, 1.15),
+        mass_scale=(0.7, 1.3),
+        # Wider thruster randomization
+        thrust_coefficient_scale=(0.7, 1.3),
+        time_constant_scale=(0.7, 1.3),
     )
 
-    # Enable ocean currents for evaluation
+    # Stronger ocean currents for evaluation
     ocean_current: OceanCurrentCfg = OceanCurrentCfg(
-        max_velocity=(0.3, 0.3, 0.1, 0.0, 0.0, 0.0),  # m/s
-        noise_scale=(0.1, 0.1, 0.05, 0.0, 0.0, 0.0),
+        max_velocity=(0.5, 0.5, 0.2, 0.0, 0.0, 0.0),  # Stronger than training
+        noise_scale=(0.15, 0.15, 0.1, 0.0, 0.0, 0.0),
     )

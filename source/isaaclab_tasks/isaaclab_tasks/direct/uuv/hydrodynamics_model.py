@@ -20,10 +20,10 @@ from typing import TYPE_CHECKING
 import torch
 
 from isaaclab.utils import configclass
-from isaaclab.utils.math import quat_apply_inverse, quat_apply
+from isaaclab.utils.math import quat_apply_inverse
 
 if TYPE_CHECKING:
-    from typing import Sequence
+    from collections.abc import Sequence
 
 
 @configclass
@@ -32,6 +32,14 @@ class HydrodynamicsCfg:
 
     All coefficients are for a 6-DOF system: [surge, sway, heave, roll, pitch, yaw].
     Diagonal matrices are assumed for simplicity (off-diagonal terms can be added later).
+
+    The model implements the complete Fossen formulation including:
+        - Weight-buoyancy difference (W-B) for non-neutral buoyancy vehicles
+        - Full Coriolis matrix C(v) = C_RB(v) + C_A(v)
+        - Quaternion-based buoyancy calculation (no gimbal lock)
+
+    Reference:
+        Fossen, T.I. (2011). Handbook of Marine Craft Hydrodynamics and Motion Control. Wiley.
     """
 
     # Added mass coefficients (kg for linear, kg*m^2 for angular)
@@ -43,17 +51,36 @@ class HydrodynamicsCfg:
     # Quadratic damping coefficients (Ns^2/m^2 for linear, Nms^2/rad^2 for angular)
     quadratic_damping: tuple[float, ...] = (18.18, 21.66, 36.99, 1.55, 1.55, 1.55)
 
+    # Vehicle mass (kg). If None, assumes neutral buoyancy (mass = volume * water_density)
+    vehicle_mass: float | None = None
+
     # Vehicle volume for buoyancy calculation (m^3)
     volume: float = 0.0113459
 
-    # Center of buoyancy offset from center of mass (m, positive = CoB above CoM)
-    center_of_buoyancy_offset: float = 0.01
+    # Center of buoyancy position in body frame (m, [x, y, z])
+    # For backward compatibility, if only z-offset needed, use center_of_buoyancy_offset
+    center_of_buoyancy: tuple[float, float, float] = (0.0, 0.0, 0.01)
 
-    # Water density (kg/m^3, default: freshwater)
+    # Center of gravity position in body frame (m, [x, y, z])
+    # Usually (0, 0, 0) if body frame origin is at CoG
+    center_of_gravity: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+    # DEPRECATED: Use center_of_buoyancy instead. Kept for backward compatibility.
+    center_of_buoyancy_offset: float | None = None
+
+    # Water density (kg/m^3, default: freshwater, seawater: 1025.0)
     water_density: float = 997.0
 
     # Acceleration filter alpha for numerical stability (0 < alpha < 1)
     acceleration_filter_alpha: float = 0.3
+
+    # Use full Coriolis matrix C(v) = C_RB(v) + C_A(v) per Fossen model
+    # If False, uses simplified added-mass-only Coriolis (legacy behavior)
+    use_full_coriolis: bool = True
+
+    # Rigid body inertia for full Coriolis (kg*m^2, [I_xx, I_yy, I_zz])
+    # If None, estimates from added mass rotational terms
+    rigid_body_inertia: tuple[float, float, float] | None = None
 
 
 @configclass
@@ -97,6 +124,7 @@ class HydrodynamicsModel:
         cfg: HydrodynamicsCfg,
         current_cfg: OceanCurrentCfg | None = None,
         dt: float = 0.01,
+        robot_mass: float | None = None,
     ) -> None:
         """Initialize the hydrodynamics model.
 
@@ -106,6 +134,7 @@ class HydrodynamicsModel:
             cfg: Hydrodynamics configuration.
             current_cfg: Ocean current configuration. Defaults to no current.
             dt: Simulation timestep for acceleration calculation.
+            robot_mass: Robot mass from physics engine. Used if cfg.vehicle_mass is None.
         """
         self.num_envs = num_envs
         self.device = device
@@ -114,23 +143,78 @@ class HydrodynamicsModel:
         self.dt = dt
 
         # Build hydrodynamic matrices (num_envs, 6, 6)
-        self._added_mass_matrix = torch.diag(
-            torch.tensor(cfg.added_mass, dtype=torch.float32, device=device)
-        ).unsqueeze(0).repeat(num_envs, 1, 1)
+        self._added_mass_matrix = (
+            torch.diag(torch.tensor(cfg.added_mass, dtype=torch.float32, device=device))
+            .unsqueeze(0)
+            .repeat(num_envs, 1, 1)
+        )
 
-        self._linear_damping_diag = torch.tensor(
-            cfg.linear_damping, dtype=torch.float32, device=device
-        ).unsqueeze(0).repeat(num_envs, 1)
+        self._linear_damping_diag = (
+            torch.tensor(cfg.linear_damping, dtype=torch.float32, device=device).unsqueeze(0).repeat(num_envs, 1)
+        )
 
-        self._quadratic_damping_diag = torch.tensor(
-            cfg.quadratic_damping, dtype=torch.float32, device=device
-        ).unsqueeze(0).repeat(num_envs, 1)
+        self._quadratic_damping_diag = (
+            torch.tensor(cfg.quadratic_damping, dtype=torch.float32, device=device).unsqueeze(0).repeat(num_envs, 1)
+        )
+
+        # Vehicle mass for weight-buoyancy difference
+        # Priority: cfg.vehicle_mass > robot_mass > neutral buoyancy assumption
+        if cfg.vehicle_mass is not None:
+            self._vehicle_mass = torch.full((num_envs,), cfg.vehicle_mass, dtype=torch.float32, device=device)
+        elif robot_mass is not None:
+            self._vehicle_mass = torch.full((num_envs,), robot_mass, dtype=torch.float32, device=device)
+        else:
+            # Neutral buoyancy: mass = volume * water_density
+            self._vehicle_mass = torch.full(
+                (num_envs,), cfg.volume * cfg.water_density, dtype=torch.float32, device=device
+            )
 
         # Buoyancy parameters
         self._volume = torch.full((num_envs,), cfg.volume, dtype=torch.float32, device=device)
-        self._cob_offset = torch.full((num_envs,), cfg.center_of_buoyancy_offset, dtype=torch.float32, device=device)
         self._water_density = cfg.water_density
         self._gravity = 9.81
+
+        # Weight = m * g
+        self._weight = self._vehicle_mass * self._gravity
+
+        # Buoyancy force magnitude = rho * V * g
+        self._buoyancy_force_base = self._water_density * self._gravity * self._volume
+
+        # Center of buoyancy and gravity in body frame (3D vectors)
+        # Handle backward compatibility with center_of_buoyancy_offset
+        if cfg.center_of_buoyancy_offset is not None:
+            # Legacy: scalar offset interpreted as z-component
+            self._r_cb = torch.zeros(num_envs, 3, dtype=torch.float32, device=device)
+            self._r_cb[:, 2] = cfg.center_of_buoyancy_offset
+        else:
+            self._r_cb = (
+                torch.tensor(cfg.center_of_buoyancy, dtype=torch.float32, device=device)
+                .unsqueeze(0)
+                .repeat(num_envs, 1)
+            )
+
+        self._r_cg = (
+            torch.tensor(cfg.center_of_gravity, dtype=torch.float32, device=device).unsqueeze(0).repeat(num_envs, 1)
+        )
+
+        # Keep legacy _cob_offset for compatibility
+        self._cob_offset = self._r_cb[:, 2]
+
+        # Rigid body inertia for full Coriolis matrix
+        if cfg.rigid_body_inertia is not None:
+            self._rigid_body_inertia = (
+                torch.tensor(cfg.rigid_body_inertia, dtype=torch.float32, device=device)
+                .unsqueeze(0)
+                .repeat(num_envs, 1)
+            )
+        else:
+            # Estimate from added mass rotational terms (rough approximation)
+            self._rigid_body_inertia = (
+                torch.tensor(cfg.added_mass[3:6], dtype=torch.float32, device=device).unsqueeze(0).repeat(num_envs, 1)
+                * 0.5
+            )
+
+        self._use_full_coriolis = cfg.use_full_coriolis
 
         # State buffers for acceleration filtering
         self._prev_body_vel = torch.zeros(num_envs, 6, dtype=torch.float32, device=device)
@@ -139,12 +223,8 @@ class HydrodynamicsModel:
 
         # Ocean current state (world frame, 6-DOF)
         self._current_velocity = torch.zeros(num_envs, 6, dtype=torch.float32, device=device)
-        self._max_current_vel = torch.tensor(
-            self.current_cfg.max_velocity, dtype=torch.float32, device=device
-        )
-        self._current_noise_scale = torch.tensor(
-            self.current_cfg.noise_scale, dtype=torch.float32, device=device
-        )
+        self._max_current_vel = torch.tensor(self.current_cfg.max_velocity, dtype=torch.float32, device=device)
+        self._current_noise_scale = torch.tensor(self.current_cfg.noise_scale, dtype=torch.float32, device=device)
 
     def compute_forces(
         self,
@@ -181,19 +261,21 @@ class HydrodynamicsModel:
         relative_vel_fossen = relative_vel.clone()
         relative_vel_fossen[:, [1, 2, 4, 5]] *= -1
 
-        # Compute Euler angles for buoyancy calculation
-        rpy = self._quaternion_to_euler(root_quat_w)
-        rpy_fossen = rpy.clone()
-        rpy_fossen[:, [1, 2]] *= -1  # Pitch and yaw sign convention
-
         # Compute body acceleration (filtered)
         body_acc = self._compute_acceleration(relative_vel_fossen)
 
         # Compute individual hydrodynamic force components
         damping = self._compute_damping(relative_vel_fossen)
         added_mass = self._compute_added_mass(body_acc)
-        coriolis = self._compute_coriolis(relative_vel_fossen)
-        buoyancy = self._compute_buoyancy(rpy_fossen)
+
+        # Choose Coriolis computation method
+        if self._use_full_coriolis:
+            coriolis = self._compute_coriolis_full(relative_vel_fossen)
+        else:
+            coriolis = self._compute_coriolis(relative_vel_fossen)
+
+        # Compute buoyancy using quaternion-based method (no gimbal lock)
+        buoyancy = self._compute_buoyancy_quat(root_quat_w)
 
         # Total hydrodynamic wrench (negative because these oppose motion)
         hydro = -(added_mass + coriolis + damping)
@@ -282,10 +364,11 @@ class HydrodynamicsModel:
         return added_mass
 
     def _compute_coriolis(self, body_vel: torch.Tensor) -> torch.Tensor:
-        """Compute Coriolis and centripetal forces.
+        """Compute Coriolis and centripetal forces (C_A only, legacy method).
 
         These forces arise from the coupling between the vehicle's linear and
-        angular velocities through the added mass.
+        angular velocities through the added mass. This is the simplified
+        formulation that only includes added mass contribution.
 
         Args:
             body_vel: Body frame velocity. Shape: (num_envs, 6).
@@ -305,18 +388,72 @@ class HydrodynamicsModel:
         coriolis_force = -torch.cross(ma_lin, ang_vel, dim=-1)
 
         # Coriolis torque: -[M_A * v_lin] x v_lin - [M_A * omega] x omega
-        coriolis_torque = -(
-            torch.cross(ma_lin, lin_vel, dim=-1) +
-            torch.cross(ma_ang, ang_vel, dim=-1)
-        )
+        coriolis_torque = -(torch.cross(ma_lin, lin_vel, dim=-1) + torch.cross(ma_ang, ang_vel, dim=-1))
 
         return torch.cat([coriolis_force, coriolis_torque], dim=-1)
 
+    def _compute_coriolis_full(self, body_vel: torch.Tensor) -> torch.Tensor:
+        """Compute full Coriolis and centripetal forces: C(v) = C_RB(v) + C_A(v).
+
+        Implements the complete Fossen formulation (Eq. 6.43, 6.53) including
+        both rigid body and added mass contributions.
+
+        Reference:
+            Fossen, T.I. (2011). Handbook of Marine Craft Hydrodynamics and Motion Control.
+            Chapter 6, Equations 6.43 and 6.53.
+
+        Args:
+            body_vel: Body frame velocity [v_lin, omega]. Shape: (num_envs, 6).
+
+        Returns:
+            Full Coriolis wrench. Shape: (num_envs, 6).
+        """
+        lin_vel = body_vel[:, :3]
+        ang_vel = body_vel[:, 3:]
+
+        # ===== C_RB: Rigid body Coriolis (Fossen Eq. 6.43) =====
+        # Assuming center of gravity at body frame origin (r_g = 0)
+
+        # Note: For r_g=0 (CoG at body frame origin), C_RB linear-angular coupling is zero
+        # p_rb = m * v not needed since C_RB^{12} = -m * S(r_g) = 0
+
+        # Rigid body angular momentum: h_rb = I * omega (diagonal inertia)
+        h_rb = self._rigid_body_inertia * ang_vel  # (num_envs, 3)
+
+        # C_RB force component (from linear-angular coupling)
+        # For r_g = 0: C_RB^{12} = 0, so c_rb_force = 0
+        c_rb_force = torch.zeros_like(lin_vel)
+
+        # C_RB torque component: -omega x (I * omega)
+        # Note: -v x (m * v) = 0 (parallel vectors)
+        c_rb_torque = -torch.cross(ang_vel, h_rb, dim=-1)
+
+        # ===== C_A: Added mass Coriolis (Fossen Eq. 6.53) =====
+        # M_A * v
+        ma_v = torch.bmm(self._added_mass_matrix, body_vel.unsqueeze(-1)).squeeze(-1)
+        ma_lin = ma_v[:, :3]  # M_A^{11} * v
+        ma_ang = ma_v[:, 3:]  # M_A^{22} * omega
+
+        # C_A force: -omega x (M_A * v_lin)
+        c_a_force = -torch.cross(ang_vel, ma_lin, dim=-1)
+
+        # C_A torque: -v x (M_A * v) - omega x (M_A * omega)
+        c_a_torque = -(torch.cross(lin_vel, ma_lin, dim=-1) + torch.cross(ang_vel, ma_ang, dim=-1))
+
+        # ===== Total Coriolis: C = C_RB + C_A =====
+        total_force = c_rb_force + c_a_force
+        total_torque = c_rb_torque + c_a_torque
+
+        return torch.cat([total_force, total_torque], dim=-1)
+
     def _compute_buoyancy(self, rpy: torch.Tensor) -> torch.Tensor:
-        """Compute buoyancy force and restoring moment.
+        """Compute buoyancy force and restoring moment (Euler angle method, legacy).
 
         The buoyancy force acts upward and the restoring moment tries to
         return the vehicle to a level orientation.
+
+        Note: This method is kept for backward compatibility. The quaternion-based
+        method (_compute_buoyancy_quat) is preferred as it avoids gimbal lock.
 
         Args:
             rpy: Roll, pitch, yaw angles. Shape: (num_envs, 3).
@@ -346,6 +483,58 @@ class HydrodynamicsModel:
         # Yaw moment is zero for vertical CoB offset
 
         return buoyancy
+
+    def _compute_buoyancy_quat(self, root_quat_w: torch.Tensor) -> torch.Tensor:
+        """Compute weight-buoyancy forces and restoring moments using quaternion rotation.
+
+        This method computes the complete W-B (weight minus buoyancy) force and
+        the restoring moments from CoB/CoG offsets using direct quaternion rotation.
+        This avoids Euler angle conversion and gimbal lock issues.
+
+        The formulation follows Fossen Eq. 3.5 and 3.13:
+            Net force: F_net = F_weight + F_buoyancy = (m*g - rho*V*g) * R^T * [0,0,1]
+            Restoring moment: M = r_cb x F_b + r_cg x F_g
+
+        Args:
+            root_quat_w: Root orientation quaternion (w, x, y, z). Shape: (num_envs, 4).
+
+        Returns:
+            Weight-buoyancy wrench [force, moment] in body frame. Shape: (num_envs, 6).
+        """
+        # Gravity direction in world frame (pointing down, negative z)
+        # When we rotate this to body frame, it tells us which direction is "down" in body coords
+        gravity_dir_w = torch.zeros(self.num_envs, 3, dtype=torch.float32, device=self.device)
+        gravity_dir_w[:, 2] = -1.0  # Unit vector pointing down
+
+        # Rotate gravity direction to body frame: g_b = R^T * g_w
+        gravity_dir_b = quat_apply_inverse(root_quat_w, gravity_dir_w)
+
+        # Weight force in body frame: F_weight = m * g * g_b (points down in body frame)
+        # Note: gravity_dir_b already points "down" relative to body
+        weight_force_b = self._weight.unsqueeze(-1) * gravity_dir_b
+
+        # Buoyancy force in body frame: F_buoyancy = -rho * V * g * g_b (points up in body frame)
+        # Negative because buoyancy opposes gravity direction
+        buoyancy_force_b = -self._buoyancy_force_base.unsqueeze(-1) * gravity_dir_b
+
+        # Net force: F_net = F_weight + F_buoyancy = (W - B) * g_b
+        # Positive net force in gravity direction means vehicle sinks
+        # Negative net force means vehicle floats
+        net_force_b = weight_force_b + buoyancy_force_b
+
+        # Restoring moments from CoB and CoG offsets
+        # M_buoyancy = r_cb x F_buoyancy
+        # M_weight = r_cg x F_weight
+        buoyancy_moment_b = torch.cross(self._r_cb, buoyancy_force_b, dim=-1)
+        weight_moment_b = torch.cross(self._r_cg, weight_force_b, dim=-1)
+
+        # Total restoring moment
+        net_moment_b = buoyancy_moment_b + weight_moment_b
+
+        # Combine into wrench
+        wrench = torch.cat([net_force_b, net_moment_b], dim=-1)
+
+        return wrench
 
     def _quaternion_to_euler(self, quat: torch.Tensor) -> torch.Tensor:
         """Convert quaternion to Euler angles (roll, pitch, yaw).
@@ -391,8 +580,9 @@ class HydrodynamicsModel:
             env_ids = torch.tensor(env_ids, dtype=torch.long, device=self.device)
 
         if velocity is None:
-            # Sample random current velocity
-            velocity = torch.rand(len(env_ids), 6, device=self.device) * self._max_current_vel * 2 - self._max_current_vel
+            # Sample random current velocity within [-max, +max]
+            rand_vel = torch.rand(len(env_ids), 6, device=self.device)
+            velocity = rand_vel * self._max_current_vel * 2 - self._max_current_vel
 
         self._current_velocity[env_ids] = velocity
 
@@ -428,6 +618,7 @@ class HydrodynamicsModel:
         linear_damping_scale: tuple[float, float] = (1.0, 1.0),
         quadratic_damping_scale: tuple[float, float] = (1.0, 1.0),
         volume_scale: tuple[float, float] = (1.0, 1.0),
+        mass_scale: tuple[float, float] = (1.0, 1.0),
     ) -> None:
         """Randomize hydrodynamic parameters for specified environments.
 
@@ -440,6 +631,7 @@ class HydrodynamicsModel:
             linear_damping_scale: Scale range (min, max) for linear damping coefficients.
             quadratic_damping_scale: Scale range (min, max) for quadratic damping coefficients.
             volume_scale: Scale range (min, max) for vehicle volume.
+            mass_scale: Scale range (min, max) for vehicle mass.
         """
         if isinstance(env_ids, (list, tuple)):
             env_ids = torch.tensor(env_ids, dtype=torch.long, device=self.device)
@@ -448,8 +640,7 @@ class HydrodynamicsModel:
 
         # Sample random scale factors for added mass (6 DOF)
         am_scales = (
-            torch.rand(num_envs, 6, device=self.device)
-            * (added_mass_scale[1] - added_mass_scale[0])
+            torch.rand(num_envs, 6, device=self.device) * (added_mass_scale[1] - added_mass_scale[0])
             + added_mass_scale[0]
         )
         base_added_mass = torch.tensor(self.cfg.added_mass, dtype=torch.float32, device=self.device)
@@ -458,8 +649,7 @@ class HydrodynamicsModel:
 
         # Sample random scale factors for linear damping
         ld_scales = (
-            torch.rand(num_envs, 6, device=self.device)
-            * (linear_damping_scale[1] - linear_damping_scale[0])
+            torch.rand(num_envs, 6, device=self.device) * (linear_damping_scale[1] - linear_damping_scale[0])
             + linear_damping_scale[0]
         )
         base_linear_damping = torch.tensor(self.cfg.linear_damping, dtype=torch.float32, device=self.device)
@@ -467,17 +657,25 @@ class HydrodynamicsModel:
 
         # Sample random scale factors for quadratic damping
         qd_scales = (
-            torch.rand(num_envs, 6, device=self.device)
-            * (quadratic_damping_scale[1] - quadratic_damping_scale[0])
+            torch.rand(num_envs, 6, device=self.device) * (quadratic_damping_scale[1] - quadratic_damping_scale[0])
             + quadratic_damping_scale[0]
         )
         base_quadratic_damping = torch.tensor(self.cfg.quadratic_damping, dtype=torch.float32, device=self.device)
         self._quadratic_damping_diag[env_ids] = base_quadratic_damping.unsqueeze(0) * qd_scales
 
         # Sample random scale factors for volume
-        vol_scales = (
-            torch.rand(num_envs, device=self.device)
-            * (volume_scale[1] - volume_scale[0])
-            + volume_scale[0]
-        )
+        vol_scales = torch.rand(num_envs, device=self.device) * (volume_scale[1] - volume_scale[0]) + volume_scale[0]
         self._volume[env_ids] = self.cfg.volume * vol_scales
+
+        # Sample random scale factors for vehicle mass
+        mass_scales = torch.rand(num_envs, device=self.device) * (mass_scale[1] - mass_scale[0]) + mass_scale[0]
+        # Use configured mass or neutral buoyancy assumption as base
+        if self.cfg.vehicle_mass is not None:
+            base_mass = self.cfg.vehicle_mass
+        else:
+            base_mass = self.cfg.volume * self.cfg.water_density
+        self._vehicle_mass[env_ids] = base_mass * mass_scales
+        self._weight[env_ids] = self._vehicle_mass[env_ids] * self._gravity
+
+        # Update buoyancy force base (depends on randomized volume)
+        self._buoyancy_force_base[env_ids] = self._water_density * self._gravity * self._volume[env_ids]
