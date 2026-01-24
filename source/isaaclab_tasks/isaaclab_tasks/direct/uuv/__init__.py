@@ -20,8 +20,15 @@ import gymnasium as gym
 from . import agents
 from .hydrodynamics_model import HydrodynamicsCfg, HydrodynamicsModel, OceanCurrentCfg
 from .uuv_env import UUVEnv
-from .uuv_env_cfg import UUVEnvCfg, ThrusterCfg, BlueROVHydrodynamicsCfg, DomainRandomizationCfg
-from .bluerov_cfg import BLUEROV_CFG, BlueROVEnvCfg, BlueROVCurrentEnvCfg, BlueROVTrainEnvCfg, BlueROVEvalEnvCfg
+from .uuv_env_cfg import UUVEnvCfg, ThrusterCfg, DomainRandomizationCfg
+from .bluerov_cfg import (
+    BLUEROV_CFG,
+    BlueROVEnvCfg,
+    BlueROVCurrentEnvCfg,
+    BlueROVTrainEnvCfg,
+    BlueROVEvalEnvCfg,
+    BlueROVHydrodynamicsCfg,
+)
 
 __all__ = [
     # Environment

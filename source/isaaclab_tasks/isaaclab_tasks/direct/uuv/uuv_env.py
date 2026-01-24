@@ -123,8 +123,8 @@ class UUVEnv(DirectRLEnv):
             ]
         }
 
-        # Get body ID for force application
-        self._body_id = self._robot.find_bodies("base_link")[0]
+        # Get body ID for force application (configurable body link name)
+        self._body_id = self._robot.find_bodies(self.cfg.body_link_name)[0]
 
         # Get robot mass for normalization
         self._robot_mass = self._robot.root_physx_view.get_masses()[0].sum()

@@ -15,7 +15,6 @@ Reference:
 
 from __future__ import annotations
 
-from dataclasses import MISSING
 from typing import TYPE_CHECKING
 
 import torch
@@ -236,7 +235,9 @@ class HydrodynamicsModel:
         """Compute damping forces (linear + quadratic).
 
         The damping matrix includes coupled terms between sway-yaw and heave-pitch
-        as commonly observed in underwater vehicles.
+        as commonly observed in underwater vehicles. This follows MarineGym's
+        implementation where velocity values are placed in off-diagonal positions
+        to enable coupling through the quadratic damping term.
 
         Args:
             body_vel: Body frame velocity. Shape: (num_envs, 6).
@@ -244,22 +245,20 @@ class HydrodynamicsModel:
         Returns:
             Damping wrench. Shape: (num_envs, 6).
         """
-        # Build velocity-dependent damping matrix with coupling terms
-        # D(v) = D_linear + D_quadratic * |v|
-        abs_vel = torch.abs(body_vel)
+        # Build velocity matrix for element-wise multiplication with damping matrices
+        # This follows MarineGym's approach: maintained_body_vels = diag(v) + coupling terms
+        # Coupling: sway-yaw (1,5), heave-pitch (2,4), and their symmetric counterparts
+        maintained_body_vels = torch.diag_embed(body_vel)
+        maintained_body_vels[:, 1, 5] = body_vel[:, 5]  # sway-yaw coupling
+        maintained_body_vels[:, 2, 4] = body_vel[:, 4]  # heave-pitch coupling
+        maintained_body_vels[:, 4, 2] = body_vel[:, 2]  # pitch-heave coupling
+        maintained_body_vels[:, 5, 1] = body_vel[:, 1]  # yaw-sway coupling
 
-        # Diagonal damping
-        damping_diag = self._linear_damping_diag + self._quadratic_damping_diag * abs_vel
-
-        # Build full damping matrix with off-diagonal coupling
-        # Coupling: sway-yaw (1,5), heave-pitch (2,4)
-        damping_matrix = torch.diag_embed(damping_diag)
-
-        # Add coupling terms (from MarineGym)
-        damping_matrix[:, 1, 5] = damping_diag[:, 5]  # sway-yaw coupling
-        damping_matrix[:, 2, 4] = damping_diag[:, 4]  # heave-pitch coupling
-        damping_matrix[:, 4, 2] = damping_diag[:, 2]  # pitch-heave coupling
-        damping_matrix[:, 5, 1] = damping_diag[:, 1]  # yaw-sway coupling
+        # Build damping matrix: D(v) = D_linear + D_quadratic * |v|
+        # Element-wise multiplication means coupling only affects quadratic damping
+        linear_damping_matrix = torch.diag_embed(self._linear_damping_diag)
+        quadratic_damping_matrix = torch.diag_embed(self._quadratic_damping_diag)
+        damping_matrix = linear_damping_matrix + quadratic_damping_matrix * torch.abs(maintained_body_vels)
 
         # Compute damping force: D(v) * v
         damping = torch.bmm(damping_matrix, body_vel.unsqueeze(-1)).squeeze(-1)

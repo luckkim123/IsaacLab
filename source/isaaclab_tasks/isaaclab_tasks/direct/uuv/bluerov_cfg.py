@@ -19,7 +19,35 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 from isaaclab.utils import configclass
 
-from .uuv_env_cfg import UUVEnvCfg, BlueROVHydrodynamicsCfg, ThrusterCfg, OceanCurrentCfg, DomainRandomizationCfg
+from .hydrodynamics_model import HydrodynamicsCfg, OceanCurrentCfg
+from .uuv_env_cfg import UUVEnvCfg, ThrusterCfg, DomainRandomizationCfg
+
+
+@configclass
+class BlueROVHydrodynamicsCfg(HydrodynamicsCfg):
+    """Hydrodynamic parameters for BlueROV2.
+
+    Parameters are from experimental identification (MarineGym, IROS 2025).
+    All values are taken from BlueROV.yaml in the MarineGym repository.
+    """
+
+    # Added mass coefficients [surge, sway, heave, roll, pitch, yaw]
+    added_mass: tuple[float, ...] = (5.5, 12.7, 14.57, 0.12, 0.12, 0.12)
+
+    # Linear damping coefficients
+    linear_damping: tuple[float, ...] = (4.03, 6.22, 5.18, 0.07, 0.07, 0.07)
+
+    # Quadratic damping coefficients
+    quadratic_damping: tuple[float, ...] = (18.18, 21.66, 36.99, 1.55, 1.55, 1.55)
+
+    # Vehicle volume (m^3) - from BlueROV2 specifications
+    volume: float = 0.0113459
+
+    # Center of buoyancy offset (m) - positive means CoB above CoM
+    center_of_buoyancy_offset: float = 0.01
+
+    # Water density (kg/m^3) - freshwater
+    water_density: float = 997.0
 
 # Path to BlueROV USD file (relative to this module)
 _ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")

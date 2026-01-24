@@ -2,12 +2,37 @@
 
 All notable changes to the UUV (Underwater Vehicle) environment module.
 
+## [0.5.0] - 2026-01-24
+
+### Fixed
+- **Damping coupling implementation**: Fixed to match MarineGym's approach
+  - Now uses velocity values in off-diagonal positions (not damping coefficients)
+  - `maintained_body_vels` matrix follows MarineGym pattern exactly
+- **Thruster time constant**: Corrected from 0.01s to 0.43s
+  - 0.01s was RPM filter time constant, not throttle dynamics
+  - 0.43s matches T200 model's `tau_up`/`tau_down` in MarineGym
+
+### Changed
+- **Code structure improvements**:
+  - Moved `BlueROVHydrodynamicsCfg` from `uuv_env_cfg.py` to `bluerov_cfg.py`
+  - Generic `UUVEnvCfg` now uses base `HydrodynamicsCfg` as default
+  - Better separation between generic UUV code and BlueROV-specific code
+- **Configurable body link name**: Added `body_link_name` to `UUVEnvCfg`
+  - Previously hardcoded as "base_link"
+  - Now configurable for different robot models
+- **Removed unused import**: Removed `MISSING` from `hydrodynamics_model.py`
+
+### Verified (No changes needed)
+- **Coriolis force calculation**: Confirmed identical to MarineGym implementation
+  - Both use `-(M_A * v_lin) x omega` formulation
+  - This is a valid simplification for diagonal added mass matrices
+
 ## [0.4.0] - 2026-01-24
 
 ### Fixed
 - **Thruster allocation**: Replaced hardcoded allocation coefficients (0.707, 0.1) with
   configurable allocation matrix in `ThrusterCfg`
-- **Thruster time constant**: Fixed from 0.15s to 0.01s to match MarineGym T200 parameters
+- **Thruster time constant**: Fixed from 0.15s (initially set incorrectly)
 - **Unused config parameters**: Now all config parameters are actually used in code
   - `max_thrust`: Applied as clamp in `_apply_action()`
   - `time_constant_scale`: Applied in domain randomization

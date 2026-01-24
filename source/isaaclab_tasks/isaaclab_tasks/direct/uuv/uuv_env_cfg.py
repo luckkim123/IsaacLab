@@ -40,9 +40,10 @@ class ThrusterCfg:
     max_thrust: float = 50.0
 
     # Thruster time constant for first-order dynamics (s)
-    # From MarineGym BlueROV.yaml - T200 thruster response time
-    time_constant_up: float = 0.01
-    time_constant_down: float = 0.01
+    # From MarineGym T200 model tau_up/tau_down (throttle dynamics)
+    # Note: BlueROV.yaml time_constants=0.01 is for RPM filter, not throttle
+    time_constant_up: float = 0.43
+    time_constant_down: float = 0.43
 
     # Thrust coefficient (N per normalized throttle [-1, 1])
     thrust_coefficient: float = 50.0
@@ -115,32 +116,6 @@ class DomainRandomizationCfg:
 
 
 @configclass
-class BlueROVHydrodynamicsCfg(HydrodynamicsCfg):
-    """Hydrodynamic parameters for BlueROV2.
-
-    Parameters are from experimental identification (MarineGym, IROS 2025).
-    """
-
-    # Added mass coefficients [surge, sway, heave, roll, pitch, yaw]
-    added_mass: tuple[float, ...] = (5.5, 12.7, 14.57, 0.12, 0.12, 0.12)
-
-    # Linear damping coefficients
-    linear_damping: tuple[float, ...] = (4.03, 6.22, 5.18, 0.07, 0.07, 0.07)
-
-    # Quadratic damping coefficients
-    quadratic_damping: tuple[float, ...] = (18.18, 21.66, 36.99, 1.55, 1.55, 1.55)
-
-    # Vehicle volume (m^3) - from BlueROV2 specifications
-    volume: float = 0.0113459
-
-    # Center of buoyancy offset (m)
-    center_of_buoyancy_offset: float = 0.01
-
-    # Water density (kg/m^3) - freshwater
-    water_density: float = 997.0
-
-
-@configclass
 class UUVEnvCfg(DirectRLEnvCfg):
     """Configuration for the UUV hover/tracking environment.
 
@@ -196,8 +171,11 @@ class UUVEnvCfg(DirectRLEnvCfg):
     # Robot configuration (will be set by specific vehicle configs)
     robot: ArticulationCfg = None  # type: ignore
 
-    # Hydrodynamics configuration
-    hydrodynamics: HydrodynamicsCfg = BlueROVHydrodynamicsCfg()
+    # Name of the body link to apply hydrodynamic forces to
+    body_link_name: str = "base_link"
+
+    # Hydrodynamics configuration (should be overridden by specific robot configs)
+    hydrodynamics: HydrodynamicsCfg = HydrodynamicsCfg()
 
     # Ocean current configuration
     ocean_current: OceanCurrentCfg = OceanCurrentCfg()
