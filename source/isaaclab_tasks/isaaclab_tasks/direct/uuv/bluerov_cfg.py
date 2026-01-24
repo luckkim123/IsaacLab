@@ -6,11 +6,13 @@
 """BlueROV2 robot configuration for Isaac Lab.
 
 The BlueROV2 is a popular open-source underwater ROV manufactured by Blue Robotics.
-This configuration uses the USD model from MarineGym with hydrodynamic parameters
-identified through experiments.
+This configuration uses the USD model with hydrodynamic parameters
+identified through experiments (originally from MarineGym, IROS 2025).
 """
 
 from __future__ import annotations
+
+import os
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -19,8 +21,9 @@ from isaaclab.utils import configclass
 
 from .uuv_env_cfg import UUVEnvCfg, BlueROVHydrodynamicsCfg, ThrusterCfg, OceanCurrentCfg, DomainRandomizationCfg
 
-# Path to BlueROV USD file (from MarineGym)
-BLUEROV_USD_PATH = "/workspace/marinegym/marinegym/robots/assets/usd/BlueROV/BlueROV.usd"
+# Path to BlueROV USD file (relative to this module)
+_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+BLUEROV_USD_PATH = os.path.join(_ASSETS_DIR, "BlueROV", "BlueROV.usd")
 
 
 BLUEROV_CFG = ArticulationCfg(
