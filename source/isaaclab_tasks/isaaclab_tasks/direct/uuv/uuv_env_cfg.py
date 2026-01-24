@@ -47,6 +47,46 @@ class ThrusterCfg:
 
 
 @configclass
+class DomainRandomizationCfg:
+    """Configuration for domain randomization in UUV environments.
+
+    This configuration supports train/evaluate mode switching and follows
+    MarineGym's scale-based parameter randomization pattern.
+
+    Randomization is applied on every environment reset when enabled.
+    """
+
+    # Enable/disable randomization (set False for deterministic training/evaluation)
+    enable: bool = False
+
+    # Initial position randomization range (meters)
+    # Following MarineGym defaults: XY [-2.5, 2.5], Z [1.5, 2.5]
+    position_x_range: tuple[float, float] = (-2.5, 2.5)
+    position_y_range: tuple[float, float] = (-2.5, 2.5)
+    position_z_range: tuple[float, float] = (1.5, 2.5)
+
+    # Initial orientation randomization range (radians)
+    # Following MarineGym defaults: Roll/Pitch ±36°, Yaw 0-360°
+    roll_range: tuple[float, float] = (-0.628, 0.628)    # ±36 degrees
+    pitch_range: tuple[float, float] = (-0.628, 0.628)   # ±36 degrees
+    yaw_range: tuple[float, float] = (0.0, 6.283)        # 0-360 degrees
+
+    # Hydrodynamic parameter scale ranges (multipliers applied to base values)
+    # Following MarineGym defaults
+    added_mass_scale: tuple[float, float] = (0.5, 1.0)
+    linear_damping_scale: tuple[float, float] = (0.5, 1.0)
+    quadratic_damping_scale: tuple[float, float] = (0.5, 1.0)
+    volume_scale: tuple[float, float] = (0.9, 1.1)
+
+    # Robot mass scale (applied to all bodies)
+    mass_scale: tuple[float, float] = (0.8, 1.2)
+
+    # Thruster parameter scales
+    thrust_coefficient_scale: tuple[float, float] = (0.8, 1.2)
+    time_constant_scale: tuple[float, float] = (0.8, 1.2)
+
+
+@configclass
 class BlueROVHydrodynamicsCfg(HydrodynamicsCfg):
     """Hydrodynamic parameters for BlueROV2.
 
@@ -167,3 +207,6 @@ class UUVEnvCfg(DirectRLEnvCfg):
 
     # Alive bonus
     alive_reward_scale: float = 0.5
+
+    # Domain randomization configuration
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg()

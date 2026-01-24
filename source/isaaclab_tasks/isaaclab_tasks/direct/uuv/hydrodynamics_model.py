@@ -421,3 +421,64 @@ class HydrodynamicsModel:
             env_ids: Environment indices to randomize.
         """
         self.set_ocean_current(env_ids, velocity=None)
+
+    def randomize_parameters(
+        self,
+        env_ids: torch.Tensor | Sequence[int],
+        added_mass_scale: tuple[float, float] = (1.0, 1.0),
+        linear_damping_scale: tuple[float, float] = (1.0, 1.0),
+        quadratic_damping_scale: tuple[float, float] = (1.0, 1.0),
+        volume_scale: tuple[float, float] = (1.0, 1.0),
+    ) -> None:
+        """Randomize hydrodynamic parameters for specified environments.
+
+        Applies scale factors to the base hydrodynamic parameters from configuration.
+        Each environment can have different randomized values.
+
+        Args:
+            env_ids: Environment indices to randomize.
+            added_mass_scale: Scale range (min, max) for added mass coefficients.
+            linear_damping_scale: Scale range (min, max) for linear damping coefficients.
+            quadratic_damping_scale: Scale range (min, max) for quadratic damping coefficients.
+            volume_scale: Scale range (min, max) for vehicle volume.
+        """
+        if isinstance(env_ids, (list, tuple)):
+            env_ids = torch.tensor(env_ids, dtype=torch.long, device=self.device)
+
+        num_envs = len(env_ids)
+
+        # Sample random scale factors for added mass (6 DOF)
+        am_scales = (
+            torch.rand(num_envs, 6, device=self.device)
+            * (added_mass_scale[1] - added_mass_scale[0])
+            + added_mass_scale[0]
+        )
+        base_added_mass = torch.tensor(self.cfg.added_mass, dtype=torch.float32, device=self.device)
+        randomized_am = base_added_mass.unsqueeze(0) * am_scales
+        self._added_mass_matrix[env_ids] = torch.diag_embed(randomized_am)
+
+        # Sample random scale factors for linear damping
+        ld_scales = (
+            torch.rand(num_envs, 6, device=self.device)
+            * (linear_damping_scale[1] - linear_damping_scale[0])
+            + linear_damping_scale[0]
+        )
+        base_linear_damping = torch.tensor(self.cfg.linear_damping, dtype=torch.float32, device=self.device)
+        self._linear_damping_diag[env_ids] = base_linear_damping.unsqueeze(0) * ld_scales
+
+        # Sample random scale factors for quadratic damping
+        qd_scales = (
+            torch.rand(num_envs, 6, device=self.device)
+            * (quadratic_damping_scale[1] - quadratic_damping_scale[0])
+            + quadratic_damping_scale[0]
+        )
+        base_quadratic_damping = torch.tensor(self.cfg.quadratic_damping, dtype=torch.float32, device=self.device)
+        self._quadratic_damping_diag[env_ids] = base_quadratic_damping.unsqueeze(0) * qd_scales
+
+        # Sample random scale factors for volume
+        vol_scales = (
+            torch.rand(num_envs, device=self.device)
+            * (volume_scale[1] - volume_scale[0])
+            + volume_scale[0]
+        )
+        self._volume[env_ids] = self.cfg.volume * vol_scales

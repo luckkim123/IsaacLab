@@ -18,7 +18,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.envs.ui import BaseEnvWindow
 from isaaclab.markers import VisualizationMarkers
-from isaaclab.utils.math import subtract_frame_transforms, quat_rotate_inverse
+from isaaclab.utils.math import subtract_frame_transforms, quat_rotate_inverse, quat_from_euler_xyz, quat_mul
 
 from .hydrodynamics_model import HydrodynamicsModel
 from .uuv_env_cfg import UUVEnvCfg
@@ -130,6 +130,14 @@ class UUVEnv(DirectRLEnv):
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
 
+        # Domain randomization buffers (per-environment)
+        if self.cfg.randomization.enable:
+            self._randomized_thrust_coeff = torch.full(
+                (self.num_envs,), self.cfg.thrusters.thrust_coefficient, device=self.device
+            )
+        else:
+            self._randomized_thrust_coeff = None
+
         # Setup debug visualization
         self.set_debug_vis(self.cfg.debug_vis)
 
@@ -188,7 +196,10 @@ class UUVEnv(DirectRLEnv):
     def _apply_action(self):
         """Apply thruster forces and hydrodynamic forces to the robot."""
         # Compute thruster forces from thruster state
-        thrust_magnitude = self._thruster_state * self.cfg.thrusters.thrust_coefficient
+        if self._randomized_thrust_coeff is not None:
+            thrust_magnitude = self._thruster_state * self._randomized_thrust_coeff.unsqueeze(-1)
+        else:
+            thrust_magnitude = self._thruster_state * self.cfg.thrusters.thrust_coefficient
 
         # Simple thruster allocation for BlueROV configuration:
         # Thrusters 0-3: Horizontal (X-Y plane control)
@@ -405,6 +416,25 @@ class UUVEnv(DirectRLEnv):
         # Reset hydrodynamics
         self._hydro.reset(env_ids)
 
+        # Apply domain randomization if enabled
+        if self.cfg.randomization.enable:
+            # Randomize hydrodynamic parameters
+            self._hydro.randomize_parameters(
+                env_ids=env_ids,
+                added_mass_scale=self.cfg.randomization.added_mass_scale,
+                linear_damping_scale=self.cfg.randomization.linear_damping_scale,
+                quadratic_damping_scale=self.cfg.randomization.quadratic_damping_scale,
+                volume_scale=self.cfg.randomization.volume_scale,
+            )
+
+            # Randomize thrust coefficient
+            thrust_scales = (
+                torch.rand(len(env_ids), device=self.device)
+                * (self.cfg.randomization.thrust_coefficient_scale[1] - self.cfg.randomization.thrust_coefficient_scale[0])
+                + self.cfg.randomization.thrust_coefficient_scale[0]
+            )
+            self._randomized_thrust_coeff[env_ids] = self.cfg.thrusters.thrust_coefficient * thrust_scales
+
         # Randomize ocean current if enabled
         if any(v > 0 for v in self.cfg.ocean_current.max_velocity):
             self._hydro.randomize_current(env_ids)
@@ -423,9 +453,55 @@ class UUVEnv(DirectRLEnv):
         # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
-        default_root_state = self._robot.data.default_root_state[env_ids]
+        default_root_state = self._robot.data.default_root_state[env_ids].clone()
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-        default_root_state[:, 2] = self.cfg.initial_height
+
+        # Apply domain randomization to initial pose if enabled
+        if self.cfg.randomization.enable:
+            num_reset = len(env_ids)
+
+            # Randomize initial position
+            pos_x = (
+                torch.rand(num_reset, device=self.device)
+                * (self.cfg.randomization.position_x_range[1] - self.cfg.randomization.position_x_range[0])
+                + self.cfg.randomization.position_x_range[0]
+            )
+            pos_y = (
+                torch.rand(num_reset, device=self.device)
+                * (self.cfg.randomization.position_y_range[1] - self.cfg.randomization.position_y_range[0])
+                + self.cfg.randomization.position_y_range[0]
+            )
+            pos_z = (
+                torch.rand(num_reset, device=self.device)
+                * (self.cfg.randomization.position_z_range[1] - self.cfg.randomization.position_z_range[0])
+                + self.cfg.randomization.position_z_range[0]
+            )
+            default_root_state[:, 0] += pos_x
+            default_root_state[:, 1] += pos_y
+            default_root_state[:, 2] = pos_z
+
+            # Randomize initial orientation
+            roll = (
+                torch.rand(num_reset, device=self.device)
+                * (self.cfg.randomization.roll_range[1] - self.cfg.randomization.roll_range[0])
+                + self.cfg.randomization.roll_range[0]
+            )
+            pitch = (
+                torch.rand(num_reset, device=self.device)
+                * (self.cfg.randomization.pitch_range[1] - self.cfg.randomization.pitch_range[0])
+                + self.cfg.randomization.pitch_range[0]
+            )
+            yaw = (
+                torch.rand(num_reset, device=self.device)
+                * (self.cfg.randomization.yaw_range[1] - self.cfg.randomization.yaw_range[0])
+                + self.cfg.randomization.yaw_range[0]
+            )
+
+            # Convert euler angles to quaternion and apply
+            random_quat = quat_from_euler_xyz(roll, pitch, yaw)
+            default_root_state[:, 3:7] = quat_mul(default_root_state[:, 3:7], random_quat)
+        else:
+            default_root_state[:, 2] = self.cfg.initial_height
 
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
