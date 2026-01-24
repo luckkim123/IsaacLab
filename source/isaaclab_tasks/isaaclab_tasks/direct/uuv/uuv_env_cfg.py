@@ -1,0 +1,169 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Configuration classes for UUV (Underwater Vehicle) environments."""
+
+from __future__ import annotations
+
+import isaaclab.sim as sim_utils
+from isaaclab.assets import ArticulationCfg
+from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sim import SimulationCfg
+from isaaclab.terrains import TerrainImporterCfg
+from isaaclab.utils import configclass
+
+from .hydrodynamics_model import HydrodynamicsCfg, OceanCurrentCfg
+
+
+@configclass
+class ThrusterCfg:
+    """Configuration for underwater vehicle thrusters.
+
+    This configuration supports simplified thruster dynamics based on the
+    Blue Robotics T200 thruster model.
+    """
+
+    # Number of thrusters
+    num_thrusters: int = 6
+
+    # Maximum thrust per thruster (N)
+    max_thrust: float = 50.0
+
+    # Thruster time constant for first-order dynamics (s)
+    time_constant_up: float = 0.15
+    time_constant_down: float = 0.15
+
+    # Thrust coefficient (N per throttle^2, normalized to [-1, 1])
+    thrust_coefficient: float = 50.0
+
+    # Thruster allocation matrix (6 x num_thrusters)
+    # Maps thruster forces to body wrench [Fx, Fy, Fz, Mx, My, Mz]
+    # Default: BlueROV2 Heavy configuration (8 thrusters)
+    # For 6-thruster config, this will be overridden
+    use_allocation_matrix: bool = True
+
+
+@configclass
+class BlueROVHydrodynamicsCfg(HydrodynamicsCfg):
+    """Hydrodynamic parameters for BlueROV2.
+
+    Parameters are from experimental identification (MarineGym, IROS 2025).
+    """
+
+    # Added mass coefficients [surge, sway, heave, roll, pitch, yaw]
+    added_mass: tuple[float, ...] = (5.5, 12.7, 14.57, 0.12, 0.12, 0.12)
+
+    # Linear damping coefficients
+    linear_damping: tuple[float, ...] = (4.03, 6.22, 5.18, 0.07, 0.07, 0.07)
+
+    # Quadratic damping coefficients
+    quadratic_damping: tuple[float, ...] = (18.18, 21.66, 36.99, 1.55, 1.55, 1.55)
+
+    # Vehicle volume (m^3) - from BlueROV2 specifications
+    volume: float = 0.0113459
+
+    # Center of buoyancy offset (m)
+    center_of_buoyancy_offset: float = 0.01
+
+    # Water density (kg/m^3) - freshwater
+    water_density: float = 997.0
+
+
+@configclass
+class UUVEnvCfg(DirectRLEnvCfg):
+    """Configuration for the UUV hover/tracking environment.
+
+    This environment trains an underwater vehicle to hover at a target position
+    or track a trajectory while experiencing hydrodynamic forces and optional
+    ocean current disturbances.
+    """
+
+    # Environment settings
+    episode_length_s: float = 15.0
+    decimation: int = 2
+    action_space: int = 6  # 6 thruster commands
+    observation_space: int = 18  # pos(3) + quat(4) + lin_vel(3) + ang_vel(3) + goal_pos_b(3) + up(2)
+    state_space: int = 0
+    debug_vis: bool = True
+
+    # Simulation configuration
+    sim: SimulationCfg = SimulationCfg(
+        dt=1 / 100,
+        render_interval=2,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=0.5,
+            dynamic_friction=0.5,
+            restitution=0.0,
+        ),
+    )
+
+    # Scene configuration
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=4096,
+        env_spacing=5.0,
+        replicate_physics=True,
+        clone_in_fabric=True,
+    )
+
+    # Terrain (underwater floor)
+    terrain: TerrainImporterCfg = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="plane",
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+        debug_vis=False,
+    )
+
+    # Robot configuration (will be set by specific vehicle configs)
+    robot: ArticulationCfg = None  # type: ignore
+
+    # Hydrodynamics configuration
+    hydrodynamics: HydrodynamicsCfg = BlueROVHydrodynamicsCfg()
+
+    # Ocean current configuration
+    ocean_current: OceanCurrentCfg = OceanCurrentCfg()
+
+    # Thruster configuration
+    thrusters: ThrusterCfg = ThrusterCfg()
+
+    # Task parameters
+    # Goal position randomization range (relative to spawn)
+    goal_pos_range: tuple[float, float, float] = (2.0, 2.0, 1.0)
+
+    # Initial position height (underwater depth)
+    initial_height: float = 2.0
+
+    # Termination conditions
+    max_height: float = 5.0  # Max distance from ground
+    min_height: float = 0.2  # Min distance from ground
+    max_distance_from_origin: float = 10.0
+
+    # Reward scales
+    # Position tracking
+    position_reward_scale: float = 10.0
+    position_reward_exp_scale: float = 0.5  # For exponential reward shaping
+
+    # Orientation tracking (upright)
+    orientation_reward_scale: float = 2.0
+
+    # Velocity penalties
+    linear_velocity_penalty_scale: float = -0.05
+    angular_velocity_penalty_scale: float = -0.01
+
+    # Action penalties
+    action_rate_penalty_scale: float = -0.01
+    action_magnitude_penalty_scale: float = -0.001
+
+    # Alive bonus
+    alive_reward_scale: float = 0.5
