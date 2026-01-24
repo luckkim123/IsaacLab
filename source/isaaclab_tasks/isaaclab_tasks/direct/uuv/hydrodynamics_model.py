@@ -485,54 +485,43 @@ class HydrodynamicsModel:
         return buoyancy
 
     def _compute_buoyancy_quat(self, root_quat_w: torch.Tensor) -> torch.Tensor:
-        """Compute weight-buoyancy forces and restoring moments using quaternion rotation.
+        """Compute buoyancy force and restoring moment using quaternion rotation.
 
-        This method computes the complete W-B (weight minus buoyancy) force and
-        the restoring moments from CoB/CoG offsets using direct quaternion rotation.
-        This avoids Euler angle conversion and gimbal lock issues.
+        IMPORTANT: This method computes ONLY buoyancy force, NOT weight.
+        Weight (gravity) is handled by Isaac Sim physics engine when disable_gravity=False.
+        Computing weight here would result in double gravity application.
 
-        The formulation follows Fossen Eq. 3.5 and 3.13:
-            Net force: F_net = F_weight + F_buoyancy = (m*g - rho*V*g) * R^T * [0,0,1]
-            Restoring moment: M = r_cb x F_b + r_cg x F_g
+        The buoyancy force always points upward (opposite to gravity) and its magnitude
+        depends on the vehicle's displaced volume: F_b = rho * V * g
+
+        The restoring moment comes from the offset between center of buoyancy (CoB)
+        and center of gravity (CoG). When CoB is above CoG, tilting the vehicle
+        creates a restoring moment that tries to return it to upright orientation.
 
         Args:
             root_quat_w: Root orientation quaternion (w, x, y, z). Shape: (num_envs, 4).
 
         Returns:
-            Weight-buoyancy wrench [force, moment] in body frame. Shape: (num_envs, 6).
+            Buoyancy wrench [force, moment] in body frame. Shape: (num_envs, 6).
         """
-        # Gravity direction in world frame (pointing down, negative z)
-        # When we rotate this to body frame, it tells us which direction is "down" in body coords
-        gravity_dir_w = torch.zeros(self.num_envs, 3, dtype=torch.float32, device=self.device)
-        gravity_dir_w[:, 2] = -1.0  # Unit vector pointing down
+        # Up direction in world frame (pointing up, positive z)
+        up_dir_w = torch.zeros(self.num_envs, 3, dtype=torch.float32, device=self.device)
+        up_dir_w[:, 2] = 1.0  # Unit vector pointing up
 
-        # Rotate gravity direction to body frame: g_b = R^T * g_w
-        gravity_dir_b = quat_apply_inverse(root_quat_w, gravity_dir_w)
+        # Rotate up direction to body frame: up_b = R^T * up_w
+        up_dir_b = quat_apply_inverse(root_quat_w, up_dir_w)
 
-        # Weight force in body frame: F_weight = m * g * g_b (points down in body frame)
-        # Note: gravity_dir_b already points "down" relative to body
-        weight_force_b = self._weight.unsqueeze(-1) * gravity_dir_b
+        # Buoyancy force in body frame: F_buoyancy = rho * V * g * up_b (points up in body frame)
+        # Buoyancy always acts upward in world frame
+        buoyancy_force_b = self._buoyancy_force_base.unsqueeze(-1) * up_dir_b
 
-        # Buoyancy force in body frame: F_buoyancy = -rho * V * g * g_b (points up in body frame)
-        # Negative because buoyancy opposes gravity direction
-        buoyancy_force_b = -self._buoyancy_force_base.unsqueeze(-1) * gravity_dir_b
-
-        # Net force: F_net = F_weight + F_buoyancy = (W - B) * g_b
-        # Positive net force in gravity direction means vehicle sinks
-        # Negative net force means vehicle floats
-        net_force_b = weight_force_b + buoyancy_force_b
-
-        # Restoring moments from CoB and CoG offsets
+        # Restoring moment from CoB offset
         # M_buoyancy = r_cb x F_buoyancy
-        # M_weight = r_cg x F_weight
+        # This creates a restoring moment when the vehicle is tilted
         buoyancy_moment_b = torch.cross(self._r_cb, buoyancy_force_b, dim=-1)
-        weight_moment_b = torch.cross(self._r_cg, weight_force_b, dim=-1)
 
-        # Total restoring moment
-        net_moment_b = buoyancy_moment_b + weight_moment_b
-
-        # Combine into wrench
-        wrench = torch.cat([net_force_b, net_moment_b], dim=-1)
+        # Combine into wrench (no weight component - handled by physics engine)
+        wrench = torch.cat([buoyancy_force_b, buoyancy_moment_b], dim=-1)
 
         return wrench
 

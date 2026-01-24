@@ -202,22 +202,25 @@ class UUVEnvCfg(DirectRLEnvCfg):
 
     # Reward scales
     # Position tracking
-    position_reward_scale: float = 10.0
-    position_reward_exp_scale: float = 0.5  # For exponential reward shaping
+    # exp(-distance/exp_scale): at 3m distance with scale=2.0, reward=0.22 (vs 0.0025 with scale=0.5)
+    position_reward_scale: float = 15.0
+    position_reward_exp_scale: float = 2.0  # Larger scale = denser reward at distance
 
-    # Orientation tracking (upright)
-    orientation_reward_scale: float = 2.0
+    # Orientation tracking (upright) - uses exponential reward
+    # exp(-tilt_angle/exp_scale): at 30deg with scale=0.5, reward=0.35
+    orientation_reward_scale: float = 5.0  # Increased for stricter upright control
+    orientation_exp_scale: float = 0.5  # 0.5 rad ~ 29 degrees for exp(-1) = 0.37
 
     # Velocity penalties
-    linear_velocity_penalty_scale: float = -0.05
-    angular_velocity_penalty_scale: float = -0.01
+    linear_velocity_penalty_scale: float = -0.01
+    angular_velocity_penalty_scale: float = -0.005
 
     # Action penalties
-    action_rate_penalty_scale: float = -0.01
-    action_magnitude_penalty_scale: float = -0.001
+    action_rate_penalty_scale: float = -0.005
+    action_magnitude_penalty_scale: float = -0.0005
 
     # Alive bonus
-    alive_reward_scale: float = 0.5
+    alive_reward_scale: float = 0.1
 
     # Domain randomization configuration
     randomization: DomainRandomizationCfg = DomainRandomizationCfg()

@@ -176,9 +176,12 @@ class BlueROVCurrentEnvCfg(BlueROVEnvCfg):
         time_constant_scale=(0.9, 1.1),
     )
 
-    # Slightly harder task with currents
-    position_reward_scale: float = 12.0
-    linear_velocity_penalty_scale: float = -0.03
+    # Slightly harder task with currents - need stronger position signal
+    position_reward_scale: float = 20.0
+    position_reward_exp_scale: float = 2.5  # Even larger scale for current disturbance
+    orientation_reward_scale: float = 8.0  # Strong orientation control against currents
+    orientation_exp_scale: float = 0.4  # Stricter than base (0.5)
+    linear_velocity_penalty_scale: float = -0.01
 
 
 @configclass
