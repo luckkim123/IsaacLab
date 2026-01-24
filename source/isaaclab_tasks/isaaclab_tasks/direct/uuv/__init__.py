@@ -54,9 +54,17 @@ from .rewards import (
 from .tasks import HoverTask, HoverTaskCfg, TaskBase, TaskBaseCfg
 from .thrusters import ThrusterModel, ThrusterModelCfg
 
+# MDP event functions for domain randomization
+from .mdp import (
+    randomize_hydrodynamics,
+    randomize_ocean_current,
+    randomize_robot_pose,
+    randomize_thruster_params,
+)
+
 # Original environment (V1)
 from .uuv_env import UUVEnv
-from .uuv_env_cfg import DomainRandomizationCfg, ThrusterCfg, UUVEnvCfg
+from .uuv_env_cfg import DomainRandomizationCfg, EventCfg, ThrusterCfg, UUVEnvCfg
 
 # Modular environment (V2)
 from .uuv_env_v2 import UUVEnvV2
@@ -74,6 +82,12 @@ __all__ = [
     "BlueROVEvalEnvCfg",
     "ThrusterCfg",
     "DomainRandomizationCfg",
+    "EventCfg",
+    # MDP event functions
+    "randomize_hydrodynamics",
+    "randomize_thruster_params",
+    "randomize_ocean_current",
+    "randomize_robot_pose",
     # Hydrodynamics
     "HydrodynamicsModel",
     "HydrodynamicsCfg",
@@ -115,6 +129,7 @@ gym.register(
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:BlueROVPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
     },
 )
 
@@ -127,6 +142,7 @@ gym.register(
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:BlueROVCurrentPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
     },
 )
 
@@ -139,6 +155,7 @@ gym.register(
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:BlueROVTrainPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
     },
 )
 
@@ -151,6 +168,7 @@ gym.register(
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:BlueROVEvalPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
     },
 )
 
@@ -167,5 +185,6 @@ gym.register(
         "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:BlueROVPPORunnerCfg",
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
     },
 )

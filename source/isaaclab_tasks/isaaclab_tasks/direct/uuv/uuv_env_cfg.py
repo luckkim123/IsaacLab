@@ -10,12 +10,14 @@ from __future__ import annotations
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 
 from .hydrodynamics_model import HydrodynamicsCfg, OceanCurrentCfg
+from .mdp import events as uuv_events
 
 
 @configclass
@@ -113,6 +115,65 @@ class DomainRandomizationCfg:
     # Thruster parameter scales
     thrust_coefficient_scale: tuple[float, float] = (0.8, 1.2)
     time_constant_scale: tuple[float, float] = (0.8, 1.2)
+
+
+@configclass
+class EventCfg:
+    """Configuration for domain randomization events following Isaac Lab patterns.
+
+    This configuration uses EventTerm to define randomization events that can
+    be triggered on "startup" (once at environment creation) or "reset" (on
+    every environment reset).
+
+    For backward compatibility, the legacy DomainRandomizationCfg is still
+    supported but this EventCfg approach is preferred for new implementations.
+    """
+
+    # Hydrodynamic parameter randomization (on reset)
+    randomize_hydrodynamics = EventTerm(
+        func=uuv_events.randomize_hydrodynamics,
+        mode="reset",
+        params={
+            "added_mass_scale": (0.5, 1.0),
+            "linear_damping_scale": (0.5, 1.0),
+            "quadratic_damping_scale": (0.5, 1.0),
+            "volume_scale": (0.9, 1.1),
+            "mass_scale": (0.8, 1.2),
+        },
+    )
+
+    # Thruster parameter randomization (on reset)
+    randomize_thrusters = EventTerm(
+        func=uuv_events.randomize_thruster_params,
+        mode="reset",
+        params={
+            "thrust_coeff_scale": (0.8, 1.2),
+            "time_constant_scale": (0.8, 1.2),
+        },
+    )
+
+    # Ocean current randomization (on reset)
+    randomize_current = EventTerm(
+        func=uuv_events.randomize_ocean_current,
+        mode="reset",
+        params={
+            "max_velocity": (0.5, 0.5, 0.1),
+        },
+    )
+
+    # Robot pose randomization (on reset)
+    randomize_pose = EventTerm(
+        func=uuv_events.randomize_robot_pose,
+        mode="reset",
+        params={
+            "position_x_range": (-2.5, 2.5),
+            "position_y_range": (-2.5, 2.5),
+            "position_z_range": (1.5, 2.5),
+            "roll_range": (-0.628, 0.628),
+            "pitch_range": (-0.628, 0.628),
+            "yaw_range": (0.0, 6.283),
+        },
+    )
 
 
 @configclass
@@ -222,5 +283,9 @@ class UUVEnvCfg(DirectRLEnvCfg):
     # Alive bonus
     alive_reward_scale: float = 0.1
 
-    # Domain randomization configuration
+    # Domain randomization configuration (legacy - for backward compatibility)
     randomization: DomainRandomizationCfg = DomainRandomizationCfg()
+
+    # Event-based randomization (Isaac Lab standard pattern)
+    # Set to None to use legacy randomization, or provide EventCfg for new pattern
+    events: EventCfg | None = None
