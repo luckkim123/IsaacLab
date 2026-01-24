@@ -118,6 +118,7 @@ class UUVEnv(DirectRLEnv):
                 "lin_vel_penalty",
                 "ang_vel_penalty",
                 "action_rate_penalty",
+                "action_magnitude_penalty",
                 "alive_reward",
             ]
         }
@@ -130,13 +131,26 @@ class UUVEnv(DirectRLEnv):
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
 
+        # Build thruster allocation matrix from config
+        self._allocation_matrix = torch.tensor(
+            self.cfg.thrusters.allocation_matrix, dtype=torch.float32, device=self.device
+        )  # (6, num_thrusters)
+
         # Domain randomization buffers (per-environment)
         if self.cfg.randomization.enable:
             self._randomized_thrust_coeff = torch.full(
                 (self.num_envs,), self.cfg.thrusters.thrust_coefficient, device=self.device
             )
+            self._randomized_time_constant_up = torch.full(
+                (self.num_envs,), self.cfg.thrusters.time_constant_up, device=self.device
+            )
+            self._randomized_time_constant_down = torch.full(
+                (self.num_envs,), self.cfg.thrusters.time_constant_down, device=self.device
+            )
         else:
             self._randomized_thrust_coeff = None
+            self._randomized_time_constant_up = None
+            self._randomized_time_constant_down = None
 
         # Setup debug visualization
         self.set_debug_vis(self.cfg.debug_vis)
@@ -179,8 +193,14 @@ class UUVEnv(DirectRLEnv):
 
         # Apply first-order thruster dynamics
         target_state = self._actions
-        tau_up = self.cfg.thrusters.time_constant_up
-        tau_down = self.cfg.thrusters.time_constant_down
+
+        # Use randomized or default time constants
+        if self._randomized_time_constant_up is not None:
+            tau_up = self._randomized_time_constant_up.unsqueeze(-1)
+            tau_down = self._randomized_time_constant_down.unsqueeze(-1)
+        else:
+            tau_up = self.cfg.thrusters.time_constant_up
+            tau_down = self.cfg.thrusters.time_constant_down
 
         # Select time constant based on direction
         tau = torch.where(
@@ -194,34 +214,32 @@ class UUVEnv(DirectRLEnv):
         self._thruster_state = self._thruster_state + alpha * (target_state - self._thruster_state)
 
     def _apply_action(self):
-        """Apply thruster forces and hydrodynamic forces to the robot."""
-        # Compute thruster forces from thruster state
+        """Apply thruster forces and hydrodynamic forces to the robot.
+
+        Uses the allocation matrix from config to convert thruster commands
+        to body wrench: wrench = allocation_matrix @ thrusts
+        """
+        # Compute individual thruster forces from thruster state
         if self._randomized_thrust_coeff is not None:
             thrust_magnitude = self._thruster_state * self._randomized_thrust_coeff.unsqueeze(-1)
         else:
             thrust_magnitude = self._thruster_state * self.cfg.thrusters.thrust_coefficient
 
-        # Simple thruster allocation for BlueROV configuration:
-        # Thrusters 0-3: Horizontal (X-Y plane control)
-        # Thrusters 4-5: Vertical (Z control)
-        # This is a simplified model - real allocation matrix would be more complex
+        # Clamp to max thrust
+        thrust_magnitude = thrust_magnitude.clamp(
+            -self.cfg.thrusters.max_thrust,
+            self.cfg.thrusters.max_thrust
+        )
 
-        # Horizontal force (from thrusters 0-3)
-        fx = (thrust_magnitude[:, 0] - thrust_magnitude[:, 1]) * 0.707  # cos(45)
-        fy = (thrust_magnitude[:, 2] - thrust_magnitude[:, 3]) * 0.707
+        # Apply allocation matrix to convert thruster forces to body wrench
+        # wrench = allocation_matrix @ thrusts
+        # allocation_matrix: (6, num_thrusters), thrust_magnitude: (num_envs, num_thrusters)
+        # Result: (num_envs, 6) = [Fx, Fy, Fz, Mx, My, Mz]
+        body_wrench = torch.matmul(thrust_magnitude, self._allocation_matrix.T)
 
-        # Vertical force (from thrusters 4-5)
-        fz = thrust_magnitude[:, 4] + thrust_magnitude[:, 5]
-
-        # Yaw torque (from differential horizontal thrust)
-        tz = (thrust_magnitude[:, 0] + thrust_magnitude[:, 1] -
-              thrust_magnitude[:, 2] - thrust_magnitude[:, 3]) * 0.1
-
-        # Compile thrust wrench
-        self._thrust_forces[:, 0, 0] = fx
-        self._thrust_forces[:, 0, 1] = fy
-        self._thrust_forces[:, 0, 2] = fz
-        self._thrust_torques[:, 0, 2] = tz
+        # Extract forces and torques from wrench
+        self._thrust_forces[:, 0, :] = body_wrench[:, :3]
+        self._thrust_torques[:, 0, :] = body_wrench[:, 3:]
 
         # Compute hydrodynamic forces
         self._hydro_forces, self._hydro_torques = self._hydro.compute_forces(
@@ -314,11 +332,18 @@ class UUVEnv(DirectRLEnv):
             * self.step_dt
         )
 
-        # Action smoothness penalty
+        # Action smoothness penalty (rate of change)
         action_rate = self._actions - self._prev_actions
         action_rate_penalty = (
             torch.sum(torch.square(action_rate), dim=1)
             * self.cfg.action_rate_penalty_scale
+            * self.step_dt
+        )
+
+        # Action magnitude penalty (penalize large actions)
+        action_magnitude_penalty = (
+            torch.sum(torch.square(self._actions), dim=1)
+            * self.cfg.action_magnitude_penalty_scale
             * self.step_dt
         )
 
@@ -332,6 +357,7 @@ class UUVEnv(DirectRLEnv):
             + lin_vel_penalty
             + ang_vel_penalty
             + action_rate_penalty
+            + action_magnitude_penalty
             + alive_reward
         )
 
@@ -341,6 +367,7 @@ class UUVEnv(DirectRLEnv):
         self._episode_sums["lin_vel_penalty"] += lin_vel_penalty
         self._episode_sums["ang_vel_penalty"] += ang_vel_penalty
         self._episode_sums["action_rate_penalty"] += action_rate_penalty
+        self._episode_sums["action_magnitude_penalty"] += action_magnitude_penalty
         self._episode_sums["alive_reward"] += alive_reward
 
         return reward
@@ -434,6 +461,19 @@ class UUVEnv(DirectRLEnv):
                 + self.cfg.randomization.thrust_coefficient_scale[0]
             )
             self._randomized_thrust_coeff[env_ids] = self.cfg.thrusters.thrust_coefficient * thrust_scales
+
+            # Randomize thruster time constants
+            time_const_scales = (
+                torch.rand(len(env_ids), device=self.device)
+                * (self.cfg.randomization.time_constant_scale[1] - self.cfg.randomization.time_constant_scale[0])
+                + self.cfg.randomization.time_constant_scale[0]
+            )
+            self._randomized_time_constant_up[env_ids] = self.cfg.thrusters.time_constant_up * time_const_scales
+            self._randomized_time_constant_down[env_ids] = self.cfg.thrusters.time_constant_down * time_const_scales
+
+            # Randomize robot mass (applied via scaling gravity compensation)
+            # Note: Actual mass change requires physics engine support
+            # This affects buoyancy calculation through volume scaling already applied above
 
         # Randomize ocean current if enabled
         if any(v > 0 for v in self.cfg.ocean_current.max_velocity):

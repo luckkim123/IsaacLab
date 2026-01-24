@@ -24,26 +24,54 @@ class ThrusterCfg:
 
     This configuration supports simplified thruster dynamics based on the
     Blue Robotics T200 thruster model.
+
+    BlueROV2 Heavy thruster layout (6 thrusters):
+        - Thrusters 0-3: Horizontal vectored at 45 degrees (X-Y-Yaw control)
+        - Thrusters 4-5: Vertical (Z-Roll-Pitch control)
+
+    The allocation matrix maps thruster commands to body wrench:
+        wrench = allocation_matrix @ thrusts
     """
 
     # Number of thrusters
     num_thrusters: int = 6
 
-    # Maximum thrust per thruster (N)
+    # Maximum thrust per thruster (N) - T200 max thrust
     max_thrust: float = 50.0
 
     # Thruster time constant for first-order dynamics (s)
-    time_constant_up: float = 0.15
-    time_constant_down: float = 0.15
+    # From MarineGym BlueROV.yaml - T200 thruster response time
+    time_constant_up: float = 0.01
+    time_constant_down: float = 0.01
 
-    # Thrust coefficient (N per throttle^2, normalized to [-1, 1])
+    # Thrust coefficient (N per normalized throttle [-1, 1])
     thrust_coefficient: float = 50.0
 
-    # Thruster allocation matrix (6 x num_thrusters)
+    # Thruster arm lengths (m) - distance from center of mass
+    arm_length_x: float = 0.12  # X distance to vertical thrusters
+    arm_length_y: float = 0.12  # Y distance to vertical thrusters
+    arm_length_xy: float = 0.15  # Distance to horizontal thrusters
+
+    # Thruster allocation matrix (6 DOF x num_thrusters)
     # Maps thruster forces to body wrench [Fx, Fy, Fz, Mx, My, Mz]
-    # Default: BlueROV2 Heavy configuration (8 thrusters)
-    # For 6-thruster config, this will be overridden
-    use_allocation_matrix: bool = True
+    # BlueROV2 Heavy configuration with 45-degree vectored horizontal thrusters
+    # Row order: Fx, Fy, Fz, Mx, My, Mz
+    # Column order: T0, T1, T2, T3, T4, T5
+    # Horizontal thrusters (0-3) at 45 degrees, Vertical thrusters (4-5)
+    allocation_matrix: tuple[tuple[float, ...], ...] = (
+        # Fx: forward thrust from horizontal thrusters
+        (0.707, 0.707, -0.707, -0.707, 0.0, 0.0),
+        # Fy: lateral thrust from horizontal thrusters
+        (0.707, -0.707, 0.707, -0.707, 0.0, 0.0),
+        # Fz: vertical thrust from vertical thrusters
+        (0.0, 0.0, 0.0, 0.0, 1.0, 1.0),
+        # Mx: roll moment from vertical thrusters
+        (0.0, 0.0, 0.0, 0.0, 0.12, -0.12),
+        # My: pitch moment from vertical thrusters
+        (0.0, 0.0, 0.0, 0.0, -0.12, -0.12),
+        # Mz: yaw moment from horizontal thrusters
+        (-0.15, 0.15, 0.15, -0.15, 0.0, 0.0),
+    )
 
 
 @configclass

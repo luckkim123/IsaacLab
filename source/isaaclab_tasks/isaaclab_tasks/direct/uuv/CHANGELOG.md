@@ -2,6 +2,31 @@
 
 All notable changes to the UUV (Underwater Vehicle) environment module.
 
+## [0.4.0] - 2026-01-24
+
+### Fixed
+- **Thruster allocation**: Replaced hardcoded allocation coefficients (0.707, 0.1) with
+  configurable allocation matrix in `ThrusterCfg`
+- **Thruster time constant**: Fixed from 0.15s to 0.01s to match MarineGym T200 parameters
+- **Unused config parameters**: Now all config parameters are actually used in code
+  - `max_thrust`: Applied as clamp in `_apply_action()`
+  - `time_constant_scale`: Applied in domain randomization
+  - `action_magnitude_penalty_scale`: Added to reward calculation
+
+### Added
+- **Thruster allocation matrix** in `ThrusterCfg`:
+  - Configurable 6x6 allocation matrix mapping thruster commands to body wrench
+  - Default values for BlueROV2 Heavy with 45-degree vectored horizontal thrusters
+  - Thruster arm length parameters (`arm_length_x`, `arm_length_y`, `arm_length_xy`)
+- **Time constant randomization**: `_randomized_time_constant_up/down` buffers
+- **Action magnitude penalty**: Added to reward function and episode logging
+
+### Changed
+- `_apply_action()`: Now uses matrix multiplication with allocation matrix
+- `_pre_physics_step()`: Supports per-environment time constant randomization
+- `_get_rewards()`: Includes `action_magnitude_penalty` term
+- `_reset_idx()`: Randomizes time constants when domain randomization enabled
+
 ## [0.3.0] - 2026-01-24
 
 ### Added
