@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from isaaclab.utils import configclass
-from isaaclab.utils.math import quat_rotate_inverse, quat_apply
+from isaaclab.utils.math import quat_apply_inverse, quat_apply
 
 if TYPE_CHECKING:
     from typing import Sequence
@@ -163,14 +163,14 @@ class HydrodynamicsModel:
             Tuple of (forces_b, torques_b) in body frame. Each has shape (num_envs, 3).
         """
         # Transform world velocities to body frame
-        lin_vel_b = quat_rotate_inverse(root_quat_w, root_lin_vel_w)
-        ang_vel_b = quat_rotate_inverse(root_quat_w, root_ang_vel_w)
+        lin_vel_b = quat_apply_inverse(root_quat_w, root_lin_vel_w)
+        ang_vel_b = quat_apply_inverse(root_quat_w, root_ang_vel_w)
         body_vel = torch.cat([lin_vel_b, ang_vel_b], dim=-1)  # (num_envs, 6)
 
         # Transform ocean current to body frame and compute relative velocity
         current_w = self._current_velocity + torch.randn_like(self._current_velocity) * self._current_noise_scale
-        current_lin_b = quat_rotate_inverse(root_quat_w, current_w[:, :3])
-        current_ang_b = quat_rotate_inverse(root_quat_w, current_w[:, 3:])
+        current_lin_b = quat_apply_inverse(root_quat_w, current_w[:, :3])
+        current_ang_b = quat_apply_inverse(root_quat_w, current_w[:, 3:])
         current_b = torch.cat([current_lin_b, current_ang_b], dim=-1)
 
         # Relative velocity (vehicle velocity - current velocity)

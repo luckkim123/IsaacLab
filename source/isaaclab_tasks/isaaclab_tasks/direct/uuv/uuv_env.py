@@ -18,7 +18,7 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.envs.ui import BaseEnvWindow
 from isaaclab.markers import VisualizationMarkers
-from isaaclab.utils.math import subtract_frame_transforms, quat_rotate_inverse, quat_from_euler_xyz, quat_mul
+from isaaclab.utils.math import subtract_frame_transforms, quat_apply_inverse, quat_from_euler_xyz, quat_mul
 
 from .hydrodynamics_model import HydrodynamicsModel
 from .uuv_env_cfg import UUVEnvCfg
@@ -277,7 +277,7 @@ class UUVEnv(DirectRLEnv):
 
         # Up vector in body frame (for orientation reward)
         up_w = torch.tensor([[0.0, 0.0, 1.0]], device=self.device).expand(self.num_envs, -1)
-        up_b = quat_rotate_inverse(self._robot.data.root_quat_w, up_w)
+        up_b = quat_apply_inverse(self._robot.data.root_quat_w, up_w)
 
         # Compile observation
         obs = torch.cat(
@@ -313,7 +313,7 @@ class UUVEnv(DirectRLEnv):
         # Orientation reward (upright bonus)
         # Compute how aligned the robot's Z-axis is with world Z
         up_w = torch.tensor([[0.0, 0.0, 1.0]], device=self.device).expand(self.num_envs, -1)
-        up_b = quat_rotate_inverse(self._robot.data.root_quat_w, up_w)
+        up_b = quat_apply_inverse(self._robot.data.root_quat_w, up_w)
         orientation_reward = (
             (up_b[:, 2] + 1.0) / 2.0  # Map [-1, 1] to [0, 1]
             * self.cfg.orientation_reward_scale

@@ -2,6 +2,32 @@
 
 All notable changes to the UUV (Underwater Vehicle) environment module.
 
+## [0.5.2] - 2026-01-24
+
+### Fixed
+- **experiment_name consistency**: Unified `experiment_name` to `"bluerov_direct"` across all RSL-RL configs
+  - **Root cause**: Train/Eval/Current variants had different experiment_names, causing checkpoint path mismatch
+  - **Problem**: Training saved to `logs/rsl_rl/bluerov_train/`, evaluation looked in `logs/rsl_rl/bluerov_hover/`
+  - **Solution**: All variants now inherit `experiment_name = "bluerov_direct"` from base config
+  - Follows Isaac Lab convention (e.g., `cartpole_direct`, `quadcopter_direct`)
+
+### Changed
+- **RSL-RL config structure**: Removed `experiment_name` overrides from derived classes
+  - `BlueROVTrainPPORunnerCfg`, `BlueROVEvalPPORunnerCfg`, `BlueROVCurrentPPORunnerCfg` now inherit from base
+  - Ensures checkpoint compatibility across all environment variants
+
+## [0.5.1] - 2026-01-24
+
+### Fixed
+- **Deprecated function replacement**: Replaced `quat_rotate_inverse` with `quat_apply_inverse`
+  - Affects `uuv_env.py` and `hydrodynamics_model.py`
+  - Fixes deprecation warnings during simulation
+
+### Changed
+- **PhysX external forces**: Enabled `enable_external_forces_every_iteration=True`
+  - Important for accurate hydrodynamic force integration in underwater vehicles
+  - Removes the warning about noisy velocities
+
 ## [0.5.0] - 2026-01-24
 
 ### Fixed

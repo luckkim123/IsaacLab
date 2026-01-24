@@ -11,7 +11,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim import SimulationCfg
+from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 
@@ -142,6 +142,11 @@ class UUVEnvCfg(DirectRLEnvCfg):
             static_friction=0.5,
             dynamic_friction=0.5,
             restitution=0.0,
+        ),
+        # Enable external forces every iteration for accurate hydrodynamic force integration
+        # This is important for underwater vehicles with continuous external forces
+        physx=PhysxCfg(
+            enable_external_forces_every_iteration=True,
         ),
     )
 

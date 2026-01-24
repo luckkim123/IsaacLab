@@ -22,12 +22,15 @@ class BlueROVPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     This configuration uses larger networks and longer horizons compared to
     quadcopter due to the more complex dynamics of underwater vehicles.
+
+    Note: All BlueROV variants share the same experiment_name to ensure
+    checkpoints are compatible across Train/Eval/Current environments.
     """
 
     num_steps_per_env = 48  # Longer horizon for slower dynamics
     max_iterations = 500
     save_interval = 50
-    experiment_name = "bluerov_hover"
+    experiment_name = "bluerov_direct"  # Consistent across all variants (Isaac Lab convention)
     empirical_normalization = False
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
@@ -55,9 +58,11 @@ class BlueROVPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 @configclass
 class BlueROVTrainPPORunnerCfg(BlueROVPPORunnerCfg):
-    """PPO configuration for BlueROV training environment (no randomization)."""
+    """PPO configuration for BlueROV training environment (no randomization).
 
-    experiment_name = "bluerov_train"
+    Inherits experiment_name from base to share checkpoints with other variants.
+    """
+
     max_iterations = 300  # Faster convergence without randomization
 
 
@@ -66,9 +71,9 @@ class BlueROVEvalPPORunnerCfg(BlueROVPPORunnerCfg):
     """PPO configuration for BlueROV evaluation environment (full randomization).
 
     Uses slightly higher entropy and more iterations to handle domain randomization.
+    Inherits experiment_name from base to share checkpoints with other variants.
     """
 
-    experiment_name = "bluerov_eval"
     max_iterations = 800  # More iterations for robust policy
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
@@ -88,9 +93,11 @@ class BlueROVEvalPPORunnerCfg(BlueROVPPORunnerCfg):
 
 @configclass
 class BlueROVCurrentPPORunnerCfg(BlueROVPPORunnerCfg):
-    """PPO configuration for BlueROV with ocean currents."""
+    """PPO configuration for BlueROV with ocean currents.
 
-    experiment_name = "bluerov_current"
+    Inherits experiment_name from base to share checkpoints with other variants.
+    """
+
     max_iterations = 600
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
