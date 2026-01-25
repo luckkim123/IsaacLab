@@ -9,36 +9,39 @@ This package provides environments for training underwater vehicles with
 full 6-DOF hydrodynamics based on the Fossen model.
 
 Available Environments:
-    - Isaac-UUV-BlueROV-v0: BlueROV2 hover task (no randomization)
-    - Isaac-UUV-BlueROV-Current-v0: BlueROV2 hover task with ocean currents
-    - Isaac-UUV-BlueROV-Train-v0: BlueROV2 training environment (no randomization)
-    - Isaac-UUV-BlueROV-Eval-v0: BlueROV2 evaluation environment (full randomization)
-    - Isaac-UUV-BlueROV-v2: BlueROV2 hover task with modular reward/task system
+    BlueROV2:
+        - Isaac-UUV-BlueROV-Hover-v0: Hover task (position + attitude)
+        - Isaac-UUV-BlueROV-Hover-Train-v0: Hover with domain randomization
+        - Isaac-UUV-BlueROV-Hover-Eval-v0: Hover evaluation
+        - Isaac-UUV-BlueROV-Attitude-v0: Attitude-only control
+        - Isaac-UUV-BlueROV-Attitude-Train-v0: Attitude with domain randomization
 
-Modular Components (V2):
-    - tasks: Task abstraction layer (HoverTask, etc.)
+    Hero Agent:
+        - Isaac-UUV-HeroAgent-Hover-v0: Hover task (position + attitude)
+        - Isaac-UUV-HeroAgent-Hover-Train-v0: Hover with domain randomization
+        - Isaac-UUV-HeroAgent-Hover-Eval-v0: Hover evaluation
+        - Isaac-UUV-HeroAgent-Attitude-v0: Attitude-only control
+        - Isaac-UUV-HeroAgent-Attitude-Train-v0: Attitude with domain randomization
+
+Modular Components:
+    - tasks: Task abstraction layer (HoverTask, AttitudeTask)
+    - models: Physical models (HydrodynamicsModel, ThrusterModel)
     - rewards: Composition-based reward terms (RewardManager, RewardTermCfg)
-    - thrusters: Thruster model interface (ThrusterModel, ThrusterModelCfg)
+    - config: Robot-specific environment configurations
 """
 
-import gymnasium as gym
+from . import config  # Import config to trigger gym.register() for all environments
 
-from . import agents
-
-# BlueROV configurations
-from .bluerov_cfg import (
-    BLUEROV_CFG,
-    BlueROVCurrentEnvCfg,
-    BlueROVEnvCfg,
-    BlueROVEvalEnvCfg,
-    BlueROVHydrodynamicsCfg,
-    BlueROVTrainEnvCfg,
+# Physical models (from models/)
+from .models import (
+    HydrodynamicsModel,
+    HydrodynamicsCfg,
+    OceanCurrentCfg,
+    ThrusterModel,
+    ThrusterCfg,
 )
 
-# Hydrodynamics
-from .hydrodynamics_model import HydrodynamicsCfg, HydrodynamicsModel, OceanCurrentCfg
-
-# Modular components
+# Modular reward system
 from .rewards import (
     RewardManager,
     RewardTermCfg,
@@ -51,8 +54,9 @@ from .rewards import (
     orientation_upright_exp,
     position_tracking_exp,
 )
-from .tasks import HoverTask, HoverTaskCfg, TaskBase, TaskBaseCfg
-from .thrusters import ThrusterModel, ThrusterModelCfg
+
+# Task abstraction
+from .tasks import AttitudeTask, AttitudeTaskCfg, HoverTask, HoverTaskCfg, TaskBase, TaskBaseCfg
 
 # MDP event functions for domain randomization
 from .mdp import (
@@ -62,25 +66,27 @@ from .mdp import (
     randomize_thruster_params,
 )
 
-# Original environment (V1)
-from .uuv_env import UUVEnv
-from .uuv_env_cfg import DomainRandomizationCfg, EventCfg, ThrusterCfg, UUVEnvCfg
+# Environment configurations
+from .uuv_env_cfg import DomainRandomizationCfg, EventCfg, UUVEnvCfg
 
-# Modular environment (V2)
+# Environment class
 from .uuv_env_v2 import UUVEnvV2
 
+# Re-export robot configurations from isaaclab_assets for convenience
+from isaaclab_assets.robots.uuv import (
+    BLUEROV_CFG,
+    BlueROVHydrodynamicsCfg,
+    BlueROVThrusterCfg,
+    HERO_AGENT_CFG,
+    HeroAgentHydrodynamicsCfg,
+    HeroAgentThrusterCfg,
+)
+
 __all__ = [
-    # Environment (V1 - backward compatible)
-    "UUVEnv",
-    # Environment (V2 - modular)
+    # Environment
     "UUVEnvV2",
     # Configurations
     "UUVEnvCfg",
-    "BlueROVEnvCfg",
-    "BlueROVCurrentEnvCfg",
-    "BlueROVTrainEnvCfg",
-    "BlueROVEvalEnvCfg",
-    "ThrusterCfg",
     "DomainRandomizationCfg",
     "EventCfg",
     # MDP event functions
@@ -88,17 +94,20 @@ __all__ = [
     "randomize_thruster_params",
     "randomize_ocean_current",
     "randomize_robot_pose",
-    # Hydrodynamics
+    # Physical models
     "HydrodynamicsModel",
     "HydrodynamicsCfg",
     "OceanCurrentCfg",
-    "BlueROVHydrodynamicsCfg",
-    # Tasks (V2)
+    "ThrusterModel",
+    "ThrusterCfg",
+    # Tasks
     "TaskBase",
     "TaskBaseCfg",
     "HoverTask",
     "HoverTaskCfg",
-    # Rewards (V2)
+    "AttitudeTask",
+    "AttitudeTaskCfg",
+    # Rewards
     "RewardManager",
     "RewardTermCfg",
     "position_tracking_exp",
@@ -109,82 +118,11 @@ __all__ = [
     "action_rate_penalty",
     "action_magnitude_penalty",
     "alive_bonus",
-    # Thrusters (V2)
-    "ThrusterModel",
-    "ThrusterModelCfg",
-    # Assets
+    # Robot assets (from isaaclab_assets)
     "BLUEROV_CFG",
+    "BlueROVHydrodynamicsCfg",
+    "BlueROVThrusterCfg",
+    "HERO_AGENT_CFG",
+    "HeroAgentHydrodynamicsCfg",
+    "HeroAgentThrusterCfg",
 ]
-
-##
-# Register Gymnasium environments
-##
-
-gym.register(
-    id="Isaac-UUV-BlueROV-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.uuv:BlueROVEnvCfg",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:BlueROVPPORunnerCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
-        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
-    },
-)
-
-gym.register(
-    id="Isaac-UUV-BlueROV-Current-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.uuv:BlueROVCurrentEnvCfg",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:BlueROVCurrentPPORunnerCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
-        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
-    },
-)
-
-gym.register(
-    id="Isaac-UUV-BlueROV-Train-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.uuv:BlueROVTrainEnvCfg",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:BlueROVTrainPPORunnerCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
-        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
-    },
-)
-
-gym.register(
-    id="Isaac-UUV-BlueROV-Eval-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.uuv:BlueROVEvalEnvCfg",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:BlueROVEvalPPORunnerCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
-        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
-    },
-)
-
-##
-# V2 Environments (modular task/reward system)
-##
-
-gym.register(
-    id="Isaac-UUV-BlueROV-v2",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnvV2",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.uuv:BlueROVEnvCfg",
-        "rl_games_cfg_entry_point": f"{agents.__name__}:rl_games_ppo_cfg.yaml",
-        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:BlueROVPPORunnerCfg",
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
-        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
-    },
-)

@@ -13,10 +13,13 @@ The design follows Isaac Lab conventions while adapting to DirectRLEnv patterns.
 
 from .task_base import TaskBase, TaskBaseCfg
 from .hover_task import HoverTask, HoverTaskCfg
+from .attitude_task import AttitudeTask, AttitudeTaskCfg
 
 __all__ = [
     "TaskBase",
     "TaskBaseCfg",
     "HoverTask",
     "HoverTaskCfg",
+    "AttitudeTask",
+    "AttitudeTaskCfg",
 ]

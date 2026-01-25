@@ -3,13 +3,11 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-# RL-Games PPO configuration for BlueROV UUV hover task.
-# Tuned for underwater vehicle control with 6-DOF dynamics.
+# RL-Games PPO configuration for Hero Agent UUV tasks.
 
 params:
   seed: 42
 
-  # environment wrapper clipping
   env:
     clip_actions: 1.0
 
@@ -34,7 +32,7 @@ params:
           val: 0
         fixed_sigma: True
     mlp:
-      units: [128, 128, 64]  # Larger network for complex dynamics
+      units: [128, 128, 64]
       activation: elu
       d2rl: False
 
@@ -47,7 +45,7 @@ params:
   load_path: ''
 
   config:
-    name: bluerov_hover
+    name: hero_agent_hover
     env_name: rlgpu
     device: 'cuda:0'
     device_name: 'cuda:0'
@@ -59,7 +57,7 @@ params:
     value_bootstrap: True
     num_actors: -1
     reward_shaper:
-      scale_value: 0.1  # Higher scale for UUV rewards
+      scale_value: 0.1
     normalize_advantage: True
     gamma: 0.99
     tau: 0.95
@@ -75,7 +73,7 @@ params:
     entropy_coef: 0.005
     truncate_grads: True
     e_clip: 0.2
-    horizon_length: 48  # Longer horizon for slower dynamics
+    horizon_length: 48
     minibatch_size: 24576
     mini_epochs: 8
     critic_coef: 1

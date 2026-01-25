@@ -16,65 +16,10 @@ from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 
-from .hydrodynamics_model import HydrodynamicsCfg, OceanCurrentCfg
+# Import configuration classes from isaaclab_assets
+from isaaclab_assets.robots.uuv import HydrodynamicsCfg, OceanCurrentCfg, ThrusterCfg
 from .mdp import events as uuv_events
-
-
-@configclass
-class ThrusterCfg:
-    """Configuration for underwater vehicle thrusters.
-
-    This configuration supports simplified thruster dynamics based on the
-    Blue Robotics T200 thruster model.
-
-    BlueROV2 Heavy thruster layout (6 thrusters):
-        - Thrusters 0-3: Horizontal vectored at 45 degrees (X-Y-Yaw control)
-        - Thrusters 4-5: Vertical (Z-Roll-Pitch control)
-
-    The allocation matrix maps thruster commands to body wrench:
-        wrench = allocation_matrix @ thrusts
-    """
-
-    # Number of thrusters
-    num_thrusters: int = 6
-
-    # Maximum thrust per thruster (N) - T200 max thrust
-    max_thrust: float = 50.0
-
-    # Thruster time constant for first-order dynamics (s)
-    # From MarineGym T200 model tau_up/tau_down (throttle dynamics)
-    # Note: BlueROV.yaml time_constants=0.01 is for RPM filter, not throttle
-    time_constant_up: float = 0.43
-    time_constant_down: float = 0.43
-
-    # Thrust coefficient (N per normalized throttle [-1, 1])
-    thrust_coefficient: float = 50.0
-
-    # Thruster arm lengths (m) - distance from center of mass
-    arm_length_x: float = 0.12  # X distance to vertical thrusters
-    arm_length_y: float = 0.12  # Y distance to vertical thrusters
-    arm_length_xy: float = 0.15  # Distance to horizontal thrusters
-
-    # Thruster allocation matrix (6 DOF x num_thrusters)
-    # Maps thruster forces to body wrench [Fx, Fy, Fz, Mx, My, Mz]
-    # BlueROV2 Heavy configuration with 45-degree vectored horizontal thrusters
-    # Row order: Fx, Fy, Fz, Mx, My, Mz
-    # Column order: T0, T1, T2, T3, T4, T5
-    # Horizontal thrusters (0-3) at 45 degrees, Vertical thrusters (4-5)
-    allocation_matrix: tuple[tuple[float, ...], ...] = (
-        # Fx: forward thrust from horizontal thrusters
-        (0.707, 0.707, -0.707, -0.707, 0.0, 0.0),
-        # Fy: lateral thrust from horizontal thrusters
-        (0.707, -0.707, 0.707, -0.707, 0.0, 0.0),
-        # Fz: vertical thrust from vertical thrusters
-        (0.0, 0.0, 0.0, 0.0, 1.0, 1.0),
-        # Mx: roll moment from vertical thrusters
-        (0.0, 0.0, 0.0, 0.0, 0.12, -0.12),
-        # My: pitch moment from vertical thrusters
-        (0.0, 0.0, 0.0, 0.0, -0.12, -0.12),
-        # Mz: yaw moment from horizontal thrusters
-        (-0.15, 0.15, 0.15, -0.15, 0.0, 0.0),
-    )
+from .tasks import TaskBaseCfg, HoverTaskCfg
 
 
 @configclass
@@ -249,7 +194,11 @@ class UUVEnvCfg(DirectRLEnvCfg):
     # Thruster configuration
     thrusters: ThrusterCfg = ThrusterCfg()
 
-    # Task parameters
+    # Task configuration (will be overridden by specific robot/task configs)
+    # Default is HoverTask with standard parameters
+    task: TaskBaseCfg = HoverTaskCfg()
+
+    # Legacy task parameters (deprecated - use task config instead)
     # Goal position randomization range (relative to spawn)
     goal_pos_range: tuple[float, float, float] = (2.0, 2.0, 1.0)
 

@@ -27,7 +27,7 @@ from isaaclab.markers import CUBOID_MARKER_CFG, VisualizationMarkers
 from isaaclab.markers.visualization_markers import VisualizationMarkersCfg
 from isaaclab.utils.math import quat_apply_inverse, quat_from_euler_xyz, quat_mul
 
-from .hydrodynamics_model import HydrodynamicsModel
+from .models import HydrodynamicsModel, ThrusterModel, ThrusterCfg
 from .rewards import (
     RewardManager,
     RewardTermCfg,
@@ -39,8 +39,7 @@ from .rewards import (
     orientation_upright_exp,
     position_tracking_exp,
 )
-from .tasks import HoverTask, HoverTaskCfg, TaskBase
-from .thrusters import ThrusterModel, ThrusterModelCfg
+from .tasks import AttitudeTask, AttitudeTaskCfg, HoverTask, HoverTaskCfg, TaskBase, TaskBaseCfg
 from .uuv_env_cfg import UUVEnvCfg
 
 if TYPE_CHECKING:
@@ -112,30 +111,16 @@ class UUVEnvV2(DirectRLEnv):
             robot_mass=self._robot_mass.item(),
         )
 
-        # Initialize thruster model
+        # Initialize thruster model - use config from UUVEnvCfg.thrusters directly
         self._thruster = ThrusterModel(
-            cfg=ThrusterModelCfg(
-                num_thrusters=self.cfg.thrusters.num_thrusters,
-                max_thrust=self.cfg.thrusters.max_thrust,
-                time_constant_up=self.cfg.thrusters.time_constant_up,
-                time_constant_down=self.cfg.thrusters.time_constant_down,
-                thrust_coefficient=self.cfg.thrusters.thrust_coefficient,
-                allocation_matrix=self.cfg.thrusters.allocation_matrix,
-            ),
+            cfg=self.cfg.thrusters,
             num_envs=self.num_envs,
             device=self.device,
             enable_randomization=self.cfg.randomization.enable,
         )
 
-        # Initialize task (default: HoverTask)
-        self._task: TaskBase = HoverTask(
-            cfg=HoverTaskCfg(
-                goal_pos_range=self.cfg.goal_pos_range,
-                initial_height=self.cfg.initial_height,
-            ),
-            num_envs=self.num_envs,
-            device=self.device,
-        )
+        # Initialize task from config
+        self._task = self._create_task_from_config()
 
         # Initialize reward manager with configurable terms
         self._reward_manager = RewardManager(
@@ -156,6 +141,46 @@ class UUVEnvV2(DirectRLEnv):
 
         # Setup debug visualization
         self.set_debug_vis(self.cfg.debug_vis)
+
+    def _create_task_from_config(self) -> TaskBase:
+        """Create task instance from environment configuration.
+
+        The task type is determined by the task configuration class:
+        - HoverTaskCfg -> HoverTask
+        - AttitudeTaskCfg -> AttitudeTask
+
+        For backward compatibility, if no task config is provided,
+        defaults to HoverTask using legacy goal_pos_range/initial_height.
+
+        Returns:
+            Task instance matching the configuration.
+        """
+        task_cfg = self.cfg.task
+
+        # Backward compatibility: create HoverTaskCfg from legacy parameters
+        if task_cfg is None or isinstance(task_cfg, TaskBaseCfg) and not isinstance(
+            task_cfg, (HoverTaskCfg, AttitudeTaskCfg)
+        ):
+            task_cfg = HoverTaskCfg(
+                goal_pos_range=self.cfg.goal_pos_range,
+                initial_height=self.cfg.initial_height,
+            )
+
+        # Create task based on config type
+        if isinstance(task_cfg, AttitudeTaskCfg):
+            return AttitudeTask(cfg=task_cfg, num_envs=self.num_envs, device=self.device)
+        elif isinstance(task_cfg, HoverTaskCfg):
+            return HoverTask(cfg=task_cfg, num_envs=self.num_envs, device=self.device)
+        else:
+            # Default to HoverTask for any TaskBaseCfg
+            return HoverTask(
+                cfg=HoverTaskCfg(
+                    goal_pos_range=task_cfg.goal_pos_range,
+                    initial_height=task_cfg.initial_height,
+                ),
+                num_envs=self.num_envs,
+                device=self.device,
+            )
 
     def _build_reward_cfg(self) -> dict[str, RewardTermCfg]:
         """Build reward configuration from environment config.

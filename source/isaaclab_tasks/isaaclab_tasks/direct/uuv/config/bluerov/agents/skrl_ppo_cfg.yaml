@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-# SKRL PPO configuration for BlueROV UUV hover task.
+# SKRL PPO configuration for BlueROV2 UUV tasks.
 # Tuned for underwater vehicle control with 6-DOF dynamics.
 
 seed: 42
@@ -23,7 +23,7 @@ models:
     network:
       - name: net
         input: OBSERVATIONS
-        layers: [128, 128, 64]  # Larger network for complex dynamics
+        layers: [128, 128, 64]
         activations: elu
     output: ACTIONS
   value:  # see deterministic_model parameters
@@ -48,7 +48,7 @@ memory:
 # https://skrl.readthedocs.io/en/latest/api/agents/ppo.html
 agent:
   class: PPO
-  rollouts: 48  # Longer horizon for slower dynamics
+  rollouts: 48
   learning_epochs: 8
   mini_batches: 4
   discount_factor: 0.99
@@ -84,5 +84,5 @@ agent:
 # https://skrl.readthedocs.io/en/latest/api/trainers/sequential.html
 trainer:
   class: SequentialTrainer
-  timesteps: 24000  # More timesteps for slower convergence
+  timesteps: 24000
   environment_info: log
