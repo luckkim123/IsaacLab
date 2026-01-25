@@ -3,14 +3,13 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""UUV Environment V2 with modular task and reward systems.
+"""UUV Environment with modular task and reward systems.
 
-This environment builds on the original UUVEnv with improved modularity:
-- Pluggable task system (HoverTask, TrackTask, etc.)
+This environment provides:
+- Pluggable task system (HoverTask, AttitudeTask, etc.)
 - Composition-based reward terms via RewardManager
 - Separated ThrusterModel for cleaner abstraction
-
-While maintaining backward compatibility with existing configurations.
+- Full 6-DOF Fossen hydrodynamics model
 """
 
 from __future__ import annotations
@@ -46,10 +45,10 @@ if TYPE_CHECKING:
     pass
 
 
-class UUVEnvV2Window(BaseEnvWindow):
-    """Window manager for the UUV V2 environment."""
+class UUVEnvWindow(BaseEnvWindow):
+    """Window manager for the UUV environment."""
 
-    def __init__(self, env: UUVEnvV2, window_name: str = "IsaacLab"):
+    def __init__(self, env: UUVEnv, window_name: str = "IsaacLab"):
         """Initialize the window."""
         super().__init__(env, window_name)
         with self.ui_window_elements["main_vstack"]:
@@ -58,12 +57,13 @@ class UUVEnvV2Window(BaseEnvWindow):
                     self._create_debug_vis_ui_element("targets", self.env)
 
 
-class UUVEnvV2(DirectRLEnv):
-    """UUV environment V2 with modular task and reward systems.
+class UUVEnv(DirectRLEnv):
+    """UUV environment with modular task and reward systems.
 
-    This environment provides improved modularity over UUVEnv:
-    - Task abstraction for easy addition of new tasks (hover, track, dock)
+    This environment provides:
+    - Task abstraction for easy addition of new tasks (hover, attitude, track)
     - Composition-based reward terms via RewardManager
+    - Full 6-DOF Fossen hydrodynamics model
     - Separated ThrusterModel for cleaner code structure
 
     Observation Space (configurable via task):
@@ -85,7 +85,7 @@ class UUVEnvV2(DirectRLEnv):
     cfg: UUVEnvCfg
 
     def __init__(self, cfg: UUVEnvCfg, render_mode: str | None = None, **kwargs):
-        """Initialize the UUV V2 environment.
+        """Initialize the UUV environment.
 
         Args:
             cfg: Environment configuration.

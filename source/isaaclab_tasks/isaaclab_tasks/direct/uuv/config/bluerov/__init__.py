@@ -42,7 +42,7 @@ __all__ = [
 # Hover Task (position + attitude control)
 gym.register(
     id="Isaac-UUV-BlueROV-Hover-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnvV2",
+    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.hover_env_cfg:BlueROVHoverEnvCfg",
@@ -55,7 +55,7 @@ gym.register(
 
 gym.register(
     id="Isaac-UUV-BlueROV-Hover-Train-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnvV2",
+    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.hover_env_cfg:BlueROVHoverTrainEnvCfg",
@@ -68,7 +68,7 @@ gym.register(
 
 gym.register(
     id="Isaac-UUV-BlueROV-Hover-Eval-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnvV2",
+    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.hover_env_cfg:BlueROVHoverEvalEnvCfg",
@@ -82,7 +82,7 @@ gym.register(
 # Attitude Task (attitude-only control)
 gym.register(
     id="Isaac-UUV-BlueROV-Attitude-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnvV2",
+    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.attitude_env_cfg:BlueROVAttitudeEnvCfg",
@@ -95,7 +95,7 @@ gym.register(
 
 gym.register(
     id="Isaac-UUV-BlueROV-Attitude-Train-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnvV2",
+    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.attitude_env_cfg:BlueROVAttitudeTrainEnvCfg",

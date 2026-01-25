@@ -108,7 +108,7 @@ YOURVEHICLE_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=YOURVEHICLE_USD_PATH,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=False,
+            disable_gravity=True,  # Gravity handled by hydrodynamics model
             max_depenetration_velocity=10.0,
             enable_gyroscopic_forces=True,
         ),

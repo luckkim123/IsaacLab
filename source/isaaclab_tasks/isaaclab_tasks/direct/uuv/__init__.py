@@ -70,7 +70,7 @@ from .mdp import (
 from .uuv_env_cfg import DomainRandomizationCfg, EventCfg, UUVEnvCfg
 
 # Environment class
-from .uuv_env_v2 import UUVEnvV2
+from .uuv_env import UUVEnv
 
 # Re-export robot configurations from isaaclab_assets for convenience
 from isaaclab_assets.robots.uuv import (
@@ -84,7 +84,7 @@ from isaaclab_assets.robots.uuv import (
 
 __all__ = [
     # Environment
-    "UUVEnvV2",
+    "UUVEnv",
     # Configurations
     "UUVEnvCfg",
     "DomainRandomizationCfg",

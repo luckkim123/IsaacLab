@@ -50,7 +50,7 @@ __all__ = [
 # Hover Task (position + attitude control)
 gym.register(
     id="Isaac-UUV-HeroAgent-Hover-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnvV2",
+    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.hover_env_cfg:HeroAgentHoverEnvCfg",
@@ -63,7 +63,7 @@ gym.register(
 
 gym.register(
     id="Isaac-UUV-HeroAgent-Hover-Train-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnvV2",
+    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.hover_env_cfg:HeroAgentHoverTrainEnvCfg",
@@ -77,7 +77,7 @@ gym.register(
 # Hover Evaluation (aggressive randomization)
 gym.register(
     id="Isaac-UUV-HeroAgent-Hover-Eval-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnvV2",
+    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.hover_env_cfg:HeroAgentHoverEvalEnvCfg",
@@ -91,7 +91,7 @@ gym.register(
 # Attitude Task (attitude-only control)
 gym.register(
     id="Isaac-UUV-HeroAgent-Attitude-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnvV2",
+    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.attitude_env_cfg:HeroAgentAttitudeEnvCfg",
@@ -105,7 +105,7 @@ gym.register(
 # Attitude Training (with domain randomization)
 gym.register(
     id="Isaac-UUV-HeroAgent-Attitude-Train-v0",
-    entry_point="isaaclab_tasks.direct.uuv:UUVEnvV2",
+    entry_point="isaaclab_tasks.direct.uuv:UUVEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.attitude_env_cfg:HeroAgentAttitudeTrainEnvCfg",

@@ -35,11 +35,10 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
     from ..uuv_env import UUVEnv
-    from ..uuv_env_v2 import UUVEnvV2
 
 
 def randomize_hydrodynamics(
-    env: UUVEnv | UUVEnvV2,
+    env: UUVEnv,
     env_ids: torch.Tensor | None,
     added_mass_scale: tuple[float, float] = (0.8, 1.2),
     linear_damping_scale: tuple[float, float] = (0.8, 1.2),
@@ -78,7 +77,7 @@ def randomize_hydrodynamics(
 
 
 def randomize_thruster_params(
-    env: UUVEnv | UUVEnvV2,
+    env: UUVEnv,
     env_ids: torch.Tensor | None,
     thrust_coeff_scale: tuple[float, float] = (0.8, 1.2),
     time_constant_scale: tuple[float, float] = (0.8, 1.2),
@@ -108,7 +107,7 @@ def randomize_thruster_params(
 
 
 def randomize_ocean_current(
-    env: UUVEnv | UUVEnvV2,
+    env: UUVEnv,
     env_ids: torch.Tensor | None,
     max_velocity: tuple[float, float, float] = (0.5, 0.5, 0.1),
 ) -> None:
@@ -132,7 +131,7 @@ def randomize_ocean_current(
 
 
 def randomize_robot_pose(
-    env: UUVEnv | UUVEnvV2,
+    env: UUVEnv,
     env_ids: torch.Tensor | None,
     position_x_range: tuple[float, float] = (-2.5, 2.5),
     position_y_range: tuple[float, float] = (-2.5, 2.5),
