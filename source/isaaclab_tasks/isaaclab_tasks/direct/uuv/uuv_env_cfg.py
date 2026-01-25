@@ -64,17 +64,20 @@ class DomainRandomizationCfg:
 
 @configclass
 class EventCfg:
-    """Configuration for domain randomization events following Isaac Lab patterns.
+    """Isaac Lab EventManager-based domain randomization configuration.
 
-    This configuration uses EventTerm to define randomization events that can
-    be triggered on "startup" (once at environment creation) or "reset" (on
-    every environment reset).
+    NOTE: Currently NOT USED. UUVEnv inherits DirectRLEnv which does not have
+    EventManager. Randomization is handled manually in _reset_idx() using
+    DomainRandomizationCfg above.
 
-    For backward compatibility, the legacy DomainRandomizationCfg is still
-    supported but this EventCfg approach is preferred for new implementations.
+    This is kept for future migration to ManagerBasedRLEnv, which would
+    automatically process these EventTerms via EventManager.
+
+    Usage (when migrating to ManagerBasedRLEnv):
+        class UUVEnvCfg(ManagerBasedRLEnvCfg):
+            events: EventCfg = EventCfg()
     """
 
-    # Hydrodynamic parameter randomization (on reset)
     randomize_hydrodynamics = EventTerm(
         func=uuv_events.randomize_hydrodynamics,
         mode="reset",
@@ -87,7 +90,6 @@ class EventCfg:
         },
     )
 
-    # Thruster parameter randomization (on reset)
     randomize_thrusters = EventTerm(
         func=uuv_events.randomize_thruster_params,
         mode="reset",
@@ -97,7 +99,6 @@ class EventCfg:
         },
     )
 
-    # Ocean current randomization (on reset)
     randomize_current = EventTerm(
         func=uuv_events.randomize_ocean_current,
         mode="reset",
@@ -106,7 +107,6 @@ class EventCfg:
         },
     )
 
-    # Robot pose randomization (on reset)
     randomize_pose = EventTerm(
         func=uuv_events.randomize_robot_pose,
         mode="reset",
@@ -232,9 +232,8 @@ class UUVEnvCfg(DirectRLEnvCfg):
     # Alive bonus
     alive_reward_scale: float = 0.1
 
-    # Domain randomization configuration (legacy - for backward compatibility)
+    # Domain randomization configuration (used by DirectRLEnv)
     randomization: DomainRandomizationCfg = DomainRandomizationCfg()
 
-    # Event-based randomization (Isaac Lab standard pattern)
-    # Set to None to use legacy randomization, or provide EventCfg for new pattern
+    # Reserved for future ManagerBasedRLEnv migration (currently unused)
     events: EventCfg | None = None
