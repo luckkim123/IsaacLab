@@ -350,10 +350,12 @@ class UUVEnv(DirectRLEnv):
         for name, value in reward_sums.items():
             self.extras["log"][f"Episode_Reward/{name}"] = value
 
-        final_distance = torch.linalg.norm(
-            self._task.goal_pos_w[env_ids] - self._robot.data.root_pos_w[env_ids], dim=1
-        ).mean()
-        self.extras["log"]["Metrics/final_distance_to_goal"] = final_distance.item()
+        # Log position tracking metric only for tasks with goal_pos_w (e.g., HoverTask)
+        if hasattr(self._task, "goal_pos_w"):
+            final_distance = torch.linalg.norm(
+                self._task.goal_pos_w[env_ids] - self._robot.data.root_pos_w[env_ids], dim=1
+            ).mean()
+            self.extras["log"]["Metrics/final_distance_to_goal"] = final_distance.item()
         self.extras["log"]["Episode_Termination/terminated"] = torch.count_nonzero(
             self.reset_terminated[env_ids]
         ).item()
