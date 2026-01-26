@@ -56,7 +56,8 @@ class HydrodynamicsCfg:
     water_density: float = 997.0
 
     # Acceleration filter alpha for numerical stability (0 < alpha < 1)
-    acceleration_filter_alpha: float = 0.3
+    # Higher values (closer to 1) provide stronger low-pass filtering, reducing noise-induced instability
+    acceleration_filter_alpha: float = 0.8
 
     # Use full Coriolis matrix C(v) = C_RB(v) + C_A(v) per Fossen model
     use_full_coriolis: bool = True

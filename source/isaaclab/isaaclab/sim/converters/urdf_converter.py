@@ -150,7 +150,6 @@ class UrdfConverter(AssetConverterBase):
         import_config.set_parse_mimic(self.cfg.convert_mimic_joints_to_normal_joints)
         # replace cylinder shapes with capsule shapes
         import_config.set_replace_cylinders_with_capsules(self.cfg.replace_cylinders_with_capsules)
-
         return import_config
 
     def _update_joint_parameters(self):

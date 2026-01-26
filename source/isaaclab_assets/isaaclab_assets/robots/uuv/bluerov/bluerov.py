@@ -27,8 +27,8 @@ from isaaclab.utils import configclass
 from ..uuv_cfg import HydrodynamicsCfg, ThrusterCfg
 
 # Path to BlueROV USD file (relative to this module)
-_BLUEROV_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "BlueROV")
-BLUEROV_USD_PATH = os.path.join(_BLUEROV_ASSETS_DIR, "BlueROV.usd")
+_BLUEROV_MESHES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshes")
+BLUEROV_USD_PATH = os.path.join(_BLUEROV_MESHES_DIR, "BlueROV.usd")
 
 
 @configclass

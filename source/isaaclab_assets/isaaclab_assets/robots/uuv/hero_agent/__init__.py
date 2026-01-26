@@ -5,4 +5,9 @@
 
 """Hero Agent underwater vehicle configuration."""
 
-from .hero_agent import HERO_AGENT_CFG, HeroAgentHydrodynamicsCfg, HeroAgentThrusterCfg
+from .hero_agent import (
+    HERO_AGENT_CFG,
+    HeroAgentBuoyHydrodynamicsCfg,
+    HeroAgentHydrodynamicsCfg,
+    HeroAgentThrusterCfg,
+)
