@@ -99,6 +99,7 @@ from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
+from isaaclab_tasks.direct.hero_agent.runners import HeroAgentEncoderRunner
 
 # import logger
 logger = logging.getLogger(__name__)
@@ -196,7 +197,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create runner from rsl-rl
     if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        # Check if using ActorCriticEncoder policy for encoder-specific logging
+        policy_class_name = getattr(agent_cfg.policy, "class_name", None)
+        if policy_class_name == "ActorCriticEncoder":
+            print("[INFO] Using HeroAgentEncoderRunner for encoder metrics logging.")
+            runner = HeroAgentEncoderRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        else:
+            runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     else:

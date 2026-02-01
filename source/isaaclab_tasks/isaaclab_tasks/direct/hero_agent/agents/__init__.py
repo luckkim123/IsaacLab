@@ -10,13 +10,19 @@ joint-based attitude control policies.
 """
 
 from .rsl_rl_ppo_cfg import (
+    HeroAgentEncoderEvalPPORunnerCfg,
+    HeroAgentEncoderTrainPPORunnerCfg,
+    HeroAgentEvalPPORunnerCfg,
     HeroAgentPPORunnerCfg,
     HeroAgentTrainPPORunnerCfg,
-    HeroAgentEvalPPORunnerCfg,
+    RslRlPpoActorCriticEncoderCfg,
 )
 
 __all__ = [
     "HeroAgentPPORunnerCfg",
     "HeroAgentTrainPPORunnerCfg",
     "HeroAgentEvalPPORunnerCfg",
+    "HeroAgentEncoderTrainPPORunnerCfg",
+    "HeroAgentEncoderEvalPPORunnerCfg",
+    "RslRlPpoActorCriticEncoderCfg",
 ]

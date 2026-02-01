@@ -91,6 +91,12 @@ class HeroAgentHydrodynamicsCfg(HydrodynamicsCfg):
     # Freshwater density from heroagent2.py (kg/m^3)
     water_density: float = 998.0
 
+    # Rigid body inertia [I_xx, I_yy, I_zz] (kg*m^2)
+    # Solid cylinder approximation: R=0.0825m, L=0.27m, m=9.18kg
+    #   I_xx = I_yy = m*(3*R^2 + L^2)/12 = 9.18*(0.0204 + 0.0729)/12 = 0.071
+    #   I_zz = m*R^2/2 = 9.18*0.006806/2 = 0.031
+    rigid_body_inertia: tuple[float, float, float] | None = (0.071, 0.071, 0.031)
+
     # Enable full Coriolis matrix (C_RB + C_A per Fossen model)
     use_full_coriolis: bool = True
 

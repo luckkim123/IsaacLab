@@ -24,11 +24,22 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.envs.ui import BaseEnvWindow
-from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse, quat_from_euler_xyz, quat_mul
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+from isaaclab.utils.math import euler_xyz_from_quat, quat_apply, quat_apply_inverse
 
 # Import models from common isaaclab_tasks.models
 from isaaclab_tasks.models import HydrodynamicsModel
 
+from .hero_agent_env_cfg import HeroAgentEnvCfg
+from .mdp.events import (
+    randomize_buoy_hydrodynamics,
+    randomize_hydrodynamics,
+    randomize_joint_positions,
+    randomize_ocean_current,
+    randomize_robot_pose,
+    reset_joint_positions_default,
+    reset_robot_pose_default,
+)
 from .rewards import (
     RewardManager,
     RewardTermCfg,
@@ -36,8 +47,7 @@ from .rewards import (
     albc_potential_reward,
     albc_progress_reward,
 )
-from .tasks import ALBCAttitudeTask, ALBCAttitudeTaskCfg
-from .hero_agent_env_cfg import HeroAgentEnvCfg
+from .tasks import ALBCAttitudeTask
 
 
 class HeroAgentEnvWindow(BaseEnvWindow):
@@ -59,7 +69,7 @@ class HeroAgentEnv(DirectRLEnv):
     - Joint position control (no thrusters)
     - Multi-body hydrodynamics (main body + buoy)
     - Potential-based reward system
-    - Decimated control (25 Hz default)
+    - Decimated control (12.5 Hz default)
 
     Observation Space (13 dims):
         [0:3]   roll, pitch, yaw (Euler angles from quaternion)
@@ -73,8 +83,8 @@ class HeroAgentEnv(DirectRLEnv):
         [1] joint2 velocity command [-1, 1]
 
     Physical Parameters:
-        - control_decimation: 4 (25 Hz control at 100 Hz sim)
-        - action_speed_scale: pi rad/s
+        - control_decimation: 4 (12.5 Hz control at 100 Hz sim with decimation=2)
+        - action_speed_scale: pi rad/s (effective pi/2 rad/s, see cfg note)
         - joint_limits: from URDF (-6.0 to 6.0 rad)
     """
 
@@ -133,11 +143,28 @@ class HeroAgentEnv(DirectRLEnv):
         self._joint_limits_upper = joint_limits_high[0]
 
         # Initialize task
-        self._task = self._create_task_from_config()
+        self._task = ALBCAttitudeTask(
+            cfg=self.cfg.task, num_envs=self.num_envs, device=self.device
+        )
 
         # Initialize reward manager
         self._reward_manager = RewardManager(
-            cfg=self._build_reward_cfg(),
+            cfg={
+                "potential": RewardTermCfg(
+                    func=albc_potential_reward,
+                    weight=self.cfg.albc_potential_reward_weight,
+                    params={"task": self._task, "scale": self.cfg.albc_potential_reward_scale},
+                ),
+                "progress": RewardTermCfg(
+                    func=albc_progress_reward,
+                    weight=self.cfg.albc_progress_reward_weight,
+                    params={"task": self._task},
+                ),
+                "action_cost": RewardTermCfg(
+                    func=albc_action_cost,
+                    weight=self.cfg.albc_action_cost_weight,
+                ),
+            },
             num_envs=self.num_envs,
             device=self.device,
         )
@@ -165,7 +192,7 @@ class HeroAgentEnv(DirectRLEnv):
         # This avoids joint constraint conflicts while maintaining buoyancy balance
         self._child_body_ids: list[torch.Tensor] = []
         self._child_body_net_forces: list[float] = []
-        gravity = 9.81
+        gravity = self._gravity_magnitude.item()
 
         for body_name, params in self.cfg.child_body_buoyancy.items():
             body_id = self._robot.find_bodies(body_name)[0]
@@ -177,50 +204,12 @@ class HeroAgentEnv(DirectRLEnv):
             net_force = buoyancy - weight
             self._child_body_net_forces.append(net_force)
 
+        # Pre-allocate reusable buffers for child body force application
+        self._child_world_up = torch.zeros(self.num_envs, 3, device=self.device)
+        self._child_zero_torque = torch.zeros(self.num_envs, 1, 3, device=self.device)
+
         # Setup debug visualization
         self.set_debug_vis(self.cfg.debug_vis)
-
-    def _create_task_from_config(self) -> ALBCAttitudeTask:
-        """Create ALBC attitude task instance.
-
-        Returns:
-            ALBCAttitudeTask instance.
-        """
-        task_cfg = self.cfg.task
-        if isinstance(task_cfg, ALBCAttitudeTaskCfg):
-            return ALBCAttitudeTask(cfg=task_cfg, num_envs=self.num_envs, device=self.device)
-        else:
-            return ALBCAttitudeTask(
-                cfg=ALBCAttitudeTaskCfg(
-                    target_attitude=(0.0, 0.0, 0.0),
-                    randomize_target=False,
-                ),
-                num_envs=self.num_envs,
-                device=self.device,
-            )
-
-    def _build_reward_cfg(self) -> dict[str, RewardTermCfg]:
-        """Build ALBC-specific reward configuration.
-
-        Returns:
-            Dictionary mapping term names to RewardTermCfg.
-        """
-        return {
-            "potential": RewardTermCfg(
-                func=albc_potential_reward,
-                weight=1.0,
-                params={"task": self._task, "scale": 8.0},
-            ),
-            "progress": RewardTermCfg(
-                func=albc_progress_reward,
-                weight=1.0,
-                params={"task": self._task},
-            ),
-            "action_cost": RewardTermCfg(
-                func=albc_action_cost,
-                weight=self.cfg.albc_action_cost_weight,
-            ),
-        }
 
     def _setup_scene(self):
         """Setup the simulation scene with robot and terrain."""
@@ -318,24 +307,19 @@ class HeroAgentEnv(DirectRLEnv):
 
         # Apply simple buoyancy to child bodies (force only, no torque)
         # This maintains buoyancy balance without fighting joint constraints
-        for i, (body_id, net_force) in enumerate(
-            zip(self._child_body_ids, self._child_body_net_forces)
-        ):
+        for body_id, net_force in zip(self._child_body_ids, self._child_body_net_forces):
             body_idx = body_id[0]
             body_quat = self._robot.data.body_quat_w[:, body_idx, :]
 
             # World up direction with net buoyancy force magnitude
-            world_up = torch.zeros(self.num_envs, 3, device=self.device)
-            world_up[:, 2] = net_force
-
-            # Transform world force to body frame
-            force_body = quat_apply_inverse(body_quat, world_up)
+            self._child_world_up[:, 2] = net_force
+            force_body = quat_apply_inverse(body_quat, self._child_world_up)
 
             # Apply force only (no torque to avoid joint conflicts)
             self._robot.permanent_wrench_composer.set_forces_and_torques(
                 body_ids=body_id,
                 forces=force_body.unsqueeze(1),
-                torques=torch.zeros(self.num_envs, 1, 3, device=self.device),
+                torques=self._child_zero_torque,
             )
 
     def _get_observations(self) -> dict:
@@ -380,7 +364,14 @@ class HeroAgentEnv(DirectRLEnv):
             dim=-1,
         )
 
-        return {"policy": obs}
+        observations = {"policy": obs}
+
+        if self.cfg.state_space > 0:
+            main_priv = self._hydro.get_privileged_info(include_current=True)
+            buoy_priv = self._buoy_hydro.get_privileged_info(include_current=False)
+            observations["privileged"] = torch.cat([main_priv, buoy_priv], dim=-1)
+
+        return observations
 
     def _get_rewards(self) -> torch.Tensor:
         """Compute ALBC rewards using potential-based system.
@@ -391,7 +382,6 @@ class HeroAgentEnv(DirectRLEnv):
         return self._reward_manager.compute(
             robot=self._robot,
             dt=self.step_dt,
-            goal_pos_w=torch.zeros(self.num_envs, 3, device=self.device),
             actions=self._actions,
             prev_actions=self._prev_actions,
         )
@@ -416,11 +406,21 @@ class HeroAgentEnv(DirectRLEnv):
         return terminated, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
-        """Reset specified environments."""
+        """Reset specified environments.
+
+        Execution order:
+            1. Logging
+            2. Component reset (robot, super, action buffers)
+            3. Hydrodynamics reset + optional randomization
+            4. Ocean current randomization
+            5. Task reset
+            6. Joint state reset (randomized or default)
+            7. Robot pose reset (randomized or default)
+        """
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._robot._ALL_INDICES
 
-        # Log episode statistics
+        # --- 1. Logging ---
         reward_sums = self._reward_manager.reset(env_ids)
 
         self.extras["log"] = {}
@@ -434,23 +434,22 @@ class HeroAgentEnv(DirectRLEnv):
             self.reset_time_outs[env_ids]
         ).item()
 
-        # Log attitude errors (in degrees) for terminated environments
         if len(env_ids) > 0:
-            attitude_errors = self._task.get_goal_observations(self._robot)
-            attitude_errors_deg = torch.rad2deg(attitude_errors[env_ids])
+            # Use cached attitude_error to avoid get_goal_observations() side effect
+            # (which would update potentials before task.reset)
+            attitude_errors_deg = torch.rad2deg(self._task.attitude_error[env_ids])
             self.extras["log"]["Attitude_Error/roll_deg"] = attitude_errors_deg[:, 0].mean().item()
             self.extras["log"]["Attitude_Error/pitch_deg"] = attitude_errors_deg[:, 1].mean().item()
-            self.extras["log"]["Attitude_Error/yaw_deg"] = attitude_errors_deg[:, 2].mean().item()
-            self.extras["log"]["Attitude_Error/total_deg"] = attitude_errors_deg.abs().sum(dim=-1).mean().item()
+            # total_deg only includes roll and pitch (yaw excluded from control)
+            self.extras["log"]["Attitude_Error/total_deg"] = attitude_errors_deg[:, :2].abs().sum(dim=-1).mean().item()
 
-            # Log joint positions (in radians)
             joint_pos = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
             self.extras["log"]["Joint_Position/joint1_rad"] = joint_pos[:, 0].mean().item()
             self.extras["log"]["Joint_Position/joint2_rad"] = joint_pos[:, 1].mean().item()
             self.extras["log"]["Joint_Position/target1_rad"] = self._joint_pos_targets[env_ids, 0].mean().item()
             self.extras["log"]["Joint_Position/target2_rad"] = self._joint_pos_targets[env_ids, 1].mean().item()
 
-        # Reset components
+        # --- 2. Component reset ---
         self._robot.reset(env_ids)
         super()._reset_idx(env_ids)
 
@@ -459,122 +458,132 @@ class HeroAgentEnv(DirectRLEnv):
                 self.episode_length_buf, high=int(self.max_episode_length)
             )
 
-        # Reset action buffers
         self._actions[env_ids] = 0.0
         self._prev_actions[env_ids] = 0.0
         self._prev_actions_obs[env_ids] = 0.0
 
-        # Reset hydrodynamics
+        # --- 3. Hydrodynamics reset ---
         self._hydro.reset(env_ids)
         self._buoy_hydro.reset(env_ids)
 
-        # Apply domain randomization
-        if self.cfg.randomization.enable:
-            self._hydro.randomize_parameters(
-                env_ids=env_ids,
-                added_mass_scale=self.cfg.randomization.added_mass_scale,
-                linear_damping_scale=self.cfg.randomization.linear_damping_scale,
-                quadratic_damping_scale=self.cfg.randomization.quadratic_damping_scale,
-                volume_scale=self.cfg.randomization.volume_scale,
-                mass_scale=self.cfg.randomization.mass_scale,
-                cob_offset_scale=self.cfg.randomization.cob_offset_scale,
-                inertia_scale=self.cfg.randomization.inertia_scale,
-                payload_mass_ratio=self.cfg.randomization.payload_mass_ratio,
-                payload_cog_offset_z=self.cfg.randomization.payload_cog_offset_z,
-            )
+        rand_cfg = self.cfg.randomization
+        if rand_cfg.enable:
+            randomize_hydrodynamics(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
+            randomize_buoy_hydrodynamics(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
 
-        # Randomize ocean current
+        # --- 4. Ocean current ---
         if any(v > 0 for v in self.cfg.ocean_current.max_velocity):
-            self._hydro.randomize_current(env_ids)
+            randomize_ocean_current(env=self, env_ids=env_ids)
 
-        # Randomize initial joint positions
-        if self.cfg.randomization.enable:
-            initial_range = self.cfg.initial_joint_pos_range
-            random_pos = torch.rand(len(env_ids), 2, device=self.device)
-            initial_joint_pos = (
-                random_pos * (initial_range[1] - initial_range[0]) + initial_range[0]
-            )
-        else:
-            initial_joint_pos = torch.zeros(len(env_ids), 2, device=self.device)
-
-        # Clamp to limits
-        initial_joint_pos = torch.clamp(
-            initial_joint_pos,
-            self._joint_limits_lower,
-            self._joint_limits_upper,
-        )
-
-        # Reset joint position targets
-        self._joint_pos_targets[env_ids] = initial_joint_pos
-
-        # Reset control step counter
-        self._control_step_counter = 0
-
-        # Reset task (samples new targets)
+        # --- 5. Task reset ---
         self._task.reset(env_ids, self._terrain.env_origins)
 
-        # Reset robot state
-        joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
-        joint_pos[:, self._albc_joint_ids] = initial_joint_pos
-        joint_vel = torch.zeros_like(joint_pos)
-
-        default_root_state = self._robot.data.default_root_state[env_ids].clone()
-        default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-
-        # Apply initial pose randomization
-        if self.cfg.randomization.enable:
-            num_reset = len(env_ids)
-
-            pos_x = (
-                torch.rand(num_reset, device=self.device)
-                * (self.cfg.randomization.position_x_range[1] - self.cfg.randomization.position_x_range[0])
-                + self.cfg.randomization.position_x_range[0]
+        # --- 6. Joint state reset (must precede root pose write) ---
+        if rand_cfg.enable:
+            randomize_joint_positions(
+                env=self,
+                env_ids=env_ids,
+                joint_pos_range=self.cfg.initial_joint_pos_range,
             )
-            pos_y = (
-                torch.rand(num_reset, device=self.device)
-                * (self.cfg.randomization.position_y_range[1] - self.cfg.randomization.position_y_range[0])
-                + self.cfg.randomization.position_y_range[0]
-            )
-            pos_z = (
-                torch.rand(num_reset, device=self.device)
-                * (self.cfg.randomization.position_z_range[1] - self.cfg.randomization.position_z_range[0])
-                + self.cfg.randomization.position_z_range[0]
-            )
-            default_root_state[:, 0] += pos_x
-            default_root_state[:, 1] += pos_y
-            default_root_state[:, 2] = self._terrain.env_origins[env_ids, 2] + pos_z
-
-            roll = (
-                torch.rand(num_reset, device=self.device)
-                * (self.cfg.randomization.roll_range[1] - self.cfg.randomization.roll_range[0])
-                + self.cfg.randomization.roll_range[0]
-            )
-            pitch = (
-                torch.rand(num_reset, device=self.device)
-                * (self.cfg.randomization.pitch_range[1] - self.cfg.randomization.pitch_range[0])
-                + self.cfg.randomization.pitch_range[0]
-            )
-            yaw = (
-                torch.rand(num_reset, device=self.device)
-                * (self.cfg.randomization.yaw_range[1] - self.cfg.randomization.yaw_range[0])
-                + self.cfg.randomization.yaw_range[0]
-            )
-
-            random_quat = quat_from_euler_xyz(roll, pitch, yaw)
-            default_root_state[:, 3:7] = quat_mul(default_root_state[:, 3:7], random_quat)
         else:
-            default_root_state[:, 2] = self._terrain.env_origins[env_ids, 2] + self.cfg.initial_height
+            reset_joint_positions_default(env=self, env_ids=env_ids)
 
-        self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
-        self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
-        self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+        # --- 7. Robot pose reset ---
+        if rand_cfg.enable:
+            randomize_robot_pose(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
+        else:
+            reset_robot_pose_default(
+                env=self, env_ids=env_ids, initial_height=self.cfg.initial_height
+            )
 
     def _set_debug_vis_impl(self, debug_vis: bool):
-        """Setup debug visualization."""
-        # ALBC doesn't have goal position visualization (attitude only)
-        pass
+        """Setup CoM and CoB visualization markers.
+
+        Creates red sphere for Center of Mass (CoM) and blue sphere for
+        Center of Buoyancy (CoB) to visualize the system's hydrostatic properties.
+        """
+        if debug_vis:
+            if not hasattr(self, "_com_marker"):
+                # CoM marker (red sphere, 3cm radius)
+                com_cfg = VisualizationMarkersCfg(
+                    prim_path="/Visuals/CoM",
+                    markers={
+                        "sphere": sim_utils.SphereCfg(
+                            radius=0.03,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
+                        ),
+                    },
+                )
+                self._com_marker = VisualizationMarkers(com_cfg)
+
+            if not hasattr(self, "_cob_marker"):
+                # CoB marker (blue sphere, 3cm radius)
+                cob_cfg = VisualizationMarkersCfg(
+                    prim_path="/Visuals/CoB",
+                    markers={
+                        "sphere": sim_utils.SphereCfg(
+                            radius=0.03,
+                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
+                        ),
+                    },
+                )
+                self._cob_marker = VisualizationMarkers(cob_cfg)
+
+            self._com_marker.set_visibility(True)
+            self._cob_marker.set_visibility(True)
+        else:
+            if hasattr(self, "_com_marker"):
+                self._com_marker.set_visibility(False)
+            if hasattr(self, "_cob_marker"):
+                self._cob_marker.set_visibility(False)
 
     def _debug_vis_callback(self, event):
-        """Update debug visualization."""
-        # ALBC doesn't have goal position visualization (attitude only)
-        pass
+        """Update CoM and CoB marker positions each frame.
+
+        Computes the system-level Center of Mass and Center of Buoyancy
+        by combining main body and buoy contributions, then transforms
+        from body frame to world frame for visualization.
+        """
+        # Get robot pose in world frame
+        root_pos = self._robot.data.root_pos_w
+        root_quat = self._robot.data.root_quat_w
+
+        # Main body parameters (from hydrodynamics model)
+        m_main = self._hydro._vehicle_mass  # (num_envs,)
+        V_main = self._hydro._volume  # (num_envs,)
+        r_cg_main = self._hydro._r_cg  # (num_envs, 3) body frame
+        r_cb_main = self._hydro._r_cb  # (num_envs, 3) body frame
+
+        # Buoy body parameters
+        m_buoy = self._buoy_hydro._vehicle_mass  # (num_envs,)
+        V_buoy = self._buoy_hydro._volume  # (num_envs,)
+        r_cg_buoy = self._buoy_hydro._r_cg  # (num_envs, 3) body frame relative to buoy
+        r_cb_buoy = self._buoy_hydro._r_cb  # (num_envs, 3) body frame relative to buoy
+
+        # Get buoy link position in body frame
+        buoy_idx = self._buoy_body_id[0]
+        buoy_pos_w = self._robot.data.body_pos_w[:, buoy_idx]
+        buoy_offset_w = buoy_pos_w - root_pos
+        buoy_offset_b = quat_apply_inverse(root_quat, buoy_offset_w)
+
+        # Calculate system CoM in body frame
+        m_total = m_main + m_buoy
+        r_cg_system_b = (
+            m_main.unsqueeze(-1) * r_cg_main
+            + m_buoy.unsqueeze(-1) * (buoy_offset_b + r_cg_buoy)
+        ) / m_total.unsqueeze(-1)
+
+        # Calculate system CoB in body frame
+        V_total = V_main + V_buoy
+        r_cb_system_b = (
+            V_main.unsqueeze(-1) * r_cb_main
+            + V_buoy.unsqueeze(-1) * (buoy_offset_b + r_cb_buoy)
+        ) / V_total.unsqueeze(-1)
+
+        # Transform to world frame
+        com_world = root_pos + quat_apply(root_quat, r_cg_system_b)
+        cob_world = root_pos + quat_apply(root_quat, r_cb_system_b)
+
+        # Update markers
+        self._com_marker.visualize(translations=com_world)
+        self._cob_marker.visualize(translations=cob_world)

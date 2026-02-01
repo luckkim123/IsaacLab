@@ -18,6 +18,8 @@ import gymnasium as gym
 from .hero_agent_env import HeroAgentEnv
 from .hero_agent_env_cfg import (
     DomainRandomizationCfg,
+    HeroAgentEncoderEvalEnvCfg,
+    HeroAgentEncoderTrainEnvCfg,
     HeroAgentEnvCfg,
     HeroAgentTrainEnvCfg,
     HeroAgentEvalEnvCfg,
@@ -58,6 +60,26 @@ gym.register(
     },
 )
 
+gym.register(
+    id="Isaac-HeroAgent-ALBC-Encoder-Train-v0",
+    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentEncoderTrainEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentEncoderTrainPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-HeroAgent-ALBC-Encoder-Eval-v0",
+    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentEncoderEvalEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentEncoderEvalPPORunnerCfg",
+    },
+)
+
 __all__ = [
     # Environment
     "HeroAgentEnv",
@@ -65,5 +87,7 @@ __all__ = [
     "HeroAgentEnvCfg",
     "HeroAgentTrainEnvCfg",
     "HeroAgentEvalEnvCfg",
+    "HeroAgentEncoderTrainEnvCfg",
+    "HeroAgentEncoderEvalEnvCfg",
     "DomainRandomizationCfg",
 ]

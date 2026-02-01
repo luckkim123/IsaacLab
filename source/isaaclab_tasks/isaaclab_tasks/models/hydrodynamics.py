@@ -446,3 +446,58 @@ class HydrodynamicsModel:
         else:
             base_inertia = torch.tensor(self.cfg.added_mass[3:6], dtype=torch.float32, device=self.device) * 0.5
         self._rigid_body_inertia[env_ids] = base_inertia.unsqueeze(0) * inertia_scales
+
+    def get_privileged_info(self, env_ids: torch.Tensor | Sequence[int] | None = None, include_current: bool = True) -> torch.Tensor:
+        """Get privileged hydrodynamic parameters as a flat tensor.
+
+        Returns per-env hydrodynamic state for use as privileged observation
+        in encoder-based policies (HORA/RMA Phase 1).
+
+        Components (with include_current=True): 35D
+            - added_mass diagonal: 6D
+            - linear_damping: 6D
+            - quadratic_damping: 6D
+            - volume: 1D
+            - vehicle_mass: 1D
+            - center_of_buoyancy: 3D
+            - center_of_gravity: 3D
+            - rigid_body_inertia: 3D
+            - current_velocity: 6D
+
+        Components (with include_current=False): 29D
+            Same as above without current_velocity.
+
+        Args:
+            env_ids: Environment indices. If None, returns all environments.
+            include_current: Whether to include ocean current velocity (6D).
+
+        Returns:
+            Flat tensor of shape (num_envs, 35) or (num_envs, 29).
+        """
+        if env_ids is None:
+            ids = slice(None)
+        else:
+            if isinstance(env_ids, (list, tuple)):
+                env_ids = torch.tensor(env_ids, dtype=torch.long, device=self.device)
+            ids = env_ids
+
+        parts = [
+            torch.diagonal(self._added_mass_matrix[ids], dim1=-2, dim2=-1),  # (N, 6)
+            self._linear_damping_diag[ids],                                   # (N, 6)
+            self._quadratic_damping_diag[ids],                                # (N, 6)
+            self._volume[ids].unsqueeze(-1),                                  # (N, 1)
+            self._vehicle_mass[ids].unsqueeze(-1),                            # (N, 1)
+            self._r_cb[ids],                                                  # (N, 3)
+            self._r_cg[ids],                                                  # (N, 3)
+            self._rigid_body_inertia[ids],                                    # (N, 3)
+        ]
+
+        if include_current:
+            parts.append(self._current_velocity[ids])                         # (N, 6)
+
+        result = torch.cat(parts, dim=-1)
+        expected_dim = 35 if include_current else 29
+        assert result.shape[-1] == expected_dim, (
+            f"Privileged info dimension mismatch: got {result.shape[-1]}, expected {expected_dim}"
+        )
+        return result

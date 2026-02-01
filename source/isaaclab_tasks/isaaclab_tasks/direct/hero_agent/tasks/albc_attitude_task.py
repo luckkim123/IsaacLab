@@ -22,14 +22,12 @@ import torch
 from isaaclab.utils import configclass
 from isaaclab.utils.math import euler_xyz_from_quat
 
-from .task_base import TaskBase, TaskBaseCfg
-
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
 
 
 @configclass
-class ALBCAttitudeTaskCfg(TaskBaseCfg):
+class ALBCAttitudeTaskCfg:
     """Configuration for the ALBC attitude control task.
 
     The ALBC task requires the UUV to maintain a target attitude using only
@@ -47,12 +45,16 @@ class ALBCAttitudeTaskCfg(TaskBaseCfg):
     target_attitude_range: tuple[float, float, float] = (0.3, 0.3, 0.0)
 
 
-class ALBCAttitudeTask(TaskBase):
+class ALBCAttitudeTask:
     """ALBC attitude control task implementation for UUV environments.
 
     Uses potential-based shaping for reward computation:
-        potential = sqrt(roll_err^2 + pitch_err^2 + yaw_err^2)
+        potential = norm(attitude_error[:2])  # roll, pitch only (yaw excluded)
         reward = 8*exp(-potential) + (prev_potential - potential) - actions_cost
+
+    Note: Yaw is excluded from potential/reward calculation because buoyancy control
+    cannot generate Z-axis torque. Yaw is still included in observations for state
+    awareness but does not affect the reward signal.
 
     The vehicle must achieve and maintain a target orientation (default: upright)
     using only the buoyancy control mechanism (no thrusters).
@@ -61,6 +63,9 @@ class ALBCAttitudeTask(TaskBase):
         - Attitude error in body frame (3) - roll, pitch, yaw errors
 
     Attributes:
+        cfg: Task configuration.
+        num_envs: Number of parallel environments.
+        device: Computation device.
         potentials: Current potential values for each environment.
         prev_potentials: Previous potential values for progress reward.
     """
@@ -80,7 +85,10 @@ class ALBCAttitudeTask(TaskBase):
             num_envs: Number of parallel environments.
             device: Computation device.
         """
-        super().__init__(cfg, num_envs, device)
+        self.cfg = cfg
+        self.num_envs = num_envs
+        self.device = device
+        self._setup_buffers()
 
     def _setup_buffers(self) -> None:
         """Setup ALBC attitude task buffers including potential tracking."""
@@ -94,11 +102,6 @@ class ALBCAttitudeTask(TaskBase):
         # Potential-based reward tracking
         self._potentials = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self._prev_potentials = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-
-    @property
-    def goal_observation_dim(self) -> int:
-        """Dimension of goal-related observations (attitude error)."""
-        return 3
 
     @property
     def potentials(self) -> torch.Tensor:
@@ -154,12 +157,9 @@ class ALBCAttitudeTask(TaskBase):
         # Update potentials: save previous and compute new
         self._prev_potentials = self._potentials.clone()
 
-        # Potential = L2 norm of attitude error
-        self._potentials = torch.sqrt(
-            self._attitude_error[:, 0] ** 2
-            + self._attitude_error[:, 1] ** 2
-            + self._attitude_error[:, 2] ** 2
-        )
+        # Potential = L2 norm of roll and pitch errors only (yaw excluded)
+        # Yaw cannot be controlled by buoyancy mechanism (no Z-axis torque)
+        self._potentials = torch.linalg.norm(self._attitude_error[:, :2], dim=-1)
 
         return self._attitude_error
 
@@ -195,6 +195,19 @@ class ALBCAttitudeTask(TaskBase):
         # Reset potentials to prevent reward spikes on reset
         self._potentials[env_ids] = 0.0
         self._prev_potentials[env_ids] = 0.0
+
+    def get_terminations(self, robot: Articulation) -> torch.Tensor:
+        """Compute task-specific termination conditions.
+
+        Currently returns no terminations (all False).
+
+        Args:
+            robot: Robot articulation for state access.
+
+        Returns:
+            Termination flags. Shape: (num_envs,).
+        """
+        return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
     def get_goal_state(self) -> dict[str, torch.Tensor]:
         """Get current goal state for visualization.

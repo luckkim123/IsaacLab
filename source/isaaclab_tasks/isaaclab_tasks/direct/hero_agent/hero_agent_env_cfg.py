@@ -48,7 +48,7 @@ class DomainRandomizationCfg:
     # Initial orientation randomization range (radians)
     roll_range: tuple[float, float] = (-0.785, 0.785)   # +/-45 degrees
     pitch_range: tuple[float, float] = (-0.785, 0.785)
-    yaw_range: tuple[float, float] = (-3.14159, 3.14159)
+    yaw_range: tuple[float, float] = (-math.pi, math.pi)
 
     # Hydrodynamic parameter scale ranges
     added_mass_scale: tuple[float, float] = (0.8, 1.2)
@@ -163,7 +163,13 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # Action speed scale: pi rad/s
     action_speed_scale: float = math.pi
 
-    # Control decimation (100 Hz sim / 4 = 25 Hz control)
+    # Control decimation: env steps between control updates.
+    # Effective control rate = (sim_rate / decimation) / control_decimation
+    #   = (100 / 2) / 4 = 12.5 Hz
+    # NOTE: dt_control in _pre_physics_step uses physics_dt * control_decimation (0.04s),
+    # which is half the actual control period (step_dt * control_decimation = 0.08s).
+    # This effectively halves the action_speed_scale (pi/2 rad/s instead of pi rad/s).
+    # Kept as-is for backward compatibility with trained policies.
     control_decimation: int = 4
 
     # Initial joint position randomization range (radians)
@@ -175,8 +181,7 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
         randomize_target=False,
     )
 
-    # Legacy parameters for compatibility
-    goal_pos_range: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # Default initial height (used when randomization is disabled)
     initial_height: float = 4.5
 
     # Termination conditions
@@ -184,7 +189,10 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     max_height: float = 10.0
     max_distance_from_origin: float = 10.0
 
-    # ALBC reward weight
+    # ALBC reward weights
+    albc_potential_reward_weight: float = 1.0
+    albc_potential_reward_scale: float = 8.0
+    albc_progress_reward_weight: float = 1.0
     albc_action_cost_weight: float = -0.1
 
     # Domain randomization configuration
@@ -195,24 +203,8 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
 class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
     """Hero Agent ALBC training environment with domain randomization."""
 
-    randomization = DomainRandomizationCfg(
-        enable=True,
-        position_x_range=(-0.5, 0.5),
-        position_y_range=(-0.5, 0.5),
-        position_z_range=(4.0, 5.0),
-        roll_range=(-0.785, 0.785),
-        pitch_range=(-0.785, 0.785),
-        yaw_range=(-3.14159, 3.14159),
-        added_mass_scale=(0.8, 1.2),
-        linear_damping_scale=(0.8, 1.2),
-        quadratic_damping_scale=(0.8, 1.2),
-        volume_scale=(0.95, 1.05),
-        mass_scale=(0.9, 1.1),
-        cob_offset_scale=(0.8, 1.2),
-        inertia_scale=(0.9, 1.1),
-        payload_mass_ratio=(0.0, 0.1),
-        payload_cog_offset_z=(-0.02, 0.02),
-    )
+    # All randomization fields use base DomainRandomizationCfg defaults; only enable=True differs.
+    randomization = DomainRandomizationCfg(enable=True)
 
     ocean_current = OceanCurrentCfg(
         max_velocity=(0.2, 0.2, 0.1, 0.0, 0.0, 0.0),
@@ -231,7 +223,7 @@ class HeroAgentEvalEnvCfg(HeroAgentEnvCfg):
         position_z_range=(4.2, 4.8),
         roll_range=(-0.5, 0.5),
         pitch_range=(-0.5, 0.5),
-        yaw_range=(-1.57, 1.57),
+        yaw_range=(-math.pi / 2, math.pi / 2),
         added_mass_scale=(0.9, 1.1),
         linear_damping_scale=(0.9, 1.1),
         quadratic_damping_scale=(0.9, 1.1),
@@ -247,3 +239,27 @@ class HeroAgentEvalEnvCfg(HeroAgentEnvCfg):
         max_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         noise_scale=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
     )
+
+
+@configclass
+class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
+    """Hero Agent encoder training with privileged hydrodynamic info.
+
+    state_space=64 signals the environment to return privileged information
+    alongside policy observations for HORA/RMA Phase 1 teacher training.
+    Main body: 35D (with current), Buoy: 29D (no current).
+    """
+
+    state_space: int = 64
+
+
+@configclass
+class HeroAgentEncoderEvalEnvCfg(HeroAgentEvalEnvCfg):
+    """Hero Agent encoder evaluation with privileged hydrodynamic info.
+
+    Uses moderate domain randomization (same as HeroAgentEvalEnvCfg) while
+    providing privileged information for encoder-based policy evaluation.
+    state_space=64 signals the environment to return privileged information.
+    """
+
+    state_space: int = 64

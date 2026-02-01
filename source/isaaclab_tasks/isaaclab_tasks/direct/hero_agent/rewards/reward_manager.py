@@ -209,13 +209,6 @@ class RewardManager:
         """
         for i, term_name in enumerate(self._term_names):
             if term_name == name:
-                # Create new config with updated weight
-                old_cfg = self._term_cfgs[i]
-                self._term_cfgs[i] = RewardTermCfg(
-                    func=old_cfg.func,
-                    weight=weight,
-                    params=old_cfg.params,
-                    enabled=old_cfg.enabled,
-                )
+                self._term_cfgs[i].weight = weight
                 return
         raise KeyError(f"Reward term '{name}' not found in active terms.")

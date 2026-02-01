@@ -5,23 +5,26 @@
 
 """MDP (Markov Decision Process) functions for Hero Agent ALBC environments.
 
-This module provides event functions for domain randomization specific to
-Hero Agent's joint-based buoyancy control system (no thrusters).
-
-These functions can be used with EventCfg to configure randomization events
-that trigger on "startup" or "reset" modes.
+This module provides event functions for domain randomization and reset
+specific to Hero Agent's joint-based buoyancy control system (no thrusters).
 """
 
 from .events import (
+    randomize_buoy_hydrodynamics,
     randomize_hydrodynamics,
     randomize_joint_positions,
     randomize_ocean_current,
     randomize_robot_pose,
+    reset_joint_positions_default,
+    reset_robot_pose_default,
 )
 
 __all__ = [
+    "randomize_buoy_hydrodynamics",
     "randomize_hydrodynamics",
     "randomize_joint_positions",
     "randomize_ocean_current",
     "randomize_robot_pose",
+    "reset_joint_positions_default",
+    "reset_robot_pose_default",
 ]

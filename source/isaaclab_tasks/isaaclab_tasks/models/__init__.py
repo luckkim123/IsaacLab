@@ -13,10 +13,12 @@ Configuration classes are imported from isaaclab_assets.robots.uuv and
 re-exported here for convenient access.
 """
 
+from .actor_critic_encoder import ActorCriticEncoder
 from .hydrodynamics import HydrodynamicsModel, HydrodynamicsCfg, OceanCurrentCfg
 from .thruster import ThrusterModel, ThrusterCfg
 
 __all__ = [
+    "ActorCriticEncoder",
     "HydrodynamicsModel",
     "HydrodynamicsCfg",
     "OceanCurrentCfg",
