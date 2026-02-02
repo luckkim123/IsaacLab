@@ -15,15 +15,13 @@ from __future__ import annotations
 import math
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
-
-# Import configuration classes from isaaclab_assets
 from isaaclab_assets.robots.uuv import (
+    HERO_AGENT_ALBC_JOINT_NAMES,
     HERO_AGENT_CFG,
     HeroAgentBuoyHydrodynamicsCfg,
     HeroAgentHydrodynamicsCfg,
@@ -31,41 +29,50 @@ from isaaclab_assets.robots.uuv import (
     OceanCurrentCfg,
 )
 
+from .rewards import ALBCRewardCfg
 from .tasks import ALBCAttitudeTaskCfg
 
 
 @configclass
 class DomainRandomizationCfg:
-    """Configuration for domain randomization in Hero Agent ALBC environments."""
+    """Configuration for domain randomization in Hero Agent ALBC environments.
+
+    Note:
+        Mass randomization has been removed because weight is now handled
+        by PhysX (disable_gravity=False). To randomize mass, modify PhysX
+        rigid body properties directly via the physics API.
+    """
 
     enable: bool = False
 
-    # Initial position randomization range (meters)
+    # -- Initial Position (meters) --
     position_x_range: tuple[float, float] = (-0.5, 0.5)
     position_y_range: tuple[float, float] = (-0.5, 0.5)
     position_z_range: tuple[float, float] = (4.0, 5.0)
 
-    # Initial orientation randomization range (radians)
-    roll_range: tuple[float, float] = (-0.785, 0.785)   # +/-45 degrees
+    # -- Initial Orientation (radians) --
+    roll_range: tuple[float, float] = (-0.785, 0.785)
     pitch_range: tuple[float, float] = (-0.785, 0.785)
     yaw_range: tuple[float, float] = (-math.pi, math.pi)
 
-    # Hydrodynamic parameter scale ranges
+    # -- Hydrodynamic Parameter Scales --
     added_mass_scale: tuple[float, float] = (0.8, 1.2)
     linear_damping_scale: tuple[float, float] = (0.8, 1.2)
     quadratic_damping_scale: tuple[float, float] = (0.8, 1.2)
     volume_scale: tuple[float, float] = (0.95, 1.05)
-    mass_scale: tuple[float, float] = (0.9, 1.1)
 
-    # Center of Buoyancy offset scale
-    cob_offset_scale: tuple[float, float] = (0.8, 1.2)
+    # -- Center of Buoyancy Offset (meters) --
+    cob_offset_x: tuple[float, float] = (-0.01, 0.01)
+    cob_offset_y: tuple[float, float] = (-0.01, 0.01)
+    cob_offset_z: tuple[float, float] = (-0.02, 0.02)
 
-    # Rigid body inertia scale
+    # -- Center of Gravity Offset (meters) --
+    cog_offset_x: tuple[float, float] = (-0.01, 0.01)
+    cog_offset_y: tuple[float, float] = (-0.01, 0.01)
+    cog_offset_z: tuple[float, float] = (-0.02, 0.02)
+
+    # -- Inertia --
     inertia_scale: tuple[float, float] = (0.9, 1.1)
-
-    # Payload randomization
-    payload_mass_ratio: tuple[float, float] = (0.0, 0.1)
-    payload_cog_offset_z: tuple[float, float] = (-0.02, 0.02)
 
 
 @configclass
@@ -76,15 +83,19 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     element for attitude stabilization. No thrusters are used.
     """
 
-    # Environment settings
+    # ==========================================================================
+    # Environment Settings
+    # ==========================================================================
     episode_length_s: float = 15.0
-    decimation: int = 2
-    action_space: int = 2  # 2 joint velocity commands
-    observation_space: int = 13  # euler(3) + ang_vel(3) + errors(3) + joint_pos(2) + prev_act(2)
+    decimation: int = 1
+    action_space: int = 2
+    observation_space: int = 13
     state_space: int = 0
-    debug_vis: bool = False  # ALBC doesn't have goal position visualization
+    debug_vis: bool = False
 
-    # Simulation configuration
+    # ==========================================================================
+    # Simulation
+    # ==========================================================================
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 100,
         render_interval=2,
@@ -100,8 +111,6 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
         ),
     )
 
-    # Scene configuration
-    # Note: clone_in_fabric=False to ensure proper visual mesh cloning
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=4096,
         env_spacing=2.0,
@@ -109,7 +118,6 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
         clone_in_fabric=False,
     )
 
-    # Terrain (underwater floor)
     terrain: TerrainImporterCfg = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="plane",
@@ -124,78 +132,45 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
     )
 
-    # Robot configuration
+    # ==========================================================================
+    # Robot and Hydrodynamics
+    # ==========================================================================
     robot = HERO_AGENT_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-
-    # Body link names
-    body_link_name: str = "base"
-    buoy_link_name: str = "link3"
-
-    # Hydrodynamics for main body
     hydrodynamics: HydrodynamicsCfg = HeroAgentHydrodynamicsCfg()
-
-    # Buoy hydrodynamics (link3)
     buoy_hydrodynamics: HydrodynamicsCfg = HeroAgentBuoyHydrodynamicsCfg()
-
-    # Child body simple buoyancy parameters (force only, no torque)
-    # Format: {"body_name": {"mass": kg, "volume": m^3}}
-    # Note: heroagent2.py does not apply separate buoyancy to these bodies,
-    # so we set them to near-neutral buoyancy (minimal effect)
-    child_body_buoyancy: dict[str, dict[str, float]] = {
-        "gripper": {"mass": 0.3, "volume": 0.0003},    # near-neutral
-        "link1": {"mass": 0.1, "volume": 0.0001},      # near-neutral
-        "link2": {"mass": 0.1, "volume": 0.0001},      # near-neutral
-    }
-
-    # Water density for child body buoyancy calculation (kg/m^3)
-    # Matched to heroagent2.py
-    water_density: float = 998.0
-
-    # Ocean current configuration
     ocean_current: OceanCurrentCfg = OceanCurrentCfg(
         max_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         noise_scale=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
     )
 
-    # ALBC joint names
-    albc_joint_names: list[str] = ["joint1", "joint2"]
+    # ==========================================================================
+    # ALBC Joint Control
+    # ==========================================================================
+    albc_joint_names: list[str] = HERO_AGENT_ALBC_JOINT_NAMES
+    max_joint_velocity: float = 2 * math.pi
+    control_decimation: int = 1
+    initial_joint_pos_range: tuple[float, float] = (-0.3, 0.3)
 
-    # Action speed scale: pi rad/s
-    action_speed_scale: float = math.pi
-
-    # Control decimation: env steps between control updates.
-    # Effective control rate = (sim_rate / decimation) / control_decimation
-    #   = (100 / 2) / 4 = 12.5 Hz
-    # NOTE: dt_control in _pre_physics_step uses physics_dt * control_decimation (0.04s),
-    # which is half the actual control period (step_dt * control_decimation = 0.08s).
-    # This effectively halves the action_speed_scale (pi/2 rad/s instead of pi rad/s).
-    # Kept as-is for backward compatibility with trained policies.
-    control_decimation: int = 4
-
-    # Initial joint position randomization range (radians)
-    initial_joint_pos_range: tuple[float, float] = (-6.0, 6.0)
-
-    # ALBC task configuration
+    # ==========================================================================
+    # Task and Rewards
+    # ==========================================================================
     task: ALBCAttitudeTaskCfg = ALBCAttitudeTaskCfg(
         target_attitude=(0.0, 0.0, 0.0),
         randomize_target=False,
     )
+    reward: ALBCRewardCfg = ALBCRewardCfg()
 
-    # Default initial height (used when randomization is disabled)
+    # ==========================================================================
+    # Initialization and Termination
+    # ==========================================================================
     initial_height: float = 4.5
-
-    # Termination conditions
     min_height: float = 0.0
     max_height: float = 10.0
     max_distance_from_origin: float = 10.0
 
-    # ALBC reward weights
-    albc_potential_reward_weight: float = 1.0
-    albc_potential_reward_scale: float = 8.0
-    albc_progress_reward_weight: float = 1.0
-    albc_action_cost_weight: float = -0.1
-
-    # Domain randomization configuration
+    # ==========================================================================
+    # Domain Randomization
+    # ==========================================================================
     randomization: DomainRandomizationCfg = DomainRandomizationCfg()
 
 
@@ -203,9 +178,7 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
 class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
     """Hero Agent ALBC training environment with domain randomization."""
 
-    # All randomization fields use base DomainRandomizationCfg defaults; only enable=True differs.
     randomization = DomainRandomizationCfg(enable=True)
-
     ocean_current = OceanCurrentCfg(
         max_velocity=(0.2, 0.2, 0.1, 0.0, 0.0, 0.0),
         noise_scale=(0.05, 0.05, 0.02, 0.0, 0.0, 0.0),
@@ -228,11 +201,13 @@ class HeroAgentEvalEnvCfg(HeroAgentEnvCfg):
         linear_damping_scale=(0.9, 1.1),
         quadratic_damping_scale=(0.9, 1.1),
         volume_scale=(0.98, 1.02),
-        mass_scale=(0.95, 1.05),
-        cob_offset_scale=(0.9, 1.1),
+        cob_offset_x=(-0.005, 0.005),
+        cob_offset_y=(-0.005, 0.005),
+        cob_offset_z=(-0.01, 0.01),
+        cog_offset_x=(-0.005, 0.005),
+        cog_offset_y=(-0.005, 0.005),
+        cog_offset_z=(-0.01, 0.01),
         inertia_scale=(0.95, 1.05),
-        payload_mass_ratio=(0.0, 0.05),
-        payload_cog_offset_z=(-0.01, 0.01),
     )
 
     ocean_current = OceanCurrentCfg(
@@ -245,12 +220,20 @@ class HeroAgentEvalEnvCfg(HeroAgentEnvCfg):
 class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
     """Hero Agent encoder training with privileged hydrodynamic info.
 
-    state_space=64 signals the environment to return privileged information
+    state_space=20 signals the environment to return compact privileged information
     alongside policy observations for HORA/RMA Phase 1 teacher training.
-    Main body: 35D (with current), Buoy: 29D (no current).
+    Uses get_privileged_info_compact(): Main body (10D) + Buoy (10D) = 20D.
+    Contains: volume, r_cg, r_cb, inertia (core hydrostatic params).
+    Excludes: damping, added_mass, ocean_current (velocity-dependent).
+
+    Network Input Dimensions (ActorCriticEncoder):
+        - observation_space (13): Used for gym.spaces.Box definition only
+        - state_space (20): Privileged info, returned as observations["privileged"]
+        - Encoder: privileged(20D) -> latent z(6D)
+        - Actual Actor/Critic input: policy_obs(13) + z(6) = 19D
     """
 
-    state_space: int = 64
+    state_space: int = 20
 
 
 @configclass
@@ -259,7 +242,12 @@ class HeroAgentEncoderEvalEnvCfg(HeroAgentEvalEnvCfg):
 
     Uses moderate domain randomization (same as HeroAgentEvalEnvCfg) while
     providing privileged information for encoder-based policy evaluation.
-    state_space=64 signals the environment to return privileged information.
+
+    Network Input Dimensions (ActorCriticEncoder):
+        - observation_space (13): Used for gym.spaces.Box definition only
+        - state_space (20): Privileged info, returned as observations["privileged"]
+        - Encoder: privileged(20D) -> latent z(6D)
+        - Actual Actor/Critic input: policy_obs(13) + z(6) = 19D
     """
 
-    state_space: int = 64
+    state_space: int = 20

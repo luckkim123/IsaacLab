@@ -44,10 +44,14 @@ class HeroAgentHydrodynamicsCfg(HydrodynamicsCfg):
         Main body: cylinder R=0.0825m, L=0.27m, m=9.18kg
         rho = 998 kg/m^3
 
-    Buoyancy balance (from heroagent2.py):
-        Base buoyancy: 7.88 * 9.81 = 77.3 N (volume ~0.00789 m^3)
-        Base weight:   9.18 * 9.81 = 90.1 N
-        Base net: -12.8 N (sinks)
+    Physics Model:
+        - PhysX gravity is ENABLED (disable_gravity=False)
+        - Weight is handled by PhysX naturally for all bodies
+        - This model applies ONLY buoyancy as external force
+        - Buoyancy-weight difference determines net vertical force
+
+    Buoyancy calculation (from heroagent2.py):
+        Volume ~0.00789 m^3 -> Buoyancy = 998 * 9.81 * 0.00789 = 77.3 N
 
     Drag coefficients from heroagent2.py:
         D_x = D_y = 1.17, D_z = 1.0
@@ -75,17 +79,19 @@ class HeroAgentHydrodynamicsCfg(HydrodynamicsCfg):
     # Rotational damping from heroagent2.py empirical values
     quadratic_damping: tuple[float, ...] = (26.0, 26.0, 10.7, 1.5, 1.5, 0.01)
 
-    # Vehicle mass from heroagent2.py (kg)
-    vehicle_mass: float | None = 9.18
+    # Volume for buoyancy calculation (m^3)
+    # From URDF: Cylinder R=0.09m, L=0.325m -> V = pi * 0.09^2 * 0.325 = 0.00827 m^3
+    # Buoyancy = 998 * 0.00827 * 9.81 = 80.9 N
+    volume: float = 0.00827
 
-    # Volume for buoyancy = 7.88 kg equivalent (from heroagent2.py)
-    # V = buoyancy_force / (rho * g) = 77.3 / (998 * 9.81) = 0.00789 m^3
-    volume: float = 0.00789
+    # Body name (for reference, not used when volume is explicitly set)
+    body_name: str = "base"
 
     # Center of buoyancy at geometric center of cylinder (body frame)
     center_of_buoyancy: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     # Center of gravity below CoB for passive stability
+    # Note: This is for restoring moment calculation. Actual CoG is from PhysX.
     center_of_gravity: tuple[float, float, float] = (0.0, 0.0, -0.10)
 
     # Freshwater density from heroagent2.py (kg/m^3)
@@ -110,15 +116,13 @@ class HeroAgentBuoyHydrodynamicsCfg(HydrodynamicsCfg):
         ABPC mass: 0.18 kg (adjusted for slight positive buoyancy)
         rho = 998 kg/m^3
 
-    Buoyancy balance:
-        ABPC buoyancy: 15.2 N
-        ABPC weight:   0.18 * 9.81 = 1.8 N
-        ABPC net: +13.4 N (floats)
+    Physics Model:
+        - PhysX gravity is ENABLED (disable_gravity=False)
+        - Weight is handled by PhysX naturally
+        - This model applies ONLY buoyancy as external force
 
-    System total (with main body):
-        Main body net: -12.8 N
-        ABPC net:      +13.4 N
-        System net:    +0.6 N (slightly positive buoyancy)
+    Buoyancy calculation:
+        Volume ~0.00155 m^3 -> Buoyancy = 998 * 9.81 * 0.00155 = 15.2 N
 
     Drag from heroagent2.py:
         A_x_abpc = 0.1 * 2 * 0.065 = 0.013 m^2
@@ -136,12 +140,13 @@ class HeroAgentBuoyHydrodynamicsCfg(HydrodynamicsCfg):
     # From heroagent2.py: 0.3 * rho * Cd * A = 0.3 * 998 * 1.17 * 0.013 = 4.6
     quadratic_damping: tuple[float, ...] = (4.6, 4.6, 4.6, 0.1, 0.1, 0.1)
 
-    # ABPC mass (kg) - adjusted for slight positive buoyancy
-    vehicle_mass: float | None = 0.18
+    # Volume for buoyancy calculation (m^3)
+    # From URDF: Cylinder R=0.085m, H=0.09m -> V = pi * 0.085^2 * 0.09 = 0.00204 m^3
+    # Buoyancy = 998 * 0.00204 * 9.81 = 20.0 N (link3 mass=0.93kg -> weight=9.1N -> net=+10.9N)
+    volume: float = 0.00204
 
-    # Volume for buoyancy = 1.55 kg equivalent (slightly > heroagent2.py's 1.51)
-    # V = 15.2 / (998 * 9.81) = 0.00155 m^3
-    volume: float = 0.00155
+    # Body name (for reference, not used when volume is explicitly set)
+    body_name: str = "link3"
 
     # Center of buoyancy at geometric center
     center_of_buoyancy: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -189,14 +194,18 @@ class HeroAgentThrusterCfg(ThrusterCfg):
     )
 
 
+# ALBC (Active Linear Buoyancy Controller) joint names
+HERO_AGENT_ALBC_JOINT_NAMES: list[str] = ["joint1", "joint2"]
+
+
 HERO_AGENT_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UsdFileCfg(
         usd_path=HERO_AGENT_USD_PATH,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=True,  # Gravity handled by hydrodynamics model
-            max_depenetration_velocity=10.0,
-            enable_gyroscopic_forces=True,
+            disable_gravity=False,  # PhysX handles gravity; HydrodynamicsModel applies buoyancy only
+            max_depenetration_velocity=10.0,  # Limits separation speed when bodies overlap
+            enable_gyroscopic_forces=True,  # Enables gyroscopic torque from rotational inertia
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
@@ -211,11 +220,10 @@ HERO_AGENT_CFG = ArticulationCfg(
         joint_vel={},
     ),
     actuators={
-        # Arm actuators - increased stiffness/damping for stability under hydrodynamic forces
         "arm": ImplicitActuatorCfg(
             joint_names_expr=["joint.*"],
-            stiffness=400.0,  # Fixed: was 100.0, increased for external force resistance
-            damping=40.0,     # Fixed: was 10.0, increased for oscillation damping
+            stiffness=100.0,
+            damping=40.0,
         ),
     },
 )

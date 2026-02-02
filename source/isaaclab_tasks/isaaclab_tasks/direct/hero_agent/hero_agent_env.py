@@ -84,8 +84,8 @@ class HeroAgentEnv(DirectRLEnv):
 
     Physical Parameters:
         - control_decimation: 4 (12.5 Hz control at 100 Hz sim with decimation=2)
-        - action_speed_scale: pi rad/s (effective pi/2 rad/s, see cfg note)
-        - joint_limits: from URDF (-6.0 to 6.0 rad)
+        - max_joint_velocity: π rad/s (180°/s, 0.5 rotation/s)
+        - joint_limits: from URDF (±2π rad, i.e. ±360 deg)
     """
 
     cfg: HeroAgentEnvCfg
@@ -100,115 +100,81 @@ class HeroAgentEnv(DirectRLEnv):
         """
         super().__init__(cfg, render_mode, **kwargs)
 
-        # Get body IDs for force application
-        self._body_id = self._robot.find_bodies(self.cfg.body_link_name)[0]
-        self._buoy_body_id = self._robot.find_bodies(self.cfg.buoy_link_name)[0]
-
-        # Get robot mass for hydrodynamics
-        self._robot_mass = self._robot.root_physx_view.get_masses()[0].sum()
+        # -- Body IDs and Physics --
+        self._body_id = self._robot.find_bodies(self.cfg.hydrodynamics.body_name)[0]
+        self._buoy_body_id = self._robot.find_bodies(self.cfg.buoy_hydrodynamics.body_name)[0]
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
 
-        # Initialize main body hydrodynamics model
+        # -- Hydrodynamics Models --
+        # Note: PhysX handles gravity naturally, so robot_mass parameter is not needed
+        prim_path = self.cfg.robot.prim_path.replace("env_.*", "env_0")
         self._hydro = HydrodynamicsModel(
             num_envs=self.num_envs,
             device=self.device,
             cfg=self.cfg.hydrodynamics,
             current_cfg=self.cfg.ocean_current,
             dt=self.physics_dt,
-            robot_mass=self._robot_mass.item(),
+            articulation_prim_path=prim_path,
         )
-
-        # Initialize buoy hydrodynamics (Hero Agent specific)
         self._buoy_hydro = HydrodynamicsModel(
             num_envs=self.num_envs,
             device=self.device,
             cfg=self.cfg.buoy_hydrodynamics,
             current_cfg=None,  # Buoy shares current with main body
             dt=self.physics_dt,
-            robot_mass=self.cfg.buoy_hydrodynamics.vehicle_mass,
+            articulation_prim_path=prim_path,
         )
 
-        # Find ALBC joint indices
+        # -- ALBC Joints --
         self._albc_joint_ids = self._robot.find_joints(self.cfg.albc_joint_names)[0]
         if len(self._albc_joint_ids) != 2:
             raise ValueError(
                 f"Expected 2 ALBC joints, found {len(self._albc_joint_ids)}. "
                 f"Joint names: {self.cfg.albc_joint_names}"
             )
+        joint_limits = self._robot.data.soft_joint_pos_limits[:, self._albc_joint_ids]
+        self._joint_limits_lower = joint_limits[0, :, 0]
+        self._joint_limits_upper = joint_limits[0, :, 1]
 
-        # Get joint limits from robot
-        joint_limits_low = self._robot.data.soft_joint_pos_limits[:, self._albc_joint_ids, 0]
-        joint_limits_high = self._robot.data.soft_joint_pos_limits[:, self._albc_joint_ids, 1]
-        self._joint_limits_lower = joint_limits_low[0]  # Same for all envs
-        self._joint_limits_upper = joint_limits_high[0]
-
-        # Initialize task
+        # -- Task and Rewards --
         self._task = ALBCAttitudeTask(
             cfg=self.cfg.task, num_envs=self.num_envs, device=self.device
         )
-
-        # Initialize reward manager
+        # Note: task is passed via context in compute() to avoid @configclass deep copy issue
         self._reward_manager = RewardManager(
             cfg={
                 "potential": RewardTermCfg(
                     func=albc_potential_reward,
-                    weight=self.cfg.albc_potential_reward_weight,
-                    params={"task": self._task, "scale": self.cfg.albc_potential_reward_scale},
+                    weight=self.cfg.reward.potential_weight,
+                    params={"scale": self.cfg.reward.potential_scale},
                 ),
                 "progress": RewardTermCfg(
                     func=albc_progress_reward,
-                    weight=self.cfg.albc_progress_reward_weight,
-                    params={"task": self._task},
+                    weight=self.cfg.reward.progress_weight,
                 ),
                 "action_cost": RewardTermCfg(
                     func=albc_action_cost,
-                    weight=self.cfg.albc_action_cost_weight,
+                    weight=self.cfg.reward.action_cost_weight,
                 ),
             },
             num_envs=self.num_envs,
             device=self.device,
         )
 
-        # Action buffers
+        # -- State Buffers --
         self._actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
-        self._prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
-
-        # Joint position target buffer (accumulated from actions)
+        self._prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)  # updated every env step (for reward)
+        self._prev_actions_obs = torch.zeros(self.num_envs, 2, device=self.device)  # updated at control frequency (for obs)
         self._joint_pos_targets = torch.zeros(self.num_envs, 2, device=self.device)
-
-        # Control step counter for decimation
         self._control_step_counter = 0
 
-        # Previous actions for observation
-        self._prev_actions_obs = torch.zeros(self.num_envs, 2, device=self.device)
-
-        # Force/torque buffers
+        # -- Force/Torque Buffers --
         self._hydro_forces = torch.zeros(self.num_envs, 3, device=self.device)
         self._hydro_torques = torch.zeros(self.num_envs, 3, device=self.device)
         self._buoy_hydro_forces = torch.zeros(self.num_envs, 3, device=self.device)
         self._buoy_hydro_torques = torch.zeros(self.num_envs, 3, device=self.device)
 
-        # Initialize child body buoyancy (simple vertical force, no torque)
-        # This avoids joint constraint conflicts while maintaining buoyancy balance
-        self._child_body_ids: list[torch.Tensor] = []
-        self._child_body_net_forces: list[float] = []
-        gravity = self._gravity_magnitude.item()
-
-        for body_name, params in self.cfg.child_body_buoyancy.items():
-            body_id = self._robot.find_bodies(body_name)[0]
-            self._child_body_ids.append(body_id)
-
-            # Net buoyancy force: buoyancy - weight (positive = upward)
-            buoyancy = self.cfg.water_density * params["volume"] * gravity
-            weight = params["mass"] * gravity
-            net_force = buoyancy - weight
-            self._child_body_net_forces.append(net_force)
-
-        # Pre-allocate reusable buffers for child body force application
-        self._child_world_up = torch.zeros(self.num_envs, 3, device=self.device)
-        self._child_zero_torque = torch.zeros(self.num_envs, 1, 3, device=self.device)
-
-        # Setup debug visualization
+        # -- Debug Visualization --
         self.set_debug_vis(self.cfg.debug_vis)
 
     def _setup_scene(self):
@@ -222,8 +188,10 @@ class HeroAgentEnv(DirectRLEnv):
 
         self.scene.clone_environments(copy_from_source=False)
 
+        # Filter inter-environment collisions but disable terrain collision
+        # (underwater robot doesn't need ground collision)
         if self.device == "cpu":
-            self.scene.filter_collisions(global_prim_paths=[self.cfg.terrain.prim_path])
+            self.scene.filter_collisions(global_prim_paths=[])
 
         light_cfg = sim_utils.DomeLightCfg(intensity=1500.0, color=(0.4, 0.6, 0.8))
         light_cfg.func("/World/Light", light_cfg)
@@ -250,7 +218,7 @@ class HeroAgentEnv(DirectRLEnv):
 
             # Accumulate joint position targets
             dt_control = self.physics_dt * self.cfg.control_decimation
-            delta = dt_control * self.cfg.action_speed_scale * self._actions
+            delta = dt_control * self.cfg.max_joint_velocity * self._actions
 
             self._joint_pos_targets += delta
 
@@ -305,23 +273,6 @@ class HeroAgentEnv(DirectRLEnv):
             torques=buoy_torques,
         )
 
-        # Apply simple buoyancy to child bodies (force only, no torque)
-        # This maintains buoyancy balance without fighting joint constraints
-        for body_id, net_force in zip(self._child_body_ids, self._child_body_net_forces):
-            body_idx = body_id[0]
-            body_quat = self._robot.data.body_quat_w[:, body_idx, :]
-
-            # World up direction with net buoyancy force magnitude
-            self._child_world_up[:, 2] = net_force
-            force_body = quat_apply_inverse(body_quat, self._child_world_up)
-
-            # Apply force only (no torque to avoid joint conflicts)
-            self._robot.permanent_wrench_composer.set_forces_and_torques(
-                body_ids=body_id,
-                forces=force_body.unsqueeze(1),
-                torques=self._child_zero_torque,
-            )
-
     def _get_observations(self) -> dict:
         """Compute ALBC-specific observations.
 
@@ -367,8 +318,12 @@ class HeroAgentEnv(DirectRLEnv):
         observations = {"policy": obs}
 
         if self.cfg.state_space > 0:
-            main_priv = self._hydro.get_privileged_info(include_current=True)
-            buoy_priv = self._buoy_hydro.get_privileged_info(include_current=False)
+            # Use compact privileged info (10D per body = 20D total)
+            # Contains: volume, r_cg, r_cb, inertia (core hydrostatic params)
+            # Excludes: damping, added_mass, ocean_current (velocity-dependent)
+            # Note: vehicle_mass removed since weight is handled by PhysX
+            main_priv = self._hydro.get_privileged_info_compact()
+            buoy_priv = self._buoy_hydro.get_privileged_info_compact()
             observations["privileged"] = torch.cat([main_priv, buoy_priv], dim=-1)
 
         return observations
@@ -376,14 +331,24 @@ class HeroAgentEnv(DirectRLEnv):
     def _get_rewards(self) -> torch.Tensor:
         """Compute ALBC rewards using potential-based system.
 
+        Updates potentials before computing rewards to ensure progress reward
+        is correctly calculated as the difference between previous and current
+        potential values.
+
         Returns:
             Reward tensor. Shape: (num_envs,).
         """
+        # Update potentials before reward computation
+        # This must be called exactly once per step to correctly compute progress reward
+        # Pass robot so update_potentials can compute current attitude error directly
+        self._task.update_potentials(self._robot)
+
         return self._reward_manager.compute(
             robot=self._robot,
             dt=self.step_dt,
             actions=self._actions,
             prev_actions=self._prev_actions,
+            task=self._task,  # Pass task directly to avoid @configclass deep copy issue
         )
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -496,6 +461,10 @@ class HeroAgentEnv(DirectRLEnv):
                 env=self, env_ids=env_ids, initial_height=self.cfg.initial_height
             )
 
+        # --- 8. Initialize potentials after robot pose is set ---
+        # Must be called after pose reset so initial potential matches actual state
+        self._task.initialize_potentials(self._robot, env_ids)
+
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Setup CoM and CoB visualization markers.
 
@@ -543,25 +512,30 @@ class HeroAgentEnv(DirectRLEnv):
         Computes the system-level Center of Mass and Center of Buoyancy
         by combining main body and buoy contributions, then transforms
         from body frame to world frame for visualization.
+
+        Note: Mass values are obtained from PhysX rigid body properties,
+        not from hydrodynamics config (since weight is handled by PhysX).
         """
         # Get robot pose in world frame
         root_pos = self._robot.data.root_pos_w
         root_quat = self._robot.data.root_quat_w
 
-        # Main body parameters (from hydrodynamics model)
-        m_main = self._hydro._vehicle_mass  # (num_envs,)
+        # Get masses from PhysX (first env only for visualization)
+        body_masses = self._robot.root_physx_view.get_masses()[0]  # (num_bodies,)
+        base_idx = self._body_id[0]
+        buoy_idx = self._buoy_body_id[0]
+        m_main = body_masses[base_idx].expand(self.num_envs)
+        m_buoy = body_masses[buoy_idx].expand(self.num_envs)
+
+        # Volume parameters (from hydrodynamics model)
         V_main = self._hydro._volume  # (num_envs,)
+        V_buoy = self._buoy_hydro._volume  # (num_envs,)
         r_cg_main = self._hydro._r_cg  # (num_envs, 3) body frame
         r_cb_main = self._hydro._r_cb  # (num_envs, 3) body frame
-
-        # Buoy body parameters
-        m_buoy = self._buoy_hydro._vehicle_mass  # (num_envs,)
-        V_buoy = self._buoy_hydro._volume  # (num_envs,)
         r_cg_buoy = self._buoy_hydro._r_cg  # (num_envs, 3) body frame relative to buoy
         r_cb_buoy = self._buoy_hydro._r_cb  # (num_envs, 3) body frame relative to buoy
 
         # Get buoy link position in body frame
-        buoy_idx = self._buoy_body_id[0]
         buoy_pos_w = self._robot.data.body_pos_w[:, buoy_idx]
         buoy_offset_w = buoy_pos_w - root_pos
         buoy_offset_b = quat_apply_inverse(root_quat, buoy_offset_w)

@@ -6,6 +6,7 @@
 """Hero Agent underwater vehicle configuration."""
 
 from .hero_agent import (
+    HERO_AGENT_ALBC_JOINT_NAMES,
     HERO_AGENT_CFG,
     HeroAgentBuoyHydrodynamicsCfg,
     HeroAgentHydrodynamicsCfg,
