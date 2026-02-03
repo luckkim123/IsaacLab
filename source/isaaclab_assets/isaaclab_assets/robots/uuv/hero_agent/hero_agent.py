@@ -157,8 +157,14 @@ class HeroAgentBuoyHydrodynamicsCfg(HydrodynamicsCfg):
     # Freshwater density from heroagent2.py (kg/m^3)
     water_density: float = 998.0
 
-    # Disable full Coriolis for small body (negligible effect)
-    use_full_coriolis: bool = False
+    # Rigid body inertia [I_xx, I_yy, I_zz] (kg*m^2)
+    # Solid cylinder approximation: R=0.085m, H=0.09m, m=0.93kg
+    #   I_xx = I_yy = m*(3*R^2 + H^2)/12 = 0.93*(0.02168 + 0.0081)/12 = 0.0023
+    #   I_zz = m*R^2/2 = 0.93*0.007225/2 = 0.0034
+    rigid_body_inertia: tuple[float, float, float] | None = (0.0023, 0.0023, 0.0034)
+
+    # Enable full Coriolis for consistency with main body
+    use_full_coriolis: bool = True
 
 
 @configclass
