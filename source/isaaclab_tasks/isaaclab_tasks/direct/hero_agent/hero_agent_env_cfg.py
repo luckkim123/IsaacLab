@@ -15,11 +15,12 @@ from __future__ import annotations
 import math
 
 import isaaclab.sim as sim_utils
-from isaaclab.envs import DirectRLEnvCfg
+from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
+
 from isaaclab_assets.robots.uuv import (
     HERO_AGENT_ALBC_JOINT_NAMES,
     HERO_AGENT_CFG,
@@ -29,8 +30,7 @@ from isaaclab_assets.robots.uuv import (
     OceanCurrentCfg,
 )
 
-from .rewards import ALBCRewardCfg
-from .tasks import ALBCAttitudeTaskCfg
+from .mdp import ALBCRewardCfg, TDCRewardCfg
 
 
 @configclass
@@ -74,6 +74,15 @@ class DomainRandomizationCfg:
     # -- Inertia --
     inertia_scale: tuple[float, float] = (0.9, 1.1)
 
+    # ==========================================================================
+    # Payload Randomization (only used when enable_payload=True)
+    # Simple weight-based payload: mass + attachment offset
+    # ==========================================================================
+    payload_mass_range: tuple[float, float] = (0.3, 0.7)  # kg
+    payload_attachment_x_range: tuple[float, float] = (-0.05, 0.05)  # m, offset from base
+    payload_attachment_y_range: tuple[float, float] = (-0.05, 0.05)  # m, offset from base
+    payload_attachment_z_range: tuple[float, float] = (-0.25, -0.15)  # m, absolute value
+
 
 @configclass
 class HeroAgentEnvCfg(DirectRLEnvCfg):
@@ -91,7 +100,13 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     action_space: int = 2
     observation_space: int = 13
     state_space: int = 0
-    debug_vis: bool = False
+    debug_vis: bool = True
+
+    # Top-down camera view (looking down at robot from above)
+    viewer: ViewerCfg = ViewerCfg(
+        eye=(0.0, 0.0, 12.0),
+        lookat=(0.0, 0.0, 4.5),
+    )
 
     # ==========================================================================
     # Simulation
@@ -118,19 +133,8 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
         clone_in_fabric=False,
     )
 
-    terrain: TerrainImporterCfg = TerrainImporterCfg(
-        prim_path="/World/ground",
-        terrain_type="plane",
-        collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-            restitution=0.0,
-        ),
-        debug_vis=False,
-    )
+    # Terrain disabled for underwater environment (no ground collision needed)
+    terrain: TerrainImporterCfg | None = None
 
     # ==========================================================================
     # Robot and Hydrodynamics
@@ -152,19 +156,22 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     initial_joint_pos_range: tuple[float, float] = (-0.3, 0.3)
 
     # ==========================================================================
-    # Task and Rewards
+    # Attitude Task and Rewards
     # ==========================================================================
-    task: ALBCAttitudeTaskCfg = ALBCAttitudeTaskCfg(
-        target_attitude=(0.0, 0.0, 0.0),
-        randomize_target=False,
-    )
+    # Target attitude [roll, pitch, yaw] in radians (default: upright)
+    # Note: yaw is included for observation but EXCLUDED from reward calculation
+    # because buoyancy control cannot generate Z-axis torque
+    target_attitude: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    randomize_target_attitude: bool = False
+    target_attitude_range: tuple[float, float, float] = (0.3, 0.3, 0.0)
+
     reward: ALBCRewardCfg = ALBCRewardCfg()
 
     # ==========================================================================
     # Initialization and Termination
     # ==========================================================================
     initial_height: float = 4.5
-    min_height: float = 0.0
+    min_height: float = -10.0
     max_height: float = 10.0
     max_distance_from_origin: float = 10.0
 
@@ -172,6 +179,13 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # Domain Randomization
     # ==========================================================================
     randomization: DomainRandomizationCfg = DomainRandomizationCfg()
+
+    # ==========================================================================
+    # Virtual Payload Configuration (simple weight model)
+    # ==========================================================================
+    enable_payload: bool = False
+    payload_mass: float = 0.5  # kg
+    payload_attachment_offset: tuple[float, float, float] = (0.0, 0.0, -0.2)  # m, body frame
 
 
 @configclass
@@ -183,71 +197,85 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
         max_velocity=(0.2, 0.2, 0.1, 0.0, 0.0, 0.0),
         noise_scale=(0.05, 0.05, 0.02, 0.0, 0.0, 0.0),
     )
-
-
-@configclass
-class HeroAgentEvalEnvCfg(HeroAgentEnvCfg):
-    """Hero Agent ALBC evaluation environment with moderate perturbations."""
-
-    randomization = DomainRandomizationCfg(
-        enable=True,
-        position_x_range=(-0.3, 0.3),
-        position_y_range=(-0.3, 0.3),
-        position_z_range=(4.2, 4.8),
-        roll_range=(-0.5, 0.5),
-        pitch_range=(-0.5, 0.5),
-        yaw_range=(-math.pi / 2, math.pi / 2),
-        added_mass_scale=(0.9, 1.1),
-        linear_damping_scale=(0.9, 1.1),
-        quadratic_damping_scale=(0.9, 1.1),
-        volume_scale=(0.98, 1.02),
-        cob_offset_x=(-0.005, 0.005),
-        cob_offset_y=(-0.005, 0.005),
-        cob_offset_z=(-0.01, 0.01),
-        cog_offset_x=(-0.005, 0.005),
-        cog_offset_y=(-0.005, 0.005),
-        cog_offset_z=(-0.01, 0.01),
-        inertia_scale=(0.95, 1.05),
-    )
-
-    ocean_current = OceanCurrentCfg(
-        max_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-        noise_scale=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-    )
+    enable_payload: bool = True
 
 
 @configclass
 class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
     """Hero Agent encoder training with privileged hydrodynamic info.
 
-    state_space=20 signals the environment to return compact privileged information
-    alongside policy observations for HORA/RMA Phase 1 teacher training.
-    Uses get_privileged_info_compact(): Main body (10D) + Buoy (10D) = 20D.
-    Contains: volume, r_cg, r_cb, inertia (core hydrostatic params).
-    Excludes: damping, added_mass, ocean_current (velocity-dependent).
+    state_space=22 returns compact privileged information for HORA/RMA Phase 1 training.
+    Uses get_privileged_info_compact(): Main body (10D) + Buoy (10D) + Payload (2D) = 22D.
+    Payload privileged info: mass (1D) + attachment_offset_z (1D).
 
     Network Input Dimensions (ActorCriticEncoder):
         - observation_space (13): Used for gym.spaces.Box definition only
-        - state_space (20): Privileged info, returned as observations["privileged"]
-        - Encoder: privileged(20D) -> latent z(6D)
+        - state_space (22): Privileged info, returned as observations["privileged"]
+        - Encoder: privileged(22D) -> latent z(6D)
         - Actual Actor/Critic input: policy_obs(13) + z(6) = 19D
     """
 
-    state_space: int = 20
+    state_space: int = 22
+    enable_payload: bool = True
+
+
+# =============================================================================
+# TDC-Specific Configurations
+# =============================================================================
 
 
 @configclass
-class HeroAgentEncoderEvalEnvCfg(HeroAgentEvalEnvCfg):
-    """Hero Agent encoder evaluation with privileged hydrodynamic info.
+class HeroAgentEncoderTDCEnvCfg(HeroAgentEncoderTrainEnvCfg):
+    """Hero Agent TDC environment configuration.
 
-    Uses moderate domain randomization (same as HeroAgentEvalEnvCfg) while
-    providing privileged information for encoder-based policy evaluation.
+    Uses TDC controller for attitude control with learned PD gains.
+    Actor outputs 4D gains instead of 2D joint velocities.
 
-    Network Input Dimensions (ActorCriticEncoder):
-        - observation_space (13): Used for gym.spaces.Box definition only
-        - state_space (20): Privileged info, returned as observations["privileged"]
-        - Encoder: privileged(20D) -> latent z(6D)
-        - Actual Actor/Critic input: policy_obs(13) + z(6) = 19D
+    Control Flow:
+        1. Actor outputs gains: [K_p_roll, K_d_roll, K_p_pitch, K_d_pitch]
+        2. Encoder outputs z (6D) -> M_hat = diag(z[:2])
+        3. TDC controller: gains + M_hat + attitude_error -> p_EE_desired
+        4. IK: p_EE_desired -> delta_joint_angles
+        5. Joint position control: integrate delta to joint targets
+
+    Network Input Dimensions (ActorCriticEncoderTDC):
+        - observation_space (15): Used for gym.spaces.Box definition (11 base + 4 prev gains)
+        - state_space (22): Privileged info for encoder
+        - Encoder: privileged(22D) -> z(6D) -> M_hat(2D for roll/pitch)
+        - Actor input: policy_obs(15) + z(6) = 21D -> gains(4D)
     """
 
-    state_space: int = 20
+    # Override action and observation space for TDC gains (4D instead of 2D)
+    action_space: int = 4
+    observation_space: int = 15  # 11 base + 4 previous gains (vs 13 = 11 + 2 in base env)
+
+    # TDC-specific reward configuration
+    reward: TDCRewardCfg = TDCRewardCfg()
+
+    # ==========================================================================
+    # TDC Controller Configuration
+    # ==========================================================================
+    # Gain bounds (RL actor output is scaled to these ranges)
+    tdc_k_p_min: float = 1.0
+    """Minimum proportional gain for TDC."""
+
+    tdc_k_p_max: float = 50.0
+    """Maximum proportional gain for TDC."""
+
+    tdc_k_d_min: float = 0.1
+    """Minimum derivative gain for TDC."""
+
+    tdc_k_d_max: float = 10.0
+    """Maximum derivative gain for TDC."""
+
+    # TDE (Time Delay Estimation) parameters
+    tdc_tde_delay_steps: int = 1
+    """Number of steps for time delay estimation."""
+
+    # Default inertia estimate
+    tdc_default_m_hat: tuple[float, float] = (1.0, 1.0)
+    """Default diagonal inertia estimate for roll and pitch."""
+
+    # Note: ALBC arm geometry (link lengths, height offset, workspace) is sourced
+    # from robot config constants (HERO_AGENT_ALBC_*) in isaaclab_assets.robots.uuv.
+    # This ensures consistency with the URDF and eliminates duplicate hardcoded values.
