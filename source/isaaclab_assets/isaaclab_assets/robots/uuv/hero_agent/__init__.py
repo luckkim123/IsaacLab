@@ -6,7 +6,10 @@
 """Hero Agent underwater vehicle configuration."""
 
 from .hero_agent import (
+    HERO_AGENT_ALBC_HEIGHT_OFFSET,
     HERO_AGENT_ALBC_JOINT_NAMES,
+    HERO_AGENT_ALBC_LINK1_LENGTH,
+    HERO_AGENT_ALBC_LINK2_LENGTH,
     HERO_AGENT_CFG,
     HeroAgentBuoyHydrodynamicsCfg,
     HeroAgentHydrodynamicsCfg,

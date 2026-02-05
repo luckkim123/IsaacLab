@@ -70,9 +70,18 @@ class TDCControllerCfg:
     workspace_radius_max: float = 0.466
     """Maximum reachable radius (L1 + L2 - epsilon)."""
 
-    # Initial M_hat (diagonal inertia estimate)
-    default_m_hat: tuple[float, float] = (1.0, 1.0)
+    # Initial M_hat (diagonal inertia estimate, close to true effective inertia)
+    default_m_hat: tuple[float, float] = (0.14, 0.15)
     """Default diagonal inertia estimate for roll and pitch."""
+
+    # DLS (Damped Least Square) for Lambda_inv
+    dls_lambda_max: float = 5.0
+    """Maximum DLS damping parameter for Lambda_inv.
+
+    Adaptive DLS prevents p_EE divergence when lf = cos(theta)*cos(phi)*F_bu -> 0
+    at large tilt angles. Damping formula: lambda^2 = lambda_max^2 * (1 - lf/lf_max).
+    At zero tilt: lambda=0 (exact tracking). At 90 deg tilt: lambda=lambda_max.
+    Inspired by Yoshikawa manipulability-based adaptive DLS from ALBC IK (slide 9)."""
 
     # ALBC geometry
     height_offset: float = 0.1625
@@ -147,6 +156,13 @@ class TDCController:
         # Last output for continuity
         self._last_output = torch.zeros(self.num_envs, 2, device=self.device)
 
+        # Pre-clamp workspace utilization ratio (r / r_max) for reward computation
+        self._last_r_ratio = torch.zeros(self.num_envs, device=self.device)
+
+        # DLS adaptive Lambda_inv: lf_max = F_bu per env (set at reset from hydro model)
+        # Default to nominal F_bu ~26.24 N; updated per-env when reset() receives f_bu
+        self._lf_max = torch.full((self.num_envs,), 26.24, device=self.device)
+
     def set_gains(self, actions: torch.Tensor) -> None:
         """Set PD gains from RL actor output.
 
@@ -169,15 +185,15 @@ class TDCController:
     def set_inertia_estimate(self, z: torch.Tensor) -> None:
         """Set inertia estimate from encoder latent output.
 
-        M_hat = diag(z) where z is the encoder output (positive via softplus).
-        Only uses the first 2 components of z for roll/pitch.
+        Following the 6-DOF convention [surge, sway, heave, roll, pitch, yaw],
+        M_hat uses z[3:5] (roll, pitch indices) from the encoder output.
 
         Args:
-            z: Encoder latent output (positive values).
-                Shape: (num_envs, latent_dim) where latent_dim >= 2.
+            z: Encoder latent output (positive values via softplus).
+                Shape: (num_envs, latent_dim) where latent_dim >= 5.
         """
-        # Use first 2 components for roll/pitch inertia
-        self._m_hat = torch.clamp(z[:, :2], min=0.1)
+        # 6-DOF convention: indices 3, 4 = roll, pitch
+        self._m_hat = torch.clamp(z[:, 3:5], min=0.1)
 
     # ------------------------------------------------------------------
     # Lambda and T_b helpers (from 05_derivation.md, Step 2)
@@ -217,25 +233,41 @@ class TDCController:
         return torch.stack([tau_roll, tau_pitch], dim=-1)
 
     def _apply_lambda_inv(self, torque: torch.Tensor, lambda_factor: torch.Tensor) -> torch.Tensor:
-        """Apply Lambda inverse: p_EE = Lambda^{-1} * tau.
+        """Apply Lambda inverse with adaptive DLS damping.
 
-        Lambda^{-1} = [[0, 1/lf], [-1/lf, 0]], so:
-            x_EE =  tau_pitch / lf
-            y_EE = -tau_roll / lf
+        Uses Damped Least Square (DLS) formulation instead of direct 1/lf:
+            p_EE = Lambda^T * (Lambda * Lambda^T + lambda^2 * I)^{-1} * tau
+
+        For the anti-diagonal Lambda, this simplifies to:
+            dls_factor = lf / (lf^2 + lambda^2)
+        where lambda^2 = lambda_max^2 * (1 - lf/lf_max) is adaptive.
+
+        At zero tilt (lf=lf_max): lambda=0, exact inverse (no damping).
+        At large tilt (lf->0): lambda=lambda_max, p_EE -> 0 (safe).
+        Maximum p_EE is bounded regardless of torque magnitude.
+
+        Inspired by Yoshikawa manipulability-based adaptive DLS for ALBC IK.
 
         Args:
             torque: Torque [tau_roll, tau_pitch]. Shape: (num_envs, 2).
-            lambda_factor: Lambda factor lf. Shape: (num_envs,).
+            lambda_factor: Lambda factor lf = cos(pitch)*cos(roll)*F_bu.
+                Shape: (num_envs,).
 
         Returns:
             End-effector position [x, y]. Shape: (num_envs, 2).
         """
-        # Numerical safety: lf = cos(theta)*cos(phi)*F_bu must be positive.
-        # Small-angle assumption guarantees this in normal operation (+/-45 deg DR range).
-        # Clamp handles transient exceedance during exploration.
-        lf_safe = torch.clamp(lambda_factor, min=1e-8)  # (N,)
-        x_ee = torque[:, 1] / lf_safe  #  tau_pitch / lf
-        y_ee = -torque[:, 0] / lf_safe  # -tau_roll / lf
+        lf = torch.clamp(lambda_factor, min=0.0)
+        lf_max = self._lf_max  # F_bu at reset (max possible lf)
+
+        # Adaptive DLS: lambda^2 = lambda_max^2 * (1 - lf/lf_max)
+        lam_sq = self.cfg.dls_lambda_max**2 * (1.0 - lf / (lf_max + 1e-8))
+        lam_sq = torch.clamp(lam_sq, min=0.0)
+
+        # DLS inverse factor: lf / (lf^2 + lambda^2)
+        dls_factor = lf / (lf**2 + lam_sq + 1e-8)
+
+        x_ee = torque[:, 1] * dls_factor   #  tau_pitch * dls
+        y_ee = -torque[:, 0] * dls_factor   # -tau_roll  * dls
         return torch.stack([x_ee, y_ee], dim=-1)
 
     def _compute_t_b(self, roll: torch.Tensor, pitch: torch.Tensor, f_bu: torch.Tensor) -> torch.Tensor:
@@ -345,6 +377,7 @@ class TDCController:
 
         # Clamp to circular workspace (2-link arm reachable region)
         r = torch.linalg.norm(p_ee_desired, dim=-1, keepdim=True)
+        self._last_r_ratio = (r / self.cfg.workspace_radius_max).squeeze(-1)
         too_small = r < 1e-6
         r_clamped = torch.clamp(r, self.cfg.workspace_radius_min, self.cfg.workspace_radius_max)
         scale = r_clamped / (r + 1e-8)
@@ -422,7 +455,20 @@ class TDCController:
         self._pitch_history[env_ids] = 0.0
         self._lambda_factor_history[env_ids] = 0.0
         self._last_output[env_ids] = 0.0
+        self._last_r_ratio[env_ids] = 0.0
         self._warmup_steps[env_ids] = 0
+
+    def set_buoyancy_force(self, env_ids: torch.Tensor, f_bu: torch.Tensor) -> None:
+        """Set per-env buoyancy force for adaptive DLS Lambda_inv.
+
+        lf_max = F_bu (maximum lambda factor at zero tilt angle).
+        Should be called after reset when DR may change buoyancy.
+
+        Args:
+            env_ids: Environment indices to update.
+            f_bu: Buoyancy force magnitude. Shape: (len(env_ids),).
+        """
+        self._lf_max[env_ids] = f_bu[env_ids]
 
     @property
     def current_gains(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -441,3 +487,14 @@ class TDCController:
             M_hat tensor of shape (num_envs, 2).
         """
         return self._m_hat
+
+    @property
+    def workspace_utilization(self) -> torch.Tensor:
+        """Get pre-clamp workspace utilization ratio (r / r_max).
+
+        Values > 1.0 indicate workspace saturation (clamped by controller).
+
+        Returns:
+            Utilization ratio of shape (num_envs,).
+        """
+        return self._last_r_ratio

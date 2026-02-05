@@ -30,7 +30,7 @@ from isaaclab_assets.robots.uuv import (
     OceanCurrentCfg,
 )
 
-from .mdp import ALBCRewardCfg, TDCRewardCfg
+from .mdp import ALBCRewardCfg, BaseTDCRewardCfg, TDCRewardCfg
 
 
 @configclass
@@ -233,7 +233,7 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentEncoderTrainEnvCfg):
 
     Control Flow:
         1. Actor outputs gains: [K_p_roll, K_d_roll, K_p_pitch, K_d_pitch]
-        2. Encoder outputs z (6D) -> M_hat = diag(z[:2])
+        2. Encoder outputs z (6D) -> M_hat = z[3:5] (roll/pitch per 6-DOF convention)
         3. TDC controller: gains + M_hat + attitude_error -> p_EE_desired
         4. IK: p_EE_desired -> delta_joint_angles
         5. Joint position control: integrate delta to joint targets
@@ -241,7 +241,7 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentEncoderTrainEnvCfg):
     Network Input Dimensions (ActorCriticEncoderTDC):
         - observation_space (15): Used for gym.spaces.Box definition (11 base + 4 prev gains)
         - state_space (22): Privileged info for encoder
-        - Encoder: privileged(22D) -> z(6D) -> M_hat(2D for roll/pitch)
+        - Encoder: privileged(22D) -> z(6D) -> M_hat = z[3:5] (roll/pitch)
         - Actor input: policy_obs(15) + z(6) = 21D -> gains(4D)
     """
 
@@ -272,10 +272,62 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentEncoderTrainEnvCfg):
     tdc_tde_delay_steps: int = 1
     """Number of steps for time delay estimation."""
 
-    # Default inertia estimate
-    tdc_default_m_hat: tuple[float, float] = (1.0, 1.0)
+    # Default inertia estimate (close to true effective inertia: Ixx+M_A44, Iyy+M_A55)
+    # True values: (0.0994+0.04, 0.0994+0.05) = (0.1394, 0.1494)
+    # Rounded to avoid false precision; encoder refines per-episode via DR
+    tdc_default_m_hat: tuple[float, float] = (0.14, 0.15)
     """Default diagonal inertia estimate for roll and pitch."""
 
     # Note: ALBC arm geometry (link lengths, height offset, workspace) is sourced
     # from robot config constants (HERO_AGENT_ALBC_*) in isaaclab_assets.robots.uuv.
     # This ensures consistency with the URDF and eliminates duplicate hardcoded values.
+
+
+@configclass
+class HeroAgentBaseTDCEnvCfg(HeroAgentTrainEnvCfg):
+    """Hero Agent TDC environment without encoder (fixed M_hat).
+
+    Uses TDC controller with fixed default_m_hat for gain-only learning.
+    No encoder, no privileged observations (state_space=0).
+    Isolates TDC gain learning from encoder/M_hat adaptation.
+
+    Control Flow:
+        1. Actor outputs gains: [K_p_roll, K_d_roll, K_p_pitch, K_d_pitch]
+        2. M_hat fixed at default_m_hat (no encoder)
+        3. TDC controller: gains + M_hat + attitude_error -> p_EE_desired
+        4. IK: p_EE_desired -> delta_joint_angles
+        5. Joint position control: integrate delta to joint targets
+
+    Network (standard ActorCritic):
+        - Actor: 15D obs -> 4D gains
+        - Critic: 15D obs -> value
+    """
+
+    # Override action and observation space for TDC gains
+    action_space: int = 4
+    observation_space: int = 15  # 11 base + 4 previous gains
+    state_space: int = 0  # No privileged obs -> no encoder needed
+
+    # TDC reward without stability (fixed M_hat) and without attitude penalty
+    reward: BaseTDCRewardCfg = BaseTDCRewardCfg()
+
+    # ==========================================================================
+    # TDC Controller Configuration
+    # ==========================================================================
+    tdc_k_p_min: float = 1.0
+    """Minimum proportional gain for TDC."""
+
+    tdc_k_p_max: float = 50.0
+    """Maximum proportional gain for TDC."""
+
+    tdc_k_d_min: float = 0.1
+    """Minimum derivative gain for TDC."""
+
+    tdc_k_d_max: float = 10.0
+    """Maximum derivative gain for TDC."""
+
+    tdc_tde_delay_steps: int = 1
+    """Number of steps for time delay estimation."""
+
+    tdc_default_m_hat: tuple[float, float] = (0.14, 0.15)
+    """Default diagonal inertia estimate for roll and pitch (fixed, not learned)."""

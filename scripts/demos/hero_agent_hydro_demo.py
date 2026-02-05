@@ -11,10 +11,10 @@ forces applied properly for articulated bodies:
     - Full hydrodynamics on link3 (buoy) - same as RL environment
     - Simple buoyancy (vertical force) on other child links (gripper, link1, link2)
 
-Note: Added mass (M_A * v_dot) is NOT applied as external force. The physics engine
-handles M_RB * v_dot internally, and applying M_A * v_dot as external force would
-cause numerical instability. The Coriolis matrix C(v) = C_RB(v) + C_A(v) includes
-the added mass coupling effects.
+Added Mass Force:
+    When apply_added_mass_force=True in HydrodynamicsCfg, the added mass force
+    (M_A * v_dot) is applied as external force using PhysX-computed acceleration.
+    Requires calling update_physx_state() after robot.update().
 
 Expected Behavior:
     - link3 (buoy): Net +10.83N upward -> floats up
@@ -142,24 +142,52 @@ def main():
         dt=dt,
     )
 
+    # Get body indices first (needed for mass lookup)
+    body_indices = {}
+    for body_name in robot.body_names:
+        idx = robot.find_bodies(body_name)[0][0]
+        body_indices[body_name] = idx
+
+    base_idx = body_indices["base"]
+    buoy_idx = body_indices["link3"]
+    num_bodies = len(robot.body_names)
+
+    # Get body masses from PhysX (gravity is handled by PhysX now)
+    body_masses = robot.root_physx_view.get_masses()[0]  # (num_bodies,)
+    print("\n[PhysX Body Masses]")
+    for i, name in enumerate(robot.body_names):
+        print(f"  {name}: {body_masses[i].item():.3f} kg")
+    total_mass = body_masses.sum().item()
+    print(f"  Total: {total_mass:.3f} kg")
+
+    # Get volumes from hydrodynamics models (may be auto-calculated)
+    # Note: volume is now auto-calculated from collision geometry if not specified
+    base_volume = hydro_model._volume[0].item() if hasattr(hydro_model, "_volume") else 0.0
+    buoy_volume = buoy_hydro_model._volume[0].item() if hasattr(buoy_hydro_model, "_volume") else 0.0
+
     # Print configuration
     print("\n[Hydrodynamics Configuration]")
-    print("  Base (full hydro):")
-    print(f"    Mass: {hydro_cfg.vehicle_mass} kg")
-    print(f"    Volume: {hydro_cfg.volume * 1000:.4f} L")
-    buoyancy_base = WATER_DENSITY * hydro_cfg.volume * GRAVITY
-    weight_base = hydro_cfg.vehicle_mass * GRAVITY
+    print("  Physics Model: PhysX gravity ON, HydrodynamicsModel applies buoyancy only")
+    print(f"  Body indices: {body_indices}")
+
+    print("\n  Base (full hydro):")
+    base_mass = body_masses[base_idx].item()
+    print(f"    Mass (from PhysX): {base_mass:.3f} kg")
+    print(f"    Volume: {base_volume * 1000:.4f} L")
+    buoyancy_base = WATER_DENSITY * base_volume * GRAVITY
+    weight_base = base_mass * GRAVITY
     print(f"    Buoyancy: {buoyancy_base:.2f} N")
-    print(f"    Weight: {weight_base:.2f} N")
+    print(f"    Weight (PhysX): {weight_base:.2f} N")
     print(f"    Net: {buoyancy_base - weight_base:+.2f} N")
 
     print("\n  Buoy/link3 (full hydro):")
-    print(f"    Mass: {buoy_hydro_cfg.vehicle_mass} kg")
-    print(f"    Volume: {buoy_hydro_cfg.volume * 1000:.4f} L")
-    buoyancy_buoy = WATER_DENSITY * buoy_hydro_cfg.volume * GRAVITY
-    weight_buoy = buoy_hydro_cfg.vehicle_mass * GRAVITY
+    buoy_mass = body_masses[buoy_idx].item()
+    print(f"    Mass (from PhysX): {buoy_mass:.3f} kg")
+    print(f"    Volume: {buoy_volume * 1000:.4f} L")
+    buoyancy_buoy = WATER_DENSITY * buoy_volume * GRAVITY
+    weight_buoy = buoy_mass * GRAVITY
     print(f"    Buoyancy: {buoyancy_buoy:.2f} N")
-    print(f"    Weight: {weight_buoy:.2f} N")
+    print(f"    Weight (PhysX): {weight_buoy:.2f} N")
     print(f"    Net: {buoyancy_buoy - weight_buoy:+.2f} N")
 
     print("\n  Other child bodies (simple buoyancy only):")
@@ -177,18 +205,6 @@ def main():
     else:
         print("  Status: NEGATIVE (system will sink)")
 
-    # Get body indices
-    body_indices = {}
-    for body_name in robot.body_names:
-        idx = robot.find_bodies(body_name)[0][0]
-        body_indices[body_name] = idx
-
-    base_idx = body_indices["base"]
-    buoy_idx = body_indices["link3"]
-    num_bodies = len(robot.body_names)
-
-    print(f"\n  Body indices: {body_indices}")
-
     print("\n" + "=" * 70)
     print("Starting simulation... Press Ctrl+C to exit.")
     print("Expected: buoy (link3) rises, base sinks, system rotates to equilibrium")
@@ -200,6 +216,18 @@ def main():
     while simulation_app.is_running() and sim_time < max_sim_time:
         # Update robot state
         robot.update(sim.cfg.dt)
+
+        # Update PhysX acceleration cache for added mass force calculation
+        if hydro_model._apply_added_mass:
+            hydro_model.update_physx_state(
+                body_com_acc_w=robot.data.body_com_acc_w,
+                root_quat_w=robot.data.root_quat_w,
+            )
+        if buoy_hydro_model._apply_added_mass:
+            buoy_hydro_model.update_physx_state(
+                body_com_acc_w=robot.data.body_com_acc_w[:, buoy_idx:buoy_idx+1, :],
+                root_quat_w=robot.data.body_quat_w[:, buoy_idx, :],
+            )
 
         # Check for NaN early
         if torch.isnan(robot.data.root_pos_w).any():

@@ -5,24 +5,32 @@
 
 """RL agent configurations for Hero Agent ALBC environments.
 
-This module provides pre-configured hyperparameters for training Hero Agent
-joint-based attitude control policies.
+This module provides:
+    - ActorCriticEncoder: Custom network for HORA Phase 1 teacher training
+    - ActorCriticEncoderTDC: TDC-specific network outputting PD gains
+    - HeroAgentPPORunnerCfg: Standard PPO for joint-based attitude control
+    - HeroAgentEncoderPPORunnerCfg: HORA Phase 1 with extrinsics encoder
+    - HeroAgentEncoderTDCPPORunnerCfg: TDC-integrated training with gains output
+    - HeroAgentBaseTDCPPORunnerCfg: TDC gain-only training (no encoder)
 """
 
+from ..encoder import ActorCriticEncoder, ActorCriticEncoderTDC
 from .rsl_rl_ppo_cfg import (
-    HeroAgentEncoderEvalPPORunnerCfg,
-    HeroAgentEncoderTrainPPORunnerCfg,
-    HeroAgentEvalPPORunnerCfg,
+    HeroAgentBaseTDCPPORunnerCfg,
+    HeroAgentEncoderPPORunnerCfg,
+    HeroAgentEncoderTDCPPORunnerCfg,
     HeroAgentPPORunnerCfg,
-    HeroAgentTrainPPORunnerCfg,
     RslRlPpoActorCriticEncoderCfg,
+    RslRlPpoActorCriticEncoderTDCCfg,
 )
 
 __all__ = [
+    "ActorCriticEncoder",
+    "ActorCriticEncoderTDC",
     "HeroAgentPPORunnerCfg",
-    "HeroAgentTrainPPORunnerCfg",
-    "HeroAgentEvalPPORunnerCfg",
-    "HeroAgentEncoderTrainPPORunnerCfg",
-    "HeroAgentEncoderEvalPPORunnerCfg",
+    "HeroAgentEncoderPPORunnerCfg",
+    "HeroAgentEncoderTDCPPORunnerCfg",
+    "HeroAgentBaseTDCPPORunnerCfg",
     "RslRlPpoActorCriticEncoderCfg",
+    "RslRlPpoActorCriticEncoderTDCCfg",
 ]

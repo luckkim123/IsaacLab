@@ -184,6 +184,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         with torch.inference_mode():
             # agent stepping
             actions = policy(obs)
+            # pass encoder z to TDC environment for M_hat estimation (if applicable)
+            if hasattr(policy_nn, "last_z") and policy_nn.last_z is not None:
+                unwrapped_env = env.unwrapped
+                if hasattr(unwrapped_env, "set_encoder_z"):
+                    unwrapped_env.set_encoder_z(policy_nn.last_z)
             # env stepping
             obs, _, dones, _ = env.step(actions)
             # reset recurrent states for episodes that have terminated

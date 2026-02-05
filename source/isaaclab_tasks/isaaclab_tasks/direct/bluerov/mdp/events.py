@@ -32,8 +32,6 @@ from typing import TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from isaaclab.envs import ManagerBasedEnv
-
     from ..bluerov_env import BlueROVEnv
 
 
@@ -44,16 +42,15 @@ def randomize_hydrodynamics(
     linear_damping_scale: tuple[float, float] = (0.8, 1.2),
     quadratic_damping_scale: tuple[float, float] = (0.8, 1.2),
     volume_scale: tuple[float, float] = (0.9, 1.1),
-    mass_scale: tuple[float, float] = (0.9, 1.1),
-    cob_offset_scale: tuple[float, float] = (1.0, 1.0),
+    cob_offset_x: tuple[float, float] = (0.0, 0.0),
+    cob_offset_y: tuple[float, float] = (0.0, 0.0),
+    cob_offset_z: tuple[float, float] = (0.0, 0.0),
+    cog_offset_x: tuple[float, float] = (0.0, 0.0),
+    cog_offset_y: tuple[float, float] = (0.0, 0.0),
+    cog_offset_z: tuple[float, float] = (0.0, 0.0),
     inertia_scale: tuple[float, float] = (1.0, 1.0),
-    payload_mass_ratio: tuple[float, float] = (0.0, 0.0),
-    payload_cog_offset_z: tuple[float, float] = (0.0, 0.0),
 ) -> None:
     """Randomize hydrodynamic parameters for specified environments.
-
-    This function applies scale-based randomization to the hydrodynamics model
-    following MarineGym's domain randomization pattern.
 
     Args:
         env: The BlueROV environment instance.
@@ -62,11 +59,13 @@ def randomize_hydrodynamics(
         linear_damping_scale: Scale range for linear damping coefficients.
         quadratic_damping_scale: Scale range for quadratic damping coefficients.
         volume_scale: Scale range for vehicle volume (affects buoyancy).
-        mass_scale: Scale range for robot mass.
-        cob_offset_scale: Scale range for center of buoyancy offset.
+        cob_offset_x: Offset range for CoB X in meters.
+        cob_offset_y: Offset range for CoB Y in meters.
+        cob_offset_z: Offset range for CoB Z in meters.
+        cog_offset_x: Offset range for CoG X in meters.
+        cog_offset_y: Offset range for CoG Y in meters.
+        cog_offset_z: Offset range for CoG Z in meters.
         inertia_scale: Scale range for rigid body inertia.
-        payload_mass_ratio: Range for additional payload mass as ratio of base mass.
-        payload_cog_offset_z: Range for payload-induced CoG offset in Z direction.
     """
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
@@ -74,18 +73,53 @@ def randomize_hydrodynamics(
     if not hasattr(env, "_hydro"):
         return
 
-    env._hydro.randomize_parameters(
-        env_ids=env_ids,
-        added_mass_scale=added_mass_scale,
-        linear_damping_scale=linear_damping_scale,
-        quadratic_damping_scale=quadratic_damping_scale,
-        volume_scale=volume_scale,
-        mass_scale=mass_scale,
-        cob_offset_scale=cob_offset_scale,
-        inertia_scale=inertia_scale,
-        payload_mass_ratio=payload_mass_ratio,
-        payload_cog_offset_z=payload_cog_offset_z,
-    )
+    hydro = env._hydro
+    num_envs = len(env_ids)
+    device = env.device
+
+    # Helper to generate uniform random in [lo, hi]
+    def rand_range(shape: tuple, lo: float, hi: float) -> torch.Tensor:
+        return torch.rand(shape, device=device) * (hi - lo) + lo
+
+    # Added mass (scale each of 6 DOF)
+    am_scales = rand_range((num_envs, 6), added_mass_scale[0], added_mass_scale[1])
+    base_am = torch.tensor(hydro.cfg.added_mass, dtype=torch.float32, device=device)
+    hydro.added_mass_matrix[env_ids] = torch.diag_embed(base_am.unsqueeze(0) * am_scales)
+
+    # Linear damping
+    ld_scales = rand_range((num_envs, 6), linear_damping_scale[0], linear_damping_scale[1])
+    base_ld = torch.tensor(hydro.cfg.linear_damping, dtype=torch.float32, device=device)
+    hydro.linear_damping[env_ids] = base_ld.unsqueeze(0) * ld_scales
+
+    # Quadratic damping
+    qd_scales = rand_range((num_envs, 6), quadratic_damping_scale[0], quadratic_damping_scale[1])
+    base_qd = torch.tensor(hydro.cfg.quadratic_damping, dtype=torch.float32, device=device)
+    hydro.quadratic_damping[env_ids] = base_qd.unsqueeze(0) * qd_scales
+
+    # Volume
+    base_volume = hydro.volume[0].item()
+    hydro.volume[env_ids] = base_volume * rand_range((num_envs,), volume_scale[0], volume_scale[1])
+    hydro.update_buoyancy_force(env_ids)
+
+    # Center of Buoyancy (offset from base)
+    base_cob = torch.tensor(hydro.cfg.center_of_buoyancy, dtype=torch.float32, device=device)
+    hydro.center_of_buoyancy[env_ids, 0] = base_cob[0] + rand_range((num_envs,), *cob_offset_x)
+    hydro.center_of_buoyancy[env_ids, 1] = base_cob[1] + rand_range((num_envs,), *cob_offset_y)
+    hydro.center_of_buoyancy[env_ids, 2] = base_cob[2] + rand_range((num_envs,), *cob_offset_z)
+
+    # Center of Gravity (offset from base)
+    base_cog = torch.tensor(hydro.cfg.center_of_gravity, dtype=torch.float32, device=device)
+    hydro.center_of_gravity[env_ids, 0] = base_cog[0] + rand_range((num_envs,), *cog_offset_x)
+    hydro.center_of_gravity[env_ids, 1] = base_cog[1] + rand_range((num_envs,), *cog_offset_y)
+    hydro.center_of_gravity[env_ids, 2] = base_cog[2] + rand_range((num_envs,), *cog_offset_z)
+
+    # Rigid body inertia
+    inertia_scales = rand_range((num_envs, 3), inertia_scale[0], inertia_scale[1])
+    if hydro.cfg.rigid_body_inertia is not None:
+        base_inertia = torch.tensor(hydro.cfg.rigid_body_inertia, dtype=torch.float32, device=device)
+    else:
+        base_inertia = torch.tensor(hydro.cfg.added_mass[3:6], dtype=torch.float32, device=device) * 0.5
+    hydro.rigid_body_inertia[env_ids] = base_inertia.unsqueeze(0) * inertia_scales
 
 
 def randomize_thruster_params(
@@ -139,7 +173,7 @@ def randomize_ocean_current(
     if not hasattr(env, "_hydro"):
         return
 
-    env._hydro.randomize_current(env_ids)
+    env._hydro.set_ocean_current(env_ids)
 
 
 def randomize_robot_pose(

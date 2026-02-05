@@ -85,6 +85,7 @@ class BlueROVAttitudeTrainEnvCfg(BlueROVAttitudeEnvCfg):
     """
 
     # Enable domain randomization
+    # Note: mass_scale removed - weight is now handled by PhysX (disable_gravity=False)
     randomization = DomainRandomizationCfg(
         enable=True,
         # Initial pose randomization (attitude focus)
@@ -99,16 +100,15 @@ class BlueROVAttitudeTrainEnvCfg(BlueROVAttitudeEnvCfg):
         linear_damping_scale=(0.8, 1.2),
         quadratic_damping_scale=(0.8, 1.2),
         volume_scale=(0.95, 1.05),
-        mass_scale=(0.9, 1.1),
         # Thruster randomization
         thrust_coefficient_scale=(0.9, 1.1),
         time_constant_scale=(0.9, 1.1),
-        # Center of Buoyancy and Inertia randomization
-        cob_offset_scale=(0.8, 1.2),
+        # Center of Buoyancy offset randomization (meters)
+        cob_offset_x=(-0.02, 0.02),
+        cob_offset_y=(-0.02, 0.02),
+        cob_offset_z=(-0.03, 0.03),
+        # Inertia randomization
         inertia_scale=(0.9, 1.1),
-        # Payload randomization
-        payload_mass_ratio=(0.0, 0.1),
-        payload_cog_offset_z=(-0.02, 0.02),
     )
 
     # Light ocean currents (attitude is affected by currents too)

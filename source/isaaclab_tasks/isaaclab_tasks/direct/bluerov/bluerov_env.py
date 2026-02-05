@@ -28,6 +28,7 @@ from isaaclab.utils.math import quat_apply_inverse, quat_from_euler_xyz, quat_mu
 # Import models from common isaaclab_tasks.models
 from isaaclab_tasks.models import HydrodynamicsModel, ThrusterModel
 
+from .bluerov_env_cfg import BlueROVEnvCfg
 from .rewards import (
     RewardManager,
     RewardTermCfg,
@@ -40,7 +41,6 @@ from .rewards import (
     position_tracking_exp,
 )
 from .tasks import AttitudeTask, AttitudeTaskCfg, HoverTask, HoverTaskCfg, TaskBase, TaskBaseCfg
-from .bluerov_env_cfg import BlueROVEnvCfg
 
 if TYPE_CHECKING:
     pass
@@ -98,18 +98,18 @@ class BlueROVEnv(DirectRLEnv):
         # Get body ID for force application
         self._body_id = self._robot.find_bodies(self.cfg.body_link_name)[0]
 
-        # Get robot mass for hydrodynamics
-        self._robot_mass = self._robot.root_physx_view.get_masses()[0].sum()
+        # Get gravity magnitude (for reference only - PhysX handles gravity)
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
 
         # Initialize hydrodynamics model
+        # Note: robot_mass parameter removed - PhysX handles gravity naturally
         self._hydro = HydrodynamicsModel(
             num_envs=self.num_envs,
             device=self.device,
             cfg=self.cfg.hydrodynamics,
             current_cfg=self.cfg.ocean_current,
             dt=self.physics_dt,
-            robot_mass=self._robot_mass.item(),
+            articulation_prim_path=self.cfg.robot.prim_path.replace("env_.*", "env_0"),
         )
 
         # Initialize thruster model
@@ -277,6 +277,14 @@ class BlueROVEnv(DirectRLEnv):
 
     def _get_observations(self) -> dict:
         """Compute observations."""
+        # Update hydrodynamics PhysX state for added mass force calculation
+        # This must be called after robot.update() which happens at the start of each step
+        if self._hydro._apply_added_mass:
+            self._hydro.update_physx_state(
+                body_com_acc_w=self._robot.data.body_com_acc_w,
+                root_quat_w=self._robot.data.root_quat_w,
+            )
+
         # Base state observations
         root_pos_w = self._robot.data.root_pos_w
         root_quat_w = self._robot.data.root_quat_w
@@ -376,6 +384,7 @@ class BlueROVEnv(DirectRLEnv):
         self._hydro.reset(env_ids)
 
         # Apply domain randomization
+        # Note: mass_scale removed - weight is now handled by PhysX (disable_gravity=False)
         if self.cfg.randomization.enable:
             self._hydro.randomize_parameters(
                 env_ids=env_ids,
@@ -383,11 +392,8 @@ class BlueROVEnv(DirectRLEnv):
                 linear_damping_scale=self.cfg.randomization.linear_damping_scale,
                 quadratic_damping_scale=self.cfg.randomization.quadratic_damping_scale,
                 volume_scale=self.cfg.randomization.volume_scale,
-                mass_scale=self.cfg.randomization.mass_scale,
-                cob_offset_scale=self.cfg.randomization.cob_offset_scale,
+                cob_offset_z=self.cfg.randomization.cob_offset_z,
                 inertia_scale=self.cfg.randomization.inertia_scale,
-                payload_mass_ratio=self.cfg.randomization.payload_mass_ratio,
-                payload_cog_offset_z=self.cfg.randomization.payload_cog_offset_z,
             )
             self._thruster.randomize_parameters(
                 env_ids=env_ids,
@@ -397,7 +403,7 @@ class BlueROVEnv(DirectRLEnv):
 
         # Randomize ocean current
         if any(v > 0 for v in self.cfg.ocean_current.max_velocity):
-            self._hydro.randomize_current(env_ids)
+            self._hydro.set_ocean_current(env_ids)
 
         # Reset task (samples new goals)
         self._task.reset(env_ids, self._terrain.env_origins)

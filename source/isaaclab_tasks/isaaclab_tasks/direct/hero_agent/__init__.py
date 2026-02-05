@@ -10,7 +10,11 @@ using ALBC (Active Linear Buoyancy Controller) for attitude control via 2 revolu
 joints that position a buoyancy element. No thrusters are used.
 
 Available Tasks:
-    - ALBC Attitude: Joint-based attitude control
+    - Isaac-HeroAgent-v0: Debug environment (minimal DR, no ocean current)
+    - Isaac-HeroAgent-Base-v0: Base training with DR and ocean current
+    - Isaac-HeroAgent-Encoder-Base-v0: Encoder training with privileged info
+    - Isaac-HeroAgent-Encoder-TDC-v0: TDC-integrated training with gains output
+    - Isaac-HeroAgent-Base-TDC-v0: TDC gain-only training (no encoder, fixed M_hat)
 """
 
 import gymnasium as gym
@@ -18,20 +22,22 @@ import gymnasium as gym
 from .hero_agent_env import HeroAgentEnv
 from .hero_agent_env_cfg import (
     DomainRandomizationCfg,
-    HeroAgentEncoderEvalEnvCfg,
+    HeroAgentBaseTDCEnvCfg,
+    HeroAgentEncoderTDCEnvCfg,
     HeroAgentEncoderTrainEnvCfg,
     HeroAgentEnvCfg,
     HeroAgentTrainEnvCfg,
-    HeroAgentEvalEnvCfg,
+    TDCRewardCfg,
 )
+from .hero_agent_tdc_env import HeroAgentTDCEnv
 
 ##
 # Register Gym environments
 ##
 
-# Hero Agent ALBC environments
+# Debug environment (no DR, no ocean current)
 gym.register(
-    id="Isaac-HeroAgent-ALBC-Direct-v0",
+    id="Isaac-HeroAgent-v0",
     entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
     disable_env_checker=True,
     kwargs={
@@ -40,54 +46,81 @@ gym.register(
     },
 )
 
+# Base training environment (renamed from Isaac-HeroAgent-Train-v0)
 gym.register(
-    id="Isaac-HeroAgent-ALBC-Train-Direct-v0",
+    id="Isaac-HeroAgent-Base-v0",
     entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentTrainEnvCfg",
-        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentTrainPPORunnerCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentPPORunnerCfg",
     },
 )
 
+# Encoder training environment (renamed from Isaac-HeroAgent-Encoder-v0)
 gym.register(
-    id="Isaac-HeroAgent-ALBC-Eval-Direct-v0",
-    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentEvalEnvCfg",
-        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentEvalPPORunnerCfg",
-    },
-)
-
-gym.register(
-    id="Isaac-HeroAgent-ALBC-Encoder-Train-v0",
+    id="Isaac-HeroAgent-Encoder-Base-v0",
     entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentEncoderTrainEnvCfg",
-        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentEncoderTrainPPORunnerCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentEncoderPPORunnerCfg",
+    },
+)
+
+# TDC-integrated training environment (with encoder)
+gym.register(
+    id="Isaac-HeroAgent-Encoder-TDC-v0",
+    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentTDCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentEncoderTDCEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentEncoderTDCPPORunnerCfg",
+    },
+)
+
+# TDC gain-only training (no encoder, fixed M_hat)
+gym.register(
+    id="Isaac-HeroAgent-Base-TDC-v0",
+    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentTDCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentBaseTDCEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentBaseTDCPPORunnerCfg",
+    },
+)
+
+# Legacy aliases for backward compatibility
+gym.register(
+    id="Isaac-HeroAgent-Train-v0",
+    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentTrainEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentPPORunnerCfg",
     },
 )
 
 gym.register(
-    id="Isaac-HeroAgent-ALBC-Encoder-Eval-v0",
+    id="Isaac-HeroAgent-Encoder-v0",
     entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentEncoderEvalEnvCfg",
-        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentEncoderEvalPPORunnerCfg",
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentEncoderTrainEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentEncoderPPORunnerCfg",
     },
 )
 
 __all__ = [
-    # Environment
+    # Environments
     "HeroAgentEnv",
+    "HeroAgentTDCEnv",
     # Configurations
     "HeroAgentEnvCfg",
     "HeroAgentTrainEnvCfg",
-    "HeroAgentEvalEnvCfg",
     "HeroAgentEncoderTrainEnvCfg",
-    "HeroAgentEncoderEvalEnvCfg",
+    "HeroAgentEncoderTDCEnvCfg",
+    "HeroAgentBaseTDCEnvCfg",
     "DomainRandomizationCfg",
+    "TDCRewardCfg",
 ]

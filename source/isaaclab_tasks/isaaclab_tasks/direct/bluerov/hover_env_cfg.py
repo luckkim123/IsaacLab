@@ -81,6 +81,7 @@ class BlueROVHoverTrainEnvCfg(BlueROVHoverEnvCfg):
     """
 
     # Enable domain randomization
+    # Note: mass_scale removed - weight is now handled by PhysX (disable_gravity=False)
     randomization = DomainRandomizationCfg(
         enable=True,
         # Initial pose randomization
@@ -95,16 +96,15 @@ class BlueROVHoverTrainEnvCfg(BlueROVHoverEnvCfg):
         linear_damping_scale=(0.8, 1.2),
         quadratic_damping_scale=(0.8, 1.2),
         volume_scale=(0.95, 1.05),
-        mass_scale=(0.9, 1.1),
         # Thruster randomization
         thrust_coefficient_scale=(0.9, 1.1),
         time_constant_scale=(0.9, 1.1),
-        # Center of Buoyancy and Inertia randomization
-        cob_offset_scale=(0.8, 1.2),
+        # Center of Buoyancy offset randomization (meters)
+        cob_offset_x=(-0.02, 0.02),
+        cob_offset_y=(-0.02, 0.02),
+        cob_offset_z=(-0.03, 0.03),
+        # Inertia randomization
         inertia_scale=(0.9, 1.1),
-        # Payload randomization (moderate for training)
-        payload_mass_ratio=(0.0, 0.1),  # 0-10% additional mass
-        payload_cog_offset_z=(-0.02, 0.02),  # +/-2cm CoG shift
     )
 
     # Ocean currents for disturbance rejection training
@@ -123,6 +123,7 @@ class BlueROVHoverEvalEnvCfg(BlueROVHoverEnvCfg):
     """
 
     # Aggressive domain randomization for stress testing
+    # Note: mass_scale removed - weight is now handled by PhysX (disable_gravity=False)
     randomization = DomainRandomizationCfg(
         enable=True,
         # Wider initial pose randomization
@@ -137,16 +138,15 @@ class BlueROVHoverEvalEnvCfg(BlueROVHoverEnvCfg):
         linear_damping_scale=(0.5, 1.5),
         quadratic_damping_scale=(0.5, 1.5),
         volume_scale=(0.85, 1.15),
-        mass_scale=(0.7, 1.3),
         # Wider thruster randomization
         thrust_coefficient_scale=(0.7, 1.3),
         time_constant_scale=(0.7, 1.3),
-        # Aggressive CoB and Inertia randomization
-        cob_offset_scale=(0.5, 1.5),
+        # Aggressive CoB offset randomization (meters)
+        cob_offset_x=(-0.04, 0.04),
+        cob_offset_y=(-0.04, 0.04),
+        cob_offset_z=(-0.05, 0.05),
+        # Inertia randomization
         inertia_scale=(0.8, 1.2),
-        # Aggressive payload randomization
-        payload_mass_ratio=(0.0, 0.2),  # 0-20% additional mass
-        payload_cog_offset_z=(-0.05, 0.05),  # +/-5cm CoG shift
     )
 
     # Stronger ocean currents for evaluation

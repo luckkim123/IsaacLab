@@ -41,6 +41,12 @@ class BlueROVHydrodynamicsCfg(HydrodynamicsCfg):
         - Air weight: ~11.5 kg
         - Displacement volume: 11.35 L (0.0113459 m^3)
         - Designed for neutral buoyancy in freshwater
+
+    Physics Model:
+        - PhysX gravity is ENABLED (disable_gravity=False)
+        - Weight is handled by PhysX naturally for all bodies
+        - This model applies ONLY buoyancy as external force
+        - For neutral buoyancy: buoyancy force ~= total weight
     """
 
     # Added mass coefficients [surge, sway, heave, roll, pitch, yaw]
@@ -52,17 +58,19 @@ class BlueROVHydrodynamicsCfg(HydrodynamicsCfg):
     # Quadratic damping coefficients
     quadratic_damping: tuple[float, ...] = (18.18, 21.66, 36.99, 1.55, 1.55, 1.55)
 
-    # Vehicle mass (kg) - None for neutral buoyancy assumption
-    vehicle_mass: float | None = None
+    # Vehicle volume - auto-calculated from collision geometry
+    # If collision geometry doesn't match desired buoyancy, set explicitly (e.g., 0.0113459 m^3)
+    volume: float | None = None
 
-    # Vehicle volume (m^3) - BlueROV2 Heavy: 11.35 L displacement
-    volume: float = 0.0113459
+    # Body name for volume auto-calculation (if volume is None)
+    body_name: str = "base_link"
 
     # Center of buoyancy position in body frame (m)
     # Positive z means CoB above CoG (provides passive stability)
     center_of_buoyancy: tuple[float, float, float] = (0.0, 0.0, 0.01)
 
     # Center of gravity at body frame origin
+    # Note: This is for restoring moment calculation. Actual CoG is from PhysX.
     center_of_gravity: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     # Freshwater density
@@ -110,7 +118,7 @@ BLUEROV_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=BLUEROV_USD_PATH,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=True,  # Gravity handled by hydrodynamics model (net buoyancy)
+            disable_gravity=False,  # PhysX handles gravity; HydrodynamicsModel applies buoyancy only
             max_depenetration_velocity=10.0,
             enable_gyroscopic_forces=True,
         ),

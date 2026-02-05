@@ -31,6 +31,11 @@ class DomainRandomizationCfg:
     MarineGym's scale-based parameter randomization pattern.
 
     Randomization is applied on every environment reset when enabled.
+
+    Note:
+        Mass randomization has been removed because weight is now handled
+        by PhysX (disable_gravity=False). To randomize mass, modify PhysX
+        rigid body properties directly via the physics API.
     """
 
     # Enable/disable randomization (set False for deterministic training/evaluation)
@@ -52,22 +57,22 @@ class DomainRandomizationCfg:
     quadratic_damping_scale: tuple[float, float] = (0.5, 1.0)
     volume_scale: tuple[float, float] = (0.9, 1.1)
 
-    # Robot mass scale (applied to all bodies)
-    mass_scale: tuple[float, float] = (0.8, 1.2)
-
     # Thruster parameter scales
     thrust_coefficient_scale: tuple[float, float] = (0.8, 1.2)
     time_constant_scale: tuple[float, float] = (0.8, 1.2)
 
-    # Center of Buoyancy offset scale (affects restoring moments)
-    cob_offset_scale: tuple[float, float] = (0.5, 1.5)
+    # Center of Buoyancy offset range in meters (affects restoring moments)
+    cob_offset_x: tuple[float, float] = (0.0, 0.0)
+    cob_offset_y: tuple[float, float] = (0.0, 0.0)
+    cob_offset_z: tuple[float, float] = (-0.02, 0.02)
+
+    # Center of Gravity offset range in meters (affects stability)
+    cog_offset_x: tuple[float, float] = (0.0, 0.0)
+    cog_offset_y: tuple[float, float] = (0.0, 0.0)
+    cog_offset_z: tuple[float, float] = (-0.02, 0.02)
 
     # Rigid body inertia scale
     inertia_scale: tuple[float, float] = (0.8, 1.2)
-
-    # Payload randomization (simulates attached equipment/cargo)
-    payload_mass_ratio: tuple[float, float] = (0.0, 0.0)  # Disabled by default
-    payload_cog_offset_z: tuple[float, float] = (0.0, 0.0)  # Disabled by default
 
 
 @configclass
@@ -79,6 +84,9 @@ class EventCfg:
     DomainRandomizationCfg above.
 
     This is kept for future migration to ManagerBasedRLEnv.
+
+    Note: mass_scale and payload parameters removed since weight is now
+    handled by PhysX (disable_gravity=False).
     """
 
     randomize_hydrodynamics = EventTerm(
@@ -89,11 +97,13 @@ class EventCfg:
             "linear_damping_scale": (0.5, 1.0),
             "quadratic_damping_scale": (0.5, 1.0),
             "volume_scale": (0.9, 1.1),
-            "mass_scale": (0.8, 1.2),
-            "cob_offset_scale": (0.5, 1.5),
+            "cob_offset_x": (0.0, 0.0),
+            "cob_offset_y": (0.0, 0.0),
+            "cob_offset_z": (-0.02, 0.02),
+            "cog_offset_x": (0.0, 0.0),
+            "cog_offset_y": (0.0, 0.0),
+            "cog_offset_z": (-0.02, 0.02),
             "inertia_scale": (0.8, 1.2),
-            "payload_mass_ratio": (0.0, 0.2),
-            "payload_cog_offset_z": (-0.05, 0.05),
         },
     )
 

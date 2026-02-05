@@ -5,21 +5,86 @@
 
 """RSL-RL PPO agent configurations for Hero Agent ALBC environments.
 
-Hyperparameters are tuned for joint-based attitude control (no thrusters).
+Provides three runner configurations:
+    - HeroAgentPPORunnerCfg: Standard PPO for joint-based attitude control
+    - HeroAgentEncoderPPORunnerCfg: HORA Phase 1 with extrinsics encoder
+    - HeroAgentEncoderTDCPPORunnerCfg: TDC-integrated training with gains output
+
+For evaluation, use CLI overrides instead of separate config classes:
+    --max_iterations 100 --save_interval 25
 """
+
+import rsl_rl.runners.on_policy_runner as _runner_module
 
 from isaaclab.utils import configclass
 
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
-# Register ActorCriticEncoder in RSL-RL runner module namespace.
-# The runner resolves policy class_name via eval() (on_policy_runner.py:416).
-# This injection makes "ActorCriticEncoder" resolvable in that scope.
-from isaaclab_tasks.models.actor_critic_encoder import ActorCriticEncoder
-
-import rsl_rl.runners.on_policy_runner as _runner_module
+# Register ActorCriticEncoder and ActorCriticEncoderTDC in RSL-RL runner module namespace.
+# The runner resolves policy class_name dynamically (on_policy_runner.py:416).
+# This injection makes custom network classes resolvable in that scope.
+from ..encoder import ActorCriticEncoder, ActorCriticEncoderTDC
 
 _runner_module.ActorCriticEncoder = ActorCriticEncoder
+_runner_module.ActorCriticEncoderTDC = ActorCriticEncoderTDC
+
+
+# =============================================================================
+# Policy Configurations
+# =============================================================================
+
+
+@configclass
+class RslRlPpoActorCriticEncoderCfg(RslRlPpoActorCriticCfg):
+    """PPO actor-critic configuration with extrinsics encoder for HORA Phase 1.
+
+    The encoder compresses privileged hydrodynamic parameters into a latent z
+    that can later be replaced by a history-based adaptation module (Phase 2).
+    """
+
+    class_name: str = "ActorCriticEncoder"
+
+    # Encoder architecture
+    encoder_hidden_dims: list[int] = [64, 32]
+    encoder_latent_dim: int = 6  # 6-DOF diagonal inertia matrix
+    encoder_activation: str = "elu"
+
+    # Softplus minimum: z = softplus(x) + z_min guarantees z > z_min
+    z_min: float = 0.1
+
+    # Observation dimensions (must match environment)
+    policy_obs_dim: int = 13
+    privileged_dim: int = 22  # Main(10D) + Buoy(10D) + Payload(2D) = 22D
+
+
+@configclass
+class RslRlPpoActorCriticEncoderTDCCfg(RslRlPpoActorCriticCfg):
+    """PPO actor-critic configuration with TDC gains output.
+
+    Similar to RslRlPpoActorCriticEncoderCfg but outputs 4D gains instead of
+    2D joint velocities:
+        - Actor output: [K_p_roll, K_d_roll, K_p_pitch, K_d_pitch]
+        - Encoder latent z exposed as M_hat for TDC controller
+    """
+
+    class_name: str = "ActorCriticEncoderTDC"
+
+    # Encoder architecture (same as base encoder)
+    encoder_hidden_dims: list[int] = [64, 32]
+    encoder_latent_dim: int = 6  # 6-DOF diagonal inertia matrix
+    encoder_activation: str = "elu"
+
+    # Softplus minimum: z = softplus(x) + z_min guarantees z > z_min
+    z_min: float = 0.1
+
+    # Observation dimensions (must match TDC environment: 15D = 11 base + 4 prev gains)
+    policy_obs_dim: int = 15
+    privileged_dim: int = 22  # Main(10D) + Buoy(10D) + Payload(2D) = 22D
+
+
+# =============================================================================
+# Runner Configurations
+# =============================================================================
 
 
 @configclass
@@ -27,18 +92,20 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for Hero Agent ALBC (Active Linear Buoyancy Controller).
 
     Optimized for 2-DOF joint control with potential-based rewards.
-    Smaller network architecture for simpler action space.
+    Uses standard ActorCritic without encoder.
     """
 
+    seed = 42
     num_steps_per_env = 32
-    max_iterations = 500
+    max_iterations = 600
     save_interval = 50
     experiment_name = "hero_agent_albc"
     empirical_normalization = False
+
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
-        actor_obs_normalization=True,
-        critic_obs_normalization=True,
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
         actor_hidden_dims=[64, 64],
         critic_hidden_dims=[64, 64],
         activation="elu",
@@ -47,7 +114,7 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,
+        entropy_coef=0.0,  # Disabled for dynamic systems (prevents std explosion)
         num_learning_epochs=8,
         num_mini_batches=4,
         learning_rate=3.0e-4,
@@ -60,73 +127,16 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 
 @configclass
-class HeroAgentTrainPPORunnerCfg(HeroAgentPPORunnerCfg):
-    """PPO configuration for Hero Agent ALBC training with domain randomization."""
+class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO configuration for Hero Agent encoder training (HORA Phase 1).
 
-    seed = -1  # Random seed for each run (ensures different domain randomization)
-    max_iterations = 600
-    # @configclass does not support partial override of nested configclass fields,
-    # so the entire algorithm block must be redefined. The only difference from
-    # the base HeroAgentPPORunnerCfg is entropy_coef: 0.008 vs 0.005.
-    algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=1.0,
-        use_clipped_value_loss=True,
-        clip_param=0.2,
-        entropy_coef=0.008,  # Higher exploration for robustness
-        num_learning_epochs=8,
-        num_mini_batches=4,
-        learning_rate=3.0e-4,
-        schedule="adaptive",
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.01,
-        max_grad_norm=1.0,
-    )
-
-
-@configclass
-class HeroAgentEvalPPORunnerCfg(HeroAgentPPORunnerCfg):
-    """PPO configuration for Hero Agent ALBC evaluation."""
-
-    max_iterations = 100
-    save_interval = 25
-    experiment_name = "hero_agent_albc_eval"
-
-
-@configclass
-class RslRlPpoActorCriticEncoderCfg(RslRlPpoActorCriticCfg):
-    """PPO actor-critic configuration with extrinsics encoder for HORA Phase 1."""
-
-    class_name: str = "ActorCriticEncoder"
-
-    # Encoder architecture
-    encoder_hidden_dims: list[int] = [64, 32]
-    encoder_latent_dim: int = 2
-    encoder_activation: str = "elu"
-
-    # Scaled sigmoid bounds for latent z.
-    # z is used as TDC's M_hat = diag(z), so must be positive.
-    # Range [0.1, 5.0] covers the domain randomization scale factors
-    # (e.g., added_mass 0.8-1.2x, damping 0.8-1.2x, mass 0.9-1.1x).
-    z_min: float = 0.1
-    z_max: float = 5.0
-
-    # Observation dimensions (must match environment)
-    policy_obs_dim: int = 13
-    privileged_dim: int = 64
-
-
-@configclass
-class HeroAgentEncoderTrainPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """PPO runner configuration for Hero Agent encoder training (HORA Phase 1).
-
-    Both actor and critic receive ["policy", "privileged"] as obs_groups.
-    The ActorCriticEncoder internally routes them differently:
-    - Actor: cat([policy_obs, z]) = 15D (compressed via encoder)
-    - Critic: cat([policy_obs, z, privileged]) = 79D (full information)
+    Uses ActorCriticEncoder that compresses privileged info into latent z:
+        - Encoder: privileged (22D) -> softplus -> z (6D)
+        - Actor: cat([policy_obs, z]) = 19D -> actions
+        - Critic: cat([policy_obs, z]) = 19D -> value (symmetric, forces encoder learning)
     """
 
-    seed = -1  # Random seed for each run (ensures different domain randomization)
+    seed = 42
     num_steps_per_env = 32
     max_iterations = 600
     save_interval = 50
@@ -140,8 +150,8 @@ class HeroAgentEncoderTrainPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     policy = RslRlPpoActorCriticEncoderCfg(
         init_noise_std=1.0,
-        actor_obs_normalization=True,
-        critic_obs_normalization=True,
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
         actor_hidden_dims=[64, 64],
         critic_hidden_dims=[64, 64],
         activation="elu",
@@ -150,7 +160,7 @@ class HeroAgentEncoderTrainPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.008,
+        entropy_coef=0.0,  # Disabled for dynamic systems (prevents std explosion)
         num_learning_epochs=8,
         num_mini_batches=4,
         learning_rate=3.0e-4,
@@ -163,13 +173,87 @@ class HeroAgentEncoderTrainPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 
 @configclass
-class HeroAgentEncoderEvalPPORunnerCfg(HeroAgentEncoderTrainPPORunnerCfg):
-    """PPO runner configuration for Hero Agent encoder evaluation.
+class HeroAgentEncoderTDCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO configuration for Hero Agent TDC training.
 
-    Inherits encoder architecture from training config but with reduced
-    iterations for evaluation purposes.
+    Uses ActorCriticEncoderTDC that outputs PD gains for TDC controller:
+        - Encoder: privileged (22D) -> softplus -> z (6D) -> M_hat
+        - Actor: cat([policy_obs, z]) = 21D -> gains (4D)  (15D obs + 6D z)
+        - TDC: gains + M_hat -> p_EE_desired -> IK -> joint targets
     """
 
-    max_iterations = 100
-    save_interval = 25
-    experiment_name = "hero_agent_albc_encoder"
+    seed = 42
+    num_steps_per_env = 32
+    max_iterations = 600
+    save_interval = 50
+    experiment_name = "hero_agent_albc_tdc"
+    empirical_normalization = False
+
+    obs_groups = {
+        "policy": ["policy", "privileged"],
+        "critic": ["policy", "privileged"],
+    }
+
+    policy = RslRlPpoActorCriticEncoderTDCCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
+        actor_hidden_dims=[64, 64],
+        critic_hidden_dims=[64, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.0,  # Disabled for dynamic systems (prevents std explosion)
+        num_learning_epochs=8,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
+class HeroAgentBaseTDCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO configuration for Hero Agent TDC gain-only training (no encoder).
+
+    Uses standard ActorCritic (no encoder, no privileged obs):
+        - Actor: 15D obs -> 4D gains [K_p_roll, K_d_roll, K_p_pitch, K_d_pitch]
+        - Critic: 15D obs -> value
+        - M_hat fixed at default_m_hat=(0.14, 0.15)
+    """
+
+    seed = 42
+    num_steps_per_env = 32
+    max_iterations = 600
+    save_interval = 50
+    experiment_name = "hero_agent_base_tdc"
+    empirical_normalization = False
+
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
+        actor_hidden_dims=[64, 64],
+        critic_hidden_dims=[64, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.01,  # Prevents entropy collapse / local minimum trapping
+        num_learning_epochs=8,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )

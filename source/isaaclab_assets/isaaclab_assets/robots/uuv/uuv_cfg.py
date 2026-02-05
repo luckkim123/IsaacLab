@@ -26,9 +26,14 @@ class HydrodynamicsCfg:
     Diagonal matrices are assumed for simplicity (off-diagonal terms can be added later).
 
     The model implements the complete Fossen formulation including:
-        - Weight-buoyancy difference (W-B) for non-neutral buoyancy vehicles
+        - Buoyancy force applied as external force (weight handled by PhysX gravity)
         - Full Coriolis matrix C(v) = C_RB(v) + C_A(v)
         - Quaternion-based buoyancy calculation (no gimbal lock)
+
+    Physics Model:
+        - PhysX handles gravity (weight) naturally for all bodies
+        - HydrodynamicsModel applies buoyancy as external upward force
+        - This ensures proper multi-body dynamics where each link's mass is considered
     """
 
     # Added mass coefficients (kg for linear, kg*m^2 for angular)
@@ -40,16 +45,19 @@ class HydrodynamicsCfg:
     # Quadratic damping coefficients (Ns^2/m^2 for linear, Nms^2/rad^2 for angular)
     quadratic_damping: tuple[float, ...] = (18.18, 21.66, 36.99, 1.55, 1.55, 1.55)
 
-    # Vehicle mass (kg). If None, assumes neutral buoyancy (mass = volume * water_density)
-    vehicle_mass: float | None = None
-
     # Vehicle volume for buoyancy calculation (m^3)
-    volume: float = 0.0113459
+    # If None, will be auto-calculated from collision geometry when articulation_prim_path is provided
+    volume: float | None = None
+
+    # Body name for volume auto-calculation (e.g., "base", "base_link")
+    # Only used when volume is None and articulation_prim_path is provided
+    body_name: str = "base"
 
     # Center of buoyancy position in body frame (m, [x, y, z])
     center_of_buoyancy: tuple[float, float, float] = (0.0, 0.0, 0.01)
 
     # Center of gravity position in body frame (m, [x, y, z])
+    # Note: This is for restoring moment calculation only. Actual CoG is from PhysX.
     center_of_gravity: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     # Water density (kg/m^3, default: freshwater, seawater: 1025.0)
@@ -65,6 +73,16 @@ class HydrodynamicsCfg:
     # Rigid body inertia for full Coriolis (kg*m^2, [I_xx, I_yy, I_zz])
     # If None, estimates from added mass rotational terms
     rigid_body_inertia: tuple[float, float, float] | None = None
+
+    # Added mass force (M_A * v_dot) settings
+    # When True, applies M_A * v_dot as external force for more accurate dynamics
+    # Uses PhysX-computed acceleration from previous step
+    # Default False for backward compatibility (only C_A velocity coupling is applied)
+    apply_added_mass_force: bool = False
+
+    # Stability factor for added mass force (0 < factor <= 1.0)
+    # Lower values increase stability at the cost of physical accuracy
+    added_mass_stability_factor: float = 0.8
 
 
 @configclass

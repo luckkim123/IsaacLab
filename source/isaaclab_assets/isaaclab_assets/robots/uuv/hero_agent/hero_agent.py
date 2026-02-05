@@ -98,13 +98,17 @@ class HeroAgentHydrodynamicsCfg(HydrodynamicsCfg):
     water_density: float = 998.0
 
     # Rigid body inertia [I_xx, I_yy, I_zz] (kg*m^2)
-    # Solid cylinder approximation: R=0.0825m, L=0.27m, m=9.18kg
-    #   I_xx = I_yy = m*(3*R^2 + L^2)/12 = 9.18*(0.0204 + 0.0729)/12 = 0.071
-    #   I_zz = m*R^2/2 = 9.18*0.006806/2 = 0.031
-    rigid_body_inertia: tuple[float, float, float] | None = (0.071, 0.071, 0.031)
+    # From URDF collision geometry: R=0.09m, L=0.325m, m=9.18kg
+    #   I_xx = I_yy = m*(3*R^2 + L^2)/12 = 9.18*(0.0243 + 0.1056)/12 = 0.0994
+    #   I_zz = m*R^2/2 = 9.18*0.0081/2 = 0.0372
+    rigid_body_inertia: tuple[float, float, float] | None = (0.0994, 0.0994, 0.0372)
 
     # Enable full Coriolis matrix (C_RB + C_A per Fossen model)
     use_full_coriolis: bool = True
+
+    # Added mass force settings for improved physics accuracy
+    apply_added_mass_force: bool = True
+    added_mass_stability_factor: float = 0.8
 
 
 @configclass
@@ -141,9 +145,10 @@ class HeroAgentBuoyHydrodynamicsCfg(HydrodynamicsCfg):
     quadratic_damping: tuple[float, ...] = (4.6, 4.6, 4.6, 0.1, 0.1, 0.1)
 
     # Volume for buoyancy calculation (m^3)
-    # From URDF: Cylinder R=0.085m, H=0.09m -> V = pi * 0.085^2 * 0.09 = 0.00204 m^3
-    # Buoyancy = 998 * 0.00204 * 9.81 = 20.0 N (link3 mass=0.93kg -> weight=9.1N -> net=+10.9N)
-    volume: float = 0.00204
+    # From URDF: Cylinder R=0.085m, H=0.118m -> V = pi * 0.085^2 * 0.118 = 0.00268 m^3
+    # Buoyancy = 998 * 0.00268 * 9.81 = 26.2 N (link3 mass=0.93kg -> weight=9.1N -> net=+17.1N)
+    # System net force: +3.0 N (slight positive buoyancy)
+    volume: float = 0.00268
 
     # Body name (for reference, not used when volume is explicitly set)
     body_name: str = "link3"
@@ -158,13 +163,17 @@ class HeroAgentBuoyHydrodynamicsCfg(HydrodynamicsCfg):
     water_density: float = 998.0
 
     # Rigid body inertia [I_xx, I_yy, I_zz] (kg*m^2)
-    # Solid cylinder approximation: R=0.085m, H=0.09m, m=0.93kg
-    #   I_xx = I_yy = m*(3*R^2 + H^2)/12 = 0.93*(0.02168 + 0.0081)/12 = 0.0023
-    #   I_zz = m*R^2/2 = 0.93*0.007225/2 = 0.0034
-    rigid_body_inertia: tuple[float, float, float] | None = (0.0023, 0.0023, 0.0034)
+    # From URDF: R=0.085m, H=0.118m, m=0.93kg
+    #   I_xx = I_yy = m*(3*R^2 + H^2)/12 = 0.93*(0.02168 + 0.01392)/12 = 0.00278
+    #   I_zz = m*R^2/2 = 0.93*0.007225/2 = 0.00336
+    rigid_body_inertia: tuple[float, float, float] | None = (0.00278, 0.00278, 0.00336)
 
     # Enable full Coriolis for consistency with main body
     use_full_coriolis: bool = True
+
+    # Added mass force settings for improved physics accuracy
+    apply_added_mass_force: bool = True
+    added_mass_stability_factor: float = 0.8
 
 
 @configclass
@@ -202,6 +211,15 @@ class HeroAgentThrusterCfg(ThrusterCfg):
 
 # ALBC (Active Linear Buoyancy Controller) joint names
 HERO_AGENT_ALBC_JOINT_NAMES: list[str] = ["joint1", "joint2"]
+
+# ALBC Arm Geometry (from agent.urdf - keep in sync!)
+# These values are extracted from URDF joint origins:
+#   joint1: xyz="0 0 0.1625"
+#   joint2: xyz="0.233 0 0.01"  (link1 length)
+#   buoy_fixer: xyz="0.233 0 0.01"  (link2 length)
+HERO_AGENT_ALBC_LINK1_LENGTH: float = 0.233  # meters (joint2 x-offset from joint1)
+HERO_AGENT_ALBC_LINK2_LENGTH: float = 0.233  # meters (buoy_fixer x-offset from joint2)
+HERO_AGENT_ALBC_HEIGHT_OFFSET: float = 0.1625  # meters (joint1 z-offset from base)
 
 
 HERO_AGENT_CFG = ArticulationCfg(

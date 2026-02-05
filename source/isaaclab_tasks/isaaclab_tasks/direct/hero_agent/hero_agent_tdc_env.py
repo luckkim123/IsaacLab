@@ -10,7 +10,7 @@ based on the IROS 2026 RL-ALBC paper methodology.
 
 Control Flow:
     1. RL Actor outputs PD gains: [K_p_roll, K_d_roll, K_p_pitch, K_d_pitch]
-    2. Encoder outputs z (6D) -> M_hat = diag(z[:2]) for inertia estimation
+    2. Encoder outputs z (6D) -> M_hat = z[3:5] (roll/pitch per 6-DOF convention)
     3. TDC controller: gains + M_hat + attitude_error -> p_EE_desired
     4. IK: p_EE_desired -> target_joint_angles
     5. Joint position control: apply target to robot joints
@@ -43,6 +43,7 @@ from .mdp import (
     RewardTermCfg,
     albc_potential_reward,
     albc_progress_reward,
+    tdc_attitude_penalty,
     tdc_gain_magnitude_cost,
     tdc_gain_smoothness_reward,
     tdc_stability_reward,
@@ -158,6 +159,10 @@ class HeroAgentTDCEnv(HeroAgentEnv):
                     func=albc_progress_reward,
                     weight=self.cfg.reward.progress_weight,
                     scale_by_dt=False,
+                ),
+                "attitude_penalty": RewardTermCfg(
+                    func=tdc_attitude_penalty,
+                    weight=self.cfg.reward.attitude_penalty_weight,
                 ),
                 "tdc_stability": RewardTermCfg(
                     func=tdc_stability_reward,
@@ -279,6 +284,9 @@ class HeroAgentTDCEnv(HeroAgentEnv):
 
         # Reset TDC controller state
         self._tdc_controller.reset(env_ids)
+
+        # Update per-env buoyancy force for adaptive DLS Lambda_inv
+        self._tdc_controller.set_buoyancy_force(env_ids, self._buoy_hydro.buoyancy_force)
 
         # Reset encoder z buffer
         if self._encoder_z is not None:

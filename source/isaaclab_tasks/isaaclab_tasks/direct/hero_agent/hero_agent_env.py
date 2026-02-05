@@ -24,30 +24,31 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.envs.ui import BaseEnvWindow
-from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
-from isaaclab.utils.math import euler_xyz_from_quat, quat_apply, quat_apply_inverse
+from isaaclab.utils.math import euler_xyz_from_quat, quat_apply
 
 # Import models from common isaaclab_tasks.models
 from isaaclab_tasks.models import HydrodynamicsModel
 
 from .hero_agent_env_cfg import HeroAgentEnvCfg
-from .mdp.events import (
-    randomize_buoy_hydrodynamics,
-    randomize_hydrodynamics,
-    randomize_joint_positions,
-    randomize_ocean_current,
-    randomize_robot_pose,
-    reset_joint_positions_default,
-    reset_robot_pose_default,
-)
-from .rewards import (
+from .mdp import (
     RewardManager,
     RewardTermCfg,
     albc_action_cost,
     albc_potential_reward,
     albc_progress_reward,
+    compute_policy_obs,
+    compute_privileged_obs,
 )
-from .tasks import ALBCAttitudeTask
+from .mdp.events import (
+    randomize_hydrodynamics,
+    randomize_joint_positions,
+    randomize_ocean_current,
+    randomize_payload,
+    randomize_robot_pose,
+    reset_joint_positions_default,
+    reset_robot_pose_default,
+)
+from .utils import DebugVisualization, log_episode_metrics
 
 
 class HeroAgentEnvWindow(BaseEnvWindow):
@@ -69,7 +70,7 @@ class HeroAgentEnv(DirectRLEnv):
     - Joint position control (no thrusters)
     - Multi-body hydrodynamics (main body + buoy)
     - Potential-based reward system
-    - Decimated control (12.5 Hz default)
+    - Decimated control (default: every physics step, configurable via control_decimation)
 
     Observation Space (13 dims):
         [0:3]   roll, pitch, yaw (Euler angles from quaternion)
@@ -83,9 +84,9 @@ class HeroAgentEnv(DirectRLEnv):
         [1] joint2 velocity command [-1, 1]
 
     Physical Parameters:
-        - control_decimation: 4 (12.5 Hz control at 100 Hz sim with decimation=2)
-        - max_joint_velocity: π rad/s (180°/s, 0.5 rotation/s)
-        - joint_limits: from URDF (±2π rad, i.e. ±360 deg)
+        - control_decimation: 1 (default, control at sim rate; configurable)
+        - max_joint_velocity: 2*pi rad/s (360 deg/s)
+        - joint_limits: from URDF (±2*pi rad, i.e. ±360 deg)
     """
 
     cfg: HeroAgentEnvCfg
@@ -100,13 +101,32 @@ class HeroAgentEnv(DirectRLEnv):
         """
         super().__init__(cfg, render_mode, **kwargs)
 
-        # -- Body IDs and Physics --
+        # Validate state_space vs enable_payload consistency
+        if self.cfg.state_space >= 22 and not self.cfg.enable_payload:
+            raise ValueError(
+                f"state_space={self.cfg.state_space} requires enable_payload=True "
+                f"(payload provides 2D of the {self.cfg.state_space}D privileged obs)"
+            )
+
+        self._init_body_ids()
+        self._init_hydrodynamics()
+        self._init_payload()
+        self._init_joints()
+        self._init_task_and_rewards()
+        self._init_state_buffers()
+
+        # Debug visualization manager
+        self._debug_vis = DebugVisualization(self.num_envs, self.device)
+        self.set_debug_vis(self.cfg.debug_vis)
+
+    def _init_body_ids(self) -> None:
+        """Initialize body IDs and physics parameters."""
         self._body_id = self._robot.find_bodies(self.cfg.hydrodynamics.body_name)[0]
         self._buoy_body_id = self._robot.find_bodies(self.cfg.buoy_hydrodynamics.body_name)[0]
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
 
-        # -- Hydrodynamics Models --
-        # Note: PhysX handles gravity naturally, so robot_mass parameter is not needed
+    def _init_hydrodynamics(self) -> None:
+        """Initialize hydrodynamics models for main body and buoy."""
         prim_path = self.cfg.robot.prim_path.replace("env_.*", "env_0")
         self._hydro = HydrodynamicsModel(
             num_envs=self.num_envs,
@@ -125,22 +145,34 @@ class HeroAgentEnv(DirectRLEnv):
             articulation_prim_path=prim_path,
         )
 
-        # -- ALBC Joints --
+    def _init_payload(self) -> None:
+        """Initialize payload parameters if enabled."""
+        if not self.cfg.enable_payload:
+            self._payload_mass = None
+            self._payload_attachment_offset = None
+            self._gravity_vec = None
+            return
+
+        self._payload_mass = torch.full((self.num_envs,), self.cfg.payload_mass, device=self.device)
+        offset_tensor = torch.tensor(self.cfg.payload_attachment_offset, device=self.device, dtype=torch.float32)
+        self._payload_attachment_offset = offset_tensor.expand(self.num_envs, -1).clone()
+        self._gravity_vec = torch.tensor(self.sim.cfg.gravity, device=self.device, dtype=torch.float32)
+
+    def _init_joints(self) -> None:
+        """Initialize ALBC joint IDs and limits."""
         self._albc_joint_ids = self._robot.find_joints(self.cfg.albc_joint_names)[0]
         if len(self._albc_joint_ids) != 2:
             raise ValueError(
-                f"Expected 2 ALBC joints, found {len(self._albc_joint_ids)}. "
-                f"Joint names: {self.cfg.albc_joint_names}"
+                f"Expected 2 ALBC joints, found {len(self._albc_joint_ids)}. Joint names: {self.cfg.albc_joint_names}"
             )
         joint_limits = self._robot.data.soft_joint_pos_limits[:, self._albc_joint_ids]
         self._joint_limits_lower = joint_limits[0, :, 0]
         self._joint_limits_upper = joint_limits[0, :, 1]
+        self._joint_limits_range = self._joint_limits_upper - self._joint_limits_lower
 
-        # -- Task and Rewards --
-        self._task = ALBCAttitudeTask(
-            cfg=self.cfg.task, num_envs=self.num_envs, device=self.device
-        )
-        # Note: task is passed via context in compute() to avoid @configclass deep copy issue
+    def _init_task_and_rewards(self) -> None:
+        """Initialize attitude task buffers and reward manager."""
+        self._init_attitude_buffers()
         self._reward_manager = RewardManager(
             cfg={
                 "potential": RewardTermCfg(
@@ -151,6 +183,7 @@ class HeroAgentEnv(DirectRLEnv):
                 "progress": RewardTermCfg(
                     func=albc_progress_reward,
                     weight=self.cfg.reward.progress_weight,
+                    scale_by_dt=False,
                 ),
                 "action_cost": RewardTermCfg(
                     func=albc_action_cost,
@@ -161,68 +194,152 @@ class HeroAgentEnv(DirectRLEnv):
             device=self.device,
         )
 
-        # -- State Buffers --
+    def _init_state_buffers(self) -> None:
+        """Initialize action and force/torque buffers."""
+        # Action buffers
         self._actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
-        self._prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)  # updated every env step (for reward)
-        self._prev_actions_obs = torch.zeros(self.num_envs, 2, device=self.device)  # updated at control frequency (for obs)
+        self._prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
+        self._prev_actions_obs = torch.zeros(self.num_envs, 2, device=self.device)
         self._joint_pos_targets = torch.zeros(self.num_envs, 2, device=self.device)
+        # Global step counter (not per-env). With control_decimation=1 (default),
+        # this modulo always passes. If control_decimation > 1, all envs share
+        # the same control phase.
         self._control_step_counter = 0
 
-        # -- Force/Torque Buffers --
+        # Force/torque buffers
         self._hydro_forces = torch.zeros(self.num_envs, 3, device=self.device)
         self._hydro_torques = torch.zeros(self.num_envs, 3, device=self.device)
         self._buoy_hydro_forces = torch.zeros(self.num_envs, 3, device=self.device)
         self._buoy_hydro_torques = torch.zeros(self.num_envs, 3, device=self.device)
 
-        # -- Debug Visualization --
-        self.set_debug_vis(self.cfg.debug_vis)
+    def _init_attitude_buffers(self) -> None:
+        """Initialize attitude task buffers for potential-based reward."""
+        # Target Euler angles (roll, pitch, yaw)
+        target_tensor = torch.tensor(self.cfg.target_attitude, device=self.device)
+        self._target_euler = target_tensor.unsqueeze(0).expand(self.num_envs, -1).clone()
+
+        # Attitude error and potential tracking buffers
+        self._attitude_error = torch.zeros(self.num_envs, 3, dtype=torch.float32, device=self.device)
+        self._potentials = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self._prev_potentials = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+
+    def _compute_attitude_error(
+        self,
+        quat: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute attitude error from quaternion orientation.
+
+        Args:
+            quat: Quaternion orientation (w, x, y, z). Shape: (N, 4).
+            env_ids: Environment indices. If None, computes for all envs.
+
+        Returns:
+            Attitude error (target - current), wrapped to [-pi, pi]. Shape: (N, 3).
+        """
+        current_euler = torch.stack(euler_xyz_from_quat(quat), dim=-1)
+        target = self._target_euler if env_ids is None else self._target_euler[env_ids]
+        error = target - current_euler
+
+        # Wrap angles to [-pi, pi]
+        return torch.atan2(torch.sin(error), torch.cos(error))
+
+    def _get_attitude_error(self) -> torch.Tensor:
+        """Compute attitude error for observations.
+
+        Returns the difference between target and current orientation
+        as roll, pitch, yaw errors.
+
+        Returns:
+            Attitude error (target - current). Shape: (num_envs, 3).
+        """
+        self._attitude_error = self._compute_attitude_error(self._robot.data.root_quat_w)
+        return self._attitude_error
+
+    def _update_potentials(self) -> None:
+        """Update potential values for reward computation.
+
+        Call once per step before reward computation. Saves current potential
+        as prev_potential and computes new potential from roll/pitch errors.
+        Yaw is excluded because buoyancy control cannot generate Z-axis torque.
+        """
+        self._prev_potentials = self._potentials.clone()
+        attitude_error = self._compute_attitude_error(self._robot.data.root_quat_w)
+        self._potentials = torch.linalg.norm(attitude_error[:, :2], dim=-1)
+
+    def _reset_attitude_task(self, env_ids: torch.Tensor) -> None:
+        """Reset target attitudes and potentials for specified environments.
+
+        Args:
+            env_ids: Environment indices to reset.
+        """
+        num_reset = len(env_ids)
+        base_attitude = torch.tensor(self.cfg.target_attitude, device=self.device)
+
+        if self.cfg.randomize_target_attitude:
+            attitude_range = torch.tensor(self.cfg.target_attitude_range, device=self.device)
+            random_offset = (torch.rand(num_reset, 3, device=self.device) * 2 - 1) * attitude_range
+            self._target_euler[env_ids] = base_attitude + random_offset
+        else:
+            self._target_euler[env_ids] = base_attitude.unsqueeze(0).expand(num_reset, -1)
+
+        # Reset potentials (will be properly initialized by _initialize_potentials after pose reset)
+        self._potentials[env_ids] = 0.0
+        self._prev_potentials[env_ids] = 0.0
+
+    def _initialize_potentials(self, env_ids: torch.Tensor) -> None:
+        """Initialize potential values after robot pose reset.
+
+        Sets both prev_potentials and potentials to the same value to prevent
+        spurious progress reward on the first step.
+
+        Args:
+            env_ids: Environment indices that were reset.
+        """
+        attitude_error = self._compute_attitude_error(self._robot.data.root_quat_w[env_ids], env_ids)
+        initial_potential = torch.linalg.norm(attitude_error[:, :2], dim=-1)
+        self._potentials[env_ids] = initial_potential
+        self._prev_potentials[env_ids] = initial_potential
 
     def _setup_scene(self):
-        """Setup the simulation scene with robot and terrain."""
+        """Setup simulation scene with robot and underwater lighting."""
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
-
-        self.cfg.terrain.num_envs = self.scene.cfg.num_envs
-        self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
-        self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
-
         self.scene.clone_environments(copy_from_source=False)
 
-        # Filter inter-environment collisions but disable terrain collision
-        # (underwater robot doesn't need ground collision)
         if self.device == "cpu":
             self.scene.filter_collisions(global_prim_paths=[])
 
-        light_cfg = sim_utils.DomeLightCfg(intensity=1500.0, color=(0.4, 0.6, 0.8))
+        # Dark underwater-style background with dim ambient lighting
+        # visible_in_primary_ray=False makes the background black (no sky texture)
+        light_cfg = sim_utils.DomeLightCfg(
+            intensity=800.0,
+            color=(0.3, 0.5, 0.7),
+            visible_in_primary_ray=False,
+        )
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        """Process actions before physics step with decimation.
+        """Process actions before physics step with control decimation.
 
-        Actions are accumulated over control_decimation steps before
-        being applied to joint position targets.
+        Velocity commands are integrated to position targets at control frequency,
+        reflecting real hardware actuator constraints.
 
         Args:
             actions: Joint velocity commands [-1, 1]. Shape: (num_envs, 2).
         """
         self._prev_actions = self._actions.clone()
         self._actions = actions.clone().clamp(-1.0, 1.0)
-
-        # Increment control step counter
         self._control_step_counter += 1
 
-        # Apply actions at control frequency (decimation)
         if self._control_step_counter % self.cfg.control_decimation == 0:
-            # Store for observation
             self._prev_actions_obs = self._actions.clone()
 
-            # Accumulate joint position targets
-            dt_control = self.physics_dt * self.cfg.control_decimation
-            delta = dt_control * self.cfg.max_joint_velocity * self._actions
+            # Integrate velocity to position: delta_pos = dt * max_vel * action
+            control_dt = self.physics_dt * self.cfg.control_decimation
+            position_delta = control_dt * self.cfg.max_joint_velocity * self._actions
+            self._joint_pos_targets += position_delta
 
-            self._joint_pos_targets += delta
-
-            # Clamp to joint limits
             self._joint_pos_targets = torch.clamp(
                 self._joint_pos_targets,
                 self._joint_limits_lower,
@@ -231,100 +348,60 @@ class HeroAgentEnv(DirectRLEnv):
 
     def _apply_action(self):
         """Apply joint position targets and hydrodynamic forces."""
-        # Apply joint position targets
-        self._robot.set_joint_position_target(
-            self._joint_pos_targets, joint_ids=self._albc_joint_ids
-        )
+        # Joint position control
+        self._robot.set_joint_position_target(self._joint_pos_targets, joint_ids=self._albc_joint_ids)
 
-        # Compute and apply main body hydrodynamic forces
+        # Main body hydrodynamics
         self._hydro_forces, self._hydro_torques = self._hydro.compute_forces(
             root_lin_vel_w=self._robot.data.root_lin_vel_w,
             root_ang_vel_w=self._robot.data.root_ang_vel_w,
             root_quat_w=self._robot.data.root_quat_w,
         )
-
-        # Apply to main body
-        total_forces = self._hydro_forces.unsqueeze(1)
-        total_torques = self._hydro_torques.unsqueeze(1)
-
+        main_forces, main_torques = self._add_payload_wrench(self._hydro_forces, self._hydro_torques)
         self._robot.permanent_wrench_composer.set_forces_and_torques(
             body_ids=self._body_id,
-            forces=total_forces,
-            torques=total_torques,
+            forces=main_forces.unsqueeze(1),
+            torques=main_torques.unsqueeze(1),
         )
 
-        # Compute and apply buoy hydrodynamics
+        # Buoy hydrodynamics
         buoy_idx = self._buoy_body_id[0]
-        buoy_lin_vel_w = self._robot.data.body_lin_vel_w[:, buoy_idx, :]
-        buoy_ang_vel_w = self._robot.data.body_ang_vel_w[:, buoy_idx, :]
-        buoy_quat_w = self._robot.data.body_quat_w[:, buoy_idx, :]
-
         self._buoy_hydro_forces, self._buoy_hydro_torques = self._buoy_hydro.compute_forces(
-            root_lin_vel_w=buoy_lin_vel_w,
-            root_ang_vel_w=buoy_ang_vel_w,
-            root_quat_w=buoy_quat_w,
+            root_lin_vel_w=self._robot.data.body_lin_vel_w[:, buoy_idx, :],
+            root_ang_vel_w=self._robot.data.body_ang_vel_w[:, buoy_idx, :],
+            root_quat_w=self._robot.data.body_quat_w[:, buoy_idx, :],
         )
-
-        buoy_forces = self._buoy_hydro_forces.unsqueeze(1)
-        buoy_torques = self._buoy_hydro_torques.unsqueeze(1)
         self._robot.permanent_wrench_composer.set_forces_and_torques(
             body_ids=self._buoy_body_id,
-            forces=buoy_forces,
-            torques=buoy_torques,
+            forces=self._buoy_hydro_forces.unsqueeze(1),
+            torques=self._buoy_hydro_torques.unsqueeze(1),
         )
+
+    def _add_payload_wrench(self, forces: torch.Tensor, torques: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Add payload weight and moment to forces/torques if payload is enabled."""
+        if self._payload_mass is None or self._gravity_vec is None or self._payload_attachment_offset is None:
+            return forces, torques
+
+        # F = m * g (world frame)
+        payload_weight = self._payload_mass.unsqueeze(-1) * self._gravity_vec
+        # tau = r x F (moment arm effect)
+        offset_world = quat_apply(self._robot.data.root_quat_w, self._payload_attachment_offset)
+        payload_torque = torch.cross(offset_world, payload_weight, dim=-1)
+
+        return forces + payload_weight, torques + payload_torque
 
     def _get_observations(self) -> dict:
         """Compute ALBC-specific observations.
 
-        Returns 13-dim observation:
-            [0:3]   roll, pitch, yaw
-            [3:6]   angular velocity body frame
-            [6:9]   attitude errors
-            [9:11]  joint positions (normalized)
-            [11:13] previous actions
+        Returns 13-dim policy observation and optional privileged observations.
+        See mdp.observations for implementation details.
 
         Returns:
-            Observation dictionary with "policy" key.
+            Observation dictionary with "policy" key and optional "privileged" key.
         """
-        # Get current orientation as Euler angles
-        root_quat_w = self._robot.data.root_quat_w
-        roll, pitch, yaw = euler_xyz_from_quat(root_quat_w)
-        euler = torch.stack([roll, pitch, yaw], dim=-1)
-
-        # Angular velocity in body frame
-        ang_vel_b = self._robot.data.root_ang_vel_b
-
-        # Attitude errors from task
-        attitude_errors = self._task.get_goal_observations(self._robot)
-
-        # Joint positions (normalized to [-1, 1])
-        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
-        joint_pos_normalized = 2.0 * (joint_pos - self._joint_limits_lower) / (
-            self._joint_limits_upper - self._joint_limits_lower
-        ) - 1.0
-
-        # Concatenate observations
-        obs = torch.cat(
-            [
-                euler,                 # 3: roll, pitch, yaw
-                ang_vel_b,             # 3: angular velocity
-                attitude_errors,       # 3: attitude errors
-                joint_pos_normalized,  # 2: joint positions
-                self._prev_actions_obs,  # 2: previous actions
-            ],
-            dim=-1,
-        )
-
-        observations = {"policy": obs}
-
+        observations = {"policy": compute_policy_obs(self, self._robot)}
         if self.cfg.state_space > 0:
-            # Use compact privileged info (10D per body = 20D total)
-            # Contains: volume, r_cg, r_cb, inertia (core hydrostatic params)
-            # Excludes: damping, added_mass, ocean_current (velocity-dependent)
-            # Note: vehicle_mass removed since weight is handled by PhysX
-            main_priv = self._hydro.get_privileged_info_compact()
-            buoy_priv = self._buoy_hydro.get_privileged_info_compact()
-            observations["privileged"] = torch.cat([main_priv, buoy_priv], dim=-1)
+            observations["privileged"] = compute_privileged_obs(self)
 
         return observations
 
@@ -340,224 +417,122 @@ class HeroAgentEnv(DirectRLEnv):
         """
         # Update potentials before reward computation
         # This must be called exactly once per step to correctly compute progress reward
-        # Pass robot so update_potentials can compute current attitude error directly
-        self._task.update_potentials(self._robot)
+        self._update_potentials()
 
         return self._reward_manager.compute(
             robot=self._robot,
             dt=self.step_dt,
             actions=self._actions,
             prev_actions=self._prev_actions,
-            task=self._task,  # Pass task directly to avoid @configclass deep copy issue
+            env=self,  # Pass env for accessing potentials
         )
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute termination conditions."""
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
+        # Height bounds check
         height = self._robot.data.root_pos_w[:, 2]
-        too_low = height < self.cfg.min_height
-        too_high = height > self.cfg.max_height
+        out_of_height_bounds = (height < self.cfg.min_height) | (height > self.cfg.max_height)
 
-        distance_from_origin = torch.linalg.norm(
-            self._robot.data.root_pos_w[:, :2] - self._terrain.env_origins[:, :2], dim=1
-        )
-        too_far = distance_from_origin > self.cfg.max_distance_from_origin
+        # Horizontal distance from origin check
+        xy_displacement = self._robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+        too_far = torch.linalg.norm(xy_displacement, dim=1) > self.cfg.max_distance_from_origin
 
-        task_terminated = self._task.get_terminations(self._robot)
-
-        terminated = too_low | too_high | too_far | task_terminated
-
-        return terminated, time_out
+        return out_of_height_bounds | too_far, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         """Reset specified environments.
 
         Execution order:
-            1. Logging
-            2. Component reset (robot, super, action buffers)
-            3. Hydrodynamics reset + optional randomization
-            4. Ocean current randomization
-            5. Task reset
-            6. Joint state reset (randomized or default)
-            7. Robot pose reset (randomized or default)
+            1. Logging (episode metrics before reset)
+            2. Component reset (robot, parent class, action buffers)
+            3. Hydrodynamics reset + domain randomization
+            4. Task reset
+            5. Robot state reset (joints, then pose)
+            6. Potential initialization
         """
-        if env_ids is None or len(env_ids) == self.num_envs:
+        # Use all indices if None or full batch (separate branches for type narrowing)
+        if env_ids is None:  # noqa: SIM114
             env_ids = self._robot._ALL_INDICES
+        elif len(env_ids) == self.num_envs:
+            env_ids = self._robot._ALL_INDICES
+        env_ids_: torch.Tensor = env_ids  # type: ignore[assignment]
 
         # --- 1. Logging ---
-        reward_sums = self._reward_manager.reset(env_ids)
-
-        self.extras["log"] = {}
-        for name, value in reward_sums.items():
-            self.extras["log"][f"Episode_Reward/{name}"] = value
-
-        self.extras["log"]["Episode_Termination/terminated"] = torch.count_nonzero(
-            self.reset_terminated[env_ids]
-        ).item()
-        self.extras["log"]["Episode_Termination/time_out"] = torch.count_nonzero(
-            self.reset_time_outs[env_ids]
-        ).item()
-
-        if len(env_ids) > 0:
-            # Use cached attitude_error to avoid get_goal_observations() side effect
-            # (which would update potentials before task.reset)
-            attitude_errors_deg = torch.rad2deg(self._task.attitude_error[env_ids])
-            self.extras["log"]["Attitude_Error/roll_deg"] = attitude_errors_deg[:, 0].mean().item()
-            self.extras["log"]["Attitude_Error/pitch_deg"] = attitude_errors_deg[:, 1].mean().item()
-            # total_deg only includes roll and pitch (yaw excluded from control)
-            self.extras["log"]["Attitude_Error/total_deg"] = attitude_errors_deg[:, :2].abs().sum(dim=-1).mean().item()
-
-            joint_pos = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
-            self.extras["log"]["Joint_Position/joint1_rad"] = joint_pos[:, 0].mean().item()
-            self.extras["log"]["Joint_Position/joint2_rad"] = joint_pos[:, 1].mean().item()
-            self.extras["log"]["Joint_Position/target1_rad"] = self._joint_pos_targets[env_ids, 0].mean().item()
-            self.extras["log"]["Joint_Position/target2_rad"] = self._joint_pos_targets[env_ids, 1].mean().item()
+        reward_sums = self._reward_manager.reset(env_ids_)
+        log_episode_metrics(
+            extras=self.extras,
+            env_ids=env_ids_,
+            reset_terminated=self.reset_terminated,
+            reset_time_outs=self.reset_time_outs,
+            reward_sums=reward_sums,
+            env=self,
+            robot=self._robot,
+            joint_ids=self._albc_joint_ids,
+            joint_pos_targets=self._joint_pos_targets,
+        )
 
         # --- 2. Component reset ---
-        self._robot.reset(env_ids)
-        super()._reset_idx(env_ids)
+        self._robot.reset(env_ids_)
+        super()._reset_idx(env_ids_)
 
-        if len(env_ids) == self.num_envs:
-            self.episode_length_buf = torch.randint_like(
-                self.episode_length_buf, high=int(self.max_episode_length)
-            )
+        # Randomize episode lengths to decorrelate environment terminations
+        if len(env_ids_) == self.num_envs:
+            self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
-        self._actions[env_ids] = 0.0
-        self._prev_actions[env_ids] = 0.0
-        self._prev_actions_obs[env_ids] = 0.0
+        # Reset action buffers
+        for buf in (self._actions, self._prev_actions, self._prev_actions_obs):
+            buf[env_ids_] = 0.0
 
         # --- 3. Hydrodynamics reset ---
-        self._hydro.reset(env_ids)
-        self._buoy_hydro.reset(env_ids)
+        self._hydro.reset(env_ids_)
+        self._buoy_hydro.reset(env_ids_)
+
+        if self._payload_mass is not None and self._payload_attachment_offset is not None:
+            self._payload_mass[env_ids_] = self.cfg.payload_mass
+            offset_tensor = torch.tensor(self.cfg.payload_attachment_offset, device=self.device, dtype=torch.float32)
+            self._payload_attachment_offset[env_ids_] = offset_tensor
 
         rand_cfg = self.cfg.randomization
         if rand_cfg.enable:
-            randomize_hydrodynamics(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
-            randomize_buoy_hydrodynamics(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
+            randomize_hydrodynamics(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
+            if self._payload_mass is not None:
+                randomize_payload(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
 
-        # --- 4. Ocean current ---
-        if any(v > 0 for v in self.cfg.ocean_current.max_velocity):
-            randomize_ocean_current(env=self, env_ids=env_ids)
+        has_ocean_current = any(v > 0 for v in self.cfg.ocean_current.max_velocity)
+        if has_ocean_current:
+            randomize_ocean_current(env=self, env_ids=env_ids_)
 
-        # --- 5. Task reset ---
-        self._task.reset(env_ids, self._terrain.env_origins)
+        # --- 4. Attitude task reset ---
+        self._reset_attitude_task(env_ids_)
 
-        # --- 6. Joint state reset (must precede root pose write) ---
+        # --- 5. Robot state reset (joint state must precede root pose) ---
         if rand_cfg.enable:
-            randomize_joint_positions(
-                env=self,
-                env_ids=env_ids,
-                joint_pos_range=self.cfg.initial_joint_pos_range,
-            )
+            randomize_joint_positions(env=self, env_ids=env_ids_, joint_pos_range=self.cfg.initial_joint_pos_range)
+            randomize_robot_pose(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
         else:
-            reset_joint_positions_default(env=self, env_ids=env_ids)
+            reset_joint_positions_default(env=self, env_ids=env_ids_)
+            reset_robot_pose_default(env=self, env_ids=env_ids_, initial_height=self.cfg.initial_height)
 
-        # --- 7. Robot pose reset ---
-        if rand_cfg.enable:
-            randomize_robot_pose(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
-        else:
-            reset_robot_pose_default(
-                env=self, env_ids=env_ids, initial_height=self.cfg.initial_height
-            )
-
-        # --- 8. Initialize potentials after robot pose is set ---
-        # Must be called after pose reset so initial potential matches actual state
-        self._task.initialize_potentials(self._robot, env_ids)
+        # --- 6. Potential initialization (must be after pose reset) ---
+        self._initialize_potentials(env_ids_)
 
     def _set_debug_vis_impl(self, debug_vis: bool):
-        """Setup CoM and CoB visualization markers.
-
-        Creates red sphere for Center of Mass (CoM) and blue sphere for
-        Center of Buoyancy (CoB) to visualize the system's hydrostatic properties.
-        """
+        """Setup or toggle visibility of debug visualization markers."""
         if debug_vis:
-            if not hasattr(self, "_com_marker"):
-                # CoM marker (red sphere, 3cm radius)
-                com_cfg = VisualizationMarkersCfg(
-                    prim_path="/Visuals/CoM",
-                    markers={
-                        "sphere": sim_utils.SphereCfg(
-                            radius=0.03,
-                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
-                        ),
-                    },
-                )
-                self._com_marker = VisualizationMarkers(com_cfg)
+            self._debug_vis.setup(enable_payload=self._payload_mass is not None)
+        self._debug_vis.set_visibility(debug_vis)
 
-            if not hasattr(self, "_cob_marker"):
-                # CoB marker (blue sphere, 3cm radius)
-                cob_cfg = VisualizationMarkersCfg(
-                    prim_path="/Visuals/CoB",
-                    markers={
-                        "sphere": sim_utils.SphereCfg(
-                            radius=0.03,
-                            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
-                        ),
-                    },
-                )
-                self._cob_marker = VisualizationMarkers(cob_cfg)
-
-            self._com_marker.set_visibility(True)
-            self._cob_marker.set_visibility(True)
-        else:
-            if hasattr(self, "_com_marker"):
-                self._com_marker.set_visibility(False)
-            if hasattr(self, "_cob_marker"):
-                self._cob_marker.set_visibility(False)
-
-    def _debug_vis_callback(self, event):
-        """Update CoM and CoB marker positions each frame.
-
-        Computes the system-level Center of Mass and Center of Buoyancy
-        by combining main body and buoy contributions, then transforms
-        from body frame to world frame for visualization.
-
-        Note: Mass values are obtained from PhysX rigid body properties,
-        not from hydrodynamics config (since weight is handled by PhysX).
-        """
-        # Get robot pose in world frame
-        root_pos = self._robot.data.root_pos_w
-        root_quat = self._robot.data.root_quat_w
-
-        # Get masses from PhysX (first env only for visualization)
-        body_masses = self._robot.root_physx_view.get_masses()[0]  # (num_bodies,)
-        base_idx = self._body_id[0]
-        buoy_idx = self._buoy_body_id[0]
-        m_main = body_masses[base_idx].expand(self.num_envs)
-        m_buoy = body_masses[buoy_idx].expand(self.num_envs)
-
-        # Volume parameters (from hydrodynamics model)
-        V_main = self._hydro._volume  # (num_envs,)
-        V_buoy = self._buoy_hydro._volume  # (num_envs,)
-        r_cg_main = self._hydro._r_cg  # (num_envs, 3) body frame
-        r_cb_main = self._hydro._r_cb  # (num_envs, 3) body frame
-        r_cg_buoy = self._buoy_hydro._r_cg  # (num_envs, 3) body frame relative to buoy
-        r_cb_buoy = self._buoy_hydro._r_cb  # (num_envs, 3) body frame relative to buoy
-
-        # Get buoy link position in body frame
-        buoy_pos_w = self._robot.data.body_pos_w[:, buoy_idx]
-        buoy_offset_w = buoy_pos_w - root_pos
-        buoy_offset_b = quat_apply_inverse(root_quat, buoy_offset_w)
-
-        # Calculate system CoM in body frame
-        m_total = m_main + m_buoy
-        r_cg_system_b = (
-            m_main.unsqueeze(-1) * r_cg_main
-            + m_buoy.unsqueeze(-1) * (buoy_offset_b + r_cg_buoy)
-        ) / m_total.unsqueeze(-1)
-
-        # Calculate system CoB in body frame
-        V_total = V_main + V_buoy
-        r_cb_system_b = (
-            V_main.unsqueeze(-1) * r_cb_main
-            + V_buoy.unsqueeze(-1) * (buoy_offset_b + r_cb_buoy)
-        ) / V_total.unsqueeze(-1)
-
-        # Transform to world frame
-        com_world = root_pos + quat_apply(root_quat, r_cg_system_b)
-        cob_world = root_pos + quat_apply(root_quat, r_cb_system_b)
-
-        # Update markers
-        self._com_marker.visualize(translations=com_world)
-        self._cob_marker.visualize(translations=cob_world)
+    def _debug_vis_callback(self, _event):
+        """Update debug marker positions each frame."""
+        self._debug_vis.update(
+            robot=self._robot,
+            body_id=self._body_id,
+            buoy_body_id=self._buoy_body_id,
+            hydro=self._hydro,
+            buoy_hydro=self._buoy_hydro,
+            payload_mass=self._payload_mass,
+            payload_offset=self._payload_attachment_offset,
+            default_payload_mass=self.cfg.payload_mass,
+        )
