@@ -144,6 +144,18 @@ class HydrodynamicsModel:
         self._r_cg = torch.tensor(cfg.center_of_gravity, **self._tensor_kwargs).expand(self.num_envs, -1).clone()
         self._cob_offset = self._r_cb[:, 2]  # Legacy compatibility
 
+        # Nominal CoG and body mass for gravity restoring moment correction.
+        # When CoG is randomized away from nominal, a correction torque is applied:
+        #   M_correction = (r_cg - r_cg_nominal) x F_weight_body
+        # This is zero when r_cg equals the nominal (URDF/PhysX) value.
+        self._r_cg_nominal = torch.tensor(cfg.center_of_gravity, **self._tensor_kwargs)
+        if cfg.body_mass is not None:
+            self._body_mass: torch.Tensor | None = torch.full(
+                (self.num_envs,), cfg.body_mass, **self._tensor_kwargs
+            )
+        else:
+            self._body_mass = None
+
     def _init_state_buffers(self, cfg: HydrodynamicsCfg) -> None:
         """Initialize state buffers and ocean current.
 
@@ -387,6 +399,15 @@ class HydrodynamicsModel:
         # Restoring moment from buoyancy acting at CoB
         # M = r_cb x F_buoyancy
         buoyancy_moment_b = torch.cross(self._r_cb, buoyancy_force_b, dim=-1)
+
+        # CoG correction torque for domain randomization.
+        # PhysX applies gravity at the nominal (URDF) CoG. When CoG is shifted
+        # via randomization, apply: M_corr = delta_cg x F_weight_body
+        # where F_weight_body = -m*g*up_dir_b (weight points downward in body frame).
+        if self._body_mass is not None:
+            delta_cg = self._r_cg - self._r_cg_nominal
+            weight_force_b = -(self._body_mass.unsqueeze(-1) * self._gravity) * up_dir_b
+            buoyancy_moment_b = buoyancy_moment_b + torch.cross(delta_cg, weight_force_b, dim=-1)
 
         wrench = torch.cat([buoyancy_force_b, buoyancy_moment_b], dim=-1)
         return wrench

@@ -13,8 +13,6 @@ Available Tasks:
     - Isaac-HeroAgent-v0: Debug environment (minimal DR, no ocean current)
     - Isaac-HeroAgent-Base-v0: Base training with DR and ocean current
     - Isaac-HeroAgent-Encoder-Base-v0: Encoder training with privileged info
-    - Isaac-HeroAgent-Encoder-TDC-v0: TDC-integrated training with gains output
-    - Isaac-HeroAgent-Base-TDC-v0: TDC gain-only training (no encoder, fixed M_hat)
 """
 
 import gymnasium as gym
@@ -22,12 +20,10 @@ import gymnasium as gym
 from .hero_agent_env import HeroAgentEnv
 from .hero_agent_env_cfg import (
     DomainRandomizationCfg,
-    HeroAgentBaseTDCEnvCfg,
-    HeroAgentEncoderTDCEnvCfg,
     HeroAgentEncoderTrainEnvCfg,
     HeroAgentEnvCfg,
+    HeroAgentTDCEnvCfg,
     HeroAgentTrainEnvCfg,
-    TDCRewardCfg,
 )
 from .hero_agent_tdc_env import HeroAgentTDCEnv
 
@@ -68,25 +64,14 @@ gym.register(
     },
 )
 
-# TDC-integrated training environment (with encoder)
+# TDC controller environment (no RL, classical control)
 gym.register(
-    id="Isaac-HeroAgent-Encoder-TDC-v0",
+    id="Isaac-HeroAgent-TDC-v0",
     entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentTDCEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentEncoderTDCEnvCfg",
-        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentEncoderTDCPPORunnerCfg",
-    },
-)
-
-# TDC gain-only training (no encoder, fixed M_hat)
-gym.register(
-    id="Isaac-HeroAgent-Base-TDC-v0",
-    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentTDCEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentBaseTDCEnvCfg",
-        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentBaseTDCPPORunnerCfg",
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentTDCEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentPPORunnerCfg",
     },
 )
 
@@ -118,9 +103,7 @@ __all__ = [
     # Configurations
     "HeroAgentEnvCfg",
     "HeroAgentTrainEnvCfg",
+    "HeroAgentTDCEnvCfg",
     "HeroAgentEncoderTrainEnvCfg",
-    "HeroAgentEncoderTDCEnvCfg",
-    "HeroAgentBaseTDCEnvCfg",
     "DomainRandomizationCfg",
-    "TDCRewardCfg",
 ]

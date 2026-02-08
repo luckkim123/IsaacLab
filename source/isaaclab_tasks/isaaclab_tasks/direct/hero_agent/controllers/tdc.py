@@ -3,437 +3,309 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Time Delay Control (TDC) implementation for Hero Agent attitude control.
+"""Time Delay Controller (TDC) for Hero Agent roll/pitch attitude stabilization.
 
-This module implements the TDC controller from the IROS 2026 paper (RL-ALBC).
-TDC uses time-delayed control inputs to compensate for model uncertainty,
-combined with learned PD gains from the RL policy.
+TDC uses Time Delay Estimation (TDE) to approximate uncertain nonlinear dynamics
+without explicit modeling. The controller positions the buoyancy element (end-effector)
+to generate restoring torques for attitude control.
 
-Control Law (from 05_derivation.md, Step 9):
-    p_EE,t = Lambda_t^{-1} * [
-        Lambda_{t-L} * p_EE_{t-L}        -- TDE: delayed control contribution
-        - M_hat * nu_dot_{t-L}            -- TDE: angular acceleration correction
-        + M_hat * (K_d * e_dot + K_p * e) -- PD term
-        + Delta_T_b                       -- passive restoring change
-    ]
+Control Law (from IROS 2026 derivation):
+    p_EE(t) = Lambda_inv(t) @ [Lambda(t-L) @ p_EE(t-L)
+              - M_hat @ nu_dot(t-L) + M_hat @ (Kd @ e_dot + Kp @ e)
+              + T_b(t-L) - T_b(t)]
 
-Where:
-    - Lambda: Anti-diagonal coupling matrix [[0, -lf], [lf, 0]]
-      with lf = cos(theta) * cos(phi) * F_bu
-    - T_b: Passive restoring torque [cos(theta)*sin(phi)*F_bu*h, sin(theta)*F_bu*h]
-    - Delta_T_b = T_b_{t-L} - T_b_t
-    - nu_dot: Angular acceleration [p_dot, q_dot] via finite difference
-    - M_hat: Estimated inertia (diagonal, from encoder z)
-    - K_p, K_d: PD gains (from RL actor)
+where:
+    Lambda:   Anti-diagonal coupling matrix (roll/pitch <-> EE position)
+    T_b:      Passive restoring torque (known, computed explicitly)
+    M_hat:    Design inertia matrix (constant diagonal)
+    H_hat:    TDE estimate of uncertain dynamics
+    e:        Attitude error [phi_d - phi, theta_d - theta]
+    e_dot:    Error rate (small-angle approx: [-p, -q])
 
-Reference:
-    - Hsia & Gao (1990), "An explanation of the stability of model-based
-      control using time delay estimation"
+References:
+    - 05_derivation.md (IROS 2026 notes)
+    - T.C. Hsia & L.S. Lasky, "Robust independent joint controller design
+      for industrial robot manipulators," IEEE Trans. Ind. Electron., 1991.
 """
 
 from __future__ import annotations
 
 import torch
 
-from isaaclab.utils import configclass
-
-
-@configclass
-class TDCControllerCfg:
-    """Configuration for the TDC (Time Delay Control) controller.
-
-    The TDC controller outputs desired end-effector positions based on
-    attitude error and learned PD gains.
-    """
-
-    # Gain bounds (RL actor output is scaled to these ranges)
-    k_p_min: float = 1.0
-    """Minimum proportional gain."""
-
-    k_p_max: float = 50.0
-    """Maximum proportional gain."""
-
-    k_d_min: float = 0.1
-    """Minimum derivative gain."""
-
-    k_d_max: float = 10.0
-    """Maximum derivative gain."""
-
-    # TDE (Time Delay Estimation) parameters
-    tde_delay_steps: int = 1
-    """Number of steps for time delay estimation (L in the paper)."""
-
-    # Workspace radius (circular limit, computed from link lengths at runtime)
-    workspace_radius_min: float = 0.01
-    """Minimum reachable radius (|L1 - L2| + epsilon)."""
-
-    workspace_radius_max: float = 0.466
-    """Maximum reachable radius (L1 + L2 - epsilon)."""
-
-    # Initial M_hat (diagonal inertia estimate, close to true effective inertia)
-    default_m_hat: tuple[float, float] = (0.14, 0.15)
-    """Default diagonal inertia estimate for roll and pitch."""
-
-    # DLS (Damped Least Square) for Lambda_inv
-    dls_lambda_max: float = 5.0
-    """Maximum DLS damping parameter for Lambda_inv.
-
-    Adaptive DLS prevents p_EE divergence when lf = cos(theta)*cos(phi)*F_bu -> 0
-    at large tilt angles. Damping formula: lambda^2 = lambda_max^2 * (1 - lf/lf_max).
-    At zero tilt: lambda=0 (exact tracking). At 90 deg tilt: lambda=lambda_max.
-    Inspired by Yoshikawa manipulability-based adaptive DLS from ALBC IK (slide 9)."""
-
-    # ALBC geometry
-    height_offset: float = 0.1625
-    """Height offset h (joint1 z-offset from base) for T_b computation."""
-
 
 class TDCController:
-    """GPU-parallel Time Delay Control for ALBC attitude stabilization.
+    """GPU-parallel TDC for Hero Agent roll/pitch attitude stabilization.
 
-    This controller computes desired end-effector positions based on:
-    1. Attitude error (roll, pitch) from target orientation
-    2. PD gains from the RL policy (learned adaptive control)
-    3. TDE (Time Delay Estimation) for model uncertainty compensation
-    4. Estimated inertia M_hat from the encoder network
+    Computes desired end-effector position to stabilize roll/pitch angles
+    using Time Delay Estimation for uncertain dynamics compensation.
 
-    The controller operates on the roll and pitch axes only, as yaw control
-    is not possible with buoyancy-based actuation.
+    The controller operates in a 2D task space [phi, theta] and outputs
+    2D end-effector positions [x_EE, y_EE] for the ALBC arm.
     """
 
     def __init__(
         self,
-        cfg: TDCControllerCfg,
         num_envs: int,
         device: str,
+        m_hat: tuple[float, float] = (0.15, 0.15),
+        kp: float = 4.0,
+        kd: float = 3.0,
+        F_bu: float = 26.24,
+        h: float = 0.230,
+        dls_damping: float = 0.01,
+        dt: float = 0.01,
+        workspace_radius: float = 0.45,
+        nu_dot_ema_alpha: float = 0.3,
+        tde_gain: float = 1.0,
+        h_hat_filter_alpha: float = 0.05,
     ) -> None:
-        """Initialize the TDC controller.
+        """Initialize TDC controller.
 
         Args:
-            cfg: TDC controller configuration.
             num_envs: Number of parallel environments.
-            device: Computation device.
+            device: Computation device (e.g., "cuda:0").
+            m_hat: Design inertia for (roll, pitch) in kg*m^2.
+            kp: Proportional gain (omega_n^2 for second-order dynamics).
+            kd: Derivative gain (2*zeta*omega_n for second-order dynamics).
+            F_bu: Buoyancy force magnitude in N (from buoy hydrodynamics).
+            h: Height offset from CoG to CoB in meters.
+            dls_damping: Damped Least Squares regularization for Lambda inverse.
+            dt: Control timestep in seconds (= TDE delay L).
+            workspace_radius: Maximum EE distance from origin (m). Must be less
+                than l1+l2 to avoid IK singularity at full extension.
+            nu_dot_ema_alpha: EMA smoothing factor for angular acceleration
+                finite difference. Lower = smoother (0 < alpha <= 1).
+            tde_gain: Scale factor for TDE contribution (0.0 = pure PD,
+                1.0 = full TDC). Useful for diagnosing TDE instability.
+            h_hat_filter_alpha: EMA filter for H_hat (TDE estimate).
+                Low values = strong filtering (cuts high-freq noise in TDE).
+                alpha = dt / (tau + dt) where tau is the filter time constant.
+                Default 0.05 corresponds to tau ~ 0.19s (cutoff ~ 0.8 Hz).
         """
-        self.cfg = cfg
         self.num_envs = num_envs
         self.device = device
+        self.dt = dt
+        self.dls_damping = dls_damping
+        self.h = h
+        self.workspace_radius = workspace_radius
+        self.nu_dot_ema_alpha = nu_dot_ema_alpha
+        self.tde_gain = tde_gain
+        self.h_hat_filter_alpha = h_hat_filter_alpha
 
-        # Gain ranges for action scaling
-        self._k_p_range = cfg.k_p_max - cfg.k_p_min
-        self._k_d_range = cfg.k_d_max - cfg.k_d_min
+        # Design inertia (diagonal 2x2)
+        self._m_hat = torch.tensor(m_hat, device=device, dtype=torch.float32)
 
-        # Cache TDE delay steps and geometry
-        self._delay = cfg.tde_delay_steps
-        self._height_offset = cfg.height_offset
+        # PD gains (scalar, broadcast to 2D)
+        self._kp = kp
+        self._kd = kd
 
-        # Initialize state buffers
-        self._init_buffers()
+        # Buoyancy force (per-env, updated at reset from hydrodynamics model)
+        self._F_bu = torch.full((num_envs,), F_bu, device=device, dtype=torch.float32)
 
-    def _init_buffers(self) -> None:
-        """Initialize internal state buffers for TDE computation."""
-        # Current gains (2D: roll, pitch)
-        self._k_p = torch.ones(self.num_envs, 2, device=self.device) * self.cfg.k_p_min
-        self._k_d = torch.ones(self.num_envs, 2, device=self.device) * self.cfg.k_d_min
+        # --- History buffers for TDE ---
+        self._nu_prev = torch.zeros(num_envs, 2, device=device)  # [p, q] at t-L
+        self._nu_dot_filtered = torch.zeros(num_envs, 2, device=device)  # EMA-filtered angular accel
+        self._p_EE_prev = torch.zeros(num_envs, 2, device=device)  # EE position at t-L
+        self._Lambda_prev = torch.zeros(num_envs, 2, 2, device=device)  # Lambda at t-L
+        self._T_b_prev = torch.zeros(num_envs, 2, device=device)  # restoring torque at t-L
+        self._U_hat_filtered = torch.zeros(num_envs, 2, device=device)  # filtered pure uncertainty
+        self._is_initialized = torch.zeros(num_envs, dtype=torch.bool, device=device)
 
-        # Inertia estimate (2D diagonal: roll, pitch)
-        default_m = torch.tensor(self.cfg.default_m_hat, device=self.device)
-        self._m_hat = default_m.unsqueeze(0).expand(self.num_envs, -1).clone()
-
-        # TDE history buffers: +2 extra for angular velocity finite difference
-        # Need idx and idx-1 for nu_dot, plus delay offset
-        self._buffer_size = self._delay + 3
-        self._p_ee_history = torch.zeros(self.num_envs, self._buffer_size, 2, device=self.device)
-        self._angular_vel_history = torch.zeros(self.num_envs, self._buffer_size, 2, device=self.device)
-        self._roll_history = torch.zeros(self.num_envs, self._buffer_size, device=self.device)
-        self._pitch_history = torch.zeros(self.num_envs, self._buffer_size, device=self.device)
-        self._lambda_factor_history = torch.zeros(self.num_envs, self._buffer_size, device=self.device)
-        self._history_idx = 0
-
-        # Per-env warmup counter to suppress TDE spikes after reset
-        self._warmup_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self._min_warmup = 3  # Need enough steps for valid finite difference
-
-        # Last output for continuity
-        self._last_output = torch.zeros(self.num_envs, 2, device=self.device)
-
-        # Pre-clamp workspace utilization ratio (r / r_max) for reward computation
-        self._last_r_ratio = torch.zeros(self.num_envs, device=self.device)
-
-        # DLS adaptive Lambda_inv: lf_max = F_bu per env (set at reset from hydro model)
-        # Default to nominal F_bu ~26.24 N; updated per-env when reset() receives f_bu
-        self._lf_max = torch.full((self.num_envs,), 26.24, device=self.device)
-
-    def set_gains(self, actions: torch.Tensor) -> None:
-        """Set PD gains from RL actor output.
-
-        The actor outputs 4D actions in [-1, 1] that are scaled to the
-        configured gain ranges.
+    def update_buoyancy_force(self, F_bu: torch.Tensor, env_ids: torch.Tensor | None = None) -> None:
+        """Update buoyancy force from hydrodynamics model.
 
         Args:
-            actions: Actor output [K_p_roll, K_d_roll, K_p_pitch, K_d_pitch].
-                Shape: (num_envs, 4).
+            F_bu: Buoyancy force magnitude. Shape: (N,) or scalar.
+            env_ids: Environment indices to update. None = all.
         """
-        # Scale from [-1, 1] to [0, 1]
-        actions_01 = (actions + 1.0) * 0.5
+        if env_ids is None:
+            self._F_bu[:] = F_bu
+        else:
+            self._F_bu[env_ids] = F_bu[env_ids] if F_bu.dim() > 0 else F_bu
 
-        # Scale to gain ranges
-        self._k_p[:, 0] = self.cfg.k_p_min + actions_01[:, 0] * self._k_p_range  # roll
-        self._k_d[:, 0] = self.cfg.k_d_min + actions_01[:, 1] * self._k_d_range  # roll
-        self._k_p[:, 1] = self.cfg.k_p_min + actions_01[:, 2] * self._k_p_range  # pitch
-        self._k_d[:, 1] = self.cfg.k_d_min + actions_01[:, 3] * self._k_d_range  # pitch
+    def _compute_lambda(self, roll: torch.Tensor, pitch: torch.Tensor) -> torch.Tensor:
+        """Compute Lambda coupling matrix.
 
-    def set_inertia_estimate(self, z: torch.Tensor) -> None:
-        """Set inertia estimate from encoder latent output.
-
-        Following the 6-DOF convention [surge, sway, heave, roll, pitch, yaw],
-        M_hat uses z[3:5] (roll, pitch indices) from the encoder output.
+        Lambda = [[0, -lf], [lf, 0]]
+        where lf = cos(theta) * cos(phi) * F_bu
 
         Args:
-            z: Encoder latent output (positive values via softplus).
-                Shape: (num_envs, latent_dim) where latent_dim >= 5.
-        """
-        # 6-DOF convention: indices 3, 4 = roll, pitch
-        self._m_hat = torch.clamp(z[:, 3:5], min=0.1)
-
-    # ------------------------------------------------------------------
-    # Lambda and T_b helpers (from 05_derivation.md, Step 2)
-    # ------------------------------------------------------------------
-
-    def _compute_lambda_factor(self, roll: torch.Tensor, pitch: torch.Tensor, f_bu: torch.Tensor) -> torch.Tensor:
-        """Compute the scalar factor for the Lambda coupling matrix.
-
-        Lambda = [[0, -lf], [lf, 0]] where lf = cos(theta)*cos(phi)*F_bu.
-
-        Args:
-            roll: Roll angle phi in radians. Shape: (num_envs,).
-            pitch: Pitch angle theta in radians. Shape: (num_envs,).
-            f_bu: Buoyancy force magnitude. Shape: (num_envs,).
+            roll: Roll angle (phi) in radians. Shape: (num_envs,).
+            pitch: Pitch angle (theta) in radians. Shape: (num_envs,).
 
         Returns:
-            Lambda factor lf = cos(pitch)*cos(roll)*F_bu. Shape: (num_envs,).
+            Lambda matrix. Shape: (num_envs, 2, 2).
         """
-        return torch.cos(pitch) * torch.cos(roll) * f_bu
+        lf = torch.cos(pitch) * torch.cos(roll) * self._F_bu  # (num_envs,)
 
-    def _apply_lambda(self, p_ee: torch.Tensor, lambda_factor: torch.Tensor) -> torch.Tensor:
-        """Apply Lambda matrix: tau = Lambda * p_EE.
+        Lambda = torch.zeros(self.num_envs, 2, 2, device=self.device)
+        Lambda[:, 0, 1] = -lf
+        Lambda[:, 1, 0] = lf
+        return Lambda
 
-        Lambda = [[0, -lf], [lf, 0]], so:
-            tau_roll  = -lf * y_EE
-            tau_pitch =  lf * x_EE
+    def _compute_lambda_inv(self, roll: torch.Tensor, pitch: torch.Tensor) -> torch.Tensor:
+        """Compute DLS-regularized inverse of Lambda.
+
+        Lambda_inv = [[0, lf_inv], [-lf_inv, 0]]
+        where lf_inv = lf / (lf^2 + damping^2)
 
         Args:
-            p_ee: End-effector position [x, y]. Shape: (num_envs, 2).
-            lambda_factor: Lambda factor lf. Shape: (num_envs,).
+            roll: Roll angle (phi) in radians. Shape: (num_envs,).
+            pitch: Pitch angle (theta) in radians. Shape: (num_envs,).
 
         Returns:
-            Torque [tau_roll, tau_pitch]. Shape: (num_envs, 2).
+            Lambda inverse matrix. Shape: (num_envs, 2, 2).
         """
-        tau_roll = -lambda_factor * p_ee[:, 1]  # -lf * y
-        tau_pitch = lambda_factor * p_ee[:, 0]  # lf * x
-        return torch.stack([tau_roll, tau_pitch], dim=-1)
+        lf = torch.cos(pitch) * torch.cos(roll) * self._F_bu
+        lf_inv = lf / (lf**2 + self.dls_damping**2)
 
-    def _apply_lambda_inv(self, torque: torch.Tensor, lambda_factor: torch.Tensor) -> torch.Tensor:
-        """Apply Lambda inverse with adaptive DLS damping.
+        Lambda_inv = torch.zeros(self.num_envs, 2, 2, device=self.device)
+        Lambda_inv[:, 0, 1] = lf_inv
+        Lambda_inv[:, 1, 0] = -lf_inv
+        return Lambda_inv
 
-        Uses Damped Least Square (DLS) formulation instead of direct 1/lf:
-            p_EE = Lambda^T * (Lambda * Lambda^T + lambda^2 * I)^{-1} * tau
-
-        For the anti-diagonal Lambda, this simplifies to:
-            dls_factor = lf / (lf^2 + lambda^2)
-        where lambda^2 = lambda_max^2 * (1 - lf/lf_max) is adaptive.
-
-        At zero tilt (lf=lf_max): lambda=0, exact inverse (no damping).
-        At large tilt (lf->0): lambda=lambda_max, p_EE -> 0 (safe).
-        Maximum p_EE is bounded regardless of torque magnitude.
-
-        Inspired by Yoshikawa manipulability-based adaptive DLS for ALBC IK.
-
-        Args:
-            torque: Torque [tau_roll, tau_pitch]. Shape: (num_envs, 2).
-            lambda_factor: Lambda factor lf = cos(pitch)*cos(roll)*F_bu.
-                Shape: (num_envs,).
-
-        Returns:
-            End-effector position [x, y]. Shape: (num_envs, 2).
-        """
-        lf = torch.clamp(lambda_factor, min=0.0)
-        lf_max = self._lf_max  # F_bu at reset (max possible lf)
-
-        # Adaptive DLS: lambda^2 = lambda_max^2 * (1 - lf/lf_max)
-        lam_sq = self.cfg.dls_lambda_max**2 * (1.0 - lf / (lf_max + 1e-8))
-        lam_sq = torch.clamp(lam_sq, min=0.0)
-
-        # DLS inverse factor: lf / (lf^2 + lambda^2)
-        dls_factor = lf / (lf**2 + lam_sq + 1e-8)
-
-        x_ee = torque[:, 1] * dls_factor   #  tau_pitch * dls
-        y_ee = -torque[:, 0] * dls_factor   # -tau_roll  * dls
-        return torch.stack([x_ee, y_ee], dim=-1)
-
-    def _compute_t_b(self, roll: torch.Tensor, pitch: torch.Tensor, f_bu: torch.Tensor) -> torch.Tensor:
+    def _compute_restoring_torque(self, roll: torch.Tensor, pitch: torch.Tensor) -> torch.Tensor:
         """Compute passive restoring torque T_b.
 
         T_b = [cos(theta)*sin(phi)*F_bu*h, sin(theta)*F_bu*h]
 
         Args:
-            roll: Roll angle phi in radians. Shape: (num_envs,).
-            pitch: Pitch angle theta in radians. Shape: (num_envs,).
-            f_bu: Buoyancy force magnitude. Shape: (num_envs,).
+            roll: Roll angle (phi) in radians. Shape: (num_envs,).
+            pitch: Pitch angle (theta) in radians. Shape: (num_envs,).
 
         Returns:
-            Restoring torque [T_b_roll, T_b_pitch]. Shape: (num_envs, 2).
+            Restoring torque vector. Shape: (num_envs, 2).
         """
-        h = self._height_offset
-        t_b_roll = torch.cos(pitch) * torch.sin(roll) * f_bu * h
-        t_b_pitch = torch.sin(pitch) * f_bu * h
-        return torch.stack([t_b_roll, t_b_pitch], dim=-1)
-
-    # ------------------------------------------------------------------
+        T_b = torch.stack([
+            torch.cos(pitch) * torch.sin(roll) * self._F_bu * self.h,
+            torch.sin(pitch) * self._F_bu * self.h,
+        ], dim=-1)
+        return T_b
 
     def compute(
         self,
-        attitude_error: torch.Tensor,
-        angular_velocity: torch.Tensor,
-        dt: float,
         roll: torch.Tensor,
         pitch: torch.Tensor,
-        f_bu: torch.Tensor,
+        ang_vel_body: torch.Tensor,
+        target_euler: torch.Tensor,
+        joint_pos: torch.Tensor,
+        kinematics,
     ) -> torch.Tensor:
-        """Compute desired end-effector position using full TDC control law.
-
-        Implements the control law from 05_derivation.md (Step 9):
-            p_EE,t = Lambda_t^{-1} * [
-                Lambda_{t-L} * p_EE_{t-L}
-                - M_hat * nu_dot_{t-L}
-                + M_hat * (K_d * e_dot + K_p * e)
-                + T_b_{t-L} - T_b_t
-            ]
+        """Compute desired end-effector position using TDC law.
 
         Args:
-            attitude_error: Attitude error [roll_error, pitch_error] in radians.
-                Shape: (num_envs, 2).
-            angular_velocity: Body angular velocity [omega_x, omega_y] in rad/s.
-                Shape: (num_envs, 2). Roll and pitch rates.
-            dt: Time step in seconds.
-            roll: Current roll angle phi in radians. Shape: (num_envs,).
-            pitch: Current pitch angle theta in radians. Shape: (num_envs,).
-            f_bu: Buoyancy force magnitude. Shape: (num_envs,).
+            roll: Current roll angle (phi) in radians. Shape: (num_envs,).
+            pitch: Current pitch angle (theta) in radians. Shape: (num_envs,).
+            ang_vel_body: Body angular velocity [p, q, r]. Shape: (num_envs, 3).
+            target_euler: Target [roll, pitch, yaw] in radians. Shape: (num_envs, 3).
+            joint_pos: Current joint angles [gamma1, gamma2]. Shape: (num_envs, 2).
+            kinematics: ALBCKinematics instance for FK (joint_pos -> p_EE).
 
         Returns:
-            Desired end-effector position [x, y] in meters.
-                Shape: (num_envs, 2).
+            Desired EE position [x, y] in meters. Shape: (num_envs, 2).
         """
-        # error_dot: d(error)/dt = -angular_velocity (target = 0 is constant)
-        error_dot = -angular_velocity
+        # Current angular velocity (roll/pitch only)
+        nu = ang_vel_body[:, :2]  # [p, q]
 
-        # PD term in torque space: M_hat * (K_p * e + K_d * e_dot)
-        pd_term = self._m_hat * (self._k_p * attitude_error + self._k_d * error_dot)
+        # Current EE position from FK
+        p_EE_current = kinematics.forward(joint_pos)
 
-        # Current Lambda factor and T_b
-        lf_current = self._compute_lambda_factor(roll, pitch, f_bu)
-        t_b_current = self._compute_t_b(roll, pitch, f_bu)
+        # Angular acceleration: finite difference + EMA low-pass filter
+        # Raw finite difference is noisy at 100Hz; EMA smooths TDE input
+        nu_dot_raw = (nu - self._nu_prev) / self.dt
+        alpha = self.nu_dot_ema_alpha
+        nu_dot = alpha * nu_dot_raw + (1.0 - alpha) * self._nu_dot_filtered
 
-        # Store current state in history
-        self._update_tde_history(self._last_output, angular_velocity, roll, pitch, lf_current)
+        # Current Lambda, Lambda_inv, T_b
+        Lambda = self._compute_lambda(roll, pitch)
+        Lambda_inv = self._compute_lambda_inv(roll, pitch)
+        T_b = self._compute_restoring_torque(roll, pitch)
 
-        # Retrieve delayed quantities (t - L)
-        delayed_idx = (self._history_idx - self._delay) % self._buffer_size
-        p_ee_delayed = self._p_ee_history[:, delayed_idx, :]
-        lf_delayed = self._lambda_factor_history[:, delayed_idx]
-        roll_delayed = self._roll_history[:, delayed_idx]
-        pitch_delayed = self._pitch_history[:, delayed_idx]
-        omega_delayed = self._angular_vel_history[:, delayed_idx, :]
+        # --- PD error dynamics ---
+        # e = [phi_d - phi, theta_d - theta]
+        e = torch.stack([target_euler[:, 0] - roll, target_euler[:, 1] - pitch], dim=-1)
+        # e_dot = [-p, -q] (small angle approximation: d/dt(phi_d - phi) ~ -p)
+        e_dot = -nu
 
-        # Angular acceleration via first-order finite difference: nu_dot = (omega_t - omega_{t-1}) / dt
-        prev_delayed_idx = (delayed_idx - 1) % self._buffer_size
-        omega_prev_delayed = self._angular_vel_history[:, prev_delayed_idx, :]
-        nu_dot_delayed = (omega_delayed - omega_prev_delayed) / (dt + 1e-8)
+        # u_pd = Kd * e_dot + Kp * e
+        u_pd = self._kd * e_dot + self._kp * e
 
-        # T_b at delayed time.
-        # Note: f_bu is assumed constant within an episode (set at reset via DR).
-        # If time-varying buoyancy is added, f_bu must also be stored in history.
-        t_b_delayed = self._compute_t_b(roll_delayed, pitch_delayed, f_bu)
+        # --- TDC control law (derivation Step 9) ---
+        # p_EE = Lambda_inv @ [Lambda_prev @ p_EE_prev - M_hat*nu_dot_prev
+        #                      + M_hat*u_pd + (T_b_prev - T_b)]
+        #
+        # Split into: U_hat (pure uncertainty, filtered) + delta_T_b (not filtered)
+        #   U_hat_raw = Lambda_prev @ p_EE_prev - M_hat * nu_dot_prev
+        #   delta_T_b = T_b_prev - T_b
+        #   tau = tde_gain * (filter(U_hat_raw) + delta_T_b) + M_hat*u_pd
 
-        # Assemble control law terms (all in torque space)
-        # term1: Lambda_{t-L} * p_EE_{t-L}
-        term1 = self._apply_lambda(p_ee_delayed, lf_delayed)
-        # term2: -M_hat * nu_dot_{t-L}
-        term2 = -self._m_hat * nu_dot_delayed
-        # term4: Delta_T_b = T_b_{t-L} - T_b_t
-        term4 = t_b_delayed - t_b_current
+        # TDE term: Lambda_prev @ p_EE_prev (batched matmul)
+        tde_lambda_p = torch.bmm(self._Lambda_prev, self._p_EE_prev.unsqueeze(-1)).squeeze(-1)
 
-        # During warmup (first 3 steps after reset), use PD only through Lambda_inv
-        # This prevents TDE spikes from zero/stale history
-        warmup_mask = (self._warmup_steps < self._min_warmup).unsqueeze(-1)  # (N, 1)
-        tde_terms = term1 + term2 + term4  # All TDE-dependent terms
-        tde_terms = torch.where(warmup_mask, torch.zeros_like(tde_terms), tde_terms)
-        self._warmup_steps += 1
+        # TDE components
+        tde_m_nu_dot = self._m_hat * self._nu_dot_filtered
+        tde_delta_T_b = self._T_b_prev - T_b
+        m_hat_u_pd = self._m_hat * u_pd
 
-        # Total torque command
-        tau_total = tde_terms + pd_term
+        # Pure uncertainty (T_b excluded): U_hat = Lambda_prev @ p_EE_prev - M_hat*nu_dot
+        U_hat_raw = tde_lambda_p - tde_m_nu_dot
 
-        # Convert torque to EE position: p_EE = Lambda_t^{-1} * tau
-        p_ee_desired = self._apply_lambda_inv(tau_total, lf_current)
+        # Low-pass filter on pure uncertainty only.
+        # T_b is excluded so that delta_T_b = T_b_prev - T_b cancels exactly.
+        beta = self.h_hat_filter_alpha
+        U_hat = beta * U_hat_raw + (1.0 - beta) * self._U_hat_filtered
 
-        # Clamp to circular workspace (2-link arm reachable region)
-        r = torch.linalg.norm(p_ee_desired, dim=-1, keepdim=True)
-        self._last_r_ratio = (r / self.cfg.workspace_radius_max).squeeze(-1)
-        too_small = r < 1e-6
-        r_clamped = torch.clamp(r, self.cfg.workspace_radius_min, self.cfg.workspace_radius_max)
-        scale = r_clamped / (r + 1e-8)
-        p_ee_desired = torch.where(too_small, torch.zeros_like(p_ee_desired), p_ee_desired * scale)
+        # Full H_hat for debug logging: H_hat = U_hat + T_b_prev (per derivation Step 6)
+        tde_H_hat = U_hat + self._T_b_prev
 
-        self._last_output = p_ee_desired.clone()
-        return p_ee_desired
+        # tau_desired for initialized envs (full TDC)
+        tau_tdc = (
+            self.tde_gain * (U_hat + tde_delta_T_b)
+            + m_hat_u_pd
+        )
 
-    def _update_tde_history(
-        self,
-        p_ee: torch.Tensor,
-        angular_vel: torch.Tensor,
-        roll: torch.Tensor,
-        pitch: torch.Tensor,
-        lambda_factor: torch.Tensor,
-    ) -> None:
-        """Update all TDE history buffers with current state.
+        # tau_desired for uninitialized envs (pure PD, no TDE)
+        tau_pd = m_hat_u_pd
 
-        Args:
-            p_ee: Current end-effector position [x, y]. Shape: (num_envs, 2).
-            angular_vel: Angular velocity [p, q]. Shape: (num_envs, 2).
-            roll: Roll angle phi. Shape: (num_envs,).
-            pitch: Pitch angle theta. Shape: (num_envs,).
-            lambda_factor: Precomputed cos(theta)*cos(phi)*F_bu. Shape: (num_envs,).
-        """
-        # Advance circular buffer index
-        self._history_idx = (self._history_idx + 1) % self._buffer_size
-        idx = self._history_idx
+        # Select between TDC and pure PD based on initialization
+        init_mask = self._is_initialized.unsqueeze(-1)  # (num_envs, 1)
+        tau_desired = torch.where(init_mask, tau_tdc, tau_pd)
 
-        self._p_ee_history[:, idx, :] = p_ee
-        self._angular_vel_history[:, idx, :] = angular_vel
-        self._roll_history[:, idx] = roll
-        self._pitch_history[:, idx] = pitch
-        self._lambda_factor_history[:, idx] = lambda_factor
+        # p_EE = Lambda_inv @ tau_desired
+        p_EE = torch.bmm(Lambda_inv, tau_desired.unsqueeze(-1)).squeeze(-1)
 
-    def get_stability_metric(self, true_inertia: torch.Tensor | None = None) -> torch.Tensor:
-        """Compute TDC stability metric for reward computation.
+        # --- Workspace clamping ---
+        # Clamp p_EE to workspace radius to prevent IK saturation.
+        # Without this, TDE feedback diverges when commands exceed workspace.
+        p_EE_raw = p_EE.clone()
+        r = torch.norm(p_EE, dim=-1, keepdim=True)  # (num_envs, 1)
+        scale = torch.clamp(self.workspace_radius / (r + 1e-8), max=1.0)
+        p_EE = p_EE * scale
 
-        The stability condition requires that the inertia estimate is close
-        to the true inertia: ||1 - M/M_hat|| should be small.
+        # --- Store debug info for logging ---
+        self._debug = {
+            "tde_lambda_p": tde_lambda_p,
+            "tde_m_nu_dot": tde_m_nu_dot,
+            "tde_H_hat": tde_H_hat,
+            "m_hat_u_pd": m_hat_u_pd,
+            "tde_delta_T_b": tde_delta_T_b,
+            "tau_desired": tau_desired,
+            "p_EE_raw": p_EE_raw,
+            "p_EE_raw_norm": torch.norm(p_EE_raw, dim=-1),
+            "nu_dot_raw": nu_dot_raw,
+            "nu_dot_filtered": nu_dot,
+        }
 
-        Args:
-            true_inertia: True diagonal inertia values (if known).
-                Shape: (num_envs, 2). If None, returns zeros.
+        # --- Update history buffers ---
+        self._nu_prev = nu.clone()
+        self._nu_dot_filtered = nu_dot.clone()
+        self._p_EE_prev = p_EE_current.clone()
+        self._Lambda_prev = Lambda.clone()
+        self._T_b_prev = T_b.clone()
+        self._U_hat_filtered = U_hat.clone()
+        self._is_initialized[:] = True
 
-        Returns:
-            Stability metric (lower is better, 0 = perfect estimate).
-                Shape: (num_envs,).
-        """
-        if true_inertia is None:
-            return torch.zeros(self.num_envs, device=self.device)
-
-        # Compute ||1 - M/M_hat||
-        ratio = true_inertia / (self._m_hat + 1e-8)
-        deviation = torch.abs(1.0 - ratio)
-        return torch.linalg.norm(deviation, dim=-1)
+        return p_EE
 
     def reset(self, env_ids: torch.Tensor) -> None:
         """Reset controller state for specified environments.
@@ -441,60 +313,10 @@ class TDCController:
         Args:
             env_ids: Environment indices to reset.
         """
-        # Reset gains to minimum
-        self._k_p[env_ids] = self.cfg.k_p_min
-        self._k_d[env_ids] = self.cfg.k_d_min
-
-        # Reset M_hat to default (broadcasts from (2,) to (len(env_ids), 2))
-        self._m_hat[env_ids] = torch.tensor(self.cfg.default_m_hat, device=self.device)
-
-        # Reset all history buffers
-        self._p_ee_history[env_ids] = 0.0
-        self._angular_vel_history[env_ids] = 0.0
-        self._roll_history[env_ids] = 0.0
-        self._pitch_history[env_ids] = 0.0
-        self._lambda_factor_history[env_ids] = 0.0
-        self._last_output[env_ids] = 0.0
-        self._last_r_ratio[env_ids] = 0.0
-        self._warmup_steps[env_ids] = 0
-
-    def set_buoyancy_force(self, env_ids: torch.Tensor, f_bu: torch.Tensor) -> None:
-        """Set per-env buoyancy force for adaptive DLS Lambda_inv.
-
-        lf_max = F_bu (maximum lambda factor at zero tilt angle).
-        Should be called after reset when DR may change buoyancy.
-
-        Args:
-            env_ids: Environment indices to update.
-            f_bu: Buoyancy force magnitude. Shape: (len(env_ids),).
-        """
-        self._lf_max[env_ids] = f_bu[env_ids]
-
-    @property
-    def current_gains(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Get current PD gains.
-
-        Returns:
-            Tuple of (K_p, K_d) tensors, each of shape (num_envs, 2).
-        """
-        return self._k_p, self._k_d
-
-    @property
-    def inertia_estimate(self) -> torch.Tensor:
-        """Get current inertia estimate M_hat.
-
-        Returns:
-            M_hat tensor of shape (num_envs, 2).
-        """
-        return self._m_hat
-
-    @property
-    def workspace_utilization(self) -> torch.Tensor:
-        """Get pre-clamp workspace utilization ratio (r / r_max).
-
-        Values > 1.0 indicate workspace saturation (clamped by controller).
-
-        Returns:
-            Utilization ratio of shape (num_envs,).
-        """
-        return self._last_r_ratio
+        self._nu_prev[env_ids] = 0.0
+        self._nu_dot_filtered[env_ids] = 0.0
+        self._p_EE_prev[env_ids] = 0.0
+        self._Lambda_prev[env_ids] = 0.0
+        self._T_b_prev[env_ids] = 0.0
+        self._U_hat_filtered[env_ids] = 0.0
+        self._is_initialized[env_ids] = False

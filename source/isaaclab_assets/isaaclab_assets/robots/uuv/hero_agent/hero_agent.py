@@ -103,6 +103,9 @@ class HeroAgentHydrodynamicsCfg(HydrodynamicsCfg):
     #   I_zz = m*R^2/2 = 9.18*0.0081/2 = 0.0372
     rigid_body_inertia: tuple[float, float, float] | None = (0.0994, 0.0994, 0.0372)
 
+    # Body mass from URDF (kg) - for CoG correction torque during domain randomization
+    body_mass: float = 9.18
+
     # Enable full Coriolis matrix (C_RB + C_A per Fossen model)
     use_full_coriolis: bool = True
 
@@ -167,6 +170,9 @@ class HeroAgentBuoyHydrodynamicsCfg(HydrodynamicsCfg):
     #   I_xx = I_yy = m*(3*R^2 + H^2)/12 = 0.93*(0.02168 + 0.01392)/12 = 0.00278
     #   I_zz = m*R^2/2 = 0.93*0.007225/2 = 0.00336
     rigid_body_inertia: tuple[float, float, float] | None = (0.00278, 0.00278, 0.00336)
+
+    # Body mass from URDF (kg) - for CoG correction torque during domain randomization
+    body_mass: float = 0.93
 
     # Enable full Coriolis for consistency with main body
     use_full_coriolis: bool = True
@@ -233,8 +239,8 @@ HERO_AGENT_CFG = ArticulationCfg(
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
-            solver_position_iteration_count=16,
-            solver_velocity_iteration_count=8,
+            solver_position_iteration_count=8,
+            solver_velocity_iteration_count=4,
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
@@ -246,8 +252,8 @@ HERO_AGENT_CFG = ArticulationCfg(
     actuators={
         "arm": ImplicitActuatorCfg(
             joint_names_expr=["joint.*"],
-            stiffness=100.0,
-            damping=40.0,
+            stiffness=500.0,  # Kp: w_n=57.7 rad/s with J~0.15 kg*m^2
+            damping=10.0,  # Kd: damping ratio ~0.7 (near critically damped)
         ),
     },
 )

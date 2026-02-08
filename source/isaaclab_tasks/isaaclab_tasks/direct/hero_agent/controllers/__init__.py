@@ -3,19 +3,17 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Controller modules for Hero Agent TDC integration.
+"""Controller modules for Hero Agent ALBC integration.
 
 This module provides:
     - ALBCKinematics: Forward/Inverse kinematics for 2-link ALBC arm
-    - TDCController: Time Delay Control implementation
-    - TDCControllerCfg: TDC configuration class
+    - TDCController: Time Delay Controller for roll/pitch attitude stabilization
 """
 
 from .kinematics import ALBCKinematics
-from .tdc import TDCController, TDCControllerCfg
+from .tdc import TDCController
 
 __all__ = [
     "ALBCKinematics",
     "TDCController",
-    "TDCControllerCfg",
 ]

@@ -27,17 +27,11 @@ from .observations import (
 )
 from .rewards import (
     ALBCRewardCfg,
-    BaseTDCRewardCfg,
     RewardManager,
     RewardTermCfg,
-    TDCRewardCfg,
-    albc_action_cost,
     albc_potential_reward,
     albc_progress_reward,
-    tdc_attitude_penalty,
-    tdc_gain_magnitude_cost,
-    tdc_gain_smoothness_reward,
-    tdc_stability_reward,
+    squared_action_cost,
 )
 
 __all__ = [
@@ -52,18 +46,11 @@ __all__ = [
     # Observations
     "compute_policy_obs",
     "compute_privileged_obs",
-    # Rewards (ALBC)
+    # Rewards
     "ALBCRewardCfg",
     "RewardManager",
     "RewardTermCfg",
-    "albc_action_cost",
     "albc_potential_reward",
     "albc_progress_reward",
-    # Rewards (TDC)
-    "TDCRewardCfg",
-    "BaseTDCRewardCfg",
-    "tdc_attitude_penalty",
-    "tdc_gain_magnitude_cost",
-    "tdc_gain_smoothness_reward",
-    "tdc_stability_reward",
+    "squared_action_cost",
 ]

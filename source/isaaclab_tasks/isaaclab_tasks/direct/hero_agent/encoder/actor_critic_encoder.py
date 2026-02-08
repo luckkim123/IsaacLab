@@ -23,7 +23,6 @@ Design choices:
     - Softplus instead of scaled sigmoid: Avoids gradient saturation at bounds.
       z = softplus(raw) + z_min guarantees z > z_min with no upper bound.
     - 6D latent: Matches 6-DOF convention [surge,sway,heave,roll,pitch,yaw].
-      TDC uses z[3:5] as M_hat for roll/pitch inertia estimation.
     - 22D privileged (not 64D): Core parameters only (mass, volume, CoG, CoB,
       inertia) without damping/added_mass which don't affect attitude dynamics.
 
@@ -51,8 +50,8 @@ class ActorCriticEncoder(nn.Module):
 
     The encoder compresses privileged information into a positive latent vector z
     using softplus: z = softplus(raw_output) + z_min.
-    This guarantees z > z_min (positive), compatible with TDC's M_hat = z[3:5].
-    Unlike scaled sigmoid, softplus has no gradient saturation at large values.
+    This guarantees z > z_min (positive). Unlike scaled sigmoid, softplus has
+    no gradient saturation at large values.
 
     Gradient flow: During PPO update, stored observations are replayed through
     the full network (encoder + actor/critic), so encoder gradients flow via

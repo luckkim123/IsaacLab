@@ -74,6 +74,11 @@ class HydrodynamicsCfg:
     # If None, estimates from added mass rotational terms
     rigid_body_inertia: tuple[float, float, float] | None = None
 
+    # Body mass for CoG correction torque (kg)
+    # When set, enables gravity restoring moment correction during CoG randomization.
+    # Should match the URDF/USD rigid body mass so that the correction is zero at nominal.
+    body_mass: float | None = None
+
     # Added mass force (M_A * v_dot) settings
     # When True, applies M_A * v_dot as external force for more accurate dynamics
     # Uses PhysX-computed acceleration from previous step

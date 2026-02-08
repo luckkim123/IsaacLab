@@ -24,7 +24,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.envs.ui import BaseEnvWindow
-from isaaclab.utils.math import euler_xyz_from_quat, quat_apply
+from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse
 
 # Import models from common isaaclab_tasks.models
 from isaaclab_tasks.models import HydrodynamicsModel
@@ -33,11 +33,11 @@ from .hero_agent_env_cfg import HeroAgentEnvCfg
 from .mdp import (
     RewardManager,
     RewardTermCfg,
-    albc_action_cost,
     albc_potential_reward,
     albc_progress_reward,
     compute_policy_obs,
     compute_privileged_obs,
+    squared_action_cost,
 )
 from .mdp.events import (
     randomize_hydrodynamics,
@@ -84,8 +84,9 @@ class HeroAgentEnv(DirectRLEnv):
         [1] joint2 velocity command [-1, 1]
 
     Physical Parameters:
-        - control_decimation: 1 (default, control at sim rate; configurable)
+        - sim_dt: 1/200 s (200 Hz physics), decimation: 2 (100 Hz policy)
         - max_joint_velocity: 2*pi rad/s (360 deg/s)
+        - joint stiffness: 500.0, damping: 10.0 (damping ratio ~0.7)
         - joint_limits: from URDF (±2*pi rad, i.e. ±360 deg)
     """
 
@@ -186,7 +187,7 @@ class HeroAgentEnv(DirectRLEnv):
                     scale_by_dt=False,
                 ),
                 "action_cost": RewardTermCfg(
-                    func=albc_action_cost,
+                    func=squared_action_cost,
                     weight=self.cfg.reward.action_cost_weight,
                 ),
             },
@@ -223,7 +224,7 @@ class HeroAgentEnv(DirectRLEnv):
         self._potentials = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         self._prev_potentials = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
 
-    def _compute_attitude_error(
+    def compute_attitude_error(
         self,
         quat: torch.Tensor,
         env_ids: torch.Tensor | None = None,
@@ -253,7 +254,7 @@ class HeroAgentEnv(DirectRLEnv):
         Returns:
             Attitude error (target - current). Shape: (num_envs, 3).
         """
-        self._attitude_error = self._compute_attitude_error(self._robot.data.root_quat_w)
+        self._attitude_error = self.compute_attitude_error(self._robot.data.root_quat_w)
         return self._attitude_error
 
     def _update_potentials(self) -> None:
@@ -262,10 +263,14 @@ class HeroAgentEnv(DirectRLEnv):
         Call once per step before reward computation. Saves current potential
         as prev_potential and computes new potential from roll/pitch errors.
         Yaw is excluded because buoyancy control cannot generate Z-axis torque.
+
+        Also caches _attitude_error so that logging in _reset_idx (which runs
+        after _get_rewards but before _get_observations) uses the current step's
+        error, not the previous step's stale value.
         """
         self._prev_potentials = self._potentials.clone()
-        attitude_error = self._compute_attitude_error(self._robot.data.root_quat_w)
-        self._potentials = torch.linalg.norm(attitude_error[:, :2], dim=-1)
+        self._attitude_error = self.compute_attitude_error(self._robot.data.root_quat_w)
+        self._potentials = torch.linalg.norm(self._attitude_error[:, :2], dim=-1)
 
     def _reset_attitude_task(self, env_ids: torch.Tensor) -> None:
         """Reset target attitudes and potentials for specified environments.
@@ -296,7 +301,7 @@ class HeroAgentEnv(DirectRLEnv):
         Args:
             env_ids: Environment indices that were reset.
         """
-        attitude_error = self._compute_attitude_error(self._robot.data.root_quat_w[env_ids], env_ids)
+        attitude_error = self.compute_attitude_error(self._robot.data.root_quat_w[env_ids], env_ids)
         initial_potential = torch.linalg.norm(attitude_error[:, :2], dim=-1)
         self._potentials[env_ids] = initial_potential
         self._prev_potentials[env_ids] = initial_potential
@@ -330,13 +335,13 @@ class HeroAgentEnv(DirectRLEnv):
         """
         self._prev_actions = self._actions.clone()
         self._actions = actions.clone().clamp(-1.0, 1.0)
+        self._prev_actions_obs = self._actions.clone()
         self._control_step_counter += 1
 
         if self._control_step_counter % self.cfg.control_decimation == 0:
-            self._prev_actions_obs = self._actions.clone()
-
             # Integrate velocity to position: delta_pos = dt * max_vel * action
-            control_dt = self.physics_dt * self.cfg.control_decimation
+            # step_dt = physics_dt * decimation (time per RL step)
+            control_dt = self.step_dt * self.cfg.control_decimation
             position_delta = control_dt * self.cfg.max_joint_velocity * self._actions
             self._joint_pos_targets += position_delta
 
@@ -378,17 +383,23 @@ class HeroAgentEnv(DirectRLEnv):
         )
 
     def _add_payload_wrench(self, forces: torch.Tensor, torques: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Add payload weight and moment to forces/torques if payload is enabled."""
+        """Add payload weight and moment to forces/torques if payload is enabled.
+
+        Forces and torques are in body frame, so payload weight must be
+        transformed from world frame to body frame before adding.
+        """
         if self._payload_mass is None or self._gravity_vec is None or self._payload_attachment_offset is None:
             return forces, torques
 
-        # F = m * g (world frame)
-        payload_weight = self._payload_mass.unsqueeze(-1) * self._gravity_vec
-        # tau = r x F (moment arm effect)
-        offset_world = quat_apply(self._robot.data.root_quat_w, self._payload_attachment_offset)
-        payload_torque = torch.cross(offset_world, payload_weight, dim=-1)
+        # Payload weight in world frame, then transform to body frame
+        payload_weight_w = self._payload_mass.unsqueeze(-1) * self._gravity_vec
+        payload_weight_b = quat_apply_inverse(self._robot.data.root_quat_w, payload_weight_w)
 
-        return forces + payload_weight, torques + payload_torque
+        # Torque in body frame: tau = r_body x F_body
+        # (attachment offset is already in body frame)
+        payload_torque_b = torch.cross(self._payload_attachment_offset, payload_weight_b, dim=-1)
+
+        return forces + payload_weight_b, torques + payload_torque_b
 
     def _get_observations(self) -> dict:
         """Compute ALBC-specific observations.
@@ -479,7 +490,16 @@ class HeroAgentEnv(DirectRLEnv):
 
         # Randomize episode lengths to decorrelate environment terminations
         if len(env_ids_) == self.num_envs:
-            self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
+            # Full batch (initial reset): spread across entire episode range
+            self.episode_length_buf[:] = torch.randint_like(
+                self.episode_length_buf, high=int(self.max_episode_length)
+            )
+        else:
+            # Individual resets: small jitter prevents re-synchronization
+            max_jitter = max(1, int(self.max_episode_length * 0.1))
+            self.episode_length_buf[env_ids_] = torch.randint_like(
+                self.episode_length_buf[env_ids_], high=max_jitter
+            )
 
         # Reset action buffers
         for buf in (self._actions, self._prev_actions, self._prev_actions_obs):
@@ -514,6 +534,16 @@ class HeroAgentEnv(DirectRLEnv):
         else:
             reset_joint_positions_default(env=self, env_ids=env_ids_)
             reset_robot_pose_default(env=self, env_ids=env_ids_, initial_height=self.cfg.initial_height)
+
+        # --- 5.5. Joint servo properties (realistic bandwidth) ---
+        if self.cfg.albc_joint_stiffness is not None:
+            self._robot.write_joint_stiffness_to_sim(
+                self.cfg.albc_joint_stiffness, joint_ids=self._albc_joint_ids, env_ids=env_ids_
+            )
+        if self.cfg.albc_joint_damping is not None:
+            self._robot.write_joint_damping_to_sim(
+                self.cfg.albc_joint_damping, joint_ids=self._albc_joint_ids, env_ids=env_ids_
+            )
 
         # --- 6. Potential initialization (must be after pose reset) ---
         self._initialize_potentials(env_ids_)

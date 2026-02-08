@@ -135,3 +135,65 @@ class ALBCKinematics:
         gamma1 = torch.atan2(y_clamped, x_clamped) - torch.atan2(k2, k1)
 
         return torch.stack([gamma1, gamma2], dim=-1)
+
+    def forward(
+        self,
+        joint_angles: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute end-effector position from joint angles (forward kinematics).
+
+        Standard 2-link planar FK:
+            x = l1*cos(g1) + l2*cos(g1+g2)
+            y = l1*sin(g1) + l2*sin(g1+g2)
+
+        Note: Z coordinate is constant (height_offset) and not returned.
+
+        Args:
+            joint_angles: Joint angles [gamma1, gamma2] in radians.
+                Shape: (num_envs, 2).
+
+        Returns:
+            End-effector position [x, y] in meters. Shape: (num_envs, 2).
+        """
+        g1 = joint_angles[:, 0]
+        g12 = joint_angles[:, 0] + joint_angles[:, 1]
+
+        x = self.l1 * torch.cos(g1) + self.l2 * torch.cos(g12)
+        y = self.l1 * torch.sin(g1) + self.l2 * torch.sin(g12)
+
+        return torch.stack([x, y], dim=-1)
+
+    def jacobian(
+        self,
+        joint_angles: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute 2x2 planar Jacobian matrix.
+
+        J = [[-l1*sin(g1) - l2*sin(g1+g2), -l2*sin(g1+g2)],
+             [ l1*cos(g1) + l2*cos(g1+g2),  l2*cos(g1+g2)]]
+
+        Usage: v_EE = J @ gamma_dot (end-effector velocity from joint velocities)
+
+        Args:
+            joint_angles: Joint angles [gamma1, gamma2] in radians.
+                Shape: (num_envs, 2).
+
+        Returns:
+            Jacobian matrix. Shape: (num_envs, 2, 2).
+        """
+        g1 = joint_angles[:, 0]
+        g12 = joint_angles[:, 0] + joint_angles[:, 1]
+
+        s1 = torch.sin(g1)
+        c1 = torch.cos(g1)
+        s12 = torch.sin(g12)
+        c12 = torch.cos(g12)
+
+        j11 = -self.l1 * s1 - self.l2 * s12   # dx/dg1
+        j12 = -self.l2 * s12                    # dx/dg2
+        j21 = self.l1 * c1 + self.l2 * c12     # dy/dg1
+        j22 = self.l2 * c12                      # dy/dg2
+
+        row1 = torch.stack([j11, j12], dim=-1)
+        row2 = torch.stack([j21, j22], dim=-1)
+        return torch.stack([row1, row2], dim=-2)

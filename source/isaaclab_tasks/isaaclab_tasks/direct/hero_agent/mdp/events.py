@@ -222,6 +222,9 @@ def randomize_ocean_current(
 ) -> None:
     """Randomize ocean current for specified environments.
 
+    Sets the same ocean current for both main body and buoy, since both
+    bodies are in the same water volume.
+
     Args:
         env: The Hero Agent environment instance.
         env_ids: Environment indices to randomize. If None, randomizes all.
@@ -230,6 +233,10 @@ def randomize_ocean_current(
     if not hasattr(env, "_hydro"):
         return
     env._hydro.set_ocean_current(env_ids)
+
+    # Share the same current with buoy (same water volume)
+    if hasattr(env, "_buoy_hydro"):
+        env._buoy_hydro.set_ocean_current(env_ids, velocity=env._hydro._current_velocity[env_ids])
 
 
 # -----------------------------------------------------------------------------

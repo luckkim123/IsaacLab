@@ -32,22 +32,19 @@ def compute_policy_obs(
 ) -> torch.Tensor:
     """Compute policy observations for ALBC control.
 
-    Returns 13-dim observation (base env) or 15-dim (TDC env):
+    Returns 13-dim observation:
         [0:3]   roll, pitch, yaw (euler angles)
         [3:6]   angular velocity in body frame
         [6:9]   attitude errors from task
         [9:11]  joint positions (normalized to [-1, 1])
-        [11:]   previous actions (2D for base env, 4D for TDC env)
-
-    The output dimension depends on ``env._prev_actions_obs`` shape:
-    base env stores 2D (joint velocities), TDC env stores 4D (PD gains).
+        [11:13] previous actions (joint velocities)
 
     Args:
         env: The Hero Agent environment instance.
         robot: The robot articulation.
 
     Returns:
-        Policy observation tensor of shape (num_envs, 13) or (num_envs, 15).
+        Policy observation tensor of shape (num_envs, 13).
     """
     roll, pitch, yaw = euler_xyz_from_quat(robot.data.root_quat_w)
 

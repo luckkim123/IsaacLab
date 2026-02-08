@@ -7,12 +7,10 @@
 
 This module provides:
     - ActorCriticEncoder: Base encoder network (privileged -> z -> actor/critic)
-    - ActorCriticEncoderTDC: TDC variant exposing z as M_hat
     - EncoderRunner: OnPolicyRunner with encoder metrics logging
 """
 
 from .actor_critic_encoder import ActorCriticEncoder
-from .actor_critic_encoder_tdc import ActorCriticEncoderTDC
 from .encoder_runner import EncoderRunner
 
-__all__ = ["ActorCriticEncoder", "ActorCriticEncoderTDC", "EncoderRunner"]
+__all__ = ["ActorCriticEncoder", "EncoderRunner"]
