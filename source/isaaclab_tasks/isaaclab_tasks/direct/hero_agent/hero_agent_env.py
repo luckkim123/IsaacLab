@@ -356,6 +356,21 @@ class HeroAgentEnv(DirectRLEnv):
         # Joint position control
         self._robot.set_joint_position_target(self._joint_pos_targets, joint_ids=self._albc_joint_ids)
 
+        # Update PhysX acceleration cache for added mass force (M_A * v_dot).
+        # Uses previous step's acceleration to avoid circular dependency.
+        # Stability factor must satisfy: factor * max(M_A_i / M_rigid_i) < 1
+        if self._hydro._apply_added_mass:
+            self._hydro.update_physx_state(
+                body_com_acc_w=self._robot.data.body_com_acc_w,
+                root_quat_w=self._robot.data.root_quat_w,
+            )
+        if self._buoy_hydro._apply_added_mass:
+            buoy_body_idx = self._buoy_body_id[0]
+            self._buoy_hydro.update_physx_state(
+                body_com_acc_w=self._robot.data.body_com_acc_w[:, buoy_body_idx, :],
+                root_quat_w=self._robot.data.body_quat_w[:, buoy_body_idx, :],
+            )
+
         # Main body hydrodynamics
         self._hydro_forces, self._hydro_torques = self._hydro.compute_forces(
             root_lin_vel_w=self._robot.data.root_lin_vel_w,
@@ -491,15 +506,11 @@ class HeroAgentEnv(DirectRLEnv):
         # Randomize episode lengths to decorrelate environment terminations
         if len(env_ids_) == self.num_envs:
             # Full batch (initial reset): spread across entire episode range
-            self.episode_length_buf[:] = torch.randint_like(
-                self.episode_length_buf, high=int(self.max_episode_length)
-            )
+            self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
         else:
             # Individual resets: small jitter prevents re-synchronization
             max_jitter = max(1, int(self.max_episode_length * 0.1))
-            self.episode_length_buf[env_ids_] = torch.randint_like(
-                self.episode_length_buf[env_ids_], high=max_jitter
-            )
+            self.episode_length_buf[env_ids_] = torch.randint_like(self.episode_length_buf[env_ids_], high=max_jitter)
 
         # Reset action buffers
         for buf in (self._actions, self._prev_actions, self._prev_actions_obs):

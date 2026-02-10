@@ -177,5 +177,3 @@ def squared_action_cost(
 ) -> torch.Tensor:
     """sum(actions^2). Use with negative weight to penalize large actions/gains."""
     return torch.sum(actions**2, dim=-1)
-
-

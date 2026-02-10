@@ -23,6 +23,8 @@ from isaaclab.utils import configclass
 
 from isaaclab_assets.robots.uuv import (
     HERO_AGENT_ALBC_JOINT_NAMES,
+    HERO_AGENT_ALBC_LINK1_LENGTH,
+    HERO_AGENT_ALBC_LINK2_LENGTH,
     HERO_AGENT_CFG,
     HeroAgentBuoyHydrodynamicsCfg,
     HeroAgentHydrodynamicsCfg,
@@ -116,6 +118,47 @@ class DomainRandomizationCfg:
     payload_attachment_x_range: tuple[float, float] = (-0.05, 0.05)  # m, offset from base
     payload_attachment_y_range: tuple[float, float] = (-0.05, 0.05)  # m, offset from base
     payload_attachment_z_range: tuple[float, float] = (-0.25, -0.15)  # m, absolute value
+
+
+@configclass
+class TDCControllerCfg:
+    """TDC (Time Delay Control) controller configuration.
+
+    Groups all parameters for the TDC attitude stabilization controller.
+    Used as a nested config in HeroAgentTDCEnvCfg.
+    """
+
+    # Design inertia [roll, pitch] in kg*m^2
+    m_hat: tuple[float, float] = (0.15, 0.16)
+
+    # PD gains
+    kp: float = 40.0  # omega_n = sqrt(40/0.15) = 16.3 rad/s
+    kd: float = 12.0  # zeta = 12/(2*sqrt(40*0.15)) = 2.45 (overdamped)
+
+    # Physical geometry
+    h: float = 0.230  # CoG-to-CoB vertical offset (m)
+
+    # DLS regularization for Lambda matrix inverse
+    dls_lambda_damping: float = 0.01
+
+    # EMA filter for angular acceleration finite difference
+    nu_dot_ema_alpha: float = 0.05
+
+    # EE offset at zero error (avoids origin singularity)
+    base_position: tuple[float, float] = (0.01, 0.01)
+
+    # IK DLS damping (Yoshikawa-style adaptive)
+    ik_dls_lambda: float = 0.15
+
+    # Joint rate limiting (rad/s)
+    max_joint_velocity: float = 2.5
+
+    # Link lengths from URDF (used by kinematics)
+    link1_length: float = HERO_AGENT_ALBC_LINK1_LENGTH
+    link2_length: float = HERO_AGENT_ALBC_LINK2_LENGTH
+
+    # Console log every N steps (0 = disabled)
+    log_interval: int = 200
 
 
 @configclass
@@ -249,27 +292,25 @@ class HeroAgentTDCEnvCfg(HeroAgentEnvCfg):
     Uses classical TDC controller instead of RL for attitude stabilization.
     All domain randomization and ocean currents are disabled for controlled testing.
     Initial pose is tilted 15 degrees in roll and pitch.
+
+    Control timing (matching C++ reference):
+        - decimation=1: step_dt = physics_dt = 0.005s (200Hz policy step)
+        - control_decimation=4: TDC runs every 4th step = 0.02s (50Hz)
     """
 
-    # TDC controller parameters
-    tdc_m_hat: tuple[float, float] = (0.15, 0.15)  # kg*m^2 (roll, pitch)
-    tdc_kp: float = 40.0  # omega_n ~= 6.3 rad/s (aggressive for TDE dominance)
-    tdc_kd: float = 12.0  # zeta ~= 0.95 (near-critically damped)
-    tdc_dls_damping: float = 0.01  # DLS regularization for singularity
-    tdc_h: float = 0.230  # buoyancy height offset (m)
-    tdc_workspace_radius: float = 0.45  # EE clamp radius (< l1+l2=0.466)
-    tdc_nu_dot_ema_alpha: float = 0.3  # EMA filter for angular accel (lower=smoother)
-    tdc_tde_gain: float = 1.0  # TDE contribution scale (0.0=pure PD, 1.0=full TDC)
-    tdc_h_hat_filter_alpha: float = 1.0  # U_hat EMA filter (1.0=no filter, <1=smoother)
-    tdc_log_interval: int = 200  # Console log every N steps (0 = disabled)
+    tdc: TDCControllerCfg = TDCControllerCfg()
 
     def __post_init__(self):
         """Set up TDC-specific defaults."""
         super().__post_init__()
 
-        # TDC runs at 200Hz (every physics step) for accurate TDE
+        # TDC runs at 50Hz (every 4th physics step, matching C++ reference)
         self.decimation = 1  # step_dt = physics_dt = 0.005s
-        self.control_decimation = 1
+        self.control_decimation = 4  # TDC dt = 0.005 * 4 = 0.02s
+
+        # Lower PhysX PD for smoother arm motion (reduces reaction torque on body)
+        self.albc_joint_stiffness = 200.0  # default 500 -> 200
+        self.albc_joint_damping = 10.0
 
         # Fixed initial pose: 15 degrees tilt in roll and pitch
         self.randomization.disable_all(roll=0.2618, pitch=0.2618)

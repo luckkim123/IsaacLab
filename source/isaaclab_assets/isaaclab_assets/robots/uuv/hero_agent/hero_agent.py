@@ -106,12 +106,15 @@ class HeroAgentHydrodynamicsCfg(HydrodynamicsCfg):
     # Body mass from URDF (kg) - for CoG correction torque during domain randomization
     body_mass: float = 9.18
 
-    # Enable full Coriolis matrix (C_RB + C_A per Fossen model)
-    use_full_coriolis: bool = True
+    # C_A only (not C_RB) — PhysX handles rigid body Coriolis/gyroscopic effects
+    # via enable_gyroscopic_forces=True. Applying C_RB here would double-count.
+    use_full_coriolis: bool = False
 
-    # Added mass force settings for improved physics accuracy
+    # Added mass force (M_A * v_dot) via explicit integration.
+    # Stability requires: factor * max(M_A_i / M_rigid_i) < 1
+    # Main body worst axis: yaw M_A=0.05 / I_zz=0.0372 = 1.34 → factor < 0.75
     apply_added_mass_force: bool = True
-    added_mass_stability_factor: float = 0.8
+    added_mass_stability_factor: float = 0.5
 
 
 @configclass
@@ -174,12 +177,14 @@ class HeroAgentBuoyHydrodynamicsCfg(HydrodynamicsCfg):
     # Body mass from URDF (kg) - for CoG correction torque during domain randomization
     body_mass: float = 0.93
 
-    # Enable full Coriolis for consistency with main body
-    use_full_coriolis: bool = True
+    # C_A only — PhysX handles rigid body Coriolis/gyroscopic effects
+    use_full_coriolis: bool = False
 
-    # Added mass force settings for improved physics accuracy
+    # Added mass force (M_A * v_dot) via explicit integration.
+    # Stability requires: factor * max(M_A_i / M_rigid_i) < 1
+    # Buoy worst axis: sway/heave M_A=1.5 / m=0.93 = 1.61 → factor < 0.62
     apply_added_mass_force: bool = True
-    added_mass_stability_factor: float = 0.8
+    added_mass_stability_factor: float = 0.4
 
 
 @configclass
@@ -252,8 +257,8 @@ HERO_AGENT_CFG = ArticulationCfg(
     actuators={
         "arm": ImplicitActuatorCfg(
             joint_names_expr=["joint.*"],
-            stiffness=500.0,  # Kp: w_n=57.7 rad/s with J~0.15 kg*m^2
-            damping=10.0,  # Kd: damping ratio ~0.7 (near critically damped)
+            stiffness=100.0,  # Kp: w_n=57.7 rad/s with J~0.15 kg*m^2
+            damping=3.0,  # Kd: damping ratio ~0.7 (near critically damped)
         ),
     },
 )

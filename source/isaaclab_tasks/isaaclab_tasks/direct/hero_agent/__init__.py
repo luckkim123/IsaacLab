@@ -24,6 +24,7 @@ from .hero_agent_env_cfg import (
     HeroAgentEnvCfg,
     HeroAgentTDCEnvCfg,
     HeroAgentTrainEnvCfg,
+    TDCControllerCfg,
 )
 from .hero_agent_tdc_env import HeroAgentTDCEnv
 
@@ -106,4 +107,5 @@ __all__ = [
     "HeroAgentTDCEnvCfg",
     "HeroAgentEncoderTrainEnvCfg",
     "DomainRandomizationCfg",
+    "TDCControllerCfg",
 ]

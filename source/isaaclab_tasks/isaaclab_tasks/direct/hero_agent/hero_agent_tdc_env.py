@@ -10,13 +10,13 @@ TDC for attitude stabilization. The TDC controller replaces RL actions with
 computed end-effector positions, which are then converted to joint angles
 via inverse kinematics.
 
-Control Flow (100 Hz):
+Control Flow (50 Hz, every control_decimation steps):
     1. Read roll, pitch from quaternion
     2. Read body angular velocity [p, q]
-    3. Compute current EE position via FK
-    4. TDCController.compute() -> desired p_EE
-    5. ALBCKinematics.inverse(p_EE) -> joint angles
-    6. Clamp to joint limits -> set as joint_pos_targets
+    3. TDCController.compute() -> desired p_EE
+    4. ALBCKinematics.inverse(p_EE, current_joints) -> joint angles (DLS IK)
+    5. Rate limit + clamp to joint limits -> set as joint_pos_targets
+    6. FK(rate-limited) -> update_ee_position() (anti-windup)
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ class HeroAgentTDCEnv(HeroAgentEnv):
     controller. RL actions are ignored; the controller directly computes
     joint position targets from the current state.
 
-    The TDC controller runs at 100 Hz (every RL step, ignoring control_decimation)
-    to maintain accurate Time Delay Estimation.
+    The TDC controller runs at 50 Hz (every control_decimation steps = 0.02s)
+    matching the C++ reference implementation.
     """
 
     cfg: HeroAgentTDCEnvCfg
@@ -57,55 +57,43 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         """
         super().__init__(cfg, render_mode, **kwargs)
 
-        # ALBC kinematics for IK (p_EE -> joint angles) and FK (joint angles -> p_EE)
+        tdc_cfg = cfg.tdc
+
+        # ALBC kinematics for IK and FK
         self._kinematics = ALBCKinematics(
             num_envs=self.num_envs,
             device=self.device,
+            link1_length=tdc_cfg.link1_length,
+            link2_length=tdc_cfg.link2_length,
         )
 
         # Get buoyancy force from buoy hydrodynamics model
         F_bu = self._buoy_hydro.buoyancy_force
 
+        # TDC dt = step_dt * control_decimation (50Hz with dec=1, ctrl_dec=4)
+        self._tdc_dt = self.step_dt * self.cfg.control_decimation
+
         # TDC controller
         self._tdc = TDCController(
             num_envs=self.num_envs,
             device=self.device,
-            m_hat=self.cfg.tdc_m_hat,
-            kp=self.cfg.tdc_kp,
-            kd=self.cfg.tdc_kd,
+            cfg=tdc_cfg,
             F_bu=F_bu.mean().item() if F_bu.dim() > 0 else float(F_bu),
-            h=self.cfg.tdc_h,
-            dls_damping=self.cfg.tdc_dls_damping,
-            dt=self.step_dt,  # TDC dt = RL step dt (100 Hz with dec=2)
-            workspace_radius=self.cfg.tdc_workspace_radius,
-            nu_dot_ema_alpha=self.cfg.tdc_nu_dot_ema_alpha,
-            tde_gain=self.cfg.tdc_tde_gain,
-            h_hat_filter_alpha=self.cfg.tdc_h_hat_filter_alpha,
+            dt=self._tdc_dt,
         )
 
-        # Console logging config
-        self._log_interval = self.cfg.tdc_log_interval
-        self._log_env_id = 0  # Which env to log (env 0)
+        # Console logging
+        self._log_interval = tdc_cfg.log_interval
+        self._log_env_id = 0
 
         if self._log_interval > 0:
-            logger.setLevel(logging.INFO)
-            if not logger.handlers:
-                handler = logging.StreamHandler()
-                handler.setFormatter(logging.Formatter("[TDC] %(message)s"))
-                logger.addHandler(handler)
-                logger.propagate = False
-            logger.info(
-                "TDC Controller initialized | M_hat=(%.3f, %.3f) Kp=%.1f Kd=%.1f F_bu=%.2f h=%.3f dt=%.4f tde_gain=%.2f",
-                *self.cfg.tdc_m_hat, self.cfg.tdc_kp, self.cfg.tdc_kd,
-                self._tdc._F_bu[0].item(), self.cfg.tdc_h, self.step_dt,
-                self.cfg.tdc_tde_gain,
-            )
+            self._setup_logger(tdc_cfg, self._tdc_dt)
 
     def _pre_physics_step(self, actions: torch.Tensor):
         """Override RL actions with TDC control output.
 
-        TDC runs every step (ignoring control_decimation) to maintain
-        accurate TDE. RL actions are stored but not used for control.
+        TDC runs every control_decimation steps (50Hz). Between TDC steps,
+        existing joint targets are held.
 
         Args:
             actions: RL actions (ignored). Shape: (num_envs, 2).
@@ -116,6 +104,10 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         self._prev_actions_obs = self._actions.clone()
         self._control_step_counter += 1
 
+        # Only run TDC at control_decimation interval
+        if self._control_step_counter % self.cfg.control_decimation != 0:
+            return
+
         # --- TDC control pipeline ---
         # 1. Get current orientation
         roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
@@ -123,60 +115,42 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         # 2. Get body angular velocity [p, q, r]
         ang_vel_body = self._robot.data.root_ang_vel_b
 
-        # 3. Get current joint positions
-        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
-
-        # 4. TDC compute -> desired EE position
+        # 3. TDC compute -> desired EE position
         p_EE_desired = self._tdc.compute(
             roll=roll,
             pitch=pitch,
             ang_vel_body=ang_vel_body,
             target_euler=self._target_euler,
-            joint_pos=joint_pos,
-            kinematics=self._kinematics,
         )
 
-        # 5. Inverse kinematics -> joint angles
-        joint_targets = self._kinematics.inverse(p_EE_desired)
+        # 4. DLS inverse kinematics -> joint angles
+        current_joints = self._joint_pos_targets.clone()
+        joint_targets = self._kinematics.inverse(
+            p_EE_desired,
+            current_joint_angles=current_joints,
+            lambda_dls=self.cfg.tdc.ik_dls_lambda,
+        )
 
-        # 6. Clamp to joint limits and set targets
-        self._joint_pos_targets = torch.clamp(
+        # 5. Clamp to joint limits
+        joint_targets = torch.clamp(
             joint_targets,
             self._joint_limits_lower,
             self._joint_limits_upper,
         )
 
-        # 7. Console logging
+        # 6. Rate limiting
+        max_delta = self.cfg.tdc.max_joint_velocity * self._tdc_dt
+        delta = joint_targets - self._joint_pos_targets
+        delta = torch.clamp(delta, -max_delta, max_delta)
+        self._joint_pos_targets = self._joint_pos_targets + delta
+
+        # 7. Anti-windup: feed actual (rate-limited) EE back to controller
+        p_EE_actual = self._kinematics.forward(self._joint_pos_targets)
+        self._tdc.update_ee_position(p_EE_actual)
+
+        # 8. Console logging
         if self._log_interval > 0 and self._control_step_counter % self._log_interval == 0:
-            i = self._log_env_id
-            t = self._control_step_counter * self.step_dt
-            r_deg = torch.rad2deg(roll[i]).item()
-            p_deg = torch.rad2deg(pitch[i]).item()
-            err_r = torch.rad2deg(self._target_euler[i, 0] - roll[i]).item()
-            err_p = torch.rad2deg(self._target_euler[i, 1] - pitch[i]).item()
-            pq = ang_vel_body[i, :2]
-            ee = p_EE_desired[i]
-            jt = self._joint_pos_targets[i]
-            logger.info(
-                "t=%5.2fs | roll=%+6.2f pitch=%+6.2f | err_r=%+6.2f err_p=%+6.2f | "
-                "p=%.3f q=%.3f | pEE=(%.4f,%.4f) | j=(%.3f,%.3f)",
-                t, r_deg, p_deg, err_r, err_p,
-                pq[0].item(), pq[1].item(),
-                ee[0].item(), ee[1].item(),
-                jt[0].item(), jt[1].item(),
-            )
-            # Debug: TDC internal term magnitudes
-            dbg = self._tdc._debug
-            def _n(x):
-                return torch.norm(x[i]).item()
-            logger.info(
-                "  terms | Lam*pEE=%+.4f | M*nu_dot=%+.4f | M*u_pd=%+.4f | "
-                "dT_b=%+.4f | H_hat=%+.4f | tau=%+.4f | pEE_raw_r=%.4f",
-                _n(dbg["tde_lambda_p"]), _n(dbg["tde_m_nu_dot"]),
-                _n(dbg["m_hat_u_pd"]), _n(dbg["tde_delta_T_b"]),
-                _n(dbg["tde_H_hat"]), _n(dbg["tau_desired"]),
-                dbg["p_EE_raw_norm"][i].item(),
-            )
+            self._log_control_state(roll, pitch, ang_vel_body, p_EE_desired)
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         """Reset specified environments including TDC controller state.
@@ -184,6 +158,9 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         Args:
             env_ids: Environment indices to reset. None = all.
         """
+        if self._log_interval > 0 and env_ids is not None and len(env_ids) < self.num_envs:
+            self._log_reset_info(env_ids)
+
         super()._reset_idx(env_ids)
 
         # Reset TDC controller history for reset environments
@@ -191,5 +168,83 @@ class HeroAgentTDCEnv(HeroAgentEnv):
             env_ids = self._robot._ALL_INDICES
         self._tdc.reset(env_ids)
 
-        # Update buoyancy force for reset envs only (may have changed from DR)
+        # Update buoyancy force for reset envs (may have changed from DR)
         self._tdc.update_buoyancy_force(self._buoy_hydro.buoyancy_force, env_ids=env_ids)
+
+    # ------------------------------------------------------------------
+    # Internal: Logging
+    # ------------------------------------------------------------------
+
+    def _setup_logger(self, tdc_cfg, tdc_dt: float) -> None:
+        """Configure console logger for TDC diagnostics."""
+        logger.setLevel(logging.INFO)
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter("[TDC] %(message)s"))
+            logger.addHandler(handler)
+            logger.propagate = False
+        logger.info(
+            "TDC Controller initialized | M_hat=(%.3f, %.3f) Kp=%.1f Kd=%.1f "
+            "F_bu=%.2f h=%.3f dt=%.4f max_jvel=%.1f base=(%.3f,%.3f)",
+            *tdc_cfg.m_hat,
+            tdc_cfg.kp,
+            tdc_cfg.kd,
+            self._tdc.F_bu[0].item(),
+            tdc_cfg.h,
+            tdc_dt,
+            tdc_cfg.max_joint_velocity,
+            *tdc_cfg.base_position,
+        )
+
+    def _log_control_state(
+        self,
+        roll: torch.Tensor,
+        pitch: torch.Tensor,
+        ang_vel_body: torch.Tensor,
+        p_EE_desired: torch.Tensor,
+    ) -> None:
+        """Log control diagnostics for a single environment."""
+        i = self._log_env_id
+        t = self._control_step_counter * self.step_dt
+        r_deg = torch.rad2deg(roll[i]).item()
+        p_deg = torch.rad2deg(pitch[i]).item()
+        err_r = torch.rad2deg(self._target_euler[i, 0] - roll[i]).item()
+        err_p = torch.rad2deg(self._target_euler[i, 1] - pitch[i]).item()
+        pq = ang_vel_body[i, :2]
+        ee = p_EE_desired[i]
+        jt = self._joint_pos_targets[i]
+        logger.info(
+            "t=%5.2fs | roll=%+6.2f pitch=%+6.2f | err_r=%+6.2f err_p=%+6.2f | "
+            "p=%.3f q=%.3f | pEE=(%.4f,%.4f) | j=(%.3f,%.3f)",
+            t,
+            r_deg,
+            p_deg,
+            err_r,
+            err_p,
+            pq[0].item(),
+            pq[1].item(),
+            ee[0].item(),
+            ee[1].item(),
+            jt[0].item(),
+            jt[1].item(),
+        )
+
+    def _log_reset_info(self, env_ids: torch.Tensor) -> None:
+        """Log termination reason before reset clears state."""
+        terminated, time_out = self._get_dones()
+        for eid in env_ids:
+            i = eid.item()
+            reason = "timeout" if time_out[i] else ("terminated" if terminated[i] else "unknown")
+            height = self._robot.data.root_pos_w[i, 2].item()
+            xy = self._robot.data.root_pos_w[i, :2] - self.scene.env_origins[i, :2]
+            dist = torch.linalg.norm(xy).item()
+            ep_len = self.episode_length_buf[i].item()
+            logger.info(
+                "RESET env=%d | reason=%s | ep_steps=%d (%.1fs) | h=%.2f dist=%.2f",
+                i,
+                reason,
+                ep_len,
+                ep_len * self.step_dt,
+                height,
+                dist,
+            )

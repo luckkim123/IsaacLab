@@ -8,12 +8,17 @@
 This module provides:
     - ALBCKinematics: Forward/Inverse kinematics for 2-link ALBC arm
     - TDCController: Time Delay Controller for roll/pitch attitude stabilization
+    - TDCControllerCfg: Configuration for TDC controller (re-exported from env_cfg)
 """
 
 from .kinematics import ALBCKinematics
 from .tdc import TDCController
 
+# Re-export config for convenience
+from ..hero_agent_env_cfg import TDCControllerCfg
+
 __all__ = [
     "ALBCKinematics",
     "TDCController",
+    "TDCControllerCfg",
 ]
