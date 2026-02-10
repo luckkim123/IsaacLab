@@ -65,9 +65,11 @@ class TDCController:
         m_hat_base = torch.tensor(cfg.m_hat, device=device, dtype=torch.float32)
         self._m_hat = m_hat_base.unsqueeze(0).expand(num_envs, -1).clone()
 
-        # PD gains
-        self._kp = cfg.kp
-        self._kd = cfg.kd
+        # PD gains — per-env (num_envs, 2) for adaptive gain integration
+        self._kp_default = cfg.kp
+        self._kd_default = cfg.kd
+        self._kp = torch.full((num_envs, 2), cfg.kp, device=device, dtype=torch.float32)
+        self._kd = torch.full((num_envs, 2), cfg.kd, device=device, dtype=torch.float32)
 
         # Physical constants
         self._h = cfg.h
@@ -141,6 +143,26 @@ class TDCController:
             if F_bu is not None:
                 self._F_bu[env_ids] = F_bu[env_ids] if F_bu.dim() > 0 else F_bu
 
+    def update_gains(
+        self,
+        kp: torch.Tensor,
+        kd: torch.Tensor,
+        env_ids: torch.Tensor | None = None,
+    ) -> None:
+        """Update per-env PD gains (for RL-adaptive gain tuning).
+
+        Args:
+            kp: Proportional gains. Shape: (N, 2) or (2,).
+            kd: Derivative gains. Shape: (N, 2) or (2,).
+            env_ids: Environment indices. None = all.
+        """
+        if env_ids is None:
+            self._kp[:] = kp
+            self._kd[:] = kd
+        else:
+            self._kp[env_ids] = kp
+            self._kd[env_ids] = kd
+
     @property
     def F_bu(self) -> torch.Tensor:
         """Buoyancy force per environment. Shape: (num_envs,)."""
@@ -205,6 +227,10 @@ class TDCController:
         self._T_b_prev[env_ids] = 0.0
         self._is_initialized[env_ids] = False
 
+        # Reset PD gains to defaults for reset environments
+        self._kp[env_ids] = self._kp_default
+        self._kd[env_ids] = self._kd_default
+
     # ------------------------------------------------------------------
     # Internal: Physics computations
     # ------------------------------------------------------------------
@@ -219,6 +245,11 @@ class TDCController:
               lf_inv = lf / (lf^2 + damping^2)
 
         Uses pre-allocated scratch buffers to avoid per-step allocation.
+
+        Note: This exploits the 2x2 anti-diagonal structure of Lambda for
+        roll/pitch control. For 6-DOF extension, Lambda becomes a general
+        coupling matrix and should use torch.linalg.solve instead of the
+        scalar DLS formula (similar to ALBCKinematics._dls_solve).
 
         Args:
             roll: Roll angle (phi). Shape: (num_envs,).

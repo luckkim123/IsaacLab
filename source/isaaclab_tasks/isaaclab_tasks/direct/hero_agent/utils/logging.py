@@ -164,3 +164,86 @@ def log_encoder_metrics(
     if encoder_params and encoder_params[0].grad is not None:
         grad_norm = sum(p.grad.data.norm(2).item() ** 2 for p in encoder_params if p.grad is not None) ** 0.5
         writer.add_scalar("Encoder/grad_norm", grad_norm, iteration)
+
+
+def log_encoder_tdc_metrics(
+    writer: Any,
+    policy: Any,
+    env: Any,
+    iteration: int,
+    device: str | torch.device,
+    logger_type: str = "tensorboard",
+) -> None:
+    """Log Encoder-TDC integration metrics to WandB/TensorBoard.
+
+    Logs adaptive TDC parameters derived from encoder z and RL actions:
+        - TDC/m_hat_roll_mean, m_hat_pitch_mean: Encoder-estimated design inertia
+        - TDC/m_hat_roll_std, m_hat_pitch_std: M_hat variation across envs
+        - TDC/kp_roll_mean, kp_pitch_mean: Adaptive proportional gains
+        - TDC/kd_roll_mean, kd_pitch_mean: Adaptive derivative gains
+        - TDC/kp_roll_std, kp_pitch_std, kd_roll_std, kd_pitch_std: Gain variation
+        - TDC/z_m_hat_roll, z_m_hat_pitch: Raw z[3:5] before clamping
+
+    Args:
+        writer: TensorBoard SummaryWriter or equivalent logger.
+        policy: Policy with get_last_z() method (ActorCriticEncoderTDC).
+        env: Wrapped environment (will be unwrapped to access TDC state).
+        iteration: Current training iteration.
+        device: Computation device.
+        logger_type: Logger type ("tensorboard" or "wandb").
+    """
+    # Unwrap to get the actual Isaac Lab env
+    raw_env = env
+    while hasattr(raw_env, "unwrapped") and raw_env is not raw_env.unwrapped:
+        raw_env = raw_env.unwrapped
+
+    if not hasattr(raw_env, "_tdc"):
+        return
+
+    tdc = raw_env._tdc
+
+    with torch.no_grad():
+        # --- M_hat from encoder z ---
+        m_hat = tdc._m_hat  # (num_envs, 2)
+        writer.add_scalar("TDC/m_hat_roll_mean", m_hat[:, 0].mean().item(), iteration)
+        writer.add_scalar("TDC/m_hat_pitch_mean", m_hat[:, 1].mean().item(), iteration)
+        writer.add_scalar("TDC/m_hat_roll_std", m_hat[:, 0].std().item(), iteration)
+        writer.add_scalar("TDC/m_hat_pitch_std", m_hat[:, 1].std().item(), iteration)
+
+        # --- Adaptive PD gains ---
+        kp = tdc._kp  # (num_envs, 2)
+        kd = tdc._kd  # (num_envs, 2)
+        writer.add_scalar("TDC/kp_roll_mean", kp[:, 0].mean().item(), iteration)
+        writer.add_scalar("TDC/kp_pitch_mean", kp[:, 1].mean().item(), iteration)
+        writer.add_scalar("TDC/kd_roll_mean", kd[:, 0].mean().item(), iteration)
+        writer.add_scalar("TDC/kd_pitch_mean", kd[:, 1].mean().item(), iteration)
+        writer.add_scalar("TDC/kp_roll_std", kp[:, 0].std().item(), iteration)
+        writer.add_scalar("TDC/kp_pitch_std", kp[:, 1].std().item(), iteration)
+        writer.add_scalar("TDC/kd_roll_std", kd[:, 0].std().item(), iteration)
+        writer.add_scalar("TDC/kd_pitch_std", kd[:, 1].std().item(), iteration)
+
+        # --- Raw z[3:5] (pre-clamp M_hat from encoder) ---
+        if hasattr(policy, "get_last_z"):
+            z = policy.get_last_z()
+            if z is not None:
+                writer.add_scalar("TDC/z_m_hat_roll", z[:, 3].mean().item(), iteration)
+                writer.add_scalar("TDC/z_m_hat_pitch", z[:, 4].mean().item(), iteration)
+
+        # --- WandB Histograms for gain distributions ---
+        if logger_type == "wandb":
+            try:
+                import wandb
+
+                wandb.log(
+                    {
+                        "TDC/kp_roll_dist": wandb.Histogram(kp[:, 0].cpu().numpy()),
+                        "TDC/kp_pitch_dist": wandb.Histogram(kp[:, 1].cpu().numpy()),
+                        "TDC/kd_roll_dist": wandb.Histogram(kd[:, 0].cpu().numpy()),
+                        "TDC/kd_pitch_dist": wandb.Histogram(kd[:, 1].cpu().numpy()),
+                        "TDC/m_hat_roll_dist": wandb.Histogram(m_hat[:, 0].cpu().numpy()),
+                        "TDC/m_hat_pitch_dist": wandb.Histogram(m_hat[:, 1].cpu().numpy()),
+                    },
+                    step=iteration,
+                )
+            except ImportError:
+                pass

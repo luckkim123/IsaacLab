@@ -17,11 +17,18 @@ ALBC Arm Geometry (from IROS 2026 paper):
 
 Inverse Kinematics uses DLS (Damped Least Squares) Jacobian pseudo-inverse
 with Yoshikawa-style adaptive damping for smooth singularity handling.
+The DLS solver uses torch.linalg.solve for dimension-independent computation,
+making it extensible to higher-DOF arms without structural changes.
 
 Note: This kinematic model is defined in the robot's local frame, where:
     - X points forward (along roll axis)
     - Y points left (along pitch axis)
     - Z points up
+
+Extension to higher-DOF:
+    Subclass ALBCKinematics and override forward(), jacobian(), and _w_max.
+    The DLS solver (_dls_solve), manipulability(), and inverse() work for
+    any Jacobian dimensions (m x n) without modification.
 """
 
 from __future__ import annotations
@@ -33,19 +40,16 @@ from isaaclab_assets.robots.uuv import (
     HERO_AGENT_ALBC_LINK2_LENGTH,
 )
 
-# Small epsilon to prevent division by zero in 2x2 determinant inversion
-_EPSILON_DET = 1e-10
-
 
 class ALBCKinematics:
-    """GPU-parallel kinematics for 2-link ALBC arm.
+    """GPU-parallel kinematics for ALBC arm.
 
     This class provides efficient batch computation of FK and IK for the ALBC
     arm across multiple parallel environments.
 
-    IK uses DLS Jacobian pseudo-inverse (closed-form 2x2 inversion) with
-    Yoshikawa-style adaptive damping. This replaces analytical cosine-law IK,
-    providing smooth behavior at workspace boundaries without clamping margins.
+    IK uses DLS Jacobian pseudo-inverse with Yoshikawa-style adaptive damping
+    via torch.linalg.solve. This provides smooth singularity handling without
+    workspace clamping and generalizes to arbitrary Jacobian dimensions.
     """
 
     def __init__(
@@ -70,9 +74,10 @@ class ALBCKinematics:
         self.l1 = link1_length
         self.l2 = link2_length
 
-        # Maximum manipulability (for adaptive lambda normalization)
-        # sqrt(|l1 * l2|) is the max of sqrt(|l1 * l2 * sin(g2)|)
-        self._sqrt_l1l2 = (abs(self.l1 * self.l2)) ** 0.5
+        # Maximum manipulability for adaptive lambda normalization.
+        # For 2-link planar: w_max = sqrt(|l1 * l2|) (at g2 = pi/2).
+        # Override _w_max for different arm geometries.
+        self._w_max = (abs(self.l1 * self.l2)) ** 0.5
 
     def forward(
         self,
@@ -84,12 +89,13 @@ class ALBCKinematics:
             x = l1*cos(g1) + l2*cos(g1+g2)
             y = l1*sin(g1) + l2*sin(g1+g2)
 
+        Override for different arm geometry.
+
         Args:
-            joint_angles: Joint angles [gamma1, gamma2] in radians.
-                Shape: (num_envs, 2).
+            joint_angles: Joint angles in radians. Shape: (num_envs, num_joints).
 
         Returns:
-            End-effector position [x, y] in meters. Shape: (num_envs, 2).
+            End-effector position in meters. Shape: (num_envs, task_dim).
         """
         g1 = joint_angles[:, 0]
         g12 = joint_angles[:, 0] + joint_angles[:, 1]
@@ -98,6 +104,63 @@ class ALBCKinematics:
         y = self.l1 * torch.sin(g1) + self.l2 * torch.sin(g12)
 
         return torch.stack([x, y], dim=-1)
+
+    def jacobian(
+        self,
+        joint_angles: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute Jacobian matrix dx/dq.
+
+        For 2-link planar arm:
+            J = [[-l1*sin(g1) - l2*sin(g1+g2),  -l2*sin(g1+g2)],
+                 [ l1*cos(g1) + l2*cos(g1+g2),   l2*cos(g1+g2)]]
+
+        Override for different arm geometry.
+
+        Args:
+            joint_angles: Joint angles in radians. Shape: (num_envs, num_joints).
+
+        Returns:
+            Jacobian matrix. Shape: (num_envs, task_dim, num_joints).
+        """
+        g1 = joint_angles[:, 0]
+        g12 = joint_angles[:, 0] + joint_angles[:, 1]
+
+        sin_g1 = torch.sin(g1)
+        cos_g1 = torch.cos(g1)
+        sin_g12 = torch.sin(g12)
+        cos_g12 = torch.cos(g12)
+
+        N = joint_angles.shape[0]
+        J = torch.zeros(N, 2, 2, device=self.device)
+        J[:, 0, 0] = -self.l1 * sin_g1 - self.l2 * sin_g12
+        J[:, 0, 1] = -self.l2 * sin_g12
+        J[:, 1, 0] = self.l1 * cos_g1 + self.l2 * cos_g12
+        J[:, 1, 1] = self.l2 * cos_g12
+
+        return J
+
+    def manipulability(
+        self,
+        J: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute Yoshikawa manipulability index (dimension-normalized).
+
+        w = det(J @ J^T) ^ (1 / (2 * task_dim))
+
+        This normalization ensures w/w_max stays in [0, 1] regardless of
+        Jacobian dimensions. For the 2-link case (task_dim=2), this reduces to
+        sqrt(|l1 * l2 * sin(g2)|), matching the ALBC 3rd week slides formula.
+
+        Args:
+            J: Jacobian matrix. Shape: (num_envs, task_dim, num_joints).
+
+        Returns:
+            Manipulability index per environment. Shape: (num_envs,).
+        """
+        JJT = torch.bmm(J, J.transpose(-1, -2))
+        m = JJT.shape[-1]
+        return torch.abs(torch.linalg.det(JJT)).pow(1.0 / (2 * m))
 
     def inverse(
         self,
@@ -108,90 +171,72 @@ class ALBCKinematics:
         """Compute joint angle update from desired EE position using DLS IK.
 
         Uses Jacobian DLS (Damped Least Squares) pseudo-inverse with
-        Yoshikawa-style adaptive damping. For the 2x2 Jacobian, JJ^T is
-        inverted analytically (closed-form, no iteration).
+        Yoshikawa-style adaptive damping. The DLS solver is dimension-independent
+        via torch.linalg.solve, so this method works for any arm geometry
+        without modification.
 
         DLS formula:
-            J_dls = J^T (J J^T + lambda^2 I)^{-1}
-            delta_q = J_dls @ (p_target - p_current)
+            delta_q = J^T (J J^T + lambda^2 I)^{-1} (p_target - p_current)
             q_new = q_current + delta_q
 
         Adaptive lambda (Yoshikawa):
-            lambda_adaptive = lambda_base * (1 - sqrt(|l1*l2*sin(g2)|) / sqrt(|l1*l2|))
-            Near singularity (g2~0 or pi): lambda -> lambda_base (max damping)
-            Far from singularity: lambda -> 0 (no damping, full accuracy)
+            w = det(JJ^T)^(1/(2m))  (dimension-normalized manipulability)
+            lambda = lambda_base * clamp(1 - w/w_max, min=0)
+            Near singularity (w~0): lambda -> lambda_base (max damping)
+            Far from singularity (w~w_max): lambda -> 0 (full accuracy)
 
         Args:
-            target_position: Desired EE position [x, y] in meters.
-                Shape: (num_envs, 2).
-            current_joint_angles: Current joint angles [gamma1, gamma2] in radians.
-                Shape: (num_envs, 2).
+            target_position: Desired EE position in meters.
+                Shape: (num_envs, task_dim).
+            current_joint_angles: Current joint angles in radians.
+                Shape: (num_envs, num_joints).
             lambda_dls: Base DLS damping factor. Larger = more damping near
-                singularity. C++ reference uses 0.15.
+                singularity. Default 0.15 (from C++ reference).
 
         Returns:
-            New joint angles [gamma1, gamma2] in radians.
-                Shape: (num_envs, 2).
+            New joint angles in radians. Shape: (num_envs, num_joints).
         """
-        g1 = current_joint_angles[:, 0]
-        g2 = current_joint_angles[:, 1]
-        g12 = g1 + g2
-
-        # Current EE position via FK
         p_current = self.forward(current_joint_angles)
+        dp = target_position - p_current
 
-        # Position error
-        dp = target_position - p_current  # (num_envs, 2)
-
-        # 2x2 Jacobian
-        # J = [[-l1*sin(g1) - l2*sin(g1+g2),  -l2*sin(g1+g2)],
-        #      [ l1*cos(g1) + l2*cos(g1+g2),   l2*cos(g1+g2)]]
-        sin_g1 = torch.sin(g1)
-        cos_g1 = torch.cos(g1)
-        sin_g12 = torch.sin(g12)
-        cos_g12 = torch.cos(g12)
-
-        j11 = -self.l1 * sin_g1 - self.l2 * sin_g12
-        j12 = -self.l2 * sin_g12
-        j21 = self.l1 * cos_g1 + self.l2 * cos_g12
-        j22 = self.l2 * cos_g12
+        J = self.jacobian(current_joint_angles)
 
         # Yoshikawa-style adaptive lambda
-        # manipulability ~ |l1 * l2 * sin(g2)|
-        manipulability = torch.sqrt(torch.abs(self.l1 * self.l2 * torch.sin(g2)))
-        lambda_adaptive = lambda_dls * (1.0 - manipulability / self._sqrt_l1l2)
-        lam2 = lambda_adaptive**2  # (num_envs,)
+        w = self.manipulability(J)
+        lam2 = (lambda_dls * torch.clamp(1.0 - w / self._w_max, min=0.0)) ** 2
 
-        # A = J @ J^T + lambda^2 * I  (2x2, computed element-wise)
-        # A11 = j11^2 + j12^2 + lam^2
-        # A12 = j11*j21 + j12*j22
-        # A21 = A12
-        # A22 = j21^2 + j22^2 + lam^2
-        a11 = j11**2 + j12**2 + lam2
-        a12 = j11 * j21 + j12 * j22
-        a22 = j21**2 + j22**2 + lam2
+        dq = self._dls_solve(J, dp, lam2)
+        return current_joint_angles + dq
 
-        # Analytical 2x2 inverse: A_inv = (1/det) * [[a22, -a12], [-a12, a11]]
-        det_A = a11 * a22 - a12**2
-        inv_det = 1.0 / (det_A + _EPSILON_DET)
+    def _dls_solve(
+        self,
+        J: torch.Tensor,
+        dp: torch.Tensor,
+        lam2: torch.Tensor,
+    ) -> torch.Tensor:
+        """Solve DLS IK: delta_q = J^T (JJ^T + lambda^2 I)^{-1} dp.
 
-        # A_inv columns
-        ai11 = a22 * inv_det
-        ai12 = -a12 * inv_det
-        ai22 = a11 * inv_det
+        Uses torch.linalg.solve instead of explicit matrix inversion for
+        numerical stability and dimension-independence. Works for any
+        (num_envs, m, n) Jacobian where m = task_dim, n = num_joints.
 
-        # J_dls = J^T @ A_inv  (2x2 @ 2x2 -> 2x2, done element-wise)
-        # J^T = [[j11, j21], [j12, j22]]
-        # J_dls row 0 = [j11*ai11 + j21*ai12, j11*ai12 + j21*ai22]
-        # J_dls row 1 = [j12*ai11 + j22*ai12, j12*ai12 + j22*ai22]
-        jd11 = j11 * ai11 + j21 * ai12
-        jd12 = j11 * ai12 + j21 * ai22
-        jd21 = j12 * ai11 + j22 * ai12
-        jd22 = j12 * ai12 + j22 * ai22
+        For square J (m=n), this is equivalent to the analytical inverse
+        but generalizes to non-square Jacobians (over/underdetermined systems).
 
-        # delta_q = J_dls @ dp
-        dq1 = jd11 * dp[:, 0] + jd12 * dp[:, 1]
-        dq2 = jd21 * dp[:, 0] + jd22 * dp[:, 1]
+        Args:
+            J: Jacobian. Shape: (num_envs, m, n).
+            dp: Position error. Shape: (num_envs, m).
+            lam2: Squared damping per-env. Shape: (num_envs,).
 
-        q_new = current_joint_angles + torch.stack([dq1, dq2], dim=-1)
-        return q_new
+        Returns:
+            Joint angle update. Shape: (num_envs, n).
+        """
+        JJT = torch.bmm(J, J.transpose(-1, -2))  # (num_envs, m, m)
+        m = JJT.shape[-1]
+        A = JJT + lam2.unsqueeze(-1).unsqueeze(-1) * torch.eye(m, device=J.device)
+
+        # Solve A @ x = dp for x = (JJ^T + lam^2 I)^{-1} dp
+        # Then delta_q = J^T @ x
+        x = torch.linalg.solve(A, dp.unsqueeze(-1))  # (num_envs, m, 1)
+        dq = torch.bmm(J.transpose(-1, -2), x).squeeze(-1)  # (num_envs, n)
+        return dq

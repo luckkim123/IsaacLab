@@ -11,6 +11,7 @@ This module provides:
 """
 
 from .actor_critic_encoder import ActorCriticEncoder
+from .actor_critic_encoder_tdc import ActorCriticEncoderTDC
 from .encoder_runner import EncoderRunner
 
-__all__ = ["ActorCriticEncoder", "EncoderRunner"]
+__all__ = ["ActorCriticEncoder", "ActorCriticEncoderTDC", "EncoderRunner"]

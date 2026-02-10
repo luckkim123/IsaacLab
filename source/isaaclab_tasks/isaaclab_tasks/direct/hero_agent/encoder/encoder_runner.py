@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from rsl_rl.runners import OnPolicyRunner
 
-from ..utils.logging import log_encoder_metrics
+from ..utils.logging import log_encoder_metrics, log_encoder_tdc_metrics
 
 
 class EncoderRunner(OnPolicyRunner):
@@ -51,6 +51,28 @@ class EncoderRunner(OnPolicyRunner):
         else:
             print("[EncoderRunner] No encoder detected. Using standard logging only.")
 
+        # Wire up encoder policy to env for TDC M_hat extraction
+        self._connect_encoder_to_env()
+
+    def _connect_encoder_to_env(self) -> None:
+        """Wire encoder policy to env if it supports set_encoder_policy().
+
+        This enables the HeroAgentEncoderTDCEnv to extract z -> M_hat from the
+        encoder during _pre_physics_step(). The env is wrapped in RslRlVecEnvWrapper,
+        so we access the unwrapped env via .unwrapped attribute chain.
+        """
+        if not self._has_encoder:
+            return
+
+        # Unwrap to get the actual Isaac Lab env
+        raw_env = self.env
+        while hasattr(raw_env, "unwrapped") and raw_env is not raw_env.unwrapped:
+            raw_env = raw_env.unwrapped
+
+        if hasattr(raw_env, "set_encoder_policy"):
+            raw_env.set_encoder_policy(self.alg.policy)
+            print("[EncoderRunner] Connected encoder policy to env for M_hat extraction.")
+
     def log(self, locs: dict, width: int = 80, pad: int = 35) -> None:
         """Extended log method that adds encoder-specific metrics.
 
@@ -68,6 +90,15 @@ class EncoderRunner(OnPolicyRunner):
         # Log encoder metrics if encoder exists and logging is enabled
         if self._has_encoder and self.log_dir is not None and not self.disable_logs:
             log_encoder_metrics(
+                writer=self.writer,
+                policy=self.alg.policy,
+                env=self.env,
+                iteration=locs["it"],
+                device=self.device,
+                logger_type=self.logger_type,
+            )
+            # Log TDC-specific metrics (M_hat, adaptive gains) if env has TDC
+            log_encoder_tdc_metrics(
                 writer=self.writer,
                 policy=self.alg.policy,
                 env=self.env,

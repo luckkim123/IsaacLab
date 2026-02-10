@@ -7,20 +7,27 @@
 
 This module provides:
     - ActorCriticEncoder: Custom network for HORA Phase 1 teacher training
+    - ActorCriticEncoderTDC: Encoder variant exposing z for TDC M_hat
     - HeroAgentPPORunnerCfg: Standard PPO for joint-based attitude control
     - HeroAgentEncoderPPORunnerCfg: HORA Phase 1 with extrinsics encoder
+    - HeroAgentEncoderTDCPPORunnerCfg: Encoder-TDC integration
 """
 
-from ..encoder import ActorCriticEncoder
+from ..encoder import ActorCriticEncoder, ActorCriticEncoderTDC
 from .rsl_rl_ppo_cfg import (
     HeroAgentEncoderPPORunnerCfg,
+    HeroAgentEncoderTDCPPORunnerCfg,
     HeroAgentPPORunnerCfg,
     RslRlPpoActorCriticEncoderCfg,
+    RslRlPpoActorCriticEncoderTDCCfg,
 )
 
 __all__ = [
     "ActorCriticEncoder",
+    "ActorCriticEncoderTDC",
     "HeroAgentPPORunnerCfg",
     "HeroAgentEncoderPPORunnerCfg",
+    "HeroAgentEncoderTDCPPORunnerCfg",
     "RslRlPpoActorCriticEncoderCfg",
+    "RslRlPpoActorCriticEncoderTDCCfg",
 ]

@@ -325,6 +325,41 @@ class HeroAgentTDCEnvCfg(HeroAgentEnvCfg):
 
 
 @configclass
+class HeroAgentEncoderTDCEnvCfg(HeroAgentTrainEnvCfg):
+    """Encoder-TDC integration: RL learns adaptive gains + M_hat for TDC.
+
+    The RL actor outputs 4D actions [Kp_roll, Kp_pitch, Kd_roll, Kd_pitch],
+    which are converted to TDC gains via sigmoid scaling. The encoder latent
+    z[3:5] provides adaptive M_hat for the TDC controller.
+
+    Inherits DR, ocean current, and payload from HeroAgentTrainEnvCfg.
+    """
+
+    tdc: TDCControllerCfg = TDCControllerCfg(log_interval=0)
+    state_space: int = 22  # privileged obs for encoder
+    action_space: int = 4  # Kp_roll, Kp_pitch, Kd_roll, Kd_pitch
+    observation_space: int = 13  # same policy obs
+    enable_payload: bool = True
+
+    # Gain bounds (after sigmoid scaling in env)
+    kp_range: tuple[float, float] = (10.0, 100.0)
+    kd_range: tuple[float, float] = (2.0, 30.0)
+
+    # M_hat bounds (from encoder z extraction)
+    m_hat_min: float = 0.05
+    m_hat_max: float = 0.50
+
+    def __post_init__(self):
+        super().__post_init__()
+        # TDC timing: decimation=1 (200Hz step), control_decimation=4 (50Hz TDC)
+        self.decimation = 1
+        self.control_decimation = 4
+        # Lower PhysX PD for smoother arm motion under TDC control
+        self.albc_joint_stiffness = 200.0
+        self.albc_joint_damping = 10.0
+
+
+@configclass
 class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
     """Hero Agent encoder training with privileged hydrodynamic info.
 
