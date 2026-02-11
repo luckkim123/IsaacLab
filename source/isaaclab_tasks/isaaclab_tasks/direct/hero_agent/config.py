@@ -23,8 +23,6 @@ from __future__ import annotations
 
 import math
 
-import torch
-
 import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
 from isaaclab.scene import InteractiveSceneCfg
@@ -324,14 +322,15 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
     # IMU sensor noise: bias (per-episode drift) + white noise (per-step)
     # Dims 0-2: euler angles (rad), 3-5: angular velocity (rad/s),
     # 6-8: attitude errors (same IMU source as euler -> same noise), 9-12: no noise
+    # Values stored as tuples for OmegaConf/Hydra compatibility; converted to tensors at env init.
     observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
         noise_cfg=GaussianNoiseCfg(
             mean=0.0,
-            std=torch.tensor([0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.01, 0.01, 0.01, 0.0, 0.0, 0.0, 0.0]),
+            std=(0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.01, 0.01, 0.01, 0.0, 0.0, 0.0, 0.0),
         ),
         bias_noise_cfg=UniformNoiseCfg(
-            n_min=torch.tensor([-0.005, -0.005, -0.005, -0.01, -0.01, -0.01, -0.005, -0.005, -0.005, 0, 0, 0, 0]),
-            n_max=torch.tensor([0.005, 0.005, 0.005, 0.01, 0.01, 0.01, 0.005, 0.005, 0.005, 0, 0, 0, 0]),
+            n_min=(-0.005, -0.005, -0.005, -0.01, -0.01, -0.01, -0.005, -0.005, -0.005, 0, 0, 0, 0),
+            n_max=(0.005, 0.005, 0.005, 0.01, 0.01, 0.01, 0.005, 0.005, 0.005, 0, 0, 0, 0),
         ),
     )
 

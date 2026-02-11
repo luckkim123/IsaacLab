@@ -147,6 +147,10 @@ class RewardManager:
             for cfg in self._term_cfgs
         ]
 
+        # Per-step raw (unweighted, un-dt-scaled) mean values for diagnostics.
+        # Updated each compute() call; read by _collect_episode_metrics().
+        self._step_raw_means: dict[str, float] = {name: 0.0 for name in self._term_names}
+
         # Initialize buffers
         self._reward_buf = torch.zeros(num_envs, dtype=torch.float32, device=device)
         self._episode_sums: dict[str, torch.Tensor] = {
@@ -162,6 +166,16 @@ class RewardManager:
     def episode_sums(self) -> dict[str, torch.Tensor]:
         """Episode sums for each reward term (for logging)."""
         return self._episode_sums
+
+    @property
+    def step_raw_means(self) -> dict[str, float]:
+        """Last step's unweighted, un-dt-scaled raw mean per term."""
+        return self._step_raw_means
+
+    @property
+    def active_weights(self) -> dict[str, float]:
+        """Current active weight per term (curriculum-adjusted)."""
+        return {name: self._active_weights[i] for i, name in enumerate(self._term_names)}
 
     def update_curriculum(self, iteration: int, end_iter: int) -> None:
         """Update penalty weights based on training progress.
@@ -195,6 +209,9 @@ class RewardManager:
             merged_params = {**term_cfg.params, **context}
             term_value = term_cfg.func(robot, **merged_params)
             weight = self._active_weights[i]
+
+            # Store raw (unweighted, un-dt-scaled) mean for diagnostics
+            self._step_raw_means[name] = term_value.mean().item()
 
             if term_cfg.scale_by_dt:
                 scaled_value = term_value * weight * dt

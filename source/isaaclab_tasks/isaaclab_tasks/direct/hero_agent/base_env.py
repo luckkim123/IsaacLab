@@ -105,7 +105,22 @@ class HeroAgentEnv(DirectRLEnv):
             render_mode: Render mode for visualization.
             **kwargs: Additional arguments.
         """
+        # Convert noise config tuples to tensors before DirectRLEnv creates the noise model.
+        # Tuples are used in config for OmegaConf/Hydra serialization compatibility.
+        self._convert_noise_cfg_tuples(cfg)
+
         super().__init__(cfg, render_mode, **kwargs)
+
+        # Pre-expand the bias buffer to match observation dimensions.
+        # NoiseModelWithAdditiveBias initializes bias as (num_envs, 1) and only expands
+        # on first __call__. But the wrapper calls env.reset() before any step, which
+        # triggers noise_model.reset() while bias is still (N, 1). With per-dimension
+        # n_min/n_max tensors, the reset produces (N, obs_dim) which can't fit in (N, 1).
+        if self.cfg.observation_noise_model is not None:
+            nm = self._observation_noise_model
+            if nm._sample_bias_per_component and nm._num_components is None:
+                nm._num_components = self.cfg.observation_space
+                nm._bias = nm._bias.repeat(1, nm._num_components)
 
         # Validate state_space vs enable_payload consistency
         if self.cfg.state_space >= 24 and not self.cfg.enable_payload:
@@ -124,6 +139,26 @@ class HeroAgentEnv(DirectRLEnv):
         # Debug visualization manager
         self._debug_vis = DebugVisualization(self.num_envs, self.device)
         self.set_debug_vis(self.cfg.debug_vis)
+
+    @staticmethod
+    def _convert_noise_cfg_tuples(cfg: HeroAgentEnvCfg) -> None:
+        """Convert noise config tuple/list values to torch.Tensor in-place.
+
+        Config uses tuples for OmegaConf/Hydra serialization compatibility.
+        The noise model functions require float or torch.Tensor for arithmetic.
+        Must be called before DirectRLEnv.__init__() which instantiates noise models.
+        """
+        noise_model = getattr(cfg, "observation_noise_model", None)
+        if noise_model is None:
+            return
+        for sub_cfg_attr in ("noise_cfg", "bias_noise_cfg"):
+            sub_cfg = getattr(noise_model, sub_cfg_attr, None)
+            if sub_cfg is None:
+                continue
+            for param in ("std", "mean", "n_min", "n_max"):
+                val = getattr(sub_cfg, param, None)
+                if isinstance(val, (list, tuple)):
+                    setattr(sub_cfg, param, torch.tensor(val))
 
     def _init_body_ids(self) -> None:
         """Initialize body IDs and physics parameters."""
@@ -567,6 +602,24 @@ class HeroAgentEnv(DirectRLEnv):
 
         # Cumulative control effort
         log["Performance/cumulative_effort"] = self._cumulative_effort[env_ids].mean().item()
+
+        # --- Per-step reward diagnostics (last step snapshot) ---
+        # Raw magnitude: unweighted function output (for cross-term comparison)
+        for term_name, raw_mean in self._reward_manager.step_raw_means.items():
+            log[f"Reward_Magnitude/{term_name}"] = raw_mean
+        # Active weight: curriculum-adjusted weight (for tracking ramp progress)
+        for term_name, weight in self._reward_manager.active_weights.items():
+            log[f"Reward_Weight/{term_name}"] = weight
+
+        # --- Action diagnostics ---
+        log["Action/magnitude_mean"] = torch.linalg.norm(self._actions[env_ids], dim=-1).mean().item()
+        log["Action/rate_mean"] = (
+            torch.linalg.norm(self._actions[env_ids] - self._prev_actions[env_ids], dim=-1).mean().item()
+        )
+
+        # --- Dynamics diagnostics ---
+        ang_vel_rp = self._robot.data.root_ang_vel_b[env_ids, :2]
+        log["Dynamics/angular_velocity_rms"] = ang_vel_rp.pow(2).mean().sqrt().item()
 
         # TDC diagnostics (for any env with TDC controller)
         if hasattr(self, "_tdc"):

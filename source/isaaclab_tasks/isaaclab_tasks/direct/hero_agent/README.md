@@ -9,7 +9,7 @@
 [![Isaac Sim][isaacsim-img]][isaacsim-url]
 [![PyTorch][pytorch-img]][pytorch-url]
 
-[Architecture][arch-url] | [Getting Started](#getting-started) | [Environments](#available-environments) | [Contributing](#contributing)
+[Getting Started](#getting-started) | [Environments](#available-environments) | [Contributing](#contributing)
 
 </div>
 
@@ -205,10 +205,6 @@ See `tdc_env.py` for a complete example.
 
 </details>
 
-## Documentation
-
-Detailed architecture documentation is available in [`docs/ARCHITECTURE.md`][arch-url], covering simulation timing, observation spaces, hydrodynamics model, and domain randomization parameters. TDC theory and literature references are in [`docs/TDC_LITERATURE_SURVEY.md`][tdc-survey-url]. Research derivations and design notes are in [`/workspace/references/iros_2026/notes/`][notes-url].
-
 ## Project Structure
 
 ```
@@ -228,7 +224,7 @@ hero_agent/
 ├── deploy/               # JIT/ONNX export for C++ integration
 ├── mdp/                  # Observations, rewards, domain randomization events
 ├── utils/                # Debug visualization + episode logging
-└── docs/                 # Architecture reference + TDC literature survey
+└── docs/                 # Architecture, TDC theory, dynamics, training, DR, sim-to-real
 ```
 
 ## Contributing
@@ -264,9 +260,6 @@ Built on [Isaac Lab][isaaclab-url] (NVIDIA) for GPU-accelerated simulation, [RSL
 [isaacsim-url]: https://developer.nvidia.com/isaac-sim
 [pytorch-img]: https://img.shields.io/badge/PyTorch-2.2%2B-ee4c2c.svg
 [pytorch-url]: https://pytorch.org/
-[arch-url]: docs/ARCHITECTURE.md
-[tdc-survey-url]: docs/TDC_LITERATURE_SURVEY.md
-[notes-url]: /workspace/references/iros_2026/notes/
 [contributing-url]: https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTING.md
 [isaaclab-url]: https://github.com/isaac-sim/IsaacLab
 [rslrl-url]: https://github.com/leggedrobotics/rsl_rl
