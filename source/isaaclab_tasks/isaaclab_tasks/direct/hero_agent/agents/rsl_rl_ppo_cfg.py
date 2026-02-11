@@ -24,11 +24,17 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 # Register ActorCriticEncoder in RSL-RL runner module namespace.
 # The runner resolves policy class_name dynamically (on_policy_runner.py:416).
 # This injection makes custom network classes resolvable in that scope.
-from ..encoder import ActorCriticEncoder, ActorCriticEncoderTDC, ActorCriticEncoderTDCAdapt
+from ..encoder import (
+    ActorCriticConstrained,
+    ActorCriticEncoder,
+    ActorCriticEncoderTDC,
+    ActorCriticEncoderTDCAdapt,
+)
 
 _runner_module.ActorCriticEncoder = ActorCriticEncoder
 _runner_module.ActorCriticEncoderTDC = ActorCriticEncoderTDC
 _runner_module.ActorCriticEncoderTDCAdapt = ActorCriticEncoderTDCAdapt
+_runner_module.ActorCriticConstrained = ActorCriticConstrained
 
 
 # =============================================================================
@@ -73,6 +79,19 @@ class RslRlPpoActorCriticEncoderTDCCfg(_RslRlPpoEncoderBaseCfg):
     """
 
     class_name: str = "ActorCriticEncoderTDC"
+
+
+@configclass
+class RslRlPpoActorCriticConstrainedCfg(_RslRlPpoEncoderBaseCfg):
+    """PPO actor-critic config with encoder for constrained TDC training.
+
+    Uses ActorCriticConstrained which extends ActorCriticEncoderTDC with
+    multi-head cost value function heads.
+    """
+
+    class_name: str = "ActorCriticConstrained"
+    num_constraints: int = 5
+    cost_hidden_dims: list[int] = [64]
 
 
 @configclass
@@ -204,6 +223,50 @@ class HeroAgentEncoderTDCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     }
 
     policy = RslRlPpoActorCriticEncoderTDCCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
+        actor_hidden_dims=[64, 64],
+        critic_hidden_dims=[64, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.0,
+        num_learning_epochs=8,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
+class HeroAgentConstrainedEncoderTDCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO configuration for Constrained Encoder-TDC (NORBC IPO).
+
+    Uses ActorCriticConstrained with multi-head cost critic and ConstrainedPPO
+    algorithm with log-barrier constraints.
+    """
+
+    seed = 42
+    num_steps_per_env = 32
+    max_iterations = 600
+    save_interval = 50
+    experiment_name = "hero_agent_constrained_tdc"
+    empirical_normalization = False
+
+    obs_groups = {
+        "policy": ["policy", "privileged"],
+        "critic": ["policy", "privileged"],
+    }
+
+    policy = RslRlPpoActorCriticConstrainedCfg(
         init_noise_std=1.0,
         actor_obs_normalization=False,
         critic_obs_normalization=False,

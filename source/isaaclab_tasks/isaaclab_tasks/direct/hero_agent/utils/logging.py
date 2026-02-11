@@ -469,3 +469,56 @@ def log_encoder_tdc_metrics(
     # Flush if we own the metrics dict
     if flush_after:
         flush_metrics(writer, metrics, iteration, logger_type, wandb_extras=wandb_extras)
+
+
+# -----------------------------------------------------------------------------
+# Constraint metrics (called from ConstrainedEncoderRunner.log)
+# -----------------------------------------------------------------------------
+
+
+def log_constraint_metrics(
+    writer: Any,
+    barrier: Any,
+    storage: Any,
+    constraint_cfgs: list,
+    iteration: int,
+    logger_type: str = "tensorboard",
+) -> None:
+    """Log constrained RL metrics to WandB/TensorBoard.
+
+    Logs barrier manager state and cost statistics:
+        - Per-constraint adaptive limits, original limits, slack ratios
+        - Per-constraint cost returns and violation rates
+
+    For probabilistic constraints, violation_rate = fraction of steps with
+    binary cost > 0.5 (empirical violation probability). For average constraints,
+    violation_rate = fraction of envs whose mean cost return exceeds d_k.
+
+    Args:
+        writer: TensorBoard SummaryWriter or equivalent logger.
+        barrier: LogBarrierManager with get_metrics().
+        storage: ConstrainedRolloutStorage with costs/cost_returns.
+        constraint_cfgs: List of ConstraintCfg for type dispatch.
+        iteration: Current training iteration.
+        logger_type: Logger type ("tensorboard" or "wandb").
+    """
+    metrics: dict[str, float] = {}
+
+    # Barrier state (adaptive limits, slack ratios)
+    metrics.update(barrier.get_metrics())
+
+    # Cost returns and violation rates from storage
+    if hasattr(storage, "cost_returns") and storage.num_constraints > 0:
+        for k, name in enumerate(barrier.constraint_names):
+            cr = storage.cost_returns[:, :, k]
+            metrics[f"Constraint/{name}_cost_return_mean"] = cr.mean().item()
+
+            if constraint_cfgs[k].constraint_type == "probabilistic":
+                costs = storage.costs[:, :, k]  # (T, N)
+                metrics[f"Constraint/{name}_violation_rate"] = (costs > 0.5).float().mean().item()
+            else:
+                per_env_cr = cr.mean(dim=0)  # (N,)
+                d_k = barrier.original_limits[k].item()
+                metrics[f"Constraint/{name}_violation_rate"] = (per_env_cr > d_k).float().mean().item()
+
+    flush_metrics(writer, metrics, iteration, logger_type)

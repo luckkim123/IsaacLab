@@ -200,10 +200,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # Hero Agent tasks use EncoderRunner for curriculum + encoder logging
         is_hero_agent = args_cli.task.startswith("Isaac-HeroAgent") if args_cli.task else False
         policy_class_name = getattr(agent_cfg.policy, "class_name", None)
+        use_constrained_runner = policy_class_name == "ActorCriticConstrained"
         use_encoder_runner = is_hero_agent or (
             policy_class_name and policy_class_name.startswith("ActorCriticEncoder")
         )
-        if use_encoder_runner:
+        if use_constrained_runner:
+            from isaaclab_tasks.direct.hero_agent.runners import ConstrainedEncoderRunner
+
+            print("[INFO] Using ConstrainedEncoderRunner for constrained TDC training.")
+            runner = ConstrainedEncoderRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+        elif use_encoder_runner:
             from isaaclab_tasks.direct.hero_agent.runners import EncoderRunner
 
             print("[INFO] Using EncoderRunner for Hero Agent (curriculum + encoder metrics).")

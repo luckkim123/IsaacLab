@@ -40,8 +40,9 @@ from isaaclab_assets.robots.uuv import (
     OceanCurrentCfg,
 )
 
+from .constraints.config import ConstrainedTrainingCfg, ConstraintCfg
 from .controllers import TDCControllerCfg
-from .mdp import ALBCRewardCfg, EncoderTDCRewardCfg
+from .mdp import ALBCRewardCfg, ConstrainedEncoderTDCRewardCfg, EncoderTDCRewardCfg
 
 
 @configclass
@@ -292,6 +293,7 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     min_height: float = -10.0
     max_height: float = 10.0
     max_distance_from_origin: float = 10.0
+    max_angular_velocity: float = 3.14159  # rad/s (~180 deg/s); terminate if roll/pitch rate exceeds this
 
     # ==========================================================================
     # Domain Randomization
@@ -422,6 +424,64 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTrainEnvCfg):
         enable=True,
         joint_stiffness_range=(160.0, 240.0),
         joint_damping_range=(8.0, 12.0),
+    )
+
+
+@configclass
+class HeroAgentConstrainedEncoderTDCEnvCfg(HeroAgentEncoderTDCEnvCfg):
+    """Encoder-TDC with NORBC constrained RL training.
+
+    Extends HeroAgentEncoderTDCEnvCfg with IPO constraint definitions.
+    The ConstrainedTrainingCfg contains 5 constraints:
+        1. workspace: EE position within reachable radius (probabilistic, D=0.001)
+        2. control_smoothness: EE position change (average, D=0.002)
+        3. inertia_rate: Encoder z change rate (average, D=0.001)
+        4. angular_velocity: Body angular velocity limit (probabilistic, D=0.01)
+        5. joint_velocity: Joint velocity sim-to-real limit (probabilistic, D=0.5)
+
+    D_k values are chosen so that discounted limits d_k = D_k/(1-gamma)
+    are comparable to observed cost returns, ensuring log-barrier gradient
+    is strong enough to influence the policy.
+    """
+
+    # Safety penalties disabled -- handled by IPO constraints instead
+    reward: ConstrainedEncoderTDCRewardCfg = ConstrainedEncoderTDCRewardCfg()
+
+    constrained_training: ConstrainedTrainingCfg = ConstrainedTrainingCfg(
+        barrier_t=10.0,
+        adaptive_alpha=0.5,
+        cost_gamma=0.99,
+        cost_value_coef=0.5,
+        constraints=[
+            ConstraintCfg(
+                name="workspace",
+                constraint_type="probabilistic",
+                limit_D=0.001,
+                params={"r_max": 0.466},
+            ),
+            ConstraintCfg(
+                name="control_smoothness",
+                constraint_type="average",
+                limit_D=0.002,
+            ),
+            ConstraintCfg(
+                name="inertia_rate",
+                constraint_type="average",
+                limit_D=0.001,
+            ),
+            ConstraintCfg(
+                name="angular_velocity",
+                constraint_type="probabilistic",
+                limit_D=0.01,
+                params={"omega_max": 1.5},
+            ),
+            ConstraintCfg(
+                name="joint_velocity",
+                constraint_type="probabilistic",
+                limit_D=0.5,
+                params={"vel_max": 1.0},
+            ),
+        ],
     )
 
 

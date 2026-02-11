@@ -55,17 +55,17 @@ class ALBCRewardCfg:
     tracking_weight: float = 1.0
     tracking_sigma: float = 0.25
 
-    # Progress (telescoping)
+    # Progress (telescoping, NOT dt-scaled)
     progress_weight: float = 1.0
 
-    # Angular velocity penalty
+    # Angular velocity penalty (curriculum: starts at 1/10)
     angular_velocity_weight: float = -1.0
 
     # Action magnitude penalty
     action_magnitude_weight: float = -1.0
 
-    # Action rate penalty
-    action_rate_weight: float = -1.0
+    # Action rate penalty (NOT dt-scaled, curriculum: starts at 1/10)
+    action_rate_weight: float = -0.005
 
     # Curriculum
     curriculum_end_iter: int = 200
@@ -75,11 +75,36 @@ class ALBCRewardCfg:
 class EncoderTDCRewardCfg(ALBCRewardCfg):
     """Encoder-TDC reward config with adjusted weights and TDE residual penalty.
 
-    Inherits all weights from ALBCRewardCfg (all |1.0|).
+    Inherits tracking/progress/angular_velocity from ALBCRewardCfg.
+    Overrides action weights for gain-tuning semantics.
     Adds TDE residual penalty to encourage accurate M_hat.
     """
 
-    tde_residual_weight: float = -1.0
+    # Lighter action_magnitude: sigmoid midpoint is a reasonable default
+    action_magnitude_weight: float = -0.5
+
+    # Heavier action_rate: gain stability is critical for TDC performance
+    action_rate_weight: float = -0.01
+
+    tde_residual_weight: float = -0.05
+
+
+@configclass
+class ConstrainedEncoderTDCRewardCfg(EncoderTDCRewardCfg):
+    """Reward config for constrained Encoder-TDC training.
+
+    Disables safety-related penalties that are now handled by IPO constraints:
+        - action_magnitude -> smoothness constraint
+        - action_rate -> smoothness constraint
+        - angular_velocity -> implicit in tracking reward
+
+    Retains pure performance signals (tracking, progress) and tde_residual
+    for M_hat accuracy (no constraint equivalent).
+    """
+
+    angular_velocity_weight: float = 0.0
+    action_magnitude_weight: float = 0.0
+    action_rate_weight: float = 0.0
 
 
 # =============================================================================
@@ -293,7 +318,8 @@ def action_rate_penalty(
     """Sum of squared action differences between consecutive steps.
 
     Penalizes abrupt action changes to encourage smooth control.
-    NOT dt-scaled (per-step difference, da ~ dt so naturally frequency-invariant).
+    NOT dt-scaled: per-step delta naturally scales with frequency
+    (halving dt -> halving delta -> quartering squared delta, but doubling steps).
     Use with negative weight.
     """
     return torch.sum((actions - prev_actions) ** 2, dim=-1)

@@ -23,8 +23,8 @@ $$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tr
 | $\sigma$ | 0.25 rad | 0.25 rad | `tracking_sigma` |
 | $w_2$ | 5.0 | 5.0 | `progress_weight` |
 | $w_3$ | -0.5 | -0.5 | `angular_velocity_weight` |
-| $w_4$ | -0.1 | -0.02 | `action_magnitude_weight` |
-| $w_5$ | -0.05 | -0.1 | `action_rate_weight` |
+| $w_4$ | -0.5 | -0.1 | `action_magnitude_weight` |
+| $w_5$ | -0.005 | -0.01 | `action_rate_weight` (NOT dt-scaled) |
 | $w_6$ | N/A | -0.05 | `tde_residual_weight` |
 | end iter | 200 | 200 | `curriculum_end_iter` |
 | $\Delta t$ | 0.005 | 0.005 | `step_dt` (decimation=1, sim dt=0.005) |
@@ -267,19 +267,19 @@ def action_magnitude_penalty(_robot, actions, **_kwargs):
 
 Base RL 환경에서 action space는 2D (관절 2개), 각 action $\in [-1, 1]$:
 
-| $a_1$ | $a_2$ | $\sum a^2$ | 페널티 (Base, w=-0.1, dt) | 페널티 (Enc-TDC, w=-0.02, dt) |
+| $a_1$ | $a_2$ | $\sum a^2$ | 페널티 (Base, w=-0.5, dt) | 페널티 (Enc-TDC, w=-0.1, dt) |
 |:---|:---|:---|:---|:---|
 | 0.0 | 0.0 | 0.00 | 0.0000 | 0.0000 |
-| 0.3 | 0.3 | 0.18 | -0.00009 | -0.00002 |
-| 0.5 | 0.5 | 0.50 | -0.00025 | -0.00005 |
-| 1.0 | 1.0 | 2.00 | -0.00100 | -0.00020 |
+| 0.3 | 0.3 | 0.18 | -0.00045 | -0.00009 |
+| 0.5 | 0.5 | 0.50 | -0.00125 | -0.00025 |
+| 1.0 | 1.0 | 2.00 | -0.00500 | -0.00100 |
 
 ### Design Rationale
 
 1. **L2 (제곱) 페널티**: 작은 행동은 거의 무시, 큰 행동만 강하게 억제.
 2. **환경별 가중치 분리**:
-   - Base RL ($w_4 = -0.1$): 관절 속도 제어이므로 과도한 속도 억제 필요.
-   - Encoder-TDC ($w_4 = -0.02$): sigmoid midpoint가 합리적 기본값이므로 가중치 완화. 과한 페널티는 게인을 midpoint에 고착시킴.
+   - Base RL ($w_4 = -0.5$): 관절 속도 제어. fix1 실험(-1.0)에서 action~0.09로 수렴, v1 실험(-0.1)에서 action~0.47로 불안정. 중간값 -0.5 채택.
+   - Encoder-TDC ($w_4 = -0.1$): sigmoid midpoint가 합리적 기본값이므로 Base의 1/5로 완화. 과한 페널티는 게인을 midpoint에 고착시킴.
 3. **dt-scaled**: 순간 상태 품질 측정.
 
 ---
@@ -299,21 +299,21 @@ def action_rate_penalty(_robot, actions, prev_actions, **_kwargs):
 
 ### Behavior
 
-| $\Delta a_1$ | $\Delta a_2$ | $\sum (\Delta a)^2$ | 페널티 (Base, w=-0.05) | 페널티 (Enc-TDC, w=-0.1) |
+| $\Delta a_1$ | $\Delta a_2$ | $\sum (\Delta a)^2$ | 페널티 (Base, w=-0.005) | 페널티 (Enc-TDC, w=-0.01) |
 |:---|:---|:---|:---|:---|
 | 0.0 | 0.0 | 0.000 | 0.000 | 0.000 |
-| 0.01 | 0.01 | 0.0002 | -0.00001 | -0.00002 |
-| 0.1 | 0.1 | 0.02 | -0.001 | -0.002 |
-| 0.3 | 0.3 | 0.18 | -0.009 | -0.018 |
-| 0.5 | 0.5 | 0.50 | -0.025 | -0.050 |
+| 0.01 | 0.01 | 0.0002 | -0.000001 | -0.000002 |
+| 0.1 | 0.1 | 0.02 | -0.0001 | -0.0002 |
+| 0.3 | 0.3 | 0.18 | -0.0009 | -0.0018 |
+| 0.5 | 0.5 | 0.50 | -0.0025 | -0.005 |
 
 ### Design Rationale
 
 1. **Smooth control**: 연속 스텝 간 행동 변화를 최소화하여 부드러운 제어 유도. 특히 TDC에서 게인 급변 방지.
-2. **NOT dt-scaled**: per-step 차분이므로 $\Delta a \sim \Delta t$ 관계에 의해 자연적으로 frequency-invariant.
+2. **NOT dt-scaled**: per-step 차분이므로 $\Delta a \sim \Delta t$ 관계에 의해 자연적으로 frequency-invariant. dt를 곱하지 않으므로 weight가 dt-scaled 항보다 작아야 동등한 기여.
 3. **환경별 가중치 분리**:
-   - Base RL ($w_5 = -0.05$): 관절 속도 변화는 물리적으로 감쇠됨.
-   - Encoder-TDC ($w_5 = -0.1$): 게인 안정성이 TDC 성능에 직결 (M_hat * u_pd 항 안정성).
+   - Base RL ($w_5 = -0.005$): fix1 실험(w=-1.0, dt-scaled)에서 검증된 균형과 동등. 관절 속도 변화는 물리적으로 감쇠됨.
+   - Encoder-TDC ($w_5 = -0.01$): Base의 2배. 게인 안정성이 TDC 성능에 직결 (M_hat * u_pd 항 안정성).
 4. **Curriculum**: 초기 $w_5 / 10$에서 시작하여 점진적 증가.
 
 ---
@@ -373,8 +373,8 @@ $$w(i) = w_{start} + (w_{full} - w_{start}) \cdot \min\!\big(1, \; i / i_{end}\b
 | Term | $w_{start}$ | $w_{full}$ | $i_{end}$ |
 |:---|:---|:---|:---|
 | angular_velocity (Base/Enc-TDC) | -0.05 | -0.5 | 200 |
-| action_rate (Base RL) | -0.005 | -0.05 | 200 |
-| action_rate (Enc-TDC) | -0.01 | -0.1 | 200 |
+| action_rate (Base RL) | -0.0005 | -0.005 | 200 |
+| action_rate (Enc-TDC) | -0.001 | -0.01 | 200 |
 
 ### Implementation
 
@@ -420,36 +420,39 @@ raw_env._reward_manager.update_curriculum(iteration, raw_env.cfg.reward.curricul
 
 ## Scale Balance Analysis
 
-### After Convergence ($\phi \approx 0.05$, $\omega \approx 0.05$, $|a| \approx 0.3$, $\Delta a \approx 0.02$)
+### After Convergence (실측: fix1/fix3 iter 599 평균)
 
-| Term | Per-step value | Weight | dt | Episode Sum (3000 steps) |
-|:---|:---|:---|:---|:---|
-| tracking | 0.96 | 1.0 | 0.005 | **14.4** |
-| progress | net ~0 | 5.0 | 1.0 | **~2.25** |
-| angular_velocity | 0.005 | -0.5 | 0.005 | -0.04 |
-| action_magnitude | 0.18 | -0.1 | 0.005 | -0.27 |
-| action_rate | 0.0008 | -0.05 | 1.0 | -0.12 |
+실험 데이터 기반 (raw magnitude는 weight=|1.0| 실험에서 측정):
 
-**Total**: ~16.2 (tracking 지배적 -- 수렴 상태에서 정상)
+| Term | Raw magnitude | Weight | dt-scaled | Per-step contribution | Ep Sum (3000 steps) |
+|:---|:---|:---|:---|:---|:---|
+| tracking | 0.67 | 1.0 | x0.005 | +0.00335 | **~10.0** |
+| progress | ~0 (converged) | 5.0 | No | ~0 | **~2.5** (telescoping) |
+| angular_velocity | 0.13 | -0.5 | x0.005 | -0.000325 | -1.0 |
+| action_magnitude | 0.053 | -0.5 | x0.005 | -0.000133 | -0.40 |
+| action_rate | 0.0006 | -0.005 | No | -0.000003 | -0.009 |
 
-### Early Training ($\phi \approx 0.5$, $\omega \approx 1.0$, $|a| \approx 0.7$, $\Delta a \approx 0.3$)
+**Total**: ~11.1 (tracking 지배적 -- 수렴 상태에서 정상)
 
-| Term | Per-step value | Weight (curriculum) | dt | Episode Sum |
-|:---|:---|:---|:---|:---|
-| tracking | 0.018 | 1.0 | 0.005 | 0.27 |
-| progress | variable | 5.0 | 1.0 | **~2.25** |
-| angular_velocity | 2.0 | -0.05 (cur.) | 0.005 | -1.50 |
-| action_magnitude | 0.98 | -0.1 | 0.005 | -1.47 |
-| action_rate | 0.18 | -0.005 (cur.) | 1.0 | -2.70 |
+### Early Training (실측: fix1/fix3 iter 0 평균)
 
-**Total**: ~-3.15 (음수 -> 에이전트가 개선해야 양의 return 획득)
+| Term | Raw magnitude | Weight (curriculum) | dt-scaled | Per-step contribution | Ep Sum |
+|:---|:---|:---|:---|:---|:---|
+| tracking | 0.094 | 1.0 | x0.005 | +0.00047 | 0.7 |
+| progress | 0.002 | 5.0 | No | +0.01 | **~2.5** |
+| angular_velocity | 1.42 | -0.05 (cur.) | x0.005 | -0.00036 | -0.5 |
+| action_magnitude | 1.07 | -0.5 | x0.005 | -0.00268 | -4.0 |
+| action_rate | 1.93 | -0.0005 (cur.) | No | -0.00097 | -1.5 |
+
+**Total**: ~-4.3 (음수 -> 에이전트가 action을 줄여야 양의 return 획득)
 
 ### Key Observations
 
-1. **Tracking:Progress 비율**: 수렴 시 6:1 (기존 30:1~200:1에서 대폭 개선)
-2. **학습 초기**: progress가 주도적 신호, penalty는 curriculum으로 완화
-3. **수렴 후**: tracking이 자세 유지를 보상, angular velocity가 진동 억제
+1. **수렴 시**: tracking이 77% 지배, penalty 총합은 tracking의 ~30% (적절한 regularization)
+2. **학습 초기**: progress가 tracking의 21배 -> Gaussian이 flat한 45deg 영역에서 유일한 방향 신호
+3. **전환점**: ~iter 100에서 tracking이 progress를 추월 (에러 ~15deg, Gaussian gradient 활성화)
 4. **Action cost**: 전 과정에서 약한 regularization. Encoder-TDC에서는 더 약하게 설정 (sigmoid midpoint 허용)
+5. **action_rate**: NOT dt-scaled이므로 weight가 작지만 (0.005), 수렴 시 raw도 매우 작아 (0.0006) 실질 기여 미미
 
 ---
 
@@ -570,4 +573,4 @@ Isaac Gym에서 progress 부호가 반대인 이유: potential 정의 자체가 
 
 ---
 **Created**: 2026-02-11
-**Updated**: 2026-02-11 (Consolidated from research note 11)
+**Updated**: 2026-02-11 (Weight tuning: action_rate NOT dt-scaled, scale balance from fix1/fix3 experiments)

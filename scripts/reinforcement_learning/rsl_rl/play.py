@@ -181,6 +181,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if hasattr(raw_env, "set_encoder_policy"):
             raw_env.set_encoder_policy(policy_nn)
 
+    # Hero Agent evaluation setup
+    raw_env = env.unwrapped
+    has_eval = hasattr(raw_env, "get_eval_snapshot")
+    eval_interval = 200  # Print eval every N steps
+    eval_episode_count = 0
+    eval_episode_errors: list[float] = []
+
     # reset environment
     obs = env.get_observations()
     timestep = 0
@@ -195,8 +202,36 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             obs, _, dones, _ = env.step(actions)
             # reset recurrent states for episodes that have terminated
             policy_nn.reset(dones)
+        timestep += 1
+
+        # Hero Agent: collect episode-end errors and print periodic eval
+        if has_eval:
+            if dones.any():
+                err_deg = torch.rad2deg(torch.linalg.norm(raw_env._attitude_error[dones.squeeze(-1), :2], dim=-1))
+                eval_episode_errors.extend(err_deg.tolist())
+                eval_episode_count += dones.sum().item()
+
+            if timestep % eval_interval == 0:
+                snap = raw_env.get_eval_snapshot()
+                ep_info = ""
+                if eval_episode_errors:
+                    import statistics
+
+                    ep_info = (
+                        f" | ep_err={statistics.mean(eval_episode_errors):.1f}"
+                        f"+/-{statistics.stdev(eval_episode_errors) if len(eval_episode_errors) > 1 else 0:.1f}deg"
+                        f" ({eval_episode_count} eps)"
+                    )
+                print(
+                    f"[Eval @{timestep:5d}] "
+                    f"err={snap['attitude_error_deg']:5.1f}deg "
+                    f"act={snap['action_magnitude']:.3f} "
+                    f"rate={snap['action_rate']:.4f} "
+                    f"angvel={snap['angular_velocity_rms']:.3f}"
+                    f"{ep_info}"
+                )
+
         if args_cli.video:
-            timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
@@ -205,6 +240,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    # Hero Agent: print final evaluation summary
+    if has_eval and eval_episode_errors:
+        import statistics
+
+        print("\n" + "=" * 60)
+        print("EVALUATION SUMMARY")
+        print("=" * 60)
+        print(f"  Total steps:    {timestep}")
+        print(f"  Episodes:       {eval_episode_count}")
+        print(
+            f"  Attitude error: {statistics.mean(eval_episode_errors):.1f} +/- "
+            f"{statistics.stdev(eval_episode_errors) if len(eval_episode_errors) > 1 else 0:.1f} deg"
+        )
+        snap = raw_env.get_eval_snapshot()
+        print(f"  Action mag:     {snap['action_magnitude']:.4f}")
+        print(f"  Action rate:    {snap['action_rate']:.5f}")
+        print(f"  Ang vel RMS:    {snap['angular_velocity_rms']:.4f}")
+        print("=" * 60)
 
     # close the simulator
     env.close()

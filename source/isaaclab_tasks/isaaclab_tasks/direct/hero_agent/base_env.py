@@ -264,7 +264,7 @@ class HeroAgentEnv(DirectRLEnv):
             "action_rate": RewardTermCfg(
                 func=action_rate_penalty,
                 weight=rcfg.action_rate_weight,
-                scale_by_dt=False,
+                scale_by_dt=False,  # per-step delta naturally scales with frequency
                 curriculum_start_weight=rcfg.action_rate_weight / 10.0,
             ),
         }
@@ -590,6 +590,7 @@ class HeroAgentEnv(DirectRLEnv):
         # Termination counts
         log["Episode_Termination/terminated"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         log["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+        log["Episode_Termination/total_resets"] = len(env_ids)
 
         if len(env_ids) == 0:
             return log
@@ -620,6 +621,9 @@ class HeroAgentEnv(DirectRLEnv):
         # --- Dynamics diagnostics ---
         ang_vel_rp = self._robot.data.root_ang_vel_b[env_ids, :2]
         log["Dynamics/angular_velocity_rms"] = ang_vel_rp.pow(2).mean().sqrt().item()
+        joint_vel = self._robot.data.joint_vel[env_ids][:, self._albc_joint_ids]
+        log["Dynamics/joint_velocity_rms"] = joint_vel.pow(2).mean().sqrt().item()
+        log["Dynamics/joint_velocity_max"] = joint_vel.abs().max().item()
 
         # TDC diagnostics (for any env with TDC controller)
         if hasattr(self, "_tdc"):
@@ -633,8 +637,33 @@ class HeroAgentEnv(DirectRLEnv):
 
         return log
 
+    def get_eval_snapshot(self) -> dict[str, float]:
+        """Return current evaluation metrics for play-mode diagnostics.
+
+        Provides instantaneous per-env averages of key quantities, useful for
+        printing periodic summaries during play without needing episode resets.
+
+        Returns:
+            Dict with keys: attitude_error_deg, action_magnitude, action_rate,
+            angular_velocity_rms, joint_pos (mean absolute).
+        """
+        err = self._attitude_error[:, :2]
+        return {
+            "attitude_error_deg": torch.rad2deg(torch.linalg.norm(err, dim=-1)).mean().item(),
+            "action_magnitude": torch.linalg.norm(self._actions, dim=-1).mean().item(),
+            "action_rate": torch.linalg.norm(self._actions - self._prev_actions, dim=-1).mean().item(),
+            "angular_velocity_rms": self._robot.data.root_ang_vel_b[:, :2].pow(2).mean().sqrt().item(),
+        }
+
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute termination conditions."""
+        """Compute termination conditions.
+
+        Termination triggers:
+            1. Height out of bounds (z < min_height or z > max_height)
+            2. Horizontal distance from origin exceeds max_distance_from_origin
+            3. Angular velocity exceeds max_angular_velocity (simulation instability)
+            4. NaN detected in root state (PhysX failure)
+        """
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
         # Height bounds check
@@ -645,7 +674,18 @@ class HeroAgentEnv(DirectRLEnv):
         xy_displacement = self._robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
         too_far = torch.linalg.norm(xy_displacement, dim=1) > self.cfg.max_distance_from_origin
 
-        return out_of_height_bounds | too_far, time_out
+        # Angular velocity check (roll/pitch rate)
+        ang_vel_rp = self._robot.data.root_ang_vel_b[:, :2]
+        too_fast = ang_vel_rp.abs().max(dim=1).values > self.cfg.max_angular_velocity
+
+        # NaN/Inf check on root state (position + quaternion)
+        bad_state = (
+            torch.isnan(self._robot.data.root_pos_w).any(dim=1)
+            | torch.isnan(self._robot.data.root_quat_w).any(dim=1)
+            | torch.isinf(self._robot.data.root_lin_vel_w).any(dim=1)
+        )
+
+        return out_of_height_bounds | too_far | too_fast | bad_state, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         """Reset specified environments.
