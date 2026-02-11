@@ -119,10 +119,20 @@ class HydrodynamicsModel:
             inertia = torch.tensor(cfg.added_mass[3:6], **self._tensor_kwargs) * 0.5
         self._rigid_body_inertia = inertia.expand(self.num_envs, -1).clone()
         self._use_full_coriolis = cfg.use_full_coriolis
+        if self._use_full_coriolis:
+            warnings.warn(
+                f"HydrodynamicsModel({cfg.body_name}): use_full_coriolis=True computes C_RB internally. "
+                "Ensure enable_gyroscopic_forces=False in RigidBodyPropertiesCfg to avoid double-counting "
+                "rigid body gyroscopic effects.",
+                stacklevel=2,
+            )
 
         # Added mass force settings
         self._apply_added_mass = cfg.apply_added_mass_force
         self._am_stability_factor = cfg.added_mass_stability_factor
+
+        # Off-diagonal damping cross-coupling
+        self._damping_cross_coupling = cfg.damping_cross_coupling
 
     def _init_buoyancy_params(self, cfg: HydrodynamicsCfg, articulation_prim_path: str | None) -> None:
         """Initialize buoyancy related parameters.
@@ -131,7 +141,7 @@ class HydrodynamicsModel:
             cfg: Hydrodynamics configuration.
             articulation_prim_path: USD path to articulation root for auto volume calculation.
         """
-        self._water_density = cfg.water_density
+        self._water_density = torch.full((self.num_envs,), cfg.water_density, **self._tensor_kwargs)
         self._gravity = 9.81
 
         # Volume and buoyancy force
@@ -150,9 +160,7 @@ class HydrodynamicsModel:
         # This is zero when r_cg equals the nominal (URDF/PhysX) value.
         self._r_cg_nominal = torch.tensor(cfg.center_of_gravity, **self._tensor_kwargs)
         if cfg.body_mass is not None:
-            self._body_mass: torch.Tensor | None = torch.full(
-                (self.num_envs,), cfg.body_mass, **self._tensor_kwargs
-            )
+            self._body_mass: torch.Tensor | None = torch.full((self.num_envs,), cfg.body_mass, **self._tensor_kwargs)
         else:
             self._body_mass = None
 
@@ -162,7 +170,8 @@ class HydrodynamicsModel:
         Args:
             cfg: Hydrodynamics configuration.
         """
-        # Velocity and acceleration state buffers
+        # Velocity and acceleration state buffers (used only in finite-difference mode,
+        # i.e. when apply_added_mass_force=False; otherwise PhysX acceleration is used)
         self._prev_body_vel = torch.zeros(self.num_envs, 6, **self._tensor_kwargs)
         self._prev_body_acc = torch.zeros(self.num_envs, 6, **self._tensor_kwargs)
         self._alpha = cfg.acceleration_filter_alpha
@@ -266,9 +275,6 @@ class HydrodynamicsModel:
         # Relative velocity for hydrodynamic calculations
         relative_vel = body_vel - current_b
 
-        # Update internal acceleration state
-        self._compute_acceleration(relative_vel)
-
         # Compute hydrodynamic components
         damping = self._compute_damping(relative_vel)
 
@@ -278,10 +284,18 @@ class HydrodynamicsModel:
         else:
             coriolis = self._compute_coriolis(relative_vel)
 
-        # Added mass force (M_A * v_dot) using PhysX acceleration when enabled
+        # Added mass force (M_A * v_dot)
+        # Two modes:
+        #   1. PhysX acceleration (apply_added_mass_force=True): uses cached PhysX body acceleration
+        #      from update_physx_state(). More accurate -- accounts for all forces/constraints.
+        #   2. Finite-difference (apply_added_mass_force=False): uses EMA-filtered numerical
+        #      differentiation of velocity. Only used as fallback; acceleration_filter_alpha controls
+        #      the low-pass filter strength.
         added_mass_force = torch.zeros(self.num_envs, 6, device=self.device)
         if self._apply_added_mass:
             added_mass_force = self._compute_added_mass(self._physx_acc_b) * self._am_stability_factor
+        else:
+            self._compute_acceleration(relative_vel)
 
         # Total hydrodynamic wrench: tau = -C(v)*v - D(v)*v - M_A*v_dot + g(eta)
         hydro_wrench = -(coriolis + damping + added_mass_force)
@@ -293,7 +307,11 @@ class HydrodynamicsModel:
         return forces_b, torques_b
 
     def _compute_acceleration(self, body_vel: torch.Tensor) -> torch.Tensor:
-        """Compute filtered body acceleration."""
+        """Compute filtered body acceleration via finite-difference.
+
+        Only called when apply_added_mass_force=False (fallback mode).
+        When apply_added_mass_force=True, PhysX acceleration is used instead.
+        """
         raw_acc = (body_vel - self._prev_body_vel) / self.dt
         filtered_acc = (1.0 - self._alpha) * self._prev_body_acc + self._alpha * raw_acc
         self._prev_body_vel = body_vel.clone()
@@ -303,11 +321,22 @@ class HydrodynamicsModel:
     def _compute_damping(self, body_vel: torch.Tensor) -> torch.Tensor:
         """Compute damping forces (linear + quadratic).
 
-        Uses simple diagonal damping: D_l * v + D_q * |v| * v
-        This avoids non-physical asymmetric force-torque coupling from off-diagonal terms.
+        When cross-coupling is disabled (default), uses diagonal damping:
+            D_l * v + D_q * |v| * v
+
+        When cross-coupling is enabled, velocity from coupled DOFs is added
+        to the damping computation. For example, coupling (1, 5) means yaw
+        velocity also contributes to sway damping, modeling the sway-yaw
+        interaction common in slender underwater vehicles.
         """
-        linear_term = self._linear_damping_diag * body_vel
-        quadratic_term = self._quadratic_damping_diag * torch.abs(body_vel) * body_vel
+        vel = body_vel
+        if self._damping_cross_coupling is not None:
+            vel = body_vel.clone()
+            for i, j in self._damping_cross_coupling:
+                vel[:, i] = vel[:, i] + body_vel[:, j]
+
+        linear_term = self._linear_damping_diag * vel
+        quadratic_term = self._quadratic_damping_diag * torch.abs(vel) * vel
         return linear_term + quadratic_term
 
     def _compute_added_mass(self, body_acc: torch.Tensor) -> torch.Tensor:
@@ -437,12 +466,14 @@ class HydrodynamicsModel:
             self._prev_body_acc.zero_()
             self._current_velocity.zero_()
             self._physx_acc_b.zero_()
+            self._water_density[:] = self.cfg.water_density
         else:
             env_ids = self._to_env_ids(env_ids)
             self._prev_body_vel[env_ids] = 0.0
             self._prev_body_acc[env_ids] = 0.0
             self._current_velocity[env_ids] = 0.0
             self._physx_acc_b[env_ids] = 0.0
+            self._water_density[env_ids] = self.cfg.water_density
 
     # --- Properties for parameter access (used by environment-specific randomization) ---
 
@@ -482,6 +513,11 @@ class HydrodynamicsModel:
         return self._r_cg
 
     @property
+    def water_density(self) -> torch.Tensor:
+        """Water density per environment (num_envs,)."""
+        return self._water_density
+
+    @property
     def rigid_body_inertia(self) -> torch.Tensor:
         """Rigid body inertia diagonal (num_envs, 3)."""
         return self._rigid_body_inertia
@@ -498,4 +534,4 @@ class HydrodynamicsModel:
             self._buoyancy_force_base = self._water_density * self._gravity * self._volume
         else:
             env_ids = self._to_env_ids(env_ids)
-            self._buoyancy_force_base[env_ids] = self._water_density * self._gravity * self._volume[env_ids]
+            self._buoyancy_force_base[env_ids] = self._water_density[env_ids] * self._gravity * self._volume[env_ids]

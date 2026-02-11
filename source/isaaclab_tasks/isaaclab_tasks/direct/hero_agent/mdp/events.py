@@ -19,11 +19,13 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
+
 if TYPE_CHECKING:
     from isaaclab_tasks.models import HydrodynamicsModel
 
-    from ..hero_agent_env import HeroAgentEnv
-    from ..hero_agent_env_cfg import DomainRandomizationCfg
+    from ..base_env import HeroAgentEnv
+    from ..config import DomainRandomizationCfg
 
 
 # -----------------------------------------------------------------------------
@@ -94,9 +96,10 @@ def _apply_xyz_offset(
     y_range: tuple[float, float],
     z_range: tuple[float, float],
     device: str | torch.device,
-    z_absolute: bool = False,
 ) -> None:
     """Apply random XYZ offsets to a target tensor.
+
+    Each axis is set to ``base[i] + uniform(range[i])``.
 
     Args:
         target: Target tensor to modify (shape: [num_envs, 3]).
@@ -106,20 +109,56 @@ def _apply_xyz_offset(
         y_range: Random offset range for Y.
         z_range: Random offset range for Z.
         device: Torch device.
-        z_absolute: If True, Z uses absolute value from range instead of offset.
     """
     num_envs = len(env_ids)
     target[env_ids, 0] = base[0] + _rand_uniform_range(num_envs, x_range, device)
     target[env_ids, 1] = base[1] + _rand_uniform_range(num_envs, y_range, device)
-    if z_absolute:
-        target[env_ids, 2] = _rand_uniform_range(num_envs, z_range, device)
-    else:
-        target[env_ids, 2] = base[2] + _rand_uniform_range(num_envs, z_range, device)
+    target[env_ids, 2] = base[2] + _rand_uniform_range(num_envs, z_range, device)
 
 
 # -----------------------------------------------------------------------------
 # Hydrodynamics Randomization
 # -----------------------------------------------------------------------------
+
+
+class _HydroBaseCache:
+    """Cached base tensors from a HydrodynamicsModel config for DR scaling.
+
+    Avoids recreating identical tensors from config lists on every reset call.
+    """
+
+    __slots__ = (
+        "added_mass",
+        "linear_damping",
+        "quadratic_damping",
+        "volume",
+        "cob",
+        "cog",
+        "inertia",
+        "water_density",
+    )
+
+    def __init__(self, hydro: HydrodynamicsModel) -> None:
+        kw = {"dtype": torch.float32, "device": hydro.device}
+        self.added_mass = torch.tensor(hydro.cfg.added_mass, **kw)
+        self.linear_damping = torch.tensor(hydro.cfg.linear_damping, **kw)
+        self.quadratic_damping = torch.tensor(hydro.cfg.quadratic_damping, **kw)
+        self.volume: float = hydro.cfg.volume if hydro.cfg.volume is not None else hydro.volume[0].item()
+        self.cob = torch.tensor(hydro.cfg.center_of_buoyancy, **kw)
+        self.cog = torch.tensor(hydro.cfg.center_of_gravity, **kw)
+        self.inertia = (
+            torch.tensor(hydro.cfg.rigid_body_inertia, **kw)
+            if hydro.cfg.rigid_body_inertia is not None
+            else torch.tensor(hydro.cfg.added_mass[3:6], **kw) * 0.5
+        )
+        self.water_density: float = hydro.cfg.water_density
+
+
+def _get_hydro_base(hydro: HydrodynamicsModel) -> _HydroBaseCache:
+    """Get or create cached base tensors for a hydrodynamics model."""
+    if not hasattr(hydro, "_dr_base_cache"):
+        hydro._dr_base_cache = _HydroBaseCache(hydro)  # type: ignore[attr-defined]
+    return hydro._dr_base_cache  # type: ignore[attr-defined]
 
 
 def _randomize_hydro_model(
@@ -136,36 +175,33 @@ def _randomize_hydro_model(
     """
     num_envs = len(env_ids)
     device = hydro.device
+    base = _get_hydro_base(hydro)
 
     # Added mass (scale each of 6 DOF)
     am_scales = _rand_uniform_range((num_envs, 6), rand_cfg.added_mass_scale, device)
-    base_am = torch.tensor(hydro.cfg.added_mass, dtype=torch.float32, device=device)
-    hydro.added_mass_matrix[env_ids] = torch.diag_embed(base_am.unsqueeze(0) * am_scales)
+    hydro.added_mass_matrix[env_ids] = torch.diag_embed(base.added_mass.unsqueeze(0) * am_scales)
 
     # Linear damping
     ld_scales = _rand_uniform_range((num_envs, 6), rand_cfg.linear_damping_scale, device)
-    base_ld = torch.tensor(hydro.cfg.linear_damping, dtype=torch.float32, device=device)
-    hydro.linear_damping[env_ids] = base_ld.unsqueeze(0) * ld_scales
+    hydro.linear_damping[env_ids] = base.linear_damping.unsqueeze(0) * ld_scales
 
     # Quadratic damping
     qd_scales = _rand_uniform_range((num_envs, 6), rand_cfg.quadratic_damping_scale, device)
-    base_qd = torch.tensor(hydro.cfg.quadratic_damping, dtype=torch.float32, device=device)
-    hydro.quadratic_damping[env_ids] = base_qd.unsqueeze(0) * qd_scales
+    hydro.quadratic_damping[env_ids] = base.quadratic_damping.unsqueeze(0) * qd_scales
 
-    # Volume: read base from config to avoid using already-randomized live tensor values
-    if hydro.cfg.volume is not None:
-        base_volume = hydro.cfg.volume
-    else:
-        base_volume = hydro.volume[0].item()
-    hydro.volume[env_ids] = base_volume * _rand_uniform_range(num_envs, rand_cfg.volume_scale, device)
+    # Volume
+    hydro.volume[env_ids] = base.volume * _rand_uniform_range(num_envs, rand_cfg.volume_scale, device)
+
+    # Water density
+    hydro.water_density[env_ids] = _rand_uniform_range(num_envs, rand_cfg.water_density_range, device)
+
     hydro.update_buoyancy_force(env_ids)
 
     # Center of Buoyancy (offset from base)
-    base_cob = torch.tensor(hydro.cfg.center_of_buoyancy, dtype=torch.float32, device=device)
     _apply_xyz_offset(
         hydro.center_of_buoyancy,
         env_ids,
-        base_cob,
+        base.cob,
         rand_cfg.cob_offset_x,
         rand_cfg.cob_offset_y,
         rand_cfg.cob_offset_z,
@@ -173,11 +209,10 @@ def _randomize_hydro_model(
     )
 
     # Center of Gravity (offset from base)
-    base_cog = torch.tensor(hydro.cfg.center_of_gravity, dtype=torch.float32, device=device)
     _apply_xyz_offset(
         hydro.center_of_gravity,
         env_ids,
-        base_cog,
+        base.cog,
         rand_cfg.cog_offset_x,
         rand_cfg.cog_offset_y,
         rand_cfg.cog_offset_z,
@@ -186,11 +221,7 @@ def _randomize_hydro_model(
 
     # Rigid body inertia
     inertia_scales = _rand_uniform_range((num_envs, 3), rand_cfg.inertia_scale, device)
-    if hydro.cfg.rigid_body_inertia is not None:
-        base_inertia = torch.tensor(hydro.cfg.rigid_body_inertia, dtype=torch.float32, device=device)
-    else:
-        base_inertia = torch.tensor(hydro.cfg.added_mass[3:6], dtype=torch.float32, device=device) * 0.5
-    hydro.rigid_body_inertia[env_ids] = base_inertia.unsqueeze(0) * inertia_scales
+    hydro.rigid_body_inertia[env_ids] = base.inertia.unsqueeze(0) * inertia_scales
 
 
 def randomize_hydrodynamics(
@@ -256,8 +287,6 @@ def randomize_robot_pose(
         env_ids: Environment indices to randomize. If None, randomizes all.
         rand_cfg: Domain randomization configuration with pose ranges.
     """
-    from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
-
     env_ids = _ensure_env_ids(env, env_ids)
     num_reset = len(env_ids)
     device = env.device
@@ -389,7 +418,9 @@ def randomize_payload(
     env_ids: torch.Tensor | None,
     rand_cfg: DomainRandomizationCfg,
 ) -> None:
-    """Randomize simple payload parameters (mass and attachment offset).
+    """Randomize payload parameters (mass, attachment offset, CoG offset).
+
+    Payload is applied to the gripper body (fixed to base). Offsets are in gripper frame.
 
     Args:
         env: The Hero Agent environment instance.
@@ -407,15 +438,122 @@ def randomize_payload(
     # Randomize mass
     env._payload_mass[env_ids] = _rand_uniform_range(num_reset, rand_cfg.payload_mass_range, device)
 
-    # Randomize attachment offset (x, y, z) - Z is absolute, not relative
+    # Reset attachment offset to fixed default (no randomization)
     base_offset = torch.tensor(env.cfg.payload_attachment_offset, device=device, dtype=torch.float32)
-    _apply_xyz_offset(
-        env._payload_attachment_offset,
-        env_ids,
-        base_offset,
-        rand_cfg.payload_attachment_x_range,
-        rand_cfg.payload_attachment_y_range,
-        rand_cfg.payload_attachment_z_range,
-        device,
-        z_absolute=True,
+    env._payload_attachment_offset[env_ids] = base_offset.unsqueeze(0)
+
+    # Randomize CoG offset (relative to attachment point)
+    if env._payload_cog_offset is not None:
+        _apply_xyz_offset(
+            env._payload_cog_offset,
+            env_ids,
+            torch.zeros(3, device=device),
+            rand_cfg.payload_cog_offset_x,
+            rand_cfg.payload_cog_offset_y,
+            rand_cfg.payload_cog_offset_z,
+            device,
+        )
+
+
+# -----------------------------------------------------------------------------
+# Joint Actuator Gain Randomization
+# -----------------------------------------------------------------------------
+
+
+def randomize_joint_gains(
+    env: HeroAgentEnv,
+    env_ids: torch.Tensor,
+    rand_cfg: DomainRandomizationCfg,
+) -> None:
+    """Randomize ALBC joint actuator stiffness and damping with absolute values.
+
+    Draws stiffness and damping from uniform distributions defined by
+    ``rand_cfg.joint_stiffness_range`` and ``rand_cfg.joint_damping_range``.
+    The same gain value is applied to both ALBC joints per environment.
+
+    Args:
+        env: The Hero Agent environment instance.
+        env_ids: Environment indices to randomize.
+        rand_cfg: Domain randomization configuration with gain ranges.
+    """
+    num_reset = len(env_ids)
+    device = env.device
+
+    stiffness = _rand_uniform_range(num_reset, rand_cfg.joint_stiffness_range, device)
+    damping = _rand_uniform_range(num_reset, rand_cfg.joint_damping_range, device)
+
+    # unsqueeze for broadcasting: (num_reset,) -> (num_reset, 1) -> (num_reset, num_joints)
+    env._robot.write_joint_stiffness_to_sim(stiffness.unsqueeze(-1), joint_ids=env._albc_joint_ids, env_ids=env_ids)
+    env._robot.write_joint_damping_to_sim(damping.unsqueeze(-1), joint_ids=env._albc_joint_ids, env_ids=env_ids)
+
+
+# -----------------------------------------------------------------------------
+# Body Mass Randomization
+# -----------------------------------------------------------------------------
+
+
+def randomize_body_mass(
+    env: HeroAgentEnv,
+    env_ids: torch.Tensor,
+    rand_cfg: DomainRandomizationCfg,
+) -> None:
+    """Randomize rigid body masses for specified environments.
+
+    Applies a single scale factor to all bodies per environment (manufacturing
+    tolerance model). Inertia is separately randomized via ``inertia_scale``
+    in the hydrodynamics DR.
+
+    Args:
+        env: The Hero Agent environment instance.
+        env_ids: Environment indices to randomize.
+        rand_cfg: Domain randomization configuration with mass scale range.
+    """
+    num_reset = len(env_ids)
+    env_ids_cpu = env_ids.cpu()
+
+    # Read current masses and reset to defaults
+    masses = env._robot.root_physx_view.get_masses()
+    masses[env_ids_cpu] = env._robot.data.default_mass[env_ids_cpu].clone()
+
+    # Single scale per env, broadcast to all bodies
+    scales = _rand_uniform_range(num_reset, rand_cfg.body_mass_scale, "cpu")
+    masses[env_ids_cpu] *= scales.unsqueeze(-1)
+    masses = torch.clamp(masses, min=1e-6)
+
+    env._robot.root_physx_view.set_masses(masses, env_ids_cpu)
+
+
+# -----------------------------------------------------------------------------
+# Joint Friction Randomization
+# -----------------------------------------------------------------------------
+
+
+def randomize_joint_friction(
+    env: HeroAgentEnv,
+    env_ids: torch.Tensor,
+    rand_cfg: DomainRandomizationCfg,
+) -> None:
+    """Randomize ALBC joint friction coefficients.
+
+    Applies static (Coulomb) and viscous friction to the ALBC joints.
+    The same friction value is applied to both joints per environment.
+    Uses Isaac Sim 5.0+ friction model: static + viscous.
+
+    Args:
+        env: The Hero Agent environment instance.
+        env_ids: Environment indices to randomize.
+        rand_cfg: Domain randomization configuration with friction ranges.
+    """
+    num_reset = len(env_ids)
+    device = env.device
+
+    static = _rand_uniform_range(num_reset, rand_cfg.joint_static_friction_range, device)
+    viscous = _rand_uniform_range(num_reset, rand_cfg.joint_viscous_friction_range, device)
+
+    # unsqueeze for broadcasting: (num_reset,) -> (num_reset, 1) -> (num_reset, num_joints)
+    env._robot.write_joint_friction_coefficient_to_sim(
+        joint_friction_coeff=static.unsqueeze(-1),
+        joint_viscous_friction_coeff=viscous.unsqueeze(-1),
+        joint_ids=env._albc_joint_ids,
+        env_ids=env_ids,
     )

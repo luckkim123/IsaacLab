@@ -13,7 +13,10 @@ Following Isaac Lab conventions, all MDP components are organized under this mod
 """
 
 from .events import (
+    randomize_body_mass,
     randomize_hydrodynamics,
+    randomize_joint_friction,
+    randomize_joint_gains,
     randomize_joint_positions,
     randomize_ocean_current,
     randomize_payload,
@@ -27,16 +30,23 @@ from .observations import (
 )
 from .rewards import (
     ALBCRewardCfg,
+    EncoderTDCRewardCfg,
     RewardManager,
     RewardTermCfg,
-    albc_potential_reward,
-    albc_progress_reward,
-    squared_action_cost,
+    action_magnitude_penalty,
+    action_rate_penalty,
+    angular_velocity_penalty,
+    progress_reward,
+    tde_residual_penalty,
+    tracking_reward,
 )
 
 __all__ = [
     # Events
+    "randomize_body_mass",
     "randomize_hydrodynamics",
+    "randomize_joint_friction",
+    "randomize_joint_gains",
     "randomize_joint_positions",
     "randomize_ocean_current",
     "randomize_payload",
@@ -46,11 +56,16 @@ __all__ = [
     # Observations
     "compute_policy_obs",
     "compute_privileged_obs",
-    # Rewards
+    # Rewards (configs)
     "ALBCRewardCfg",
+    "EncoderTDCRewardCfg",
     "RewardManager",
     "RewardTermCfg",
-    "albc_potential_reward",
-    "albc_progress_reward",
-    "squared_action_cost",
+    # Rewards (functions)
+    "tracking_reward",
+    "progress_reward",
+    "angular_velocity_penalty",
+    "action_rate_penalty",
+    "action_magnitude_penalty",
+    "tde_residual_penalty",
 ]

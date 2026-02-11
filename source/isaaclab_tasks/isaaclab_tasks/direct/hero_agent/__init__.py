@@ -15,22 +15,25 @@ Available Tasks:
     - Isaac-HeroAgent-Encoder-Base-v0: Encoder training with privileged info
     - Isaac-HeroAgent-TDC-v0: Classical TDC control (no RL)
     - Isaac-HeroAgent-Encoder-TDC-v0: Encoder-TDC integration (RL adaptive gains + M_hat)
+    - Isaac-HeroAgent-Adapt-TDC-v0: Phase 2 adaptation (proprio history -> z_hat)
 """
 
 import gymnasium as gym
 
-from .hero_agent_encoder_tdc_env import HeroAgentEncoderTDCEnv
-from .hero_agent_env import HeroAgentEnv
-from .hero_agent_env_cfg import (
+from .adapt_tdc_env import HeroAgentAdaptTDCEnv
+from .base_env import HeroAgentEnv
+from .config import (
     DomainRandomizationCfg,
+    HeroAgentAdaptTDCEnvCfg,
     HeroAgentEncoderTDCEnvCfg,
     HeroAgentEncoderTrainEnvCfg,
     HeroAgentEnvCfg,
     HeroAgentTDCEnvCfg,
     HeroAgentTrainEnvCfg,
-    TDCControllerCfg,
 )
-from .hero_agent_tdc_env import HeroAgentTDCEnv
+from .controllers import TDCControllerCfg
+from .encoder_tdc_env import HeroAgentEncoderTDCEnv
+from .tdc_env import HeroAgentTDCEnv
 
 ##
 # Register Gym environments
@@ -47,7 +50,7 @@ gym.register(
     },
 )
 
-# Base training environment (renamed from Isaac-HeroAgent-Train-v0)
+# Base training environment
 gym.register(
     id="Isaac-HeroAgent-Base-v0",
     entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
@@ -58,7 +61,7 @@ gym.register(
     },
 )
 
-# Encoder training environment (renamed from Isaac-HeroAgent-Encoder-v0)
+# Encoder training environment
 gym.register(
     id="Isaac-HeroAgent-Encoder-Base-v0",
     entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
@@ -91,24 +94,14 @@ gym.register(
     },
 )
 
-# Legacy aliases for backward compatibility
+# Phase 2: Adaptation module (proprio history -> z_hat, supervised training)
 gym.register(
-    id="Isaac-HeroAgent-Train-v0",
-    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
+    id="Isaac-HeroAgent-Adapt-TDC-v0",
+    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentAdaptTDCEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentTrainEnvCfg",
-        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentPPORunnerCfg",
-    },
-)
-
-gym.register(
-    id="Isaac-HeroAgent-Encoder-v0",
-    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentEncoderTrainEnvCfg",
-        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentEncoderPPORunnerCfg",
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentAdaptTDCEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentAdaptTDCRunnerCfg",
     },
 )
 
@@ -117,12 +110,14 @@ __all__ = [
     "HeroAgentEnv",
     "HeroAgentTDCEnv",
     "HeroAgentEncoderTDCEnv",
+    "HeroAgentAdaptTDCEnv",
     # Configurations
     "HeroAgentEnvCfg",
     "HeroAgentTrainEnvCfg",
     "HeroAgentTDCEnvCfg",
     "HeroAgentEncoderTrainEnvCfg",
     "HeroAgentEncoderTDCEnvCfg",
+    "HeroAgentAdaptTDCEnvCfg",
     "DomainRandomizationCfg",
     "TDCControllerCfg",
 ]

@@ -3,28 +3,27 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""ActorCritic with extrinsics encoder for HORA/RMA Phase 1 teacher training.
+"""ActorCritic with extrinsics encoder for HORA/RMA training.
 
-This module implements a custom ActorCritic network that compresses privileged
-hydrodynamic parameters (22D) into a low-dimensional latent z (6D) via a
-learned encoder with softplus output.
+This module provides the encoder-based actor-critic networks:
+    - ActorCriticEncoder: Base encoder network (Phase 1 teacher training)
+    - ActorCriticEncoderTDC: Encoder with z exposure for TDC M_hat extraction
 
 Architecture:
-    Encoder: privileged (22D) -> MLP -> softplus + z_min -> z (6D)
-    Actor:   cat([policy_obs, z]) = 19D -> MLP -> actions (2D)
+    Encoder: privileged (24D) -> MLP -> softplus + z_min -> z (6D)
+    Actor:   cat([policy_obs, z]) = 19D -> MLP -> actions
     Critic:  cat([policy_obs, z]) = 19D -> MLP -> value (1D)
 
 Note: Critic does NOT receive privileged info directly (symmetric with actor).
-This forces the encoder to compress useful information into z. If critic had
-direct access to privileged info, it would ignore z and encoder would collapse
-to a constant output.
+This forces the encoder to compress useful information into z.
 
 Design choices:
     - Softplus instead of scaled sigmoid: Avoids gradient saturation at bounds.
       z = softplus(raw) + z_min guarantees z > z_min with no upper bound.
     - 6D latent: Matches 6-DOF convention [surge,sway,heave,roll,pitch,yaw].
-    - 22D privileged (not 64D): Core parameters only (mass, volume, CoG, CoB,
-      inertia) without damping/added_mass which don't affect attitude dynamics.
+    - 24D privileged (not 64D): Core hydrostatic parameters only (volume, CoG,
+      CoB, inertia) + payload (mass, cog_offset). Damping/added_mass excluded
+      as they don't affect attitude dynamics in the ALBC task.
 
 Reference:
     - HORA: Heuristic-Free Online Robust Adaptation (Qi et al., 2023)
@@ -33,9 +32,12 @@ Reference:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import torch
+
+logger = logging.getLogger(__name__)
 import torch.nn as nn
 import torch.nn.functional as F
 from rsl_rl.networks import MLP, EmpiricalNormalization
@@ -67,7 +69,7 @@ class ActorCriticEncoder(nn.Module):
         num_actions: int,
         # Encoder parameters
         policy_obs_dim: int = 13,
-        privileged_dim: int = 22,
+        privileged_dim: int = 24,
         encoder_hidden_dims: list[int] | tuple[int, ...] = (64, 32),
         encoder_latent_dim: int = 6,
         encoder_activation: str = "elu",
@@ -84,7 +86,10 @@ class ActorCriticEncoder(nn.Module):
         **kwargs: Any,
     ) -> None:
         if kwargs:
-            print(f"ActorCriticEncoder.__init__ got unexpected arguments, which will be ignored: {list(kwargs.keys())}")
+            logger.warning(
+                "ActorCriticEncoder.__init__ got unexpected arguments, which will be ignored: %s",
+                list(kwargs.keys()),
+            )
         super().__init__()
 
         # Store dimension info
@@ -118,7 +123,7 @@ class ActorCriticEncoder(nn.Module):
 
         # Encoder: privileged -> z
         self.encoder = MLP(privileged_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
-        print(f"Encoder MLP: {self.encoder}")
+        logger.info("Encoder MLP: %s", self.encoder)
 
         # Actor/Critic input: policy_obs + z (symmetric design)
         # Note: Privileged info is NOT passed to critic to force encoder learning.
@@ -128,7 +133,7 @@ class ActorCriticEncoder(nn.Module):
         # Actor
         actor_output = [2, num_actions] if self.state_dependent_std else num_actions
         self.actor = MLP(num_combined_obs, actor_output, list(actor_hidden_dims), activation)
-        print(f"Actor MLP: {self.actor}")
+        logger.info("Actor MLP: %s", self.actor)
 
         # Actor observation normalization (applied to actor input: policy_obs + z)
         self.actor_obs_normalization = actor_obs_normalization
@@ -138,7 +143,7 @@ class ActorCriticEncoder(nn.Module):
 
         # Critic
         self.critic = MLP(num_combined_obs, 1, list(critic_hidden_dims), activation)
-        print(f"Critic MLP: {self.critic}")
+        logger.info("Critic MLP: %s", self.critic)
 
         # Critic observation normalization (applied to critic input: policy_obs + z)
         self.critic_obs_normalization = critic_obs_normalization
@@ -198,13 +203,22 @@ class ActorCriticEncoder(nn.Module):
 
     # --- Observation processing ---
 
+    def _softplus_z(self, raw: torch.Tensor) -> torch.Tensor:
+        """Apply softplus + z_min to guarantee z > z_min (positive latent).
+
+        This is the canonical activation for all encoder/adaptation z outputs.
+        Centralizing here ensures consistency across Phase 1 encoder, Phase 2
+        adaptation, and the adaptation runner.
+        """
+        return F.softplus(raw) + self.z_min
+
     def _encode(self, privileged: torch.Tensor) -> torch.Tensor:
         """Encode privileged info into positive latent z via softplus.
 
         z = softplus(encoder_output) + z_min
         Guarantees z > z_min, no gradient saturation at large values.
         """
-        return F.softplus(self.encoder(privileged)) + self.z_min
+        return self._softplus_z(self.encoder(privileged))
 
     def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
         """Get combined observation: cat([policy_obs, z]).
@@ -290,3 +304,42 @@ class ActorCriticEncoder(nn.Module):
         """
         super().load_state_dict(state_dict, strict=strict)
         return True
+
+
+class ActorCriticEncoderTDC(ActorCriticEncoder):
+    """ActorCriticEncoder with z exposure for TDC M_hat extraction.
+
+    Overrides _get_combined_obs() to cache the encoder latent z after each
+    forward pass. The environment retrieves z via get_last_z() to set
+    TDC M_hat = z[3:5].
+
+    Timing:
+        RSL-RL loop: obs = env.get_observations() -> action = policy.act(obs)
+                     -> env.step(action) [calls _pre_physics_step]
+        So _last_z is computed in act() and available when _pre_physics_step() runs.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._last_z: torch.Tensor | None = None
+
+    def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
+        """Get combined observation and cache z for environment access.
+
+        Both actor and critic use the same combined observation (symmetric design).
+        The cached _last_z enables the environment to extract M_hat from the
+        encoder output without re-running the encoder.
+        """
+        policy_obs = obs[self._policy_obs_key]
+        z = self._encode(obs[self._privileged_key])
+        self._last_z = z
+        return torch.cat([policy_obs, z], dim=-1)
+
+    def get_last_z(self) -> torch.Tensor | None:
+        """Return the last computed encoder latent z.
+
+        Returns:
+            z tensor of shape (num_envs, encoder_latent_dim), or None if
+            act() has not been called yet.
+        """
+        return self._last_z

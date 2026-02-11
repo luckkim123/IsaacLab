@@ -174,6 +174,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     dt = env.unwrapped.step_dt
 
+    # Wire encoder policy to env for M_hat extraction (one-time setup).
+    # The env's _pre_physics_step() will call policy.get_last_z() automatically.
+    if hasattr(policy_nn, "get_last_z"):
+        raw_env = env.unwrapped
+        if hasattr(raw_env, "set_encoder_policy"):
+            raw_env.set_encoder_policy(policy_nn)
+
     # reset environment
     obs = env.get_observations()
     timestep = 0
@@ -184,11 +191,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         with torch.inference_mode():
             # agent stepping
             actions = policy(obs)
-            # pass encoder z to TDC environment for M_hat estimation (if applicable)
-            if hasattr(policy_nn, "last_z") and policy_nn.last_z is not None:
-                unwrapped_env = env.unwrapped
-                if hasattr(unwrapped_env, "set_encoder_z"):
-                    unwrapped_env.set_encoder_z(policy_nn.last_z)
             # env stepping
             obs, _, dones, _ = env.step(actions)
             # reset recurrent states for episodes that have terminated

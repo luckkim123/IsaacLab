@@ -11,7 +11,7 @@ This module integrates the HORA encoder with the TDC controller:
 - TDC controller uses adaptive M_hat + gains for attitude stabilization
 
 Data Flow:
-    Privileged (22D) -> Encoder -> z (6D)
+    Privileged (24D) -> Encoder -> z (6D)
         z[3:5] -> M_hat -> TDC.update_controller_params()
     policy_obs (13D) + z (6D) -> Actor -> 4D raw gains
         sigmoid scaling -> Kp (2D), Kd (2D) -> TDC.update_gains()
@@ -30,13 +30,12 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from isaaclab.utils.math import euler_xyz_from_quat
-
-from .hero_agent_env_cfg import HeroAgentEncoderTDCEnvCfg
-from .hero_agent_tdc_env import HeroAgentTDCEnv
+from .config import HeroAgentEncoderTDCEnvCfg
+from .mdp import RewardTermCfg, tde_residual_penalty
+from .tdc_env import HeroAgentTDCEnv
 
 if TYPE_CHECKING:
-    from .encoder.actor_critic_encoder_tdc import ActorCriticEncoderTDC
+    from .encoder.actor_critic_encoder import ActorCriticEncoderTDC
 
 
 class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
@@ -55,6 +54,17 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
         # Pre-allocate M_hat buffer with config defaults (updated from encoder z each step)
         m_hat_default = torch.tensor(cfg.tdc.m_hat, device=self.device, dtype=torch.float32)
         self._encoder_m_hat = m_hat_default.unsqueeze(0).expand(self.num_envs, -1).clone()
+
+    def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
+        """Build reward terms: 5 shared + TDE residual penalty."""
+        terms = super()._build_reward_terms()
+        rcfg = self.cfg.reward
+        if hasattr(rcfg, "tde_residual_weight") and rcfg.tde_residual_weight != 0.0:
+            terms["tde_residual"] = RewardTermCfg(
+                func=tde_residual_penalty,
+                weight=rcfg.tde_residual_weight,
+            )
+        return terms
 
     def set_encoder_policy(self, policy: ActorCriticEncoderTDC) -> None:
         """Register the encoder policy for z -> M_hat extraction.
@@ -77,12 +87,7 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
         Args:
             actions: RL actions [Kp_r, Kp_p, Kd_r, Kd_p]. Shape: (num_envs, 4).
         """
-        # Store actions for observation/logging compatibility
-        self._prev_actions = self._actions.clone()
-        self._actions = actions.clone().clamp(-1.0, 1.0)
-        # Store first 2 dims as prev_actions_obs to maintain 13D obs compatibility
-        self._prev_actions_obs = self._actions[:, :2].clone()
-        self._control_step_counter += 1
+        self._update_action_buffers(actions, obs_action_slice=slice(0, 2))
 
         # Only run TDC at control_decimation interval
         if self._control_step_counter % self.cfg.control_decimation != 0:
@@ -92,7 +97,7 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
         if self._encoder_policy is not None:
             z = self._encoder_policy.get_last_z()
             if z is not None:
-                m_hat = z[:, 3:5].clamp(self.cfg.m_hat_min, self.cfg.m_hat_max)
+                m_hat = z[:, 3:5]
                 self._encoder_m_hat = m_hat
                 self._tdc.update_controller_params(m_hat=m_hat)
 
@@ -105,41 +110,8 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
         kd = kd_min + torch.sigmoid(kd_raw) * (kd_max - kd_min)
         self._tdc.update_gains(kp=kp, kd=kd)
 
-        # --- 3. TDC control pipeline (same as parent) ---
-        roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
-        ang_vel_body = self._robot.data.root_ang_vel_b
-
-        p_EE_desired = self._tdc.compute(
-            roll=roll,
-            pitch=pitch,
-            ang_vel_body=ang_vel_body,
-            target_euler=self._target_euler,
-        )
-
-        # --- 4. DLS inverse kinematics -> joint angles ---
-        current_joints = self._joint_pos_targets.clone()
-        joint_targets = self._kinematics.inverse(
-            p_EE_desired,
-            current_joint_angles=current_joints,
-            lambda_dls=self.cfg.tdc.ik_dls_lambda,
-        )
-
-        # --- 5. Clamp to joint limits ---
-        joint_targets = torch.clamp(
-            joint_targets,
-            self._joint_limits_lower,
-            self._joint_limits_upper,
-        )
-
-        # --- 6. Rate limiting ---
-        max_delta = self.cfg.tdc.max_joint_velocity * self._tdc_dt
-        delta = joint_targets - self._joint_pos_targets
-        delta = torch.clamp(delta, -max_delta, max_delta)
-        self._joint_pos_targets = self._joint_pos_targets + delta
-
-        # --- 7. Anti-windup: feed actual (rate-limited) EE back to controller ---
-        p_EE_actual = self._kinematics.forward(self._joint_pos_targets)
-        self._tdc.update_ee_position(p_EE_actual)
+        # --- 3. TDC control pipeline (shared with parent) ---
+        self._run_tdc_pipeline()
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         """Reset specified environments including cached M_hat."""
@@ -148,3 +120,8 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
         if env_ids is not None:
             m_hat_default = torch.tensor(self.cfg.tdc.m_hat, device=self.device, dtype=torch.float32)
             self._encoder_m_hat[env_ids] = m_hat_default
+            # Sync TDC controller m_hat (prevents 1-step stale M_hat from previous episode)
+            self._tdc.update_controller_params(
+                m_hat=m_hat_default.unsqueeze(0).expand(len(env_ids), -1),
+                env_ids=env_ids,
+            )

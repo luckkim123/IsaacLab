@@ -22,18 +22,34 @@ System net buoyancy: ~+3N (slight positive buoyancy for passive stability).
 ```
 hero_agent/
 ├── __init__.py                 # Gym environment registration
-├── hero_agent_env.py           # Main environment class (HeroAgentEnv)
-├── hero_agent_env_cfg.py       # Configuration classes
+├── base_env.py                 # Main environment class (HeroAgentEnv)
+├── tdc_env.py                  # TDC controller environment (HeroAgentTDCEnv)
+├── encoder_tdc_env.py          # Encoder-TDC env (HeroAgentEncoderTDCEnv)
+├── adapt_tdc_env.py            # Phase 2 adaptation env (HeroAgentAdaptTDCEnv)
+├── config.py                   # All configuration classes
 ├── agents/                     # RL agent configs (PPO runner, network arch)
 │   └── rsl_rl_ppo_cfg.py
 ├── controllers/
 │   ├── __init__.py
+│   ├── tdc.py                  # TDC controller + TDCControllerCfg
 │   └── kinematics.py           # ALBCKinematics: 2-link IK/FK/Jacobian
-├── encoder/                    # HORA encoder module (RL-specific)
+├── encoder/                    # HORA encoder networks (NN architectures)
 │   ├── actor_critic_encoder.py
-│   └── encoder_runner.py
+│   ├── adaptation.py
+│   └── normalization.py
+├── runners/                    # Training runners
+│   ├── encoder_runner.py       # Phase 1 PPO (EncoderRunner)
+│   └── adapt_runner.py         # Phase 2 supervised (AdaptRunner)
+├── workflows/                  # Phase 2/3 workflow scripts + shared logic
+│   ├── _config_resolver.py     # Shared config resolution from gym.spec
+│   ├── _policy_factory.py      # Shared policy build + checkpoint loading
+│   ├── train_adaptation.py     # Adaptation module training entry-point
+│   └── play_phase3.py          # Evaluation + deploy export entry-point
+├── deploy/                     # Phase 3 deployment export
+│   ├── deploy_module.py        # JIT-scriptable deploy module
+│   └── deploy_exporter.py      # JIT/ONNX/JSON export
 ├── mdp/
-│   ├── observations.py         # compute_policy_obs (13D), compute_privileged_obs (22D)
+│   ├── observations.py         # compute_policy_obs (13D), compute_privileged_obs (24D)
 │   ├── rewards.py              # Potential-based reward manager (RL-specific)
 │   └── events.py               # Domain randomization & reset functions
 └── utils/
@@ -128,7 +144,7 @@ step(actions)                              # Called at 100 Hz
 |:---|:---|:---|
 | Link 1 length (L1) | 0.233 m | |
 | Link 2 length (L2) | 0.233 m | Equal link lengths |
-| Height offset | 0.230 m | Constant Z offset |
+| Height offset (h) | 0.180 m | CoG-to-ABPC vertical distance (CoG at -0.05m) |
 | Workspace (reach) | 0 ~ 0.466 m | L1 + L2 |
 | Joint limits | from USD | ~+/- 2*pi rad |
 
@@ -240,7 +256,7 @@ Potentials must be initialized after pose reset.
 |:---|:---|:---|:---|:---|:---|
 | `Isaac-HeroAgent-v0` | `HeroAgentEnvCfg` | No | No | No | 0 |
 | `Isaac-HeroAgent-Base-v0` | `HeroAgentTrainEnvCfg` | Yes | Yes (0.2m/s) | Yes | 0 |
-| `Isaac-HeroAgent-Encoder-Base-v0` | `HeroAgentEncoderTrainEnvCfg` | Yes | Yes | Yes | 22 |
+| `Isaac-HeroAgent-Encoder-Base-v0` | `HeroAgentEncoderTrainEnvCfg` | Yes | Yes | Yes | 24 |
 
 All variants use the same `HeroAgentEnv` class with different configs.
 

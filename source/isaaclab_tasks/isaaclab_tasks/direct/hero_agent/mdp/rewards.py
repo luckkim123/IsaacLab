@@ -5,8 +5,18 @@
 
 """Reward system for Hero Agent ALBC environments.
 
-Provides reward configuration, a lightweight reward manager, and reward functions
-for ALBC (joint-based attitude control) training.
+Provides reward configuration, a lightweight reward manager with curriculum
+support, and reward functions for ALBC (joint-based attitude control) training.
+
+Reward design principles:
+    - Gaussian kernel normalization: positive rewards use exp(-err^2/sigma^2)
+      for natural [0,1] bounding and intuitive weight interpretation.
+    - dt-scaling: "instantaneous state quality" terms are dt-scaled;
+      "telescoping difference" terms are NOT dt-scaled.
+    - Environment-specific configs: Base RL and Encoder-TDC have different
+      action semantics, so reward weights are separated.
+    - Curriculum: penalty terms start small and increase over training to
+      preserve early exploration.
 """
 
 from __future__ import annotations
@@ -22,7 +32,7 @@ from isaaclab.utils import configclass
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
 
-    from ..hero_agent_env import HeroAgentEnv
+    from ..base_env import HeroAgentEnv
 
 
 # =============================================================================
@@ -32,22 +42,49 @@ if TYPE_CHECKING:
 
 @configclass
 class ALBCRewardCfg:
-    """ALBC reward weights.
+    """ALBC reward configuration with Gaussian tracking + multi-term penalties.
 
-    reward = potential_weight * scale * exp(-e) + progress_weight * (prev_e - e) + action_cost_weight * ||a||^2
+    Reward = tracking * w_t * dt
+           + progress * w_p
+           + angular_velocity * w_av * dt
+           + action_magnitude * w_am * dt
+           + action_rate * w_ar
     """
 
-    potential_weight: float = 1.0
-    """Weight for potential reward: scale * exp(-potential)."""
+    # Tracking (Gaussian kernel)
+    tracking_weight: float = 1.0
+    tracking_sigma: float = 0.25
 
-    potential_scale: float = 8.0
-    """Scale factor for potential reward."""
-
+    # Progress (telescoping)
     progress_weight: float = 1.0
-    """Weight for progress reward: prev_potential - current_potential."""
 
-    action_cost_weight: float = -1.0
-    """Weight for action cost (negative = penalty)."""
+    # Angular velocity penalty
+    angular_velocity_weight: float = -1.0
+
+    # Action magnitude penalty
+    action_magnitude_weight: float = -1.0
+
+    # Action rate penalty
+    action_rate_weight: float = -1.0
+
+    # Curriculum
+    curriculum_end_iter: int = 200
+
+
+@configclass
+class EncoderTDCRewardCfg(ALBCRewardCfg):
+    """Encoder-TDC reward config with adjusted weights and TDE residual penalty.
+
+    Inherits all weights from ALBCRewardCfg (all |1.0|).
+    Adds TDE residual penalty to encourage accurate M_hat.
+    """
+
+    tde_residual_weight: float = -1.0
+
+
+# =============================================================================
+# Reward Term Configuration
+# =============================================================================
 
 
 @configclass
@@ -66,6 +103,10 @@ class RewardTermCfg:
     scale_by_dt: bool = True
     """Whether to scale reward by dt. Set False for progress-style rewards."""
 
+    curriculum_start_weight: float | None = None
+    """If set, weight starts at this value and linearly ramps to ``weight``
+    over curriculum_end_iter iterations. None means no curriculum (constant weight)."""
+
 
 # =============================================================================
 # Reward Manager
@@ -76,7 +117,8 @@ class RewardManager:
     """Lightweight reward manager for DirectRLEnv UUV environments.
 
     Computes total reward as a weighted sum of individual terms, with automatic
-    dt scaling and episode sum tracking for logging.
+    dt scaling, episode sum tracking for logging, and curriculum support for
+    gradually increasing penalty weights during training.
     """
 
     def __init__(
@@ -97,6 +139,14 @@ class RewardManager:
                 self._term_names.append(name)
                 self._term_cfgs.append(term_cfg)
 
+        # Active weights (modified by curriculum).
+        # Initialize to curriculum_start_weight when set, so iteration 0
+        # uses the correct starting weight (not full weight).
+        self._active_weights = [
+            cfg.curriculum_start_weight if cfg.curriculum_start_weight is not None else cfg.weight
+            for cfg in self._term_cfgs
+        ]
+
         # Initialize buffers
         self._reward_buf = torch.zeros(num_envs, dtype=torch.float32, device=device)
         self._episode_sums: dict[str, torch.Tensor] = {
@@ -113,6 +163,25 @@ class RewardManager:
         """Episode sums for each reward term (for logging)."""
         return self._episode_sums
 
+    def update_curriculum(self, iteration: int, end_iter: int) -> None:
+        """Update penalty weights based on training progress.
+
+        Linear ramp from curriculum_start_weight to weight over end_iter iterations.
+
+        Args:
+            iteration: Current training iteration (0-based).
+            end_iter: Iteration at which curriculum reaches full weight.
+        """
+        if end_iter <= 0:
+            return
+
+        progress = min(1.0, iteration / end_iter)
+        for i, term_cfg in enumerate(self._term_cfgs):
+            if term_cfg.curriculum_start_weight is not None:
+                start = term_cfg.curriculum_start_weight
+                full = term_cfg.weight
+                self._active_weights[i] = start + (full - start) * progress
+
     def compute(
         self,
         robot: Articulation,
@@ -122,14 +191,15 @@ class RewardManager:
         """Compute total reward as weighted sum of terms."""
         self._reward_buf.zero_()
 
-        for name, term_cfg in zip(self._term_names, self._term_cfgs):
+        for i, (name, term_cfg) in enumerate(zip(self._term_names, self._term_cfgs)):
             merged_params = {**term_cfg.params, **context}
             term_value = term_cfg.func(robot, **merged_params)
+            weight = self._active_weights[i]
 
             if term_cfg.scale_by_dt:
-                scaled_value = term_value * term_cfg.weight * dt
+                scaled_value = term_value * weight * dt
             else:
-                scaled_value = term_value * term_cfg.weight
+                scaled_value = term_value * weight
 
             self._reward_buf += scaled_value
             self._episode_sums[name] += scaled_value
@@ -147,33 +217,103 @@ class RewardManager:
 
 
 # =============================================================================
-# Shared Reward Functions
+# Shared Reward Functions (Base RL + Encoder-TDC)
 # =============================================================================
 
 
-def albc_potential_reward(
+def tracking_reward(
     _robot: Articulation,
     env: HeroAgentEnv,
-    scale: float = 8.0,
+    sigma: float = 0.25,
     **_kwargs,
 ) -> torch.Tensor:
-    """scale * exp(-potential). Maximized at zero attitude error."""
-    return scale * torch.exp(-env._potentials)
+    """Gaussian kernel tracking reward: exp(-||e||^2 / sigma^2).
+
+    Output in [0, 1]. error=0 -> 1.0, error=sigma -> 1/e (~0.37).
+    Uses L2 squared norm of roll/pitch errors for smoother gradient near zero.
+
+    Args:
+        env: Environment instance (provides _potentials = ||[roll_err, pitch_err]||).
+        sigma: Gaussian kernel width in radians. Default 0.25 rad (~14.3 deg).
+    """
+    err_sq = env._potentials**2
+    return torch.exp(-err_sq / (sigma**2))
 
 
-def albc_progress_reward(
+def progress_reward(
     _robot: Articulation,
     env: HeroAgentEnv,
     **_kwargs,
 ) -> torch.Tensor:
-    """prev_potential - current_potential. Positive when error decreases."""
+    """Telescoping progress reward: prev_potential - current_potential.
+
+    Positive when error decreases. Episode sum = phi_0 - phi_T (initial - final error).
+    NOT dt-scaled because the telescoping sum is naturally frequency-invariant.
+    """
     return env._prev_potentials - env._potentials
 
 
-def squared_action_cost(
+def angular_velocity_penalty(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+    **_kwargs,
+) -> torch.Tensor:
+    """Sum of squared body angular velocities (roll rate, pitch rate).
+
+    Penalizes fast rotations to suppress oscillation after reaching the target.
+    Use with negative weight. dt-scaled (instantaneous quality measure).
+    """
+    ang_vel = env._robot.data.root_ang_vel_b[:, :2]  # [p, q]
+    return torch.sum(ang_vel**2, dim=-1)
+
+
+def action_rate_penalty(
+    _robot: Articulation,
+    actions: torch.Tensor,
+    prev_actions: torch.Tensor,
+    **_kwargs,
+) -> torch.Tensor:
+    """Sum of squared action differences between consecutive steps.
+
+    Penalizes abrupt action changes to encourage smooth control.
+    NOT dt-scaled (per-step difference, da ~ dt so naturally frequency-invariant).
+    Use with negative weight.
+    """
+    return torch.sum((actions - prev_actions) ** 2, dim=-1)
+
+
+def action_magnitude_penalty(
     _robot: Articulation,
     actions: torch.Tensor,
     **_kwargs,
 ) -> torch.Tensor:
-    """sum(actions^2). Use with negative weight to penalize large actions/gains."""
+    """Sum of squared actions. Penalizes large control effort.
+
+    dt-scaled (instantaneous quality measure). Use with negative weight.
+    """
     return torch.sum(actions**2, dim=-1)
+
+
+# =============================================================================
+# Encoder-TDC Exclusive Reward Functions
+# =============================================================================
+
+
+def tde_residual_penalty(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+    **_kwargs,
+) -> torch.Tensor:
+    """TDE residual ratio: ||U_hat|| / (||M_hat * u_pd|| + eps).
+
+    Measures how large the TDE compensation torque is relative to the PD torque.
+    A small ratio indicates accurate M_hat and appropriate gains.
+    Good values < 0.5, problematic > 1.0.
+
+    dt-scaled (instantaneous quality measure). Use with negative weight.
+
+    Requires env._tdc to be available (TDC environments only).
+    """
+    u_hat_norm = env._tdc.u_hat.norm(dim=-1)
+    pd_norm = env._tdc.pd_torque.norm(dim=-1) + 1e-6
+    return u_hat_norm / pd_norm

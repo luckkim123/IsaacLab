@@ -89,6 +89,12 @@ class HydrodynamicsCfg:
     # Lower values increase stability at the cost of physical accuracy
     added_mass_stability_factor: float = 0.8
 
+    # Off-diagonal damping cross-coupling pairs.
+    # Each tuple (i, j) means DOF j velocity contributes to DOF i damping.
+    # Example: ((1, 5), (5, 1), (2, 4), (4, 2)) couples sway-yaw and heave-pitch.
+    # None disables cross-coupling (standard diagonal damping only).
+    damping_cross_coupling: tuple[tuple[int, int], ...] | None = None
+
 
 @configclass
 class OceanCurrentCfg:

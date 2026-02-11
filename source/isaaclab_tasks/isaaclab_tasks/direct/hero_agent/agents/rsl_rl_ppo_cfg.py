@@ -5,10 +5,11 @@
 
 """RSL-RL PPO agent configurations for Hero Agent ALBC environments.
 
-Provides three runner configurations:
+Provides runner configurations:
     - HeroAgentPPORunnerCfg: Standard PPO for joint-based attitude control
     - HeroAgentEncoderPPORunnerCfg: HORA Phase 1 with extrinsics encoder
     - HeroAgentEncoderTDCPPORunnerCfg: Encoder-TDC integration (adaptive gains + M_hat)
+    - HeroAgentAdaptTDCRunnerCfg: Phase 2 adaptation (supervised, non-PPO)
 
 For evaluation, use CLI overrides instead of separate config classes:
     --max_iterations 100 --save_interval 25
@@ -23,10 +24,11 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 # Register ActorCriticEncoder in RSL-RL runner module namespace.
 # The runner resolves policy class_name dynamically (on_policy_runner.py:416).
 # This injection makes custom network classes resolvable in that scope.
-from ..encoder import ActorCriticEncoder, ActorCriticEncoderTDC
+from ..encoder import ActorCriticEncoder, ActorCriticEncoderTDC, ActorCriticEncoderTDCAdapt
 
 _runner_module.ActorCriticEncoder = ActorCriticEncoder
 _runner_module.ActorCriticEncoderTDC = ActorCriticEncoderTDC
+_runner_module.ActorCriticEncoderTDCAdapt = ActorCriticEncoderTDCAdapt
 
 
 # =============================================================================
@@ -35,28 +37,24 @@ _runner_module.ActorCriticEncoderTDC = ActorCriticEncoderTDC
 
 
 @configclass
-class RslRlPpoActorCriticEncoderTDCCfg(RslRlPpoActorCriticCfg):
-    """PPO actor-critic configuration with encoder for TDC adaptive gains.
+class _RslRlPpoEncoderBaseCfg(RslRlPpoActorCriticCfg):
+    """Shared encoder architecture fields for all encoder-based policies.
 
-    Uses ActorCriticEncoderTDC which exposes encoder z for M_hat extraction.
-    Actor outputs 4D: [Kp_roll, Kp_pitch, Kd_roll, Kd_pitch].
+    All encoder variants (base, TDC, TDC-adapt) share the same encoder MLP
+    architecture and observation dimensions. This base avoids repeating 6 fields
+    across 3 config classes.
     """
 
-    class_name: str = "ActorCriticEncoderTDC"
-
-    # Encoder architecture (same as base encoder)
     encoder_hidden_dims: list[int] = [64, 32]
     encoder_latent_dim: int = 6
     encoder_activation: str = "elu"
     z_min: float = 0.1
-
-    # Observation dimensions
     policy_obs_dim: int = 13
-    privileged_dim: int = 22
+    privileged_dim: int = 24
 
 
 @configclass
-class RslRlPpoActorCriticEncoderCfg(RslRlPpoActorCriticCfg):
+class RslRlPpoActorCriticEncoderCfg(_RslRlPpoEncoderBaseCfg):
     """PPO actor-critic configuration with extrinsics encoder for HORA Phase 1.
 
     The encoder compresses privileged hydrodynamic parameters into a latent z
@@ -65,17 +63,32 @@ class RslRlPpoActorCriticEncoderCfg(RslRlPpoActorCriticCfg):
 
     class_name: str = "ActorCriticEncoder"
 
-    # Encoder architecture
-    encoder_hidden_dims: list[int] = [64, 32]
-    encoder_latent_dim: int = 6  # 6-DOF diagonal inertia matrix
-    encoder_activation: str = "elu"
 
-    # Softplus minimum: z = softplus(x) + z_min guarantees z > z_min
-    z_min: float = 0.1
+@configclass
+class RslRlPpoActorCriticEncoderTDCCfg(_RslRlPpoEncoderBaseCfg):
+    """PPO actor-critic configuration with encoder for TDC adaptive gains.
 
-    # Observation dimensions (must match environment)
-    policy_obs_dim: int = 13
-    privileged_dim: int = 22  # Main(10D) + Buoy(10D) + Payload(2D) = 22D
+    Uses ActorCriticEncoderTDC which exposes encoder z for M_hat extraction.
+    Actor outputs 4D: [Kp_roll, Kp_pitch, Kd_roll, Kd_pitch].
+    """
+
+    class_name: str = "ActorCriticEncoderTDC"
+
+
+@configclass
+class RslRlPpoActorCriticEncoderTDCAdaptCfg(_RslRlPpoEncoderBaseCfg):
+    """PPO actor-critic configuration for Phase 2 adaptation training.
+
+    Uses ActorCriticEncoderTDCAdapt which adds the adapt_tconv module on top
+    of ActorCriticEncoderTDC. The adapt module replaces the encoder for z
+    estimation using proprioception history.
+    """
+
+    class_name: str = "ActorCriticEncoderTDCAdapt"
+
+    # Adaptation module parameters
+    proprio_history_len: int = 30
+    proprio_feature_dim: int = 12
 
 
 # =============================================================================
@@ -127,7 +140,7 @@ class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for Hero Agent encoder training (HORA Phase 1).
 
     Uses ActorCriticEncoder that compresses privileged info into latent z:
-        - Encoder: privileged (22D) -> softplus -> z (6D)
+        - Encoder: privileged (24D) -> softplus -> z (6D)
         - Actor: cat([policy_obs, z]) = 19D -> actions
         - Critic: cat([policy_obs, z]) = 19D -> value (symmetric, forces encoder learning)
     """
@@ -173,7 +186,7 @@ class HeroAgentEncoderTDCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for Encoder-TDC integration.
 
     Uses ActorCriticEncoderTDC that:
-        - Encodes privileged (22D) -> z (6D), z[3:5] -> M_hat for TDC
+        - Encodes privileged (24D) -> z (6D), z[3:5] -> M_hat for TDC
         - Actor: cat([policy_obs, z]) = 19D -> 4D gains (Kp_r, Kp_p, Kd_r, Kd_p)
         - Critic: cat([policy_obs, z]) = 19D -> value (symmetric)
     """
@@ -212,3 +225,59 @@ class HeroAgentEncoderTDCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class HeroAgentAdaptTDCRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Runner configuration for Phase 2 supervised adaptation training.
+
+    This config is consumed by AdaptRunner (not OnPolicyRunner). It extends
+    RslRlOnPolicyRunnerCfg for gym.register entry_point compatibility only;
+    the inherited PPO fields (num_steps_per_env, max_iterations, algorithm)
+    are unused.
+
+    Phase 2 trains adapt_tconv with supervised L2 loss:
+        z_hat = adapt_tconv(proprio_hist)
+        z_gt  = frozen_encoder(privileged)
+        loss  = ||z_hat - z_gt||^2
+    """
+
+    seed = 42
+    num_steps_per_env = 1  # Unused by AdaptRunner (kept for base class compat)
+    max_iterations = 1  # Unused by AdaptRunner (kept for base class compat)
+    save_interval = 50  # Unused by AdaptRunner (kept for base class compat)
+    experiment_name = "hero_agent_adapt_tdc"
+    empirical_normalization = False
+
+    obs_groups = {
+        "policy": ["policy", "privileged"],
+        "critic": ["policy", "privileged"],
+    }
+
+    policy = RslRlPpoActorCriticEncoderTDCAdaptCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
+        actor_hidden_dims=[64, 64],
+        critic_hidden_dims=[64, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg()  # Unused by AdaptRunner (kept for base class compat)
+
+    # -- Phase 2 supervised training parameters --
+
+    adapt_lr: float = 3e-4
+    """Learning rate for adapt_tconv (Adam optimizer). Matches HORA reference."""
+
+    max_agent_steps: int = 100_000_000
+    """Total environment steps before training terminates."""
+
+    save_interval_steps: int = 10_000_000
+    """Save checkpoint every N agent steps."""
+
+    log_interval: int = 10
+    """Log metrics to writer every N iterations (1 iteration = num_envs steps)."""
+
+    max_grad_norm: float = 10.0
+    """Gradient clipping threshold for adapt_tconv. Relaxed vs Phase 1 (1.0) to
+    preserve fast initial convergence while catching anomalous gradient spikes."""

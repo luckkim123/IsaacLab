@@ -3,15 +3,24 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Encoder networks and runner for HORA/RMA Phase 1 training.
+"""Encoder networks for HORA/RMA training.
 
-This module provides:
-    - ActorCriticEncoder: Base encoder network (privileged -> z -> actor/critic)
-    - EncoderRunner: OnPolicyRunner with encoder metrics logging
+Neural network architectures for the HORA pipeline:
+    - ActorCriticEncoder: Base encoder (Phase 1 teacher)
+    - ActorCriticEncoderTDC: Encoder with z exposure for TDC M_hat
+    - ActorCriticEncoderTDCAdapt: Phase 2 adaptation (proprio history -> z_hat)
+    - ProprioAdaptTConv: Temporal conv for proprioception history
+    - RunningMeanStd: Welford's online normalization
 """
 
-from .actor_critic_encoder import ActorCriticEncoder
-from .actor_critic_encoder_tdc import ActorCriticEncoderTDC
-from .encoder_runner import EncoderRunner
+from .actor_critic_encoder import ActorCriticEncoder, ActorCriticEncoderTDC
+from .adaptation import ActorCriticEncoderTDCAdapt, ProprioAdaptTConv
+from .normalization import RunningMeanStd
 
-__all__ = ["ActorCriticEncoder", "ActorCriticEncoderTDC", "EncoderRunner"]
+__all__ = [
+    "ActorCriticEncoder",
+    "ActorCriticEncoderTDC",
+    "ActorCriticEncoderTDCAdapt",
+    "ProprioAdaptTConv",
+    "RunningMeanStd",
+]

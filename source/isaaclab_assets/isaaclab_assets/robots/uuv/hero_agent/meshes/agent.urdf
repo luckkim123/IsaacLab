@@ -32,7 +32,7 @@
 
   <!-- ========== BASE LINK (Main Body) ========== -->
   <!-- Cylinder: R=0.09m, L=0.325m, mass=9.18kg -->
-  <!-- CoG offset (0,0,-0.10) for passive stability (CoG below CoB) -->
+  <!-- CoG offset (0,0,-0.05) for passive stability (CoG below CoB) -->
   <link name="base">
     <visual>
       <origin xyz="0 0 -0.02" rpy="3.14159 0 1.0472"/>
@@ -47,7 +47,7 @@
       </geometry>
     </collision>
     <inertial>
-      <origin xyz="0 0 -0.10" rpy="0 0 0"/>
+      <origin xyz="0 0 -0.05" rpy="0 0 0"/>
       <mass value="9.18"/>
       <inertia ixx="0.0994" ixy="0" ixz="0" iyy="0.0994" iyz="0" izz="0.0372"/>
     </inertial>

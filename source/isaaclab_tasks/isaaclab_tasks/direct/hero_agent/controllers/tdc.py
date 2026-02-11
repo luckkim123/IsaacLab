@@ -25,7 +25,57 @@ from __future__ import annotations
 
 import torch
 
-from ..hero_agent_env_cfg import TDCControllerCfg
+from isaaclab.utils import configclass
+
+from isaaclab_assets.robots.uuv import (
+    HERO_AGENT_ALBC_LINK1_LENGTH,
+    HERO_AGENT_ALBC_LINK2_LENGTH,
+)
+
+
+@configclass
+class TDCControllerCfg:
+    """TDC (Time Delay Control) controller configuration.
+
+    Groups all parameters for the TDC attitude stabilization controller.
+    Used as a nested config in HeroAgentTDCEnvCfg.
+    """
+
+    # Design inertia [roll, pitch] in kg*m^2
+    m_hat: tuple[float, float] = (0.15, 0.16)
+
+    # PD gains
+    kp: float = 40.0  # omega_n = sqrt(40/0.15) = 16.3 rad/s
+    kd: float = 12.0  # zeta = 12/(2*sqrt(40*0.15)) = 2.45 (overdamped)
+
+    # Physical geometry
+    h: float = 0.180  # CoG-to-ABPC vertical offset (m), CoG at -0.05m
+
+    # DLS regularization for Lambda matrix inverse
+    dls_lambda_damping: float = 0.01
+
+    # EMA filter for angular acceleration finite difference
+    nu_dot_ema_alpha: float = 0.05
+
+    # EE offset at zero error (avoids origin singularity)
+    base_position: tuple[float, float] = (0.002, 0.002)
+
+    # IK DLS damping (Yoshikawa-style adaptive)
+    ik_dls_lambda: float = 0.15
+
+    # Joint rate limiting (rad/s)
+    max_joint_velocity: float = 2.5
+
+    # Link lengths from URDF (used by kinematics)
+    link1_length: float = HERO_AGENT_ALBC_LINK1_LENGTH
+    link2_length: float = HERO_AGENT_ALBC_LINK2_LENGTH
+
+    # Console log every N steps (0 = disabled)
+    log_interval: int = 200
+
+    # PhysX joint PD gains for TDC arm control (lower than RL default for smoother motion)
+    joint_stiffness: float = 200.0
+    joint_damping: float = 10.0
 
 
 class TDCController:
@@ -87,25 +137,22 @@ class TDCController:
         self._T_b_prev = torch.zeros(num_envs, 2, device=device)
         self._is_initialized = torch.zeros(num_envs, dtype=torch.bool, device=device)
 
+        # --- Diagnostic buffers (read-only, populated by compute()) ---
+        self._u_hat = torch.zeros(num_envs, 2, device=device)
+        self._m_hat_u_pd = torch.zeros(num_envs, 2, device=device)
+        self._delta_T_b = torch.zeros(num_envs, 2, device=device)
+
         # --- Scratch buffers (reused each step to avoid per-step allocation) ---
+        # WARNING: These are returned by reference from _compute_lambda_and_inv() and
+        # _compute_restoring_torque(). Calling either method a second time within the
+        # same compute() cycle will silently overwrite previously returned values.
         self._Lambda_scratch = torch.zeros(num_envs, 2, 2, device=device)
         self._Lambda_inv_scratch = torch.zeros(num_envs, 2, 2, device=device)
+        self._T_b_scratch = torch.zeros(num_envs, 2, device=device)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
-    def update_buoyancy_force(self, F_bu: torch.Tensor, env_ids: torch.Tensor | None = None) -> None:
-        """Update buoyancy force from hydrodynamics model.
-
-        Args:
-            F_bu: Buoyancy force magnitude. Shape: (N,) or scalar.
-            env_ids: Environment indices to update. None = all.
-        """
-        if env_ids is None:
-            self._F_bu[:] = F_bu
-        else:
-            self._F_bu[env_ids] = F_bu[env_ids] if F_bu.dim() > 0 else F_bu
 
     def update_ee_position(self, p_EE: torch.Tensor) -> None:
         """Update stored EE position for anti-windup correction.
@@ -168,6 +215,21 @@ class TDCController:
         """Buoyancy force per environment. Shape: (num_envs,)."""
         return self._F_bu
 
+    @property
+    def u_hat(self) -> torch.Tensor:
+        """TDE compensation torque from last compute(). Shape: (num_envs, 2)."""
+        return self._u_hat
+
+    @property
+    def pd_torque(self) -> torch.Tensor:
+        """PD torque (M_hat * u_pd) from last compute(). Shape: (num_envs, 2)."""
+        return self._m_hat_u_pd
+
+    @property
+    def delta_T_b(self) -> torch.Tensor:
+        """Restoring torque change from last compute(). Shape: (num_envs, 2)."""
+        return self._delta_T_b
+
     def compute(
         self,
         roll: torch.Tensor,
@@ -226,6 +288,9 @@ class TDCController:
         self._Lambda_prev[env_ids] = 0.0
         self._T_b_prev[env_ids] = 0.0
         self._is_initialized[env_ids] = False
+        self._u_hat[env_ids] = 0.0
+        self._m_hat_u_pd[env_ids] = 0.0
+        self._delta_T_b[env_ids] = 0.0
 
         # Reset PD gains to defaults for reset environments
         self._kp[env_ids] = self._kp_default
@@ -286,13 +351,9 @@ class TDCController:
         Returns:
             Restoring torque vector. Shape: (num_envs, 2).
         """
-        return torch.stack(
-            [
-                -torch.cos(pitch) * torch.sin(roll) * self._F_bu * self._h,
-                -torch.sin(pitch) * self._F_bu * self._h,
-            ],
-            dim=-1,
-        )
+        self._T_b_scratch[:, 0] = -torch.cos(pitch) * torch.sin(roll) * self._F_bu * self._h
+        self._T_b_scratch[:, 1] = -torch.sin(pitch) * self._F_bu * self._h
+        return self._T_b_scratch
 
     # ------------------------------------------------------------------
     # Internal: Control law sub-steps
@@ -332,7 +393,9 @@ class TDCController:
         e = torch.stack([target_euler[:, 0] - roll, target_euler[:, 1] - pitch], dim=-1)
         e_dot = -nu
         u_pd = self._kd * e_dot + self._kp * e
-        return self._m_hat * u_pd
+        m_hat_u_pd = self._m_hat * u_pd
+        self._m_hat_u_pd.copy_(m_hat_u_pd)
+        return m_hat_u_pd
 
     def _compute_tde_torque(self, T_b: torch.Tensor) -> torch.Tensor:
         """Compute TDE compensation torque.
@@ -349,6 +412,8 @@ class TDCController:
         tde_lambda_p = torch.bmm(self._Lambda_prev, self._p_EE_prev.unsqueeze(-1)).squeeze(-1)
         U_hat = tde_lambda_p - self._m_hat * self._nu_dot_filtered
         delta_T_b = self._T_b_prev - T_b
+        self._u_hat.copy_(U_hat)
+        self._delta_T_b.copy_(delta_T_b)
         return U_hat + delta_T_b
 
     def _torque_to_ee_position(self, Lambda_inv: torch.Tensor, tau: torch.Tensor) -> torch.Tensor:
@@ -383,9 +448,9 @@ class TDCController:
             Lambda: Coupling matrix. Shape: (num_envs, 2, 2).
             T_b: Restoring torque. Shape: (num_envs, 2).
         """
-        self._nu_prev = nu.clone()
-        self._nu_dot_filtered = nu_dot.clone()
-        self._p_EE_prev = p_EE.clone()
-        self._Lambda_prev = Lambda.clone()
-        self._T_b_prev = T_b.clone()
+        self._nu_prev.copy_(nu)
+        self._nu_dot_filtered.copy_(nu_dot)
+        self._p_EE_prev.copy_(p_EE)
+        self._Lambda_prev.copy_(Lambda)
+        self._T_b_prev.copy_(T_b)
         self._is_initialized[:] = True

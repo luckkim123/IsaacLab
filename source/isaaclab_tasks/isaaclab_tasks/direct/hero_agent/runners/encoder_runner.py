@@ -19,9 +19,14 @@ Usage:
 
 from __future__ import annotations
 
+import logging
+
 from rsl_rl.runners import OnPolicyRunner
 
+from ..utils.env_utils import connect_encoder_to_env, unwrap_env
 from ..utils.logging import log_encoder_metrics, log_encoder_tdc_metrics
+
+logger = logging.getLogger(__name__)
 
 
 class EncoderRunner(OnPolicyRunner):
@@ -47,31 +52,13 @@ class EncoderRunner(OnPolicyRunner):
         self._has_encoder = hasattr(self.alg.policy, "encoder")
 
         if self._has_encoder:
-            print("[EncoderRunner] Encoder detected. Encoder metrics logging enabled.")
+            logger.info("[EncoderRunner] Encoder detected. Encoder metrics logging enabled.")
         else:
-            print("[EncoderRunner] No encoder detected. Using standard logging only.")
+            logger.info("[EncoderRunner] No encoder detected. Using standard logging only.")
 
         # Wire up encoder policy to env for TDC M_hat extraction
-        self._connect_encoder_to_env()
-
-    def _connect_encoder_to_env(self) -> None:
-        """Wire encoder policy to env if it supports set_encoder_policy().
-
-        This enables the HeroAgentEncoderTDCEnv to extract z -> M_hat from the
-        encoder during _pre_physics_step(). The env is wrapped in RslRlVecEnvWrapper,
-        so we access the unwrapped env via .unwrapped attribute chain.
-        """
-        if not self._has_encoder:
-            return
-
-        # Unwrap to get the actual Isaac Lab env
-        raw_env = self.env
-        while hasattr(raw_env, "unwrapped") and raw_env is not raw_env.unwrapped:
-            raw_env = raw_env.unwrapped
-
-        if hasattr(raw_env, "set_encoder_policy"):
-            raw_env.set_encoder_policy(self.alg.policy)
-            print("[EncoderRunner] Connected encoder policy to env for M_hat extraction.")
+        if self._has_encoder:
+            connect_encoder_to_env(self.env, self.alg.policy, "EncoderRunner")
 
     def log(self, locs: dict, width: int = 80, pad: int = 35) -> None:
         """Extended log method that adds encoder-specific metrics.
@@ -84,6 +71,12 @@ class EncoderRunner(OnPolicyRunner):
             width: Terminal output width for formatting.
             pad: Padding for log formatting.
         """
+        # Update reward curriculum before logging
+        iteration = locs["it"]
+        raw_env = unwrap_env(self.env)
+        if hasattr(raw_env, "_reward_manager") and hasattr(raw_env.cfg, "reward"):
+            raw_env._reward_manager.update_curriculum(iteration, raw_env.cfg.reward.curriculum_end_iter)
+
         # Call parent log method first (handles all standard logging)
         super().log(locs, width, pad)
 

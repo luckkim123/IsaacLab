@@ -23,7 +23,25 @@ from isaaclab.utils.math import euler_xyz_from_quat
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
 
-    from ..hero_agent_env import HeroAgentEnv
+    from isaaclab_tasks.models import HydrodynamicsModel
+
+    from ..base_env import HeroAgentEnv
+
+
+def _hydro_privileged_info(hydro: HydrodynamicsModel) -> torch.Tensor:
+    """Pack hydrodynamic parameters into a 10D privileged observation vector.
+
+    Returns: (num_envs, 10) = [volume(1), r_cg(3), r_cb(3), inertia(3)].
+    """
+    return torch.cat(
+        [
+            hydro.volume.unsqueeze(-1),
+            hydro.center_of_gravity,
+            hydro.center_of_buoyancy,
+            hydro.rigid_body_inertia,
+        ],
+        dim=-1,
+    )
 
 
 def compute_policy_obs(
@@ -73,9 +91,9 @@ def compute_privileged_obs(
     Returns compact privileged info containing hydrostatic parameters:
         - Main body (10D): volume, r_cg (3), r_cb (3), inertia (3)
         - Buoy body (10D): volume, r_cg (3), r_cb (3), inertia (3)
-        - Payload (2D, optional): mass, z-offset
+        - Payload (4D, optional): mass, cog_offset (3)
 
-    Total: 22D when payload is included, 20D otherwise.
+    Total: 24D when payload is included, 20D otherwise.
 
     Args:
         env: The Hero Agent environment instance.
@@ -83,34 +101,12 @@ def compute_privileged_obs(
     Returns:
         Privileged observation tensor of shape (num_envs, state_space).
     """
-    # Main body privileged info (10D)
-    main_priv = torch.cat(
-        [
-            env._hydro.volume.unsqueeze(-1),
-            env._hydro.center_of_gravity,
-            env._hydro.center_of_buoyancy,
-            env._hydro.rigid_body_inertia,
-        ],
-        dim=-1,
-    )
-
-    # Buoy privileged info (10D)
-    buoy_priv = torch.cat(
-        [
-            env._buoy_hydro.volume.unsqueeze(-1),
-            env._buoy_hydro.center_of_gravity,
-            env._buoy_hydro.center_of_buoyancy,
-            env._buoy_hydro.rigid_body_inertia,
-        ],
-        dim=-1,
-    )
-
-    priv_obs = [main_priv, buoy_priv]
+    priv_obs = [_hydro_privileged_info(env._hydro), _hydro_privileged_info(env._buoy_hydro)]
 
     # Include payload info if enabled and state_space is large enough
-    if env._payload_mass is not None and env.cfg.state_space >= 22:
-        payload_priv = torch.stack(
-            [env._payload_mass, env._payload_attachment_offset[:, 2]],
+    if env._payload_mass is not None and env._payload_cog_offset is not None and env.cfg.state_space >= 24:
+        payload_priv = torch.cat(
+            [env._payload_mass.unsqueeze(-1), env._payload_cog_offset],
             dim=-1,
         )
         priv_obs.append(payload_priv)

@@ -131,8 +131,7 @@ class ALBCKinematics:
         sin_g12 = torch.sin(g12)
         cos_g12 = torch.cos(g12)
 
-        N = joint_angles.shape[0]
-        J = torch.zeros(N, 2, 2, device=self.device)
+        J = torch.zeros(joint_angles.shape[0], 2, 2, device=self.device)
         J[:, 0, 0] = -self.l1 * sin_g1 - self.l2 * sin_g12
         J[:, 0, 1] = -self.l2 * sin_g12
         J[:, 1, 0] = self.l1 * cos_g1 + self.l2 * cos_g12

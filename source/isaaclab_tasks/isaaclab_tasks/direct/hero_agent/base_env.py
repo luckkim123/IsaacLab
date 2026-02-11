@@ -29,18 +29,23 @@ from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse
 # Import models from common isaaclab_tasks.models
 from isaaclab_tasks.models import HydrodynamicsModel
 
-from .hero_agent_env_cfg import HeroAgentEnvCfg
+from .config import HeroAgentEnvCfg
 from .mdp import (
     RewardManager,
     RewardTermCfg,
-    albc_potential_reward,
-    albc_progress_reward,
+    action_magnitude_penalty,
+    action_rate_penalty,
+    angular_velocity_penalty,
     compute_policy_obs,
     compute_privileged_obs,
-    squared_action_cost,
+    progress_reward,
+    tracking_reward,
 )
 from .mdp.events import (
+    randomize_body_mass,
     randomize_hydrodynamics,
+    randomize_joint_friction,
+    randomize_joint_gains,
     randomize_joint_positions,
     randomize_ocean_current,
     randomize_payload,
@@ -48,7 +53,7 @@ from .mdp.events import (
     reset_joint_positions_default,
     reset_robot_pose_default,
 )
-from .utils import DebugVisualization, log_episode_metrics
+from .utils import DebugVisualization, log_dr_metrics, log_tdc_diagnostics
 
 
 class HeroAgentEnvWindow(BaseEnvWindow):
@@ -84,9 +89,9 @@ class HeroAgentEnv(DirectRLEnv):
         [1] joint2 velocity command [-1, 1]
 
     Physical Parameters:
-        - sim_dt: 1/200 s (200 Hz physics), decimation: 2 (100 Hz policy)
+        - sim_dt: 1/200 s (200 Hz physics), decimation: 1, control_decimation: 4 (50 Hz control)
         - max_joint_velocity: 2*pi rad/s (360 deg/s)
-        - joint stiffness: 500.0, damping: 10.0 (damping ratio ~0.7)
+        - joint stiffness: 100.0, damping: 3.0 (ImplicitActuator default)
         - joint_limits: from URDF (±2*pi rad, i.e. ±360 deg)
     """
 
@@ -103,10 +108,10 @@ class HeroAgentEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Validate state_space vs enable_payload consistency
-        if self.cfg.state_space >= 22 and not self.cfg.enable_payload:
+        if self.cfg.state_space >= 24 and not self.cfg.enable_payload:
             raise ValueError(
                 f"state_space={self.cfg.state_space} requires enable_payload=True "
-                f"(payload provides 2D of the {self.cfg.state_space}D privileged obs)"
+                f"(payload provides 4D of the {self.cfg.state_space}D privileged obs)"
             )
 
         self._init_body_ids()
@@ -124,6 +129,7 @@ class HeroAgentEnv(DirectRLEnv):
         """Initialize body IDs and physics parameters."""
         self._body_id = self._robot.find_bodies(self.cfg.hydrodynamics.body_name)[0]
         self._buoy_body_id = self._robot.find_bodies(self.cfg.buoy_hydrodynamics.body_name)[0]
+        self._gripper_body_id = self._robot.find_bodies("gripper")[0]
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
 
     def _init_hydrodynamics(self) -> None:
@@ -147,16 +153,22 @@ class HeroAgentEnv(DirectRLEnv):
         )
 
     def _init_payload(self) -> None:
-        """Initialize payload parameters if enabled."""
-        if not self.cfg.enable_payload:
+        """Initialize payload parameters if enabled.
+
+        Payload is applied to the gripper body (fixed to base via base_to_gripper joint).
+        """
+        self._payload_enabled = self.cfg.enable_payload
+        if not self._payload_enabled:
             self._payload_mass = None
             self._payload_attachment_offset = None
+            self._payload_cog_offset = None
             self._gravity_vec = None
             return
 
         self._payload_mass = torch.full((self.num_envs,), self.cfg.payload_mass, device=self.device)
         offset_tensor = torch.tensor(self.cfg.payload_attachment_offset, device=self.device, dtype=torch.float32)
         self._payload_attachment_offset = offset_tensor.expand(self.num_envs, -1).clone()
+        self._payload_cog_offset = torch.zeros(self.num_envs, 3, device=self.device)
         self._gravity_vec = torch.tensor(self.sim.cfg.gravity, device=self.device, dtype=torch.float32)
 
     def _init_joints(self) -> None:
@@ -172,28 +184,55 @@ class HeroAgentEnv(DirectRLEnv):
         self._joint_limits_range = self._joint_limits_upper - self._joint_limits_lower
 
     def _init_task_and_rewards(self) -> None:
-        """Initialize attitude task buffers and reward manager."""
+        """Initialize attitude task buffers and reward manager.
+
+        Reward terms are built by ``_build_reward_terms()`` (overridable hook).
+        """
         self._init_attitude_buffers()
         self._reward_manager = RewardManager(
-            cfg={
-                "potential": RewardTermCfg(
-                    func=albc_potential_reward,
-                    weight=self.cfg.reward.potential_weight,
-                    params={"scale": self.cfg.reward.potential_scale},
-                ),
-                "progress": RewardTermCfg(
-                    func=albc_progress_reward,
-                    weight=self.cfg.reward.progress_weight,
-                    scale_by_dt=False,
-                ),
-                "action_cost": RewardTermCfg(
-                    func=squared_action_cost,
-                    weight=self.cfg.reward.action_cost_weight,
-                ),
-            },
+            cfg=self._build_reward_terms(),
             num_envs=self.num_envs,
             device=self.device,
         )
+
+    def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
+        """Build the reward terms dict. Override in subclasses to add/modify terms.
+
+        Base terms (5):
+            1. tracking: Gaussian kernel exp(-e^2/sigma^2), dt-scaled
+            2. progress: telescoping (prev_e - e), NOT dt-scaled
+            3. angular_velocity: squared omega penalty, dt-scaled, curriculum
+            4. action_magnitude: squared action penalty, dt-scaled
+            5. action_rate: squared delta-action penalty, NOT dt-scaled, curriculum
+        """
+        rcfg = self.cfg.reward
+        return {
+            "tracking": RewardTermCfg(
+                func=tracking_reward,
+                weight=rcfg.tracking_weight,
+                params={"sigma": rcfg.tracking_sigma},
+            ),
+            "progress": RewardTermCfg(
+                func=progress_reward,
+                weight=rcfg.progress_weight,
+                scale_by_dt=False,
+            ),
+            "angular_velocity": RewardTermCfg(
+                func=angular_velocity_penalty,
+                weight=rcfg.angular_velocity_weight,
+                curriculum_start_weight=rcfg.angular_velocity_weight / 10.0,
+            ),
+            "action_magnitude": RewardTermCfg(
+                func=action_magnitude_penalty,
+                weight=rcfg.action_magnitude_weight,
+            ),
+            "action_rate": RewardTermCfg(
+                func=action_rate_penalty,
+                weight=rcfg.action_rate_weight,
+                scale_by_dt=False,
+                curriculum_start_weight=rcfg.action_rate_weight / 10.0,
+            ),
+        }
 
     def _init_state_buffers(self) -> None:
         """Initialize action and force/torque buffers."""
@@ -206,6 +245,9 @@ class HeroAgentEnv(DirectRLEnv):
         # this modulo always passes. If control_decimation > 1, all envs share
         # the same control phase.
         self._control_step_counter = 0
+
+        # Energy accumulator for control effort tracking
+        self._cumulative_effort = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
 
         # Force/torque buffers
         self._hydro_forces = torch.zeros(self.num_envs, 3, device=self.device)
@@ -324,6 +366,21 @@ class HeroAgentEnv(DirectRLEnv):
         )
         light_cfg.func("/World/Light", light_cfg)
 
+    def _update_action_buffers(self, actions: torch.Tensor, obs_action_slice: slice | None = None) -> None:
+        """Update action history buffers. Called at the start of _pre_physics_step().
+
+        Args:
+            actions: Raw actions from RL. Shape: (num_envs, action_space).
+            obs_action_slice: Slice for _prev_actions_obs. None = full clone.
+        """
+        self._prev_actions = self._actions.clone()
+        self._actions = actions.clone().clamp(-1.0, 1.0)
+        if obs_action_slice is not None:
+            self._prev_actions_obs = self._actions[:, obs_action_slice].clone()
+        else:
+            self._prev_actions_obs = self._actions.clone()
+        self._control_step_counter += 1
+
     def _pre_physics_step(self, actions: torch.Tensor):
         """Process actions before physics step with control decimation.
 
@@ -333,10 +390,7 @@ class HeroAgentEnv(DirectRLEnv):
         Args:
             actions: Joint velocity commands [-1, 1]. Shape: (num_envs, 2).
         """
-        self._prev_actions = self._actions.clone()
-        self._actions = actions.clone().clamp(-1.0, 1.0)
-        self._prev_actions_obs = self._actions.clone()
-        self._control_step_counter += 1
+        self._update_action_buffers(actions)
 
         if self._control_step_counter % self.cfg.control_decimation == 0:
             # Integrate velocity to position: delta_pos = dt * max_vel * action
@@ -371,17 +425,16 @@ class HeroAgentEnv(DirectRLEnv):
                 root_quat_w=self._robot.data.body_quat_w[:, buoy_body_idx, :],
             )
 
-        # Main body hydrodynamics
+        # Main body hydrodynamics (no payload -- payload is on gripper body)
         self._hydro_forces, self._hydro_torques = self._hydro.compute_forces(
             root_lin_vel_w=self._robot.data.root_lin_vel_w,
             root_ang_vel_w=self._robot.data.root_ang_vel_w,
             root_quat_w=self._robot.data.root_quat_w,
         )
-        main_forces, main_torques = self._add_payload_wrench(self._hydro_forces, self._hydro_torques)
         self._robot.permanent_wrench_composer.set_forces_and_torques(
             body_ids=self._body_id,
-            forces=main_forces.unsqueeze(1),
-            torques=main_torques.unsqueeze(1),
+            forces=self._hydro_forces.unsqueeze(1),
+            torques=self._hydro_torques.unsqueeze(1),
         )
 
         # Buoy hydrodynamics
@@ -397,24 +450,43 @@ class HeroAgentEnv(DirectRLEnv):
             torques=self._buoy_hydro_torques.unsqueeze(1),
         )
 
-    def _add_payload_wrench(self, forces: torch.Tensor, torques: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Add payload weight and moment to forces/torques if payload is enabled.
+        # Gripper payload (weight force applied at attachment point + CoG offset)
+        payload_forces, payload_torques = self._compute_payload_wrench()
+        if payload_forces is not None and payload_torques is not None:
+            self._robot.permanent_wrench_composer.set_forces_and_torques(
+                body_ids=self._gripper_body_id,
+                forces=payload_forces.unsqueeze(1),
+                torques=payload_torques.unsqueeze(1),
+            )
 
-        Forces and torques are in body frame, so payload weight must be
-        transformed from world frame to body frame before adding.
+    def _compute_payload_wrench(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Compute payload weight force and torque in the gripper body frame.
+
+        The payload hangs from the gripper (fixed to base via base_to_gripper joint).
+        Force = m*g transformed to gripper body frame.
+        Torque = (attachment_offset + cog_offset) x F_body.
+
+        Returns:
+            Tuple of (forces, torques) in gripper body frame, or (None, None) if disabled.
         """
-        if self._payload_mass is None or self._gravity_vec is None or self._payload_attachment_offset is None:
-            return forces, torques
+        if not self._payload_enabled:
+            return None, None
 
-        # Payload weight in world frame, then transform to body frame
+        # Gripper body orientation (same as base since fixed joint, but correct API)
+        gripper_idx = self._gripper_body_id[0]
+        gripper_quat = self._robot.data.body_quat_w[:, gripper_idx, :]
+
+        # Payload weight in world frame, then transform to gripper body frame
         payload_weight_w = self._payload_mass.unsqueeze(-1) * self._gravity_vec
-        payload_weight_b = quat_apply_inverse(self._robot.data.root_quat_w, payload_weight_w)
+        payload_weight_b = quat_apply_inverse(gripper_quat, payload_weight_w)
+
+        # Effective offset = attachment point + CoG offset (both in gripper body frame)
+        effective_offset = self._payload_attachment_offset + self._payload_cog_offset
 
         # Torque in body frame: tau = r_body x F_body
-        # (attachment offset is already in body frame)
-        payload_torque_b = torch.cross(self._payload_attachment_offset, payload_weight_b, dim=-1)
+        payload_torque_b = torch.cross(effective_offset, payload_weight_b, dim=-1)
 
-        return forces + payload_weight_b, torques + payload_torque_b
+        return payload_weight_b, payload_torque_b
 
     def _get_observations(self) -> dict:
         """Compute ALBC-specific observations.
@@ -445,6 +517,9 @@ class HeroAgentEnv(DirectRLEnv):
         # This must be called exactly once per step to correctly compute progress reward
         self._update_potentials()
 
+        # Accumulate control effort: sum(||a||^2 * dt) over episode
+        self._cumulative_effort += torch.sum(self._actions**2, dim=-1) * self.step_dt
+
         return self._reward_manager.compute(
             robot=self._robot,
             dt=self.step_dt,
@@ -452,6 +527,58 @@ class HeroAgentEnv(DirectRLEnv):
             prev_actions=self._prev_actions,
             env=self,  # Pass env for accessing potentials
         )
+
+    def _collect_episode_metrics(
+        self,
+        env_ids: torch.Tensor,
+        reward_sums: dict[str, torch.Tensor],
+    ) -> dict[str, float | torch.Tensor]:
+        """Collect episode metrics for TensorBoard/WandB logging.
+
+        Called from ``_reset_idx()`` before resetting state.  Replaces the former
+        standalone ``log_episode_metrics()`` function so that all env-internal
+        attribute access goes through ``self``.
+
+        Args:
+            env_ids: Environment indices being reset.
+            reward_sums: Accumulated rewards per term from RewardManager.
+
+        Returns:
+            Dict of metric tag -> value, written to ``self.extras["log"]``.
+        """
+        log: dict[str, float | torch.Tensor] = {}
+
+        # Reward sums
+        for name, value in reward_sums.items():
+            log[f"Episode_Reward/{name}"] = value
+
+        # Termination counts
+        log["Episode_Termination/terminated"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
+        log["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+
+        if len(env_ids) == 0:
+            return log
+
+        # Attitude errors (use cached values to avoid side effects)
+        attitude_errors_deg = torch.rad2deg(self._attitude_error[env_ids])
+        log["Attitude_Error/roll_deg"] = attitude_errors_deg[:, 0].abs().mean().item()
+        log["Attitude_Error/pitch_deg"] = attitude_errors_deg[:, 1].abs().mean().item()
+        log["Attitude_Error/total_deg"] = attitude_errors_deg[:, :2].abs().sum(dim=-1).mean().item()
+
+        # Cumulative control effort
+        log["Performance/cumulative_effort"] = self._cumulative_effort[env_ids].mean().item()
+
+        # TDC diagnostics (for any env with TDC controller)
+        if hasattr(self, "_tdc"):
+            log_tdc_diagnostics(log, self._tdc)
+
+        # DR parameters (when randomization is enabled)
+        if hasattr(self.cfg, "randomization") and self.cfg.randomization.enable:
+            # log_dr_metrics expects extras["log"] dict -- pass a wrapper
+            extras_wrapper: dict = {"log": log}
+            log_dr_metrics(extras_wrapper, self, self._robot, self._albc_joint_ids)
+
+        return log
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute termination conditions."""
@@ -487,17 +614,7 @@ class HeroAgentEnv(DirectRLEnv):
 
         # --- 1. Logging ---
         reward_sums = self._reward_manager.reset(env_ids_)
-        log_episode_metrics(
-            extras=self.extras,
-            env_ids=env_ids_,
-            reset_terminated=self.reset_terminated,
-            reset_time_outs=self.reset_time_outs,
-            reward_sums=reward_sums,
-            env=self,
-            robot=self._robot,
-            joint_ids=self._albc_joint_ids,
-            joint_pos_targets=self._joint_pos_targets,
-        )
+        self.extras["log"] = self._collect_episode_metrics(env_ids_, reward_sums)
 
         # --- 2. Component reset ---
         self._robot.reset(env_ids_)
@@ -515,20 +632,23 @@ class HeroAgentEnv(DirectRLEnv):
         # Reset action buffers
         for buf in (self._actions, self._prev_actions, self._prev_actions_obs):
             buf[env_ids_] = 0.0
+        self._cumulative_effort[env_ids_] = 0.0
 
         # --- 3. Hydrodynamics reset ---
         self._hydro.reset(env_ids_)
         self._buoy_hydro.reset(env_ids_)
 
-        if self._payload_mass is not None and self._payload_attachment_offset is not None:
+        if self._payload_enabled:
             self._payload_mass[env_ids_] = self.cfg.payload_mass
             offset_tensor = torch.tensor(self.cfg.payload_attachment_offset, device=self.device, dtype=torch.float32)
             self._payload_attachment_offset[env_ids_] = offset_tensor
+            self._payload_cog_offset[env_ids_] = 0.0
 
         rand_cfg = self.cfg.randomization
         if rand_cfg.enable:
             randomize_hydrodynamics(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
-            if self._payload_mass is not None:
+            randomize_body_mass(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
+            if self._payload_enabled:
                 randomize_payload(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
 
         has_ocean_current = any(v > 0 for v in self.cfg.ocean_current.max_velocity)
@@ -546,15 +666,11 @@ class HeroAgentEnv(DirectRLEnv):
             reset_joint_positions_default(env=self, env_ids=env_ids_)
             reset_robot_pose_default(env=self, env_ids=env_ids_, initial_height=self.cfg.initial_height)
 
-        # --- 5.5. Joint servo properties (realistic bandwidth) ---
-        if self.cfg.albc_joint_stiffness is not None:
-            self._robot.write_joint_stiffness_to_sim(
-                self.cfg.albc_joint_stiffness, joint_ids=self._albc_joint_ids, env_ids=env_ids_
-            )
-        if self.cfg.albc_joint_damping is not None:
-            self._robot.write_joint_damping_to_sim(
-                self.cfg.albc_joint_damping, joint_ids=self._albc_joint_ids, env_ids=env_ids_
-            )
+        # --- 5.5. Joint actuator DR ---
+        # Always applied: when DR disabled, ranges collapse to defaults (no randomization).
+        # TDC envs override stiffness/damping in their own _reset_idx().
+        randomize_joint_gains(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
+        randomize_joint_friction(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
 
         # --- 6. Potential initialization (must be after pose reset) ---
         self._initialize_potentials(env_ids_)
@@ -562,7 +678,7 @@ class HeroAgentEnv(DirectRLEnv):
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Setup or toggle visibility of debug visualization markers."""
         if debug_vis:
-            self._debug_vis.setup(enable_payload=self._payload_mass is not None)
+            self._debug_vis.setup(enable_payload=self._payload_enabled)
         self._debug_vis.set_visibility(debug_vis)
 
     def _debug_vis_callback(self, _event):

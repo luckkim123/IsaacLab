@@ -21,17 +21,14 @@ Control Flow (50 Hz, every control_decimation steps):
 
 from __future__ import annotations
 
-import logging
-
 import torch
 
 from isaaclab.utils.math import euler_xyz_from_quat
 
-logger = logging.getLogger(__name__)
-
+from .base_env import HeroAgentEnv
+from .config import HeroAgentTDCEnvCfg
 from .controllers import ALBCKinematics, TDCController
-from .hero_agent_env import HeroAgentEnv
-from .hero_agent_env_cfg import HeroAgentTDCEnvCfg
+from .utils.logging import log_tdc_control_state, log_tdc_init, log_tdc_reset_info
 
 
 class HeroAgentTDCEnv(HeroAgentEnv):
@@ -87,7 +84,7 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         self._log_env_id = 0
 
         if self._log_interval > 0:
-            self._setup_logger(tdc_cfg, self._tdc_dt)
+            log_tdc_init(tdc_cfg, self._tdc.F_bu[0].item(), self._tdc_dt)
 
     def _pre_physics_step(self, actions: torch.Tensor):
         """Override RL actions with TDC control output.
@@ -98,17 +95,20 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         Args:
             actions: RL actions (ignored). Shape: (num_envs, 2).
         """
-        # Store actions for observation/logging compatibility
-        self._prev_actions = self._actions.clone()
-        self._actions = actions.clone().clamp(-1.0, 1.0)
-        self._prev_actions_obs = self._actions.clone()
-        self._control_step_counter += 1
+        self._update_action_buffers(actions)
 
         # Only run TDC at control_decimation interval
         if self._control_step_counter % self.cfg.control_decimation != 0:
             return
 
-        # --- TDC control pipeline ---
+        self._run_tdc_pipeline()
+
+    def _run_tdc_pipeline(self) -> None:
+        """Run the TDC control pipeline: orientation -> TDC -> IK -> rate limit -> anti-windup.
+
+        Shared between HeroAgentTDCEnv and HeroAgentEncoderTDCEnv.
+        Subclasses should update TDC params (M_hat, gains) before calling this.
+        """
         # 1. Get current orientation
         roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
 
@@ -150,7 +150,17 @@ class HeroAgentTDCEnv(HeroAgentEnv):
 
         # 8. Console logging
         if self._log_interval > 0 and self._control_step_counter % self._log_interval == 0:
-            self._log_control_state(roll, pitch, ang_vel_body, p_EE_desired)
+            log_tdc_control_state(
+                step_counter=self._control_step_counter,
+                step_dt=self.step_dt,
+                log_env_id=self._log_env_id,
+                roll=roll,
+                pitch=pitch,
+                ang_vel_body=ang_vel_body,
+                p_EE_desired=p_EE_desired,
+                joint_pos_targets=self._joint_pos_targets,
+                target_euler=self._target_euler,
+            )
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         """Reset specified environments including TDC controller state.
@@ -159,92 +169,23 @@ class HeroAgentTDCEnv(HeroAgentEnv):
             env_ids: Environment indices to reset. None = all.
         """
         if self._log_interval > 0 and env_ids is not None and len(env_ids) < self.num_envs:
-            self._log_reset_info(env_ids)
+            log_tdc_reset_info(
+                env_ids=env_ids,
+                terminated=self.reset_terminated,
+                time_outs=self.reset_time_outs,
+                root_pos_w=self._robot.data.root_pos_w,
+                env_origins=self.scene.env_origins,
+                episode_length_buf=self.episode_length_buf,
+                step_dt=self.step_dt,
+            )
 
         super()._reset_idx(env_ids)
 
         # Reset TDC controller history for reset environments
         if env_ids is None:
             env_ids = self._robot._ALL_INDICES
+
         self._tdc.reset(env_ids)
 
         # Update buoyancy force for reset envs (may have changed from DR)
-        self._tdc.update_buoyancy_force(self._buoy_hydro.buoyancy_force, env_ids=env_ids)
-
-    # ------------------------------------------------------------------
-    # Internal: Logging
-    # ------------------------------------------------------------------
-
-    def _setup_logger(self, tdc_cfg, tdc_dt: float) -> None:
-        """Configure console logger for TDC diagnostics."""
-        logger.setLevel(logging.INFO)
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            handler.setFormatter(logging.Formatter("[TDC] %(message)s"))
-            logger.addHandler(handler)
-            logger.propagate = False
-        logger.info(
-            "TDC Controller initialized | M_hat=(%.3f, %.3f) Kp=%.1f Kd=%.1f "
-            "F_bu=%.2f h=%.3f dt=%.4f max_jvel=%.1f base=(%.3f,%.3f)",
-            *tdc_cfg.m_hat,
-            tdc_cfg.kp,
-            tdc_cfg.kd,
-            self._tdc.F_bu[0].item(),
-            tdc_cfg.h,
-            tdc_dt,
-            tdc_cfg.max_joint_velocity,
-            *tdc_cfg.base_position,
-        )
-
-    def _log_control_state(
-        self,
-        roll: torch.Tensor,
-        pitch: torch.Tensor,
-        ang_vel_body: torch.Tensor,
-        p_EE_desired: torch.Tensor,
-    ) -> None:
-        """Log control diagnostics for a single environment."""
-        i = self._log_env_id
-        t = self._control_step_counter * self.step_dt
-        r_deg = torch.rad2deg(roll[i]).item()
-        p_deg = torch.rad2deg(pitch[i]).item()
-        err_r = torch.rad2deg(self._target_euler[i, 0] - roll[i]).item()
-        err_p = torch.rad2deg(self._target_euler[i, 1] - pitch[i]).item()
-        pq = ang_vel_body[i, :2]
-        ee = p_EE_desired[i]
-        jt = self._joint_pos_targets[i]
-        logger.info(
-            "t=%5.2fs | roll=%+6.2f pitch=%+6.2f | err_r=%+6.2f err_p=%+6.2f | "
-            "p=%.3f q=%.3f | pEE=(%.4f,%.4f) | j=(%.3f,%.3f)",
-            t,
-            r_deg,
-            p_deg,
-            err_r,
-            err_p,
-            pq[0].item(),
-            pq[1].item(),
-            ee[0].item(),
-            ee[1].item(),
-            jt[0].item(),
-            jt[1].item(),
-        )
-
-    def _log_reset_info(self, env_ids: torch.Tensor) -> None:
-        """Log termination reason before reset clears state."""
-        terminated, time_out = self._get_dones()
-        for eid in env_ids:
-            i = eid.item()
-            reason = "timeout" if time_out[i] else ("terminated" if terminated[i] else "unknown")
-            height = self._robot.data.root_pos_w[i, 2].item()
-            xy = self._robot.data.root_pos_w[i, :2] - self.scene.env_origins[i, :2]
-            dist = torch.linalg.norm(xy).item()
-            ep_len = self.episode_length_buf[i].item()
-            logger.info(
-                "RESET env=%d | reason=%s | ep_steps=%d (%.1fs) | h=%.2f dist=%.2f",
-                i,
-                reason,
-                ep_len,
-                ep_len * self.step_dt,
-                height,
-                dist,
-            )
+        self._tdc.update_controller_params(F_bu=self._buoy_hydro.buoyancy_force, env_ids=env_ids)

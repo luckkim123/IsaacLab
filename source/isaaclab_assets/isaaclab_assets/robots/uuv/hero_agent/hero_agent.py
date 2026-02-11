@@ -92,7 +92,7 @@ class HeroAgentHydrodynamicsCfg(HydrodynamicsCfg):
 
     # Center of gravity below CoB for passive stability
     # Note: This is for restoring moment calculation. Actual CoG is from PhysX.
-    center_of_gravity: tuple[float, float, float] = (0.0, 0.0, -0.10)
+    center_of_gravity: tuple[float, float, float] = (0.0, 0.0, -0.05)
 
     # Freshwater density from heroagent2.py (kg/m^3)
     water_density: float = 998.0

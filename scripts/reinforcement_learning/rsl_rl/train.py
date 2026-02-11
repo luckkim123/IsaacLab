@@ -197,12 +197,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create runner from rsl-rl
     if agent_cfg.class_name == "OnPolicyRunner":
-        # Check if using ActorCriticEncoder policy for encoder-specific logging
+        # Hero Agent tasks use EncoderRunner for curriculum + encoder logging
+        is_hero_agent = args_cli.task.startswith("Isaac-HeroAgent") if args_cli.task else False
         policy_class_name = getattr(agent_cfg.policy, "class_name", None)
-        if policy_class_name and policy_class_name.startswith("ActorCriticEncoder"):
-            from isaaclab_tasks.direct.hero_agent.encoder import EncoderRunner
+        use_encoder_runner = is_hero_agent or (
+            policy_class_name and policy_class_name.startswith("ActorCriticEncoder")
+        )
+        if use_encoder_runner:
+            from isaaclab_tasks.direct.hero_agent.runners import EncoderRunner
 
-            print("[INFO] Using EncoderRunner for encoder metrics logging.")
+            print("[INFO] Using EncoderRunner for Hero Agent (curriculum + encoder metrics).")
             runner = EncoderRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
         else:
             runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)

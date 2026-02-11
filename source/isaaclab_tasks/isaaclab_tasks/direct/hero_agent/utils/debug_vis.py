@@ -79,14 +79,9 @@ class DebugVisualization:
                 self.setup()
             return
 
-        if self._com_marker is not None:
-            self._com_marker.set_visibility(visible)
-        if self._cob_marker is not None:
-            self._cob_marker.set_visibility(visible)
-        if self._payload_marker is not None:
-            self._payload_marker.set_visibility(visible)
-        if self._frame_marker is not None:
-            self._frame_marker.set_visibility(visible)
+        for marker in (self._com_marker, self._cob_marker, self._payload_marker, self._frame_marker):
+            if marker is not None:
+                marker.set_visibility(visible)
 
     def update(
         self,

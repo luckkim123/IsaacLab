@@ -8,11 +8,22 @@
 Hero Agent uses ALBC (Active Linear Buoyancy Controller) for attitude control
 via 2 revolute joints (joint1, joint2) that position a buoyancy element.
 No thrusters are used.
+
+This module consolidates all environment configurations:
+- DomainRandomizationCfg: DR parameter ranges
+- HeroAgentEnvCfg: Base environment config (debug, no DR)
+- HeroAgentTrainEnvCfg: Training config (DR + ocean current + payload)
+- HeroAgentEncoderTrainEnvCfg: Encoder training with privileged info
+- HeroAgentTDCEnvCfg: Classical TDC control (no RL)
+- HeroAgentEncoderTDCEnvCfg: Encoder-TDC integration (RL adaptive gains + M_hat)
+- HeroAgentAdaptTDCEnvCfg: Phase 2 adaptation (proprio history -> z_hat)
 """
 
 from __future__ import annotations
 
 import math
+
+import torch
 
 import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
@@ -20,11 +31,10 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg, UniformNoiseCfg
 
 from isaaclab_assets.robots.uuv import (
     HERO_AGENT_ALBC_JOINT_NAMES,
-    HERO_AGENT_ALBC_LINK1_LENGTH,
-    HERO_AGENT_ALBC_LINK2_LENGTH,
     HERO_AGENT_CFG,
     HeroAgentBuoyHydrodynamicsCfg,
     HeroAgentHydrodynamicsCfg,
@@ -32,7 +42,8 @@ from isaaclab_assets.robots.uuv import (
     OceanCurrentCfg,
 )
 
-from .mdp import ALBCRewardCfg
+from .controllers import TDCControllerCfg
+from .mdp import ALBCRewardCfg, EncoderTDCRewardCfg
 
 
 @configclass
@@ -40,9 +51,8 @@ class DomainRandomizationCfg:
     """Configuration for domain randomization in Hero Agent ALBC environments.
 
     Note:
-        Mass randomization has been removed because weight is now handled
-        by PhysX (disable_gravity=False). To randomize mass, modify PhysX
-        rigid body properties directly via the physics API.
+        Body mass is randomized via PhysX ``set_masses()`` API (see ``body_mass_scale``).
+        Weight (gravity) is handled by PhysX natively (disable_gravity=False).
     """
 
     enable: bool = False
@@ -58,23 +68,38 @@ class DomainRandomizationCfg:
     yaw_range: tuple[float, float] = (-math.pi, math.pi)
 
     # -- Hydrodynamic Parameter Scales --
-    added_mass_scale: tuple[float, float] = (0.8, 1.2)
-    linear_damping_scale: tuple[float, float] = (0.8, 1.2)
-    quadratic_damping_scale: tuple[float, float] = (0.8, 1.2)
-    volume_scale: tuple[float, float] = (0.95, 1.05)
+    added_mass_scale: tuple[float, float] = (0.7, 1.3)
+    linear_damping_scale: tuple[float, float] = (0.7, 1.3)
+    quadratic_damping_scale: tuple[float, float] = (0.6, 1.4)
+    volume_scale: tuple[float, float] = (0.9, 1.1)
 
     # -- Center of Buoyancy Offset (meters) --
     cob_offset_x: tuple[float, float] = (-0.01, 0.01)
     cob_offset_y: tuple[float, float] = (-0.01, 0.01)
-    cob_offset_z: tuple[float, float] = (-0.02, 0.02)
+    cob_offset_z: tuple[float, float] = (-0.04, 0.04)
 
     # -- Center of Gravity Offset (meters) --
     cog_offset_x: tuple[float, float] = (-0.01, 0.01)
     cog_offset_y: tuple[float, float] = (-0.01, 0.01)
-    cog_offset_z: tuple[float, float] = (-0.02, 0.02)
+    cog_offset_z: tuple[float, float] = (-0.04, 0.04)
 
     # -- Inertia --
-    inertia_scale: tuple[float, float] = (0.9, 1.1)
+    inertia_scale: tuple[float, float] = (0.8, 1.2)
+
+    # -- Body Mass Scale (applied uniformly to all bodies) --
+    body_mass_scale: tuple[float, float] = (0.9, 1.1)
+
+    # -- Water Density (kg/m^3) --
+    water_density_range: tuple[float, float] = (995.0, 1025.0)
+
+    # -- Joint Actuator Gains (absolute values) --
+    # Asset defaults: stiffness=100.0, damping=3.0 (ImplicitActuatorCfg)
+    joint_stiffness_range: tuple[float, float] = (80.0, 120.0)
+    joint_damping_range: tuple[float, float] = (2.4, 3.6)
+
+    # -- Joint Friction --
+    joint_static_friction_range: tuple[float, float] = (0.0, 0.05)
+    joint_viscous_friction_range: tuple[float, float] = (0.0, 0.3)
 
     def disable_all(
         self,
@@ -98,8 +123,15 @@ class DomainRandomizationCfg:
             "quadratic_damping_scale",
             "volume_scale",
             "inertia_scale",
+            "body_mass_scale",
         ):
             setattr(self, attr, (1.0, 1.0))
+        self.water_density_range = (998.0, 998.0)
+        # Fix joint gains to asset defaults
+        self.joint_stiffness_range = (100.0, 100.0)
+        self.joint_damping_range = (3.0, 3.0)
+        self.joint_static_friction_range = (0.0, 0.0)
+        self.joint_viscous_friction_range = (0.0, 0.0)
         for attr in (
             "cob_offset_x",
             "cob_offset_y",
@@ -107,58 +139,69 @@ class DomainRandomizationCfg:
             "cog_offset_x",
             "cog_offset_y",
             "cog_offset_z",
+            "payload_cog_offset_x",
+            "payload_cog_offset_y",
+            "payload_cog_offset_z",
         ):
             setattr(self, attr, (0.0, 0.0))
+        # Fix payload mass to nominal (matches HeroAgentEnvCfg.payload_mass default)
+        self.payload_mass_range = (0.5, 0.5)
+
+    @classmethod
+    def fixed_pose(
+        cls,
+        roll: float = 0.0,
+        pitch: float = 0.0,
+        yaw: float = 0.0,
+        position: tuple[float, float, float] = (0.0, 0.0, 4.5),
+    ) -> DomainRandomizationCfg:
+        """Create a DR config with all randomization disabled except a fixed pose.
+
+        Use this classmethod for declarative config construction (no mutable
+        ``disable_all()`` needed).
+        """
+        return cls(
+            enable=True,
+            roll_range=(roll, roll),
+            pitch_range=(pitch, pitch),
+            yaw_range=(yaw, yaw),
+            position_x_range=(position[0], position[0]),
+            position_y_range=(position[1], position[1]),
+            position_z_range=(position[2], position[2]),
+            added_mass_scale=(1.0, 1.0),
+            linear_damping_scale=(1.0, 1.0),
+            quadratic_damping_scale=(1.0, 1.0),
+            volume_scale=(1.0, 1.0),
+            inertia_scale=(1.0, 1.0),
+            body_mass_scale=(1.0, 1.0),
+            water_density_range=(998.0, 998.0),
+            joint_stiffness_range=(100.0, 100.0),
+            joint_damping_range=(3.0, 3.0),
+            joint_static_friction_range=(0.0, 0.0),
+            joint_viscous_friction_range=(0.0, 0.0),
+            cob_offset_x=(0.0, 0.0),
+            cob_offset_y=(0.0, 0.0),
+            cob_offset_z=(0.0, 0.0),
+            cog_offset_x=(0.0, 0.0),
+            cog_offset_y=(0.0, 0.0),
+            cog_offset_z=(0.0, 0.0),
+            payload_cog_offset_x=(0.0, 0.0),
+            payload_cog_offset_y=(0.0, 0.0),
+            payload_cog_offset_z=(0.0, 0.0),
+            payload_mass_range=(0.5, 0.5),
+        )
 
     # ==========================================================================
     # Payload Randomization (only used when enable_payload=True)
-    # Simple weight-based payload: mass + attachment offset
+    # Payload is attached to the gripper body (fixed to base via base_to_gripper joint).
+    # Offsets are in gripper body frame.
     # ==========================================================================
-    payload_mass_range: tuple[float, float] = (0.3, 0.7)  # kg
-    payload_attachment_x_range: tuple[float, float] = (-0.05, 0.05)  # m, offset from base
-    payload_attachment_y_range: tuple[float, float] = (-0.05, 0.05)  # m, offset from base
-    payload_attachment_z_range: tuple[float, float] = (-0.25, -0.15)  # m, absolute value
+    payload_mass_range: tuple[float, float] = (0.0, 1.0)  # kg
 
-
-@configclass
-class TDCControllerCfg:
-    """TDC (Time Delay Control) controller configuration.
-
-    Groups all parameters for the TDC attitude stabilization controller.
-    Used as a nested config in HeroAgentTDCEnvCfg.
-    """
-
-    # Design inertia [roll, pitch] in kg*m^2
-    m_hat: tuple[float, float] = (0.15, 0.16)
-
-    # PD gains
-    kp: float = 40.0  # omega_n = sqrt(40/0.15) = 16.3 rad/s
-    kd: float = 12.0  # zeta = 12/(2*sqrt(40*0.15)) = 2.45 (overdamped)
-
-    # Physical geometry
-    h: float = 0.230  # CoG-to-CoB vertical offset (m)
-
-    # DLS regularization for Lambda matrix inverse
-    dls_lambda_damping: float = 0.01
-
-    # EMA filter for angular acceleration finite difference
-    nu_dot_ema_alpha: float = 0.05
-
-    # EE offset at zero error (avoids origin singularity)
-    base_position: tuple[float, float] = (0.01, 0.01)
-
-    # IK DLS damping (Yoshikawa-style adaptive)
-    ik_dls_lambda: float = 0.15
-
-    # Joint rate limiting (rad/s)
-    max_joint_velocity: float = 2.5
-
-    # Link lengths from URDF (used by kinematics)
-    link1_length: float = HERO_AGENT_ALBC_LINK1_LENGTH
-    link2_length: float = HERO_AGENT_ALBC_LINK2_LENGTH
-
-    # Console log every N steps (0 = disabled)
-    log_interval: int = 200
+    # -- Payload CoG Offset (meters, relative to attachment point) --
+    payload_cog_offset_x: tuple[float, float] = (-0.50, 0.50)
+    payload_cog_offset_y: tuple[float, float] = (-0.50, 0.50)
+    payload_cog_offset_z: tuple[float, float] = (-0.20, 0.0)
 
 
 @configclass
@@ -173,7 +216,7 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # Environment Settings
     # ==========================================================================
     episode_length_s: float = 15.0
-    decimation: int = 2  # 0.005 * 2 = 0.01s = 100Hz policy (RL action)
+    decimation: int = 1  # 0.005 * 1 = 0.005s step; 50Hz control via control_decimation=4
     action_space: int = 2
     observation_space: int = 13
     state_space: int = 0
@@ -229,16 +272,8 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # ==========================================================================
     albc_joint_names: list[str] = HERO_AGENT_ALBC_JOINT_NAMES
     max_joint_velocity: float = 2 * math.pi
-    control_decimation: int = 4  # target updates every 4th RL step (25Hz servo command)
-    initial_joint_pos_range: tuple[float, float] = (-0.3, 0.3)
-
-    albc_joint_stiffness: float | None = None
-    """ALBC joint stiffness (PhysX PD gain). None = use actuator default (500.0).
-    Override for runtime tuning. Target damping ratio ~0.7 with Kd=10."""
-
-    albc_joint_damping: float | None = None
-    """ALBC joint damping (PhysX PD gain). None = use actuator default (10.0).
-    Override for runtime tuning. Target damping ratio ~0.7 with Kp=500."""
+    control_decimation: int = 4  # target updates every 4th step = 0.02s (50Hz control)
+    initial_joint_pos_range: tuple[float, float] = (-math.pi, math.pi)
 
     # ==========================================================================
     # Attitude Task and Rewards
@@ -267,10 +302,11 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
 
     # ==========================================================================
     # Virtual Payload Configuration (simple weight model)
+    # Payload is applied to the gripper body (fixed to base). Offsets in gripper frame.
     # ==========================================================================
     enable_payload: bool = False
     payload_mass: float = 0.5  # kg
-    payload_attachment_offset: tuple[float, float, float] = (0.0, 0.0, -0.2)  # m, body frame
+    payload_attachment_offset: tuple[float, float, float] = (0.0, 0.0, -0.05)  # m, gripper frame
 
 
 @configclass
@@ -283,45 +319,75 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
         noise_scale=(0.05, 0.05, 0.02, 0.0, 0.0, 0.0),
     )
     enable_payload: bool = True
+    randomize_target_attitude: bool = True
+
+    # IMU sensor noise: bias (per-episode drift) + white noise (per-step)
+    # Dims 0-2: euler angles (rad), 3-5: angular velocity (rad/s),
+    # 6-8: attitude errors (same IMU source as euler -> same noise), 9-12: no noise
+    observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
+        noise_cfg=GaussianNoiseCfg(
+            mean=0.0,
+            std=torch.tensor([0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.01, 0.01, 0.01, 0.0, 0.0, 0.0, 0.0]),
+        ),
+        bias_noise_cfg=UniformNoiseCfg(
+            n_min=torch.tensor([-0.005, -0.005, -0.005, -0.01, -0.01, -0.01, -0.005, -0.005, -0.005, 0, 0, 0, 0]),
+            n_max=torch.tensor([0.005, 0.005, 0.005, 0.01, 0.01, 0.01, 0.005, 0.005, 0.005, 0, 0, 0, 0]),
+        ),
+    )
 
 
 @configclass
-class HeroAgentTDCEnvCfg(HeroAgentEnvCfg):
+class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
+    """Hero Agent encoder training with privileged hydrodynamic info.
+
+    state_space=24 returns compact privileged information for HORA/RMA Phase 1 training.
+    Main body (10D) + Buoy (10D) + Payload (4D) = 24D.
+    Payload privileged info: mass (1D) + cog_offset (3D).
+
+    Network Input Dimensions (ActorCriticEncoder):
+        - observation_space (13): Used for gym.spaces.Box definition only
+        - state_space (24): Privileged info, returned as observations["privileged"]
+        - Encoder: privileged(24D) -> latent z(6D)
+        - Actual Actor/Critic input: policy_obs(13) + z(6) = 19D
+    """
+
+    state_space: int = 24
+
+
+# =============================================================================
+# TDC (Time Delay Control) Configurations
+# =============================================================================
+
+
+@configclass
+class HeroAgentTDCEnvCfg(HeroAgentTrainEnvCfg):
     """Hero Agent TDC (Time Delay Control) environment configuration.
 
     Uses classical TDC controller instead of RL for attitude stabilization.
-    All domain randomization and ocean currents are disabled for controlled testing.
-    Initial pose is tilted 15 degrees in roll and pitch.
+    Inherits DR, ocean current, and payload from HeroAgentTrainEnvCfg.
 
     Control timing (matching C++ reference):
-        - decimation=1: step_dt = physics_dt = 0.005s (200Hz policy step)
+        - decimation=1: step_dt = physics_dt = 0.005s (200Hz step)
         - control_decimation=4: TDC runs every 4th step = 0.02s (50Hz)
+
+    Joint gains are centered at TDC-optimal values (Kp=200, Kd=10) with
+    +/-20% randomization, unlike the base RL config (Kp=100, Kd=3).
     """
 
     tdc: TDCControllerCfg = TDCControllerCfg()
 
-    def __post_init__(self):
-        """Set up TDC-specific defaults."""
-        super().__post_init__()
+    # TDC runs at 50Hz (every 4th physics step, matching C++ reference)
+    control_decimation: int = 4  # TDC dt = 0.005 * 4 = 0.02s
 
-        # TDC runs at 50Hz (every 4th physics step, matching C++ reference)
-        self.decimation = 1  # step_dt = physics_dt = 0.005s
-        self.control_decimation = 4  # TDC dt = 0.005 * 4 = 0.02s
+    # No privileged obs for pure TDC (classical control, no encoder)
+    state_space: int = 0
 
-        # Lower PhysX PD for smoother arm motion (reduces reaction torque on body)
-        self.albc_joint_stiffness = 200.0  # default 500 -> 200
-        self.albc_joint_damping = 10.0
-
-        # Fixed initial pose: 15 degrees tilt in roll and pitch
-        self.randomization.disable_all(roll=0.2618, pitch=0.2618)
-
-        # Disable ocean current for pure control testing
-        self.ocean_current.max_velocity = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        self.ocean_current.noise_scale = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-
-        # Disable payload
-        self.enable_payload = False
-        self.state_space = 0
+    # Override joint gain ranges for TDC (centered at Kp=200, Kd=10)
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg(
+        enable=True,
+        joint_stiffness_range=(160.0, 240.0),
+        joint_damping_range=(8.0, 12.0),
+    )
 
 
 @configclass
@@ -333,46 +399,41 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTrainEnvCfg):
     z[3:5] provides adaptive M_hat for the TDC controller.
 
     Inherits DR, ocean current, and payload from HeroAgentTrainEnvCfg.
+    Joint gains centered at TDC-optimal values (Kp=200, Kd=10).
     """
 
     tdc: TDCControllerCfg = TDCControllerCfg(log_interval=0)
-    state_space: int = 22  # privileged obs for encoder
+
+    # TDC timing: control_decimation=4 (50Hz TDC)
+    control_decimation: int = 4
+
+    state_space: int = 24  # privileged obs for encoder
     action_space: int = 4  # Kp_roll, Kp_pitch, Kd_roll, Kd_pitch
     observation_space: int = 13  # same policy obs
-    enable_payload: bool = True
 
     # Gain bounds (after sigmoid scaling in env)
     kp_range: tuple[float, float] = (10.0, 100.0)
     kd_range: tuple[float, float] = (2.0, 30.0)
 
-    # M_hat bounds (from encoder z extraction)
-    m_hat_min: float = 0.05
-    m_hat_max: float = 0.50
+    # Encoder-TDC specific reward config (adjusted weights + TDE residual)
+    reward: EncoderTDCRewardCfg = EncoderTDCRewardCfg()
 
-    def __post_init__(self):
-        super().__post_init__()
-        # TDC timing: decimation=1 (200Hz step), control_decimation=4 (50Hz TDC)
-        self.decimation = 1
-        self.control_decimation = 4
-        # Lower PhysX PD for smoother arm motion under TDC control
-        self.albc_joint_stiffness = 200.0
-        self.albc_joint_damping = 10.0
+    # Override joint gain ranges for TDC (centered at Kp=200, Kd=10)
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg(
+        enable=True,
+        joint_stiffness_range=(160.0, 240.0),
+        joint_damping_range=(8.0, 12.0),
+    )
 
 
 @configclass
-class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
-    """Hero Agent encoder training with privileged hydrodynamic info.
+class HeroAgentAdaptTDCEnvCfg(HeroAgentEncoderTDCEnvCfg):
+    """Phase 2 adaptation training config.
 
-    state_space=22 returns compact privileged information for HORA/RMA Phase 1 training.
-    Uses get_privileged_info_compact(): Main body (10D) + Buoy (10D) + Payload (2D) = 22D.
-    Payload privileged info: mass (1D) + attachment_offset_z (1D).
-
-    Network Input Dimensions (ActorCriticEncoder):
-        - observation_space (13): Used for gym.spaces.Box definition only
-        - state_space (22): Privileged info, returned as observations["privileged"]
-        - Encoder: privileged(22D) -> latent z(6D)
-        - Actual Actor/Critic input: policy_obs(13) + z(6) = 19D
+    Adds proprioception history buffer for the adaptation module.
+    Per-timestep feature (12D):
+        [roll(1), pitch(1), p(1), q(1), joint_pos_norm(2), joint_vel(2), actions(4)]
     """
 
-    state_space: int = 22
-    enable_payload: bool = True
+    proprio_history_len: int = 30
+    proprio_feature_dim: int = 12  # body(4) + joint_pos(2) + joint_vel(2) + actions(4)
