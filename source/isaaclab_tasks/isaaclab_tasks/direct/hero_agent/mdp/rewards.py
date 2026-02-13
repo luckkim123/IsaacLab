@@ -358,5 +358,5 @@ def tde_residual_penalty(
     Requires env._tdc to be available (TDC environments only).
     """
     u_hat_norm = env._tdc.u_hat.norm(dim=-1)
-    pd_norm = env._tdc.pd_torque.norm(dim=-1) + 1e-6
-    return u_hat_norm / pd_norm
+    pd_norm = env._tdc.pd_torque.norm(dim=-1)
+    return torch.where(pd_norm > 1e-3, u_hat_norm / pd_norm, u_hat_norm)

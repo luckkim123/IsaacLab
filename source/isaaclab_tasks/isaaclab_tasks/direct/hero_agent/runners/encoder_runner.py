@@ -71,14 +71,15 @@ class EncoderRunner(OnPolicyRunner):
             width: Terminal output width for formatting.
             pad: Padding for log formatting.
         """
-        # Update reward curriculum before logging
+        # Call parent log method first (handles all standard logging)
+        super().log(locs, width, pad)
+
+        # Update reward curriculum after logging so logged data matches the
+        # curriculum that produced it (avoids 1-interval offset)
         iteration = locs["it"]
         raw_env = unwrap_env(self.env)
         if hasattr(raw_env, "_reward_manager") and hasattr(raw_env.cfg, "reward"):
             raw_env._reward_manager.update_curriculum(iteration, raw_env.cfg.reward.curriculum_end_iter)
-
-        # Call parent log method first (handles all standard logging)
-        super().log(locs, width, pad)
 
         # Log encoder metrics if encoder exists and logging is enabled
         if self._has_encoder and self.log_dir is not None and not self.disable_logs:

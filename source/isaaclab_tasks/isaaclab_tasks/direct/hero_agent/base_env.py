@@ -685,7 +685,12 @@ class HeroAgentEnv(DirectRLEnv):
             | torch.isinf(self._robot.data.root_lin_vel_w).any(dim=1)
         )
 
-        return out_of_height_bounds | too_far | too_fast | bad_state, time_out
+        # Attitude angle check: terminate if roll or pitch exceeds limit.
+        # Beyond ~90 deg, cos(angle) flips sign -> Lambda matrix reversal -> unrecoverable.
+        roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
+        excessive_tilt = (roll.abs() > self.cfg.max_attitude_angle) | (pitch.abs() > self.cfg.max_attitude_angle)
+
+        return out_of_height_bounds | too_far | too_fast | bad_state | excessive_tilt, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         """Reset specified environments.
@@ -715,8 +720,11 @@ class HeroAgentEnv(DirectRLEnv):
 
         # Randomize episode lengths to decorrelate environment terminations
         if len(env_ids_) == self.num_envs:
-            # Full batch (initial reset): spread across entire episode range
-            self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
+            # Full batch (initial reset): spread across 0~50% of episode range.
+            # This decorrelates terminations while ensuring every env collects
+            # at least half an episode of meaningful experience.
+            half_ep = max(1, int(self.max_episode_length * 0.5))
+            self.episode_length_buf[:] = torch.randint_like(self.episode_length_buf, high=half_ep)
         else:
             # Individual resets: small jitter prevents re-synchronization
             max_jitter = max(1, int(self.max_episode_length * 0.1))
@@ -766,6 +774,8 @@ class HeroAgentEnv(DirectRLEnv):
         randomize_joint_friction(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
 
         # --- 6. Potential initialization (must be after pose reset) ---
+        # Note: write_root_pose_to_sim() immediately updates internal data cache,
+        # so root_quat_w reflects the new pose without needing an explicit update() call.
         self._initialize_potentials(env_ids_)
 
     def _set_debug_vis_impl(self, debug_vis: bool):

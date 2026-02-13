@@ -188,7 +188,7 @@ class TDCController:
             if m_hat is not None:
                 self._m_hat[env_ids] = m_hat
             if F_bu is not None:
-                self._F_bu[env_ids] = F_bu[env_ids] if F_bu.dim() > 0 else F_bu
+                self._F_bu[env_ids] = F_bu
 
     def update_gains(
         self,

@@ -294,6 +294,7 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     max_height: float = 10.0
     max_distance_from_origin: float = 10.0
     max_angular_velocity: float = 3.14159  # rad/s (~180 deg/s); terminate if roll/pitch rate exceeds this
+    max_attitude_angle: float = 1.5708  # rad (~90 deg), prevents Lambda sign reversal
 
     # ==========================================================================
     # Domain Randomization

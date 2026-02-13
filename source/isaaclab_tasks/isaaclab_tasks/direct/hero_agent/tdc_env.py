@@ -188,4 +188,4 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         self._tdc.reset(env_ids)
 
         # Update buoyancy force for reset envs (may have changed from DR)
-        self._tdc.update_controller_params(F_bu=self._buoy_hydro.buoyancy_force, env_ids=env_ids)
+        self._tdc.update_controller_params(F_bu=self._buoy_hydro.buoyancy_force[env_ids], env_ids=env_ids)
