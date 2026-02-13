@@ -29,6 +29,7 @@ from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse
 # Import models from common isaaclab_tasks.models
 from isaaclab_tasks.models import HydrodynamicsModel
 
+from .attitude_task import AttitudeTask
 from .config import HeroAgentEnvCfg
 from .mdp import (
     RewardManager,
@@ -223,7 +224,13 @@ class HeroAgentEnv(DirectRLEnv):
 
         Reward terms are built by ``_build_reward_terms()`` (overridable hook).
         """
-        self._init_attitude_buffers()
+        self._attitude_task = AttitudeTask(
+            num_envs=self.num_envs,
+            device=self.device,
+            target_attitude=self.cfg.target_attitude,
+            randomize=self.cfg.randomize_target_attitude,
+            target_range=self.cfg.target_attitude_range,
+        )
         self._reward_manager = RewardManager(
             cfg=self._build_reward_terms(),
             num_envs=self.num_envs,
@@ -290,98 +297,39 @@ class HeroAgentEnv(DirectRLEnv):
         self._buoy_hydro_forces = torch.zeros(self.num_envs, 3, device=self.device)
         self._buoy_hydro_torques = torch.zeros(self.num_envs, 3, device=self.device)
 
-    def _init_attitude_buffers(self) -> None:
-        """Initialize attitude task buffers for potential-based reward."""
-        # Target Euler angles (roll, pitch, yaw)
-        target_tensor = torch.tensor(self.cfg.target_attitude, device=self.device)
-        self._target_euler = target_tensor.unsqueeze(0).expand(self.num_envs, -1).clone()
+    # ------------------------------------------------------------------
+    # Attitude task delegation (see attitude_task.py)
+    # ------------------------------------------------------------------
+    # Backwards-compatible accessors: external code (rewards.py, observations.py,
+    # tdc_env.py, benchmark_runner.py) accesses env._potentials, env._target_euler, etc.
 
-        # Attitude error and potential tracking buffers
-        self._attitude_error = torch.zeros(self.num_envs, 3, dtype=torch.float32, device=self.device)
-        self._potentials = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self._prev_potentials = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+    @property
+    def _target_euler(self) -> torch.Tensor:
+        return self._attitude_task.target_euler
+
+    @property
+    def _attitude_error(self) -> torch.Tensor:
+        return self._attitude_task.attitude_error
+
+    @property
+    def _potentials(self) -> torch.Tensor:
+        return self._attitude_task.potentials
+
+    @property
+    def _prev_potentials(self) -> torch.Tensor:
+        return self._attitude_task.prev_potentials
 
     def compute_attitude_error(
         self,
         quat: torch.Tensor,
         env_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute attitude error from quaternion orientation.
-
-        Args:
-            quat: Quaternion orientation (w, x, y, z). Shape: (N, 4).
-            env_ids: Environment indices. If None, computes for all envs.
-
-        Returns:
-            Attitude error (target - current), wrapped to [-pi, pi]. Shape: (N, 3).
-        """
-        current_euler = torch.stack(euler_xyz_from_quat(quat), dim=-1)
-        target = self._target_euler if env_ids is None else self._target_euler[env_ids]
-        error = target - current_euler
-
-        # Wrap angles to [-pi, pi]
-        return torch.atan2(torch.sin(error), torch.cos(error))
+        """Compute attitude error from quaternion orientation."""
+        return self._attitude_task.compute_error(quat, env_ids)
 
     def _get_attitude_error(self) -> torch.Tensor:
-        """Compute attitude error for observations.
-
-        Returns the difference between target and current orientation
-        as roll, pitch, yaw errors.
-
-        Returns:
-            Attitude error (target - current). Shape: (num_envs, 3).
-        """
-        self._attitude_error = self.compute_attitude_error(self._robot.data.root_quat_w)
-        return self._attitude_error
-
-    def _update_potentials(self) -> None:
-        """Update potential values for reward computation.
-
-        Call once per step before reward computation. Saves current potential
-        as prev_potential and computes new potential from roll/pitch errors.
-        Yaw is excluded because buoyancy control cannot generate Z-axis torque.
-
-        Also caches _attitude_error so that logging in _reset_idx (which runs
-        after _get_rewards but before _get_observations) uses the current step's
-        error, not the previous step's stale value.
-        """
-        self._prev_potentials = self._potentials.clone()
-        self._attitude_error = self.compute_attitude_error(self._robot.data.root_quat_w)
-        self._potentials = torch.linalg.norm(self._attitude_error[:, :2], dim=-1)
-
-    def _reset_attitude_task(self, env_ids: torch.Tensor) -> None:
-        """Reset target attitudes and potentials for specified environments.
-
-        Args:
-            env_ids: Environment indices to reset.
-        """
-        num_reset = len(env_ids)
-        base_attitude = torch.tensor(self.cfg.target_attitude, device=self.device)
-
-        if self.cfg.randomize_target_attitude:
-            attitude_range = torch.tensor(self.cfg.target_attitude_range, device=self.device)
-            random_offset = (torch.rand(num_reset, 3, device=self.device) * 2 - 1) * attitude_range
-            self._target_euler[env_ids] = base_attitude + random_offset
-        else:
-            self._target_euler[env_ids] = base_attitude.unsqueeze(0).expand(num_reset, -1)
-
-        # Reset potentials (will be properly initialized by _initialize_potentials after pose reset)
-        self._potentials[env_ids] = 0.0
-        self._prev_potentials[env_ids] = 0.0
-
-    def _initialize_potentials(self, env_ids: torch.Tensor) -> None:
-        """Initialize potential values after robot pose reset.
-
-        Sets both prev_potentials and potentials to the same value to prevent
-        spurious progress reward on the first step.
-
-        Args:
-            env_ids: Environment indices that were reset.
-        """
-        attitude_error = self.compute_attitude_error(self._robot.data.root_quat_w[env_ids], env_ids)
-        initial_potential = torch.linalg.norm(attitude_error[:, :2], dim=-1)
-        self._potentials[env_ids] = initial_potential
-        self._prev_potentials[env_ids] = initial_potential
+        """Compute and cache attitude error for observations."""
+        return self._attitude_task.get_attitude_error(self._robot.data.root_quat_w)
 
     def _setup_scene(self):
         """Setup simulation scene with robot and underwater lighting."""
@@ -550,7 +498,7 @@ class HeroAgentEnv(DirectRLEnv):
         """
         # Update potentials before reward computation
         # This must be called exactly once per step to correctly compute progress reward
-        self._update_potentials()
+        self._attitude_task.update_potentials(self._robot.data.root_quat_w)
 
         # Accumulate control effort: sum(||a||^2 * dt) over episode
         self._cumulative_effort += torch.sum(self._actions**2, dim=-1) * self.step_dt
@@ -757,7 +705,7 @@ class HeroAgentEnv(DirectRLEnv):
             randomize_ocean_current(env=self, env_ids=env_ids_)
 
         # --- 4. Attitude task reset ---
-        self._reset_attitude_task(env_ids_)
+        self._attitude_task.reset_targets(env_ids_)
 
         # --- 5. Robot state reset (joint state must precede root pose) ---
         if rand_cfg.enable:
@@ -776,7 +724,7 @@ class HeroAgentEnv(DirectRLEnv):
         # --- 6. Potential initialization (must be after pose reset) ---
         # Note: write_root_pose_to_sim() immediately updates internal data cache,
         # so root_quat_w reflects the new pose without needing an explicit update() call.
-        self._initialize_potentials(env_ids_)
+        self._attitude_task.initialize_potentials(env_ids_, self._robot.data.root_quat_w[env_ids_])
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Setup or toggle visibility of debug visualization markers."""
