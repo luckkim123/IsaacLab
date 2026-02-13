@@ -28,7 +28,7 @@ from isaaclab.utils.math import euler_xyz_from_quat
 from .base_env import HeroAgentEnv
 from .config import HeroAgentTDCEnvCfg
 from .controllers import ALBCKinematics, TDCController
-from .utils.logging import log_tdc_control_state, log_tdc_init, log_tdc_reset_info
+from .utils.logging_tdc import log_tdc_control_state, log_tdc_init, log_tdc_reset_info
 
 
 class HeroAgentTDCEnv(HeroAgentEnv):

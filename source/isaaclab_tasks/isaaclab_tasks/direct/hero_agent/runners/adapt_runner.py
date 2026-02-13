@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 
 from ..encoder.normalization import RunningMeanStd
 from ..utils.env_utils import connect_encoder_to_env, unwrap_env
-from ..utils.logging import flush_metrics, log_encoder_tdc_metrics, pearson_r
+from ..utils.logging import flush_metrics, pearson_r
+from ..utils.logging_encoder import log_encoder_tdc_metrics
 
 
 class _WandbTBWriter:

@@ -24,7 +24,7 @@ import logging
 from rsl_rl.runners import OnPolicyRunner
 
 from ..utils.env_utils import connect_encoder_to_env, unwrap_env
-from ..utils.logging import log_encoder_metrics, log_encoder_tdc_metrics
+from ..utils.logging_encoder import log_encoder_metrics, log_encoder_tdc_metrics
 
 logger = logging.getLogger(__name__)
 
