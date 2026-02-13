@@ -24,7 +24,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.envs.ui import BaseEnvWindow
-from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse
+from isaaclab.utils.math import euler_xyz_from_quat
 
 # Import models from common isaaclab_tasks.models
 from isaaclab_tasks.models import HydrodynamicsModel
@@ -54,6 +54,7 @@ from .mdp.events import (
     reset_joint_positions_default,
     reset_robot_pose_default,
 )
+from .payload import PayloadPhysics
 from .utils import DebugVisualization, log_dr_metrics, log_tdc_diagnostics
 
 
@@ -189,23 +190,44 @@ class HeroAgentEnv(DirectRLEnv):
         )
 
     def _init_payload(self) -> None:
-        """Initialize payload parameters if enabled.
+        """Initialize payload physics model if enabled.
 
         Payload is applied to the gripper body (fixed to base via base_to_gripper joint).
         """
-        self._payload_enabled = self.cfg.enable_payload
-        if not self._payload_enabled:
-            self._payload_mass = None
-            self._payload_attachment_offset = None
-            self._payload_cog_offset = None
-            self._gravity_vec = None
-            return
+        if self.cfg.enable_payload:
+            self._payload = PayloadPhysics(
+                num_envs=self.num_envs,
+                device=self.device,
+                default_mass=self.cfg.payload_mass,
+                attachment_offset=self.cfg.payload_attachment_offset,
+                gravity_vec=tuple(self.sim.cfg.gravity),
+            )
+        else:
+            self._payload = None
 
-        self._payload_mass = torch.full((self.num_envs,), self.cfg.payload_mass, device=self.device)
-        offset_tensor = torch.tensor(self.cfg.payload_attachment_offset, device=self.device, dtype=torch.float32)
-        self._payload_attachment_offset = offset_tensor.expand(self.num_envs, -1).clone()
-        self._payload_cog_offset = torch.zeros(self.num_envs, 3, device=self.device)
-        self._gravity_vec = torch.tensor(self.sim.cfg.gravity, device=self.device, dtype=torch.float32)
+    # --- Backwards-compatible payload property accessors ---
+    # External code (events.py, observations.py, logging_dr.py) references
+    # env._payload_mass etc. These properties delegate to self._payload.
+
+    @property
+    def _payload_enabled(self) -> bool:
+        """Whether payload physics is enabled."""
+        return self._payload is not None
+
+    @property
+    def _payload_mass(self) -> torch.Tensor | None:
+        """Payload mass per environment. Shape: (num_envs,)."""
+        return self._payload.mass if self._payload is not None else None
+
+    @property
+    def _payload_attachment_offset(self) -> torch.Tensor | None:
+        """Payload attachment offset in gripper frame. Shape: (num_envs, 3)."""
+        return self._payload.attachment_offset if self._payload is not None else None
+
+    @property
+    def _payload_cog_offset(self) -> torch.Tensor | None:
+        """Payload CoG offset from attachment point. Shape: (num_envs, 3)."""
+        return self._payload.cog_offset if self._payload is not None else None
 
     def _init_joints(self) -> None:
         """Initialize ALBC joint IDs and limits."""
@@ -445,31 +467,15 @@ class HeroAgentEnv(DirectRLEnv):
     def _compute_payload_wrench(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Compute payload weight force and torque in the gripper body frame.
 
-        The payload hangs from the gripper (fixed to base via base_to_gripper joint).
-        Force = m*g transformed to gripper body frame.
-        Torque = (attachment_offset + cog_offset) x F_body.
-
         Returns:
             Tuple of (forces, torques) in gripper body frame, or (None, None) if disabled.
         """
-        if not self._payload_enabled:
+        if self._payload is None:
             return None, None
 
-        # Gripper body orientation (same as base since fixed joint, but correct API)
         gripper_idx = self._gripper_body_id[0]
         gripper_quat = self._robot.data.body_quat_w[:, gripper_idx, :]
-
-        # Payload weight in world frame, then transform to gripper body frame
-        payload_weight_w = self._payload_mass.unsqueeze(-1) * self._gravity_vec
-        payload_weight_b = quat_apply_inverse(gripper_quat, payload_weight_w)
-
-        # Effective offset = attachment point + CoG offset (both in gripper body frame)
-        effective_offset = self._payload_attachment_offset + self._payload_cog_offset
-
-        # Torque in body frame: tau = r_body x F_body
-        payload_torque_b = torch.cross(effective_offset, payload_weight_b, dim=-1)
-
-        return payload_weight_b, payload_torque_b
+        return self._payload.compute_wrench(gripper_quat)
 
     def _get_observations(self) -> dict:
         """Compute ALBC-specific observations.
@@ -687,11 +693,8 @@ class HeroAgentEnv(DirectRLEnv):
         self._hydro.reset(env_ids_)
         self._buoy_hydro.reset(env_ids_)
 
-        if self._payload_enabled:
-            self._payload_mass[env_ids_] = self.cfg.payload_mass
-            offset_tensor = torch.tensor(self.cfg.payload_attachment_offset, device=self.device, dtype=torch.float32)
-            self._payload_attachment_offset[env_ids_] = offset_tensor
-            self._payload_cog_offset[env_ids_] = 0.0
+        if self._payload is not None:
+            self._payload.reset(env_ids_, self.cfg.payload_mass, self.cfg.payload_attachment_offset)
 
         rand_cfg = self.cfg.randomization
         if rand_cfg.enable:
