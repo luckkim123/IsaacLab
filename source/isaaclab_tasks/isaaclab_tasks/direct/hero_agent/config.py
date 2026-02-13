@@ -81,8 +81,8 @@ class DomainRandomizationCfg:
     cog_offset_y: tuple[float, float] = (-0.01, 0.01)
     cog_offset_z: tuple[float, float] = (-0.04, 0.04)
 
-    # -- Inertia --
-    inertia_scale: tuple[float, float] = (0.8, 1.2)
+    # -- Inertia (widened: URDF uses uniform-density assumption, Tan et al. use [50%, 150%]) --
+    inertia_scale: tuple[float, float] = (0.6, 1.4)
 
     # -- Body Mass Scale (applied uniformly to all bodies) --
     body_mass_scale: tuple[float, float] = (0.9, 1.1)
@@ -152,11 +152,31 @@ class DomainRandomizationCfg:
             cog_offset_x=(0.0, 0.0),
             cog_offset_y=(0.0, 0.0),
             cog_offset_z=(0.0, 0.0),
+            enable_perturbation=False,
+            action_latency_range=(0, 0),
             payload_cog_offset_x=(0.0, 0.0),
             payload_cog_offset_y=(0.0, 0.0),
             payload_cog_offset_z=(0.0, 0.0),
             payload_mass_range=(0.5, 0.5),
         )
+
+    # ==========================================================================
+    # Random Perturbation (per-step external disturbance, Tan et al. 2018)
+    # Periodically applies random wrench (force + torque) to the base body.
+    # Models: tether tension variation, sudden current changes, contact forces.
+    # ==========================================================================
+    enable_perturbation: bool = True
+    perturbation_force_range: tuple[float, float] = (0.0, 5.0)  # N (Hero Agent ~10kg -> 0.5 m/s^2 max)
+    perturbation_torque_range: tuple[float, float] = (0.0, 0.5)  # Nm
+    perturbation_interval: int = 200  # physics steps between events (~1s at 200Hz)
+    perturbation_duration: int = 10  # physics steps active (~0.05s)
+
+    # ==========================================================================
+    # Action Latency (delays RL action application by random physics steps)
+    # Models: communication delay, computation latency in real hardware.
+    # Sampled per-env at reset time, held constant during episode.
+    # ==========================================================================
+    action_latency_range: tuple[int, int] = (0, 2)  # physics steps (0-10ms at 200Hz)
 
     # ==========================================================================
     # Payload Randomization (only used when enable_payload=True)
@@ -166,8 +186,8 @@ class DomainRandomizationCfg:
     payload_mass_range: tuple[float, float] = (0.0, 1.0)  # kg
 
     # -- Payload CoG Offset (meters, relative to attachment point) --
-    payload_cog_offset_x: tuple[float, float] = (-0.50, 0.50)
-    payload_cog_offset_y: tuple[float, float] = (-0.50, 0.50)
+    payload_cog_offset_x: tuple[float, float] = (-0.30, 0.30)
+    payload_cog_offset_y: tuple[float, float] = (-0.30, 0.30)
     payload_cog_offset_z: tuple[float, float] = (-0.20, 0.0)
 
 
@@ -293,15 +313,16 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
     # IMU sensor noise: bias (per-episode drift) + white noise (per-step)
     # Dims 0-2: euler angles (rad), 3-5: angular velocity (rad/s),
     # 6-8: attitude errors (same IMU source as euler -> same noise), 9-12: no noise
+    # Values calibrated for general MEMS IMU (BIR Survey / Tan et al. reference).
     # Values stored as tuples for OmegaConf/Hydra compatibility; converted to tensors at env init.
     observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
         noise_cfg=GaussianNoiseCfg(
             mean=0.0,
-            std=(0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.01, 0.01, 0.01, 0.0, 0.0, 0.0, 0.0),
+            std=(0.02, 0.02, 0.02, 0.04, 0.04, 0.04, 0.02, 0.02, 0.02, 0.0, 0.0, 0.0, 0.0),
         ),
         bias_noise_cfg=UniformNoiseCfg(
-            n_min=(-0.005, -0.005, -0.005, -0.01, -0.01, -0.01, -0.005, -0.005, -0.005, 0, 0, 0, 0),
-            n_max=(0.005, 0.005, 0.005, 0.01, 0.01, 0.01, 0.005, 0.005, 0.005, 0, 0, 0, 0),
+            n_min=(-0.02, -0.02, -0.02, -0.03, -0.03, -0.03, -0.02, -0.02, -0.02, 0, 0, 0, 0),
+            n_max=(0.02, 0.02, 0.02, 0.03, 0.03, 0.03, 0.02, 0.02, 0.02, 0, 0, 0, 0),
         ),
     )
 
@@ -353,10 +374,12 @@ class HeroAgentTDCEnvCfg(HeroAgentTrainEnvCfg):
     state_space: int = 0
 
     # Override joint gain ranges for TDC (centered at Kp=200, Kd=10)
+    # Action latency disabled: TDC overrides _pre_physics_step entirely
     randomization: DomainRandomizationCfg = DomainRandomizationCfg(
         enable=True,
         joint_stiffness_range=(160.0, 240.0),
         joint_damping_range=(8.0, 12.0),
+        action_latency_range=(0, 0),
     )
 
 
@@ -389,10 +412,12 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTrainEnvCfg):
     reward: EncoderTDCRewardCfg = EncoderTDCRewardCfg()
 
     # Override joint gain ranges for TDC (centered at Kp=200, Kd=10)
+    # Action latency disabled: Encoder-TDC overrides _pre_physics_step entirely
     randomization: DomainRandomizationCfg = DomainRandomizationCfg(
         enable=True,
         joint_stiffness_range=(160.0, 240.0),
         joint_damping_range=(8.0, 12.0),
+        action_latency_range=(0, 0),
     )
 
 

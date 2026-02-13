@@ -319,6 +319,25 @@ class HeroAgentEnv(DirectRLEnv):
         self._buoy_hydro_forces = torch.zeros(self.num_envs, 3, device=self.device)
         self._buoy_hydro_torques = torch.zeros(self.num_envs, 3, device=self.device)
 
+        # Random perturbation buffers (Tan et al. 2018)
+        self._perturb_forces = torch.zeros(self.num_envs, 3, device=self.device)
+        self._perturb_torques = torch.zeros(self.num_envs, 3, device=self.device)
+        rand_cfg = self.cfg.randomization
+        perturb_cycle = max(1, rand_cfg.perturbation_interval + rand_cfg.perturbation_duration)
+        self._perturb_timer = torch.randint(0, perturb_cycle, (self.num_envs,), device=self.device)
+
+        # Action latency buffer (ring buffer for delayed action application)
+        max_latency = rand_cfg.action_latency_range[1]
+        self._max_action_latency = max_latency
+        if max_latency > 0:
+            self._action_history = torch.zeros(
+                self.num_envs, max_latency + 1, self.cfg.action_space, device=self.device
+            )
+            self._action_latency = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        else:
+            self._action_history = None
+            self._action_latency = None
+
     # ------------------------------------------------------------------
     # Attitude task delegation (see attitude_task.py)
     # ------------------------------------------------------------------
@@ -386,11 +405,83 @@ class HeroAgentEnv(DirectRLEnv):
             self._prev_actions_obs = self._actions.clone()
         self._control_step_counter += 1
 
+    def _get_delayed_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        """Apply action latency by returning delayed actions from the history buffer.
+
+        The history buffer stores recent actions in order [newest, ..., oldest].
+        Each env has a per-env latency (sampled at reset). Latency=0 returns
+        the current action (no delay).
+
+        Args:
+            actions: Current raw actions. Shape: (num_envs, action_space).
+
+        Returns:
+            Delayed actions. Same shape as input.
+        """
+        if self._action_history is None or not self.cfg.randomization.enable:
+            return actions
+
+        # Shift history: move existing entries one slot older
+        if self._action_history.shape[1] > 1:
+            self._action_history[:, 1:] = self._action_history[:, :-1].clone()
+        # Insert newest action at index 0
+        self._action_history[:, 0] = actions
+
+        # Read delayed actions using per-env latency as index
+        env_idx = torch.arange(self.num_envs, device=self.device)
+        return self._action_history[env_idx, self._action_latency]
+
+    def _update_perturbation(self) -> None:
+        """Update per-step random perturbation forces on the base body.
+
+        Uses a per-env timer that cycles through [0, interval+duration).
+        Phase [0, duration): perturbation active. Phase [duration, cycle): cooldown.
+        New random wrench is generated at the start of each active phase.
+
+        Forces are stored in ``_perturb_forces`` / ``_perturb_torques`` and
+        added to hydro forces in ``_apply_action()``.
+        """
+        rand_cfg = self.cfg.randomization
+        if not rand_cfg.enable or not rand_cfg.enable_perturbation:
+            return
+
+        interval = rand_cfg.perturbation_interval
+        duration = rand_cfg.perturbation_duration
+        cycle = interval + duration
+
+        # Advance per-env timer (wraps around)
+        self._perturb_timer = (self._perturb_timer + 1) % cycle
+
+        # Generate new perturbation at the start of active phase (timer == 0)
+        trigger = self._perturb_timer == 0
+        if trigger.any():
+            n = trigger.sum().item()
+            # Random force: uniform magnitude, random direction (unit sphere)
+            f_dir = torch.randn(n, 3, device=self.device)
+            f_dir = f_dir / f_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
+            f_lo, f_hi = rand_cfg.perturbation_force_range
+            f_mag = torch.rand(n, device=self.device) * (f_hi - f_lo) + f_lo
+            self._perturb_forces[trigger] = f_dir * f_mag.unsqueeze(1)
+
+            # Random torque: uniform magnitude, random direction
+            t_dir = torch.randn(n, 3, device=self.device)
+            t_dir = t_dir / t_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
+            t_lo, t_hi = rand_cfg.perturbation_torque_range
+            t_mag = torch.rand(n, device=self.device) * (t_hi - t_lo) + t_lo
+            self._perturb_torques[trigger] = t_dir * t_mag.unsqueeze(1)
+
+        # Clear forces when active phase ends (timer == duration)
+        deactivate = self._perturb_timer == duration
+        if deactivate.any():
+            self._perturb_forces[deactivate] = 0.0
+            self._perturb_torques[deactivate] = 0.0
+
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Process actions before physics step with control decimation.
 
         Velocity commands are integrated to position targets at control frequency,
-        reflecting real hardware actuator constraints.
+        reflecting real hardware actuator constraints. Action latency is applied
+        before control integration.
 
         Args:
             actions: Joint velocity commands [-1, 1]. Shape: (num_envs, 2).
@@ -398,10 +489,13 @@ class HeroAgentEnv(DirectRLEnv):
         self._update_action_buffers(actions)
 
         if self._control_step_counter % self.cfg.control_decimation == 0:
+            # Apply action latency (delayed actions for control, raw actions kept for obs)
+            effective_actions = self._get_delayed_actions(self._actions)
+
             # Integrate velocity to position: delta_pos = dt * max_vel * action
             # step_dt = physics_dt * decimation (time per RL step)
             control_dt = self.step_dt * self.cfg.control_decimation
-            position_delta = control_dt * self.cfg.max_joint_velocity * self._actions
+            position_delta = control_dt * self.cfg.max_joint_velocity * effective_actions
             self._joint_pos_targets += position_delta
 
             self._joint_pos_targets = torch.clamp(
@@ -411,7 +505,7 @@ class HeroAgentEnv(DirectRLEnv):
             )
 
     def _apply_action(self):
-        """Apply joint position targets and hydrodynamic forces."""
+        """Apply joint position targets, hydrodynamic forces, and random perturbation."""
         # Joint position control
         self._robot.set_joint_position_target(self._joint_pos_targets, joint_ids=self._albc_joint_ids)
 
@@ -430,16 +524,21 @@ class HeroAgentEnv(DirectRLEnv):
                 root_quat_w=self._robot.data.body_quat_w[:, buoy_body_idx, :],
             )
 
-        # Main body hydrodynamics (no payload -- payload is on gripper body)
+        # Update random perturbation state (per-step event, independent of control freq)
+        self._update_perturbation()
+
+        # Main body hydrodynamics + random perturbation
         self._hydro_forces, self._hydro_torques = self._hydro.compute_forces(
             root_lin_vel_w=self._robot.data.root_lin_vel_w,
             root_ang_vel_w=self._robot.data.root_ang_vel_w,
             root_quat_w=self._robot.data.root_quat_w,
         )
+        total_forces = self._hydro_forces + self._perturb_forces
+        total_torques = self._hydro_torques + self._perturb_torques
         self._robot.permanent_wrench_composer.set_forces_and_torques(
             body_ids=self._body_id,
-            forces=self._hydro_forces.unsqueeze(1),
-            torques=self._hydro_torques.unsqueeze(1),
+            forces=total_forces.unsqueeze(1),
+            torques=total_torques.unsqueeze(1),
         )
 
         # Buoy hydrodynamics
@@ -695,6 +794,19 @@ class HeroAgentEnv(DirectRLEnv):
         for buf in (self._actions, self._prev_actions, self._prev_actions_obs):
             buf[env_ids] = 0.0
         self._cumulative_effort[env_ids] = 0.0
+
+        # Reset perturbation state: randomize timer phase to decorrelate envs
+        rand_cfg = self.cfg.randomization
+        perturb_cycle = max(1, rand_cfg.perturbation_interval + rand_cfg.perturbation_duration)
+        self._perturb_forces[env_ids] = 0.0
+        self._perturb_torques[env_ids] = 0.0
+        self._perturb_timer[env_ids] = torch.randint(0, perturb_cycle, (len(env_ids),), device=self.device)
+
+        # Reset action latency: sample new per-env latency and clear history
+        if self._action_history is not None and self._action_latency is not None:
+            lo, hi = rand_cfg.action_latency_range
+            self._action_history[env_ids] = 0.0
+            self._action_latency[env_ids] = torch.randint(lo, hi + 1, (len(env_ids),), device=self.device)
 
     def _reset_physics(self, env_ids: torch.Tensor) -> None:
         """Reset hydrodynamics, payload, and apply domain randomization."""

@@ -1,15 +1,19 @@
 # Domain Randomization
 
-> **Status**: 2026-02-11 | **Source**: `config.py`, `mdp/events.py`, `base_env.py`
+> **Status**: 2026-02-14 | **Source**: `config.py`, `base_env.py`, `mdp/events.py`
 >
 > Hero Agent ALBC 환경의 Domain Randomization(DR) 구현 전체 검토.
-> 10개 카테고리, 30+ 파라미터, Fossen 모델 기반 물리적 랜덤화.
+> 12개 카테고리, 35+ 파라미터, Fossen 모델 기반 물리적 랜덤화.
+> BIR Survey (Zhu et al. 2023) 및 Sim-to-Real Locomotion (Tan et al. 2018) 분석 반영.
 
 ---
 
 ## Overview
 
-DR은 reset-time에만 적용된다 (에피소드 중 변경 없음). 이는 DR이 "다른 로봇 인스턴스"를 나타내는 것이지, 시변 동역학이 아니기 때문이다.
+DR은 두 가지 시간 스케일로 적용된다:
+
+1. **Reset-time DR**: 에피소드 시작 시 파라미터 샘플링 (수력학, 질량, 관절 게인, 센서 바이어스 등). "다른 로봇 인스턴스"를 나타냄.
+2. **Per-step DR**: 에피소드 진행 중 동적 변동 (random perturbation, action latency). "환경 변동 및 하드웨어 불확실성"을 나타냄.
 
 ---
 
@@ -40,7 +44,9 @@ Quaternion 기반 회전 (gimbal lock 방지). Position은 기본값에 대한 a
 | volume_scale | [0.9, 1.1] | Multiplicative | scalar | 부력 불확실성 (+-10%) |
 | cob_offset | +-1cm (xy), +-4cm (z) | Additive | 3 | 부력 중심 오차 |
 | cog_offset | +-1cm (xy), +-4cm (z) | Additive | 3 | 질량 중심 오차 |
-| inertia_scale | [0.8, 1.2] | Multiplicative | 3 (independent) | 관성 모멘트 불확실성 (+-20%) |
+| inertia_scale | **[0.6, 1.4]** | Multiplicative | 3 (independent) | 관성 모멘트 불확실성 (+-40%) |
+
+**Inertia 범위 근거 (2026-02-14 변경)**: Tan et al. (2018)은 관성을 "균일 밀도 가정으로 추정"하여 [50%, 150%]의 넓은 범위를 사용. Hero Agent도 URDF 기반 균일밀도 추정이므로 +-40%로 확대 (이전: +-20%). TDE가 관성 변화를 보상하므로 넓은 범위에서도 안정적.
 
 Implementation: `_randomize_hydro_model()` in `mdp/events.py`. Base tensor는 `_HydroBaseCache`로 캐싱하여 4096 병렬 환경에서의 성능 보장.
 
@@ -68,9 +74,11 @@ Payload는 **gripper body**에 적용된다 (base에 고정 조인트로 연결,
 | Item | Range | Note |
 |:---|:---|:---|
 | mass | [0.0, 1.0] kg | Weight 모델만 (drag 없음), 0=페이로드 없음 |
-| cog_offset_x | [-0.50, 0.50] m | 부착점 기준 CoG 오프셋 |
-| cog_offset_y | [-0.50, 0.50] m | 부착점 기준 CoG 오프셋 |
+| cog_offset_x | **[-0.30, 0.30] m** | 부착점 기준 CoG 오프셋 |
+| cog_offset_y | **[-0.30, 0.30] m** | 부착점 기준 CoG 오프셋 |
 | cog_offset_z | [-0.20, 0.0] m | 부착점 아래 방향 오프셋 |
+
+**CoG offset 범위 근거 (2026-02-14 변경)**: 33cm 차체 대비 +-50cm는 물리적으로 극단적 (50cm 길이의 막대형 도구 의미). +-30cm로 축소하여 robustness-optimality trade-off 개선 (Tan et al. 참조: 너무 넓은 범위는 정책이 극단적 케이스에 대비하느라 중간 범위에서의 최적성을 희생).
 
 Implementation: `randomize_payload()` in `mdp/events.py`.
 - Payload force: $F = mg$, gripper body frame으로 변환
@@ -106,11 +114,13 @@ Per-env tensor. 부력 ($F_b = \rho V g$)과 항력 ($F_d = 0.5 \rho C_d A v^2$)
 
 | Item | Range | Note |
 |:---|:---|:---|
-| euler noise (3D) | N(0, 0.01 rad) | White noise per step |
-| euler bias (3D) | U(-0.005, 0.005 rad) | Per-episode 샘플링 |
-| ang_vel noise (3D) | N(0, 0.02 rad/s) | White noise per step |
-| ang_vel bias (3D) | U(-0.01, 0.01 rad/s) | Per-episode 샘플링 |
+| euler noise (3D) | **N(0, 0.02 rad)** | White noise per step |
+| euler bias (3D) | **U(-0.02, 0.02 rad)** | Per-episode 샘플링 |
+| ang_vel noise (3D) | **N(0, 0.04 rad/s)** | White noise per step |
+| ang_vel bias (3D) | **U(-0.03, 0.03 rad/s)** | Per-episode 샘플링 |
 | other dims (7D) | 0 | att_error, joint_pos, prev_actions에는 노이즈 없음 |
+
+**IMU 노이즈 범위 근거 (2026-02-14 변경)**: 일반 MEMS IMU 수준으로 확대 (이전: high-precision IMU 가정). Tan et al. (2018)은 euler bias +-0.05 rad, noise std 0.05 rad를 사용. 현재 값은 그 중간 수준으로, 일반 상업용 MEMS를 보수적으로 모델링.
 
 `NoiseModelWithAdditiveBiasCfg` 사용. Bias는 리셋 시 샘플링 (per-episode gyro drift 모델), white noise는 매 스텝 추가. Obs dims 0-5 (IMU)에만 적용, dims 6-12는 정확.
 
@@ -123,30 +133,79 @@ Per-env tensor. 부력 ($F_b = \rho V g$)과 항력 ($F_d = 0.5 \rho C_d A v^2$)
 
 두 ALBC 관절에 동일 값 적용.
 
+### K. Random Perturbation (per-step, Tan et al. 2018)
+
+**Per-step DR**: 에피소드 진행 중 주기적 외란 인가. Reset-time DR과 달리 매 physics step 업데이트.
+
+| Item | Value | Note |
+|:---|:---|:---|
+| enable_perturbation | True | DR 활성화 시 자동 적용 |
+| force_range | [0.0, 5.0] N | ~10kg 차체에 최대 0.5 m/s^2 가속 |
+| torque_range | [0.0, 0.5] Nm | 랜덤 방향 토크 |
+| interval | 200 physics steps (~1s) | 이벤트 간 쿨다운 |
+| duration | 10 physics steps (~0.05s) | 충격 지속 시간 |
+
+**근거**: Tan et al. (2018)은 200스텝마다 130-220N의 랜덤 외력을 인가하여 균형 회복 능력을 학습시켰다. Hero Agent는 ~10kg 수중 차량으로, 최대 5N (0.5 m/s^2)은 수중 환경에서 발생하는 비정상 외란을 모델링:
+- 해류 급변 (해류는 reset-time에 상수로 설정되나, 실제로는 변동)
+- 테더(tether) 장력 변동
+- 물체 파지 순간 반작용력
+- 구조물 접촉 반작용
+
+**Implementation**: `base_env._update_perturbation()` (per-step 호출).
+- Per-env 타이머로 비동기 perturbation 트리거 (환경간 위상 랜덤화)
+- 랜덤 방향 (unit sphere) x 균일 크기 -> 3D wrench 생성
+- Main body의 hydro forces에 additive로 적용
+- Reset 시 타이머 위상 재랜덤화 (환경 동기화 방지)
+
+### L. Action Latency (per-step, Tan et al. 2018)
+
+**Per-step DR**: RL action 적용에 지연을 추가. 실제 하드웨어의 통신/연산 지연 모델링.
+
+| Item | Value | Note |
+|:---|:---|:---|
+| action_latency_range | [0, 2] physics steps | 0-10ms at 200Hz |
+
+**근거**: Tan et al. (2018) Table I에서 control latency를 [0, 40ms]로 명시적 랜덤화. Hero Agent에서는:
+- 통신 지연: ROV 하드웨어의 RS-485/Ethernet 통신 0~5ms
+- 연산 지연: 정책 추론 + 전처리 ~2-5ms
+- TDC 영향: TDE 추정 오차 상한이 sampling period에 비례하므로, 실효 지연이 TDE 정확도에 직접 영향
+
+**Implementation**: `base_env._get_delayed_actions()`.
+- Ring buffer `_action_history`: (num_envs, max_latency+1, action_dim)
+- Per-env latency `_action_latency`: reset시 uniform 샘플링, 에피소드 중 고정
+- `self._actions`는 raw (비지연) 값 유지 -> observation/reward에는 영향 없음
+- Control에만 delayed actions 사용 -> 에이전트가 지연을 인지하지 못하는 상황 모델링
+- TDC env는 `_pre_physics_step()` 전체를 오버라이드하므로 영향 없음
+
 ---
 
 ## Per-Environment DR Activation
 
-| Environment | Task ID | DR | Current | Payload | Noise | Target DR |
-|:---|:---|:---:|:---:|:---:|:---:|:---:|
-| HeroAgentEnvCfg (debug) | Isaac-HeroAgent-v0 | OFF | OFF | OFF | OFF | OFF |
-| HeroAgentTrainEnvCfg | Isaac-HeroAgent-Base-v0 | ON | ON | ON | ON | ON |
-| HeroAgentEncoderTrainEnvCfg | Isaac-HeroAgent-Encoder-Base-v0 | ON | ON | ON | ON | ON |
-| HeroAgentTDCEnvCfg | Isaac-HeroAgent-TDC-v0 | Pose(15deg) | OFF | OFF | OFF | OFF |
-| HeroAgentEncoderTDCEnvCfg | Isaac-HeroAgent-Encoder-TDC-v0 | ON | ON | ON | ON | ON |
-| HeroAgentAdaptTDCEnvCfg | Isaac-HeroAgent-Adapt-TDC-v0 | ON | ON | ON | ON | ON |
+| Environment | Task ID | DR | Current | Payload | Noise | Perturb | Latency |
+|:---|:---|:---:|:---:|:---:|:---:|:---:|:---:|
+| HeroAgentEnvCfg (debug) | Isaac-HeroAgent-v0 | OFF | OFF | OFF | OFF | OFF | OFF |
+| HeroAgentTrainEnvCfg | Isaac-HeroAgent-Base-v0 | ON | ON | ON | ON | ON | ON |
+| HeroAgentEncoderTrainEnvCfg | Isaac-HeroAgent-Encoder-Base-v0 | ON | ON | ON | ON | ON | ON |
+| HeroAgentTDCEnvCfg | Isaac-HeroAgent-TDC-v0 | ON | ON | ON | ON | ON | N/A |
+| HeroAgentEncoderTDCEnvCfg | Isaac-HeroAgent-Encoder-TDC-v0 | ON | ON | ON | ON | ON | ON |
+| HeroAgentAdaptTDCEnvCfg | Isaac-HeroAgent-Adapt-TDC-v0 | ON | ON | ON | ON | ON | ON |
+
+Note: Latency "N/A" = TDC env overrides `_pre_physics_step()` entirely, so RL action latency does not apply. Perturbation applies to all envs via `_apply_action()`.
 
 ---
 
 ## DR Application Sequence
 
-All DR은 reset-time에만 적용된다 (runtime randomization 없음).
+Two time scales of DR:
+
+### Reset-time DR (per episode)
 
 ```
 _reset_idx() execution order:
   1. Logging (episode metrics)
   2. Component reset (robot, action buffers)
   3. Episode length decorrelation (full batch: full range, individual: 10% jitter)
+  3b. Perturbation timer reset (random phase) + action latency sampling
   4. Hydrodynamics reset + DR
      - hydro.reset() + buoy_hydro.reset() (density also reset)
      - payload reset to defaults
@@ -162,6 +221,23 @@ _reset_idx() execution order:
      - randomize_joint_gains()
      - randomize_joint_friction()
   8. Potential initialization
+```
+
+### Per-step DR (every physics step)
+
+```
+_apply_action() per-step events:
+  1. _update_perturbation()
+     - Advance per-env timer
+     - At phase 0: generate random wrench (force + torque)
+     - At phase duration: clear wrench
+     - Add to main body hydro forces
+
+_pre_physics_step() per-step events:
+  2. _get_delayed_actions()
+     - Shift action history buffer
+     - Return delayed action based on per-env latency
+     - Used for control integration only (obs uses raw actions)
 ```
 
 ---
@@ -182,6 +258,7 @@ Payload    (4D): [mass(1), cog_offset(3)]
 | Hydrodynamic | - | Added mass, damping | 동적 응답 속도에 영향, 정상상태 자세에는 미미 |
 | External | Payload (mass + CoG) | Ocean current | 페이로드는 복원 토크 직접 변경 |
 | Sensor | - | Noise/bias | 관측 노이즈는 policy robustness로 처리 |
+| Perturbation | - | Force/torque | 비예측적 외란으로 robust policy에 기여 |
 
 ---
 
@@ -193,8 +270,20 @@ Payload    (4D): [mass(1), cog_offset(3)]
 2. **이중 수력학 DR**: Main body와 buoy를 독립적으로 랜덤화 (buoy 부력 = 제어 권한)
 3. **CoG 보정 토크**: PhysX nominal CoG와 DR CoG 차이를 정확히 보상
 4. **Caching**: `_HydroBaseCache`로 텐서 재생성 방지 (4096 병렬 환경 성능)
-5. **Reset-time only**: 물리적으로 정확 (다른 로봇 인스턴스 모델)
-6. **Episode decorrelation**: 초기 분산 + jitter로 환경 동기화 방지
+5. **이중 시간 스케일 DR**: Reset-time (인스턴스 변동) + Per-step (환경 변동)
+6. **Episode decorrelation**: 초기 분산 + jitter + perturbation 위상 랜덤화
+
+### Parameter Range Justification (Tan et al. 2018 comparison)
+
+| Parameter | Hero Agent | Tan et al. | Rationale |
+|:---|:---|:---|:---|
+| Body mass | +-10% | +-20% | Hero Agent는 정밀 제조 ROV, 별도 payload DR 존재 |
+| Inertia | **+-40%** | +-50% | URDF 균일밀도 추정 불확실성 반영 |
+| IMU noise std | **0.02 rad** | 0.05 rad | 일반 MEMS (소비자급보다 양호) |
+| IMU bias | **+-0.02 rad** | +-0.05 rad | 일반 MEMS gyro drift |
+| Control latency | **0-10ms** | 0-40ms | 수중 ROV는 유선 통신 (무선보다 빠름) |
+| Perturbation force | **0-5N** | 130-220N | 체중 비례 (10kg vs 25kg, 수중 vs 지상) |
+| Payload CoG | **+-0.3m** | N/A | 33cm 차체 대비 현실적 범위 |
 
 ### Resolved Issues
 
@@ -204,6 +293,11 @@ Payload    (4D): [mass(1), cog_offset(3)]
 | Water density 고정 | 담수/해수 간 전이 불가 | Section H: Per-env tensor (995-1025) |
 | Sensor noise 없음 | Sim-to-real gap 주요 원인 | Section I: IMU bias + white noise |
 | Joint friction 없음 | 관절 저항 미모델링 | Section J: Static + viscous friction |
+| Random perturbation 없음 | 비정상 외란 미모델링 | Section K: Per-step wrench (2026-02-14) |
+| Control latency 없음 | 하드웨어 지연 미모델링 | Section L: Action delay buffer (2026-02-14) |
+| Inertia 범위 보수적 | URDF 추정 불확실성 과소평가 | Section B: +-20% -> +-40% (2026-02-14) |
+| Payload CoG 과도 | 33cm 차체 대비 +-50cm 비현실적 | Section E: +-50cm -> +-30cm (2026-02-14) |
+| IMU 노이즈 과소 | High-precision 가정 | Section I: MEMS 수준으로 확대 (2026-02-14) |
 
 ### Remaining Minor Issues
 
@@ -255,6 +349,14 @@ Payload    (4D): [mass(1), cog_offset(3)]
 
 ---
 
+## References
+
+- Tan, J., et al. (2018). "Sim-to-Real: Learning Agile Locomotion For Quadruped Robots." RSS.
+  - Table I: DR parameter ranges (mass, inertia, latency, perturbation)
+  - Key insight: perturbation forces + control latency are essential for sim-to-real transfer
+- Zhu, Y., et al. (2023). "A Survey on Sim-to-Real Transfer for Robotics." (BIR Survey)
+  - Taxonomy of DR categories and theoretical analysis
+
 ## Related Documents
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md): 환경 구조 및 시뮬레이션 설정
@@ -264,4 +366,4 @@ Payload    (4D): [mass(1), cog_offset(3)]
 ---
 
 **Created**: 2026-02-11
-**Updated**: 2026-02-11 (Consolidated from research note 09. Issues B/C resolved, privileged obs 22D->24D.)
+**Updated**: 2026-02-14 (Random perturbation, action latency 추가. Inertia +-40%, payload CoG +-0.3m, IMU MEMS 수준으로 조정. Tan et al. 2018 비교표 추가.)
