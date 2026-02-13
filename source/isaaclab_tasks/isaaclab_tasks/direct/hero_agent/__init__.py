@@ -15,7 +15,6 @@ Available Tasks:
     - Isaac-HeroAgent-Encoder-Base-v0: Encoder training with privileged info
     - Isaac-HeroAgent-TDC-v0: Classical TDC control (no RL)
     - Isaac-HeroAgent-Encoder-TDC-v0: Encoder-TDC integration (RL adaptive gains + M_hat)
-    - Isaac-HeroAgent-Constrained-TDC-v0: Constrained RL with NORBC IPO
     - Isaac-HeroAgent-Adapt-TDC-v0: Phase 2 adaptation (proprio history -> z_hat)
 """
 
@@ -26,14 +25,12 @@ from .base_env import HeroAgentEnv
 from .config import (
     DomainRandomizationCfg,
     HeroAgentAdaptTDCEnvCfg,
-    HeroAgentConstrainedEncoderTDCEnvCfg,
     HeroAgentEncoderTDCEnvCfg,
     HeroAgentEncoderTrainEnvCfg,
     HeroAgentEnvCfg,
     HeroAgentTDCEnvCfg,
     HeroAgentTrainEnvCfg,
 )
-from .constrained_encoder_tdc_env import HeroAgentConstrainedEncoderTDCEnv
 from .controllers import TDCControllerCfg
 from .encoder_tdc_env import HeroAgentEncoderTDCEnv
 from .tdc_env import HeroAgentTDCEnv
@@ -97,17 +94,6 @@ gym.register(
     },
 )
 
-# Constrained RL: Encoder-TDC with NORBC IPO (log-barrier constraints)
-gym.register(
-    id="Isaac-HeroAgent-Constrained-TDC-v0",
-    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentConstrainedEncoderTDCEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentConstrainedEncoderTDCEnvCfg",
-        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentConstrainedEncoderTDCPPORunnerCfg",
-    },
-)
-
 # Phase 2: Adaptation module (proprio history -> z_hat, supervised training)
 gym.register(
     id="Isaac-HeroAgent-Adapt-TDC-v0",
@@ -124,7 +110,6 @@ __all__ = [
     "HeroAgentEnv",
     "HeroAgentTDCEnv",
     "HeroAgentEncoderTDCEnv",
-    "HeroAgentConstrainedEncoderTDCEnv",
     "HeroAgentAdaptTDCEnv",
     # Configurations
     "HeroAgentEnvCfg",
@@ -132,7 +117,6 @@ __all__ = [
     "HeroAgentTDCEnvCfg",
     "HeroAgentEncoderTrainEnvCfg",
     "HeroAgentEncoderTDCEnvCfg",
-    "HeroAgentConstrainedEncoderTDCEnvCfg",
     "HeroAgentAdaptTDCEnvCfg",
     "DomainRandomizationCfg",
     "TDCControllerCfg",

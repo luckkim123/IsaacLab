@@ -18,11 +18,9 @@ This module provides:
 from ..encoder import ActorCriticEncoder, ActorCriticEncoderTDC, ActorCriticEncoderTDCAdapt
 from .rsl_rl_ppo_cfg import (
     HeroAgentAdaptTDCRunnerCfg,
-    HeroAgentConstrainedEncoderTDCPPORunnerCfg,
     HeroAgentEncoderPPORunnerCfg,
     HeroAgentEncoderTDCPPORunnerCfg,
     HeroAgentPPORunnerCfg,
-    RslRlPpoActorCriticConstrainedCfg,
     RslRlPpoActorCriticEncoderCfg,
     RslRlPpoActorCriticEncoderTDCAdaptCfg,
     RslRlPpoActorCriticEncoderTDCCfg,
@@ -35,10 +33,8 @@ __all__ = [
     "HeroAgentPPORunnerCfg",
     "HeroAgentEncoderPPORunnerCfg",
     "HeroAgentEncoderTDCPPORunnerCfg",
-    "HeroAgentConstrainedEncoderTDCPPORunnerCfg",
     "HeroAgentAdaptTDCRunnerCfg",
     "RslRlPpoActorCriticEncoderCfg",
     "RslRlPpoActorCriticEncoderTDCCfg",
-    "RslRlPpoActorCriticConstrainedCfg",
     "RslRlPpoActorCriticEncoderTDCAdaptCfg",
 ]

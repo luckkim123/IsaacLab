@@ -6,7 +6,6 @@
 """Training runners for Hero Agent encoder and adaptation training."""
 
 from .adapt_runner import AdaptRunner
-from .constrained_runner import ConstrainedEncoderRunner
 from .encoder_runner import EncoderRunner
 
-__all__ = ["EncoderRunner", "AdaptRunner", "ConstrainedEncoderRunner"]
+__all__ = ["EncoderRunner", "AdaptRunner"]

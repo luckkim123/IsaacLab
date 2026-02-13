@@ -89,24 +89,6 @@ class EncoderTDCRewardCfg(ALBCRewardCfg):
     tde_residual_weight: float = -0.05
 
 
-@configclass
-class ConstrainedEncoderTDCRewardCfg(EncoderTDCRewardCfg):
-    """Reward config for constrained Encoder-TDC training.
-
-    Disables safety-related penalties that are now handled by IPO constraints:
-        - action_magnitude -> smoothness constraint
-        - action_rate -> smoothness constraint
-        - angular_velocity -> implicit in tracking reward
-
-    Retains pure performance signals (tracking, progress) and tde_residual
-    for M_hat accuracy (no constraint equivalent).
-    """
-
-    angular_velocity_weight: float = 0.0
-    action_magnitude_weight: float = 0.0
-    action_rate_weight: float = 0.0
-
-
 # =============================================================================
 # Reward Term Configuration
 # =============================================================================

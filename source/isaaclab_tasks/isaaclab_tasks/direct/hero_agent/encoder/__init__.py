@@ -13,7 +13,6 @@ Neural network architectures for the HORA pipeline:
     - RunningMeanStd: Welford's online normalization
 """
 
-from .actor_critic_constrained import ActorCriticConstrained
 from .actor_critic_encoder import ActorCriticEncoder, ActorCriticEncoderTDC
 from .adaptation import ActorCriticEncoderTDCAdapt, ProprioAdaptTConv
 from .normalization import RunningMeanStd
@@ -21,7 +20,6 @@ from .normalization import RunningMeanStd
 __all__ = [
     "ActorCriticEncoder",
     "ActorCriticEncoderTDC",
-    "ActorCriticConstrained",
     "ActorCriticEncoderTDCAdapt",
     "ProprioAdaptTConv",
     "RunningMeanStd",
