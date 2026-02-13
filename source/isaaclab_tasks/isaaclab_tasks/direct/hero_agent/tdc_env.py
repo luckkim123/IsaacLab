@@ -182,10 +182,8 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         super()._reset_idx(env_ids)
 
         # Reset TDC controller history for reset environments
-        if env_ids is None:
-            env_ids = self._robot._ALL_INDICES
-
-        self._tdc.reset(env_ids)
+        env_ids_ = self._coerce_env_ids(env_ids)
+        self._tdc.reset(env_ids_)
 
         # Update buoyancy force for reset envs (may have changed from DR)
-        self._tdc.update_controller_params(F_bu=self._buoy_hydro.buoyancy_force[env_ids], env_ids=env_ids)
+        self._tdc.update_controller_params(F_bu=self._buoy_hydro.buoyancy_force[env_ids_], env_ids=env_ids_)

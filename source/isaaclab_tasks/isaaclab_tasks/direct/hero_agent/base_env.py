@@ -646,34 +646,42 @@ class HeroAgentEnv(DirectRLEnv):
 
         return out_of_height_bounds | too_far | too_fast | bad_state | excessive_tilt, time_out
 
+    def _coerce_env_ids(self, env_ids: torch.Tensor | None) -> torch.Tensor:
+        """Normalize env_ids to a concrete tensor.
+
+        Returns ALL_INDICES for None or full-batch inputs.
+        """
+        if env_ids is None or len(env_ids) == self.num_envs:
+            return self._robot._ALL_INDICES
+        return env_ids
+
     def _reset_idx(self, env_ids: torch.Tensor | None) -> None:
         """Reset specified environments.
 
-        Execution order:
-            1. Logging (episode metrics before reset)
-            2. Component reset (robot, parent class, action buffers)
-            3. Hydrodynamics reset + domain randomization
-            4. Task reset
-            5. Robot state reset (joints, then pose)
-            6. Potential initialization
+        Phases:
+            1. Logging and reward reset
+            2. Framework reset (robot, parent class, episode jitter, action buffers)
+            3. Physics reset (hydrodynamics, payload, domain randomization, ocean current)
+            4. Task and state reset (attitude targets, robot pose, joint DR, potentials)
         """
-        # Use all indices if None or full batch (separate branches for type narrowing)
-        if env_ids is None:  # noqa: SIM114
-            env_ids = self._robot._ALL_INDICES
-        elif len(env_ids) == self.num_envs:
-            env_ids = self._robot._ALL_INDICES
-        env_ids_: torch.Tensor = env_ids  # type: ignore[assignment]
+        env_ids_ = self._coerce_env_ids(env_ids)
+        self._log_and_reset_rewards(env_ids_)
+        self._reset_framework(env_ids_)
+        self._reset_physics(env_ids_)
+        self._reset_task_and_state(env_ids_)
 
-        # --- 1. Logging ---
-        reward_sums = self._reward_manager.reset(env_ids_)
-        self.extras["log"] = self._collect_episode_metrics(env_ids_, reward_sums)
+    def _log_and_reset_rewards(self, env_ids: torch.Tensor) -> None:
+        """Collect episode metrics and reset reward accumulators."""
+        reward_sums = self._reward_manager.reset(env_ids)
+        self.extras["log"] = self._collect_episode_metrics(env_ids, reward_sums)
 
-        # --- 2. Component reset ---
-        self._robot.reset(env_ids_)
-        super()._reset_idx(env_ids_)
+    def _reset_framework(self, env_ids: torch.Tensor) -> None:
+        """Reset robot, parent class, jitter episode lengths, and zero action buffers."""
+        self._robot.reset(env_ids)
+        super()._reset_idx(env_ids)
 
         # Randomize episode lengths to decorrelate environment terminations
-        if len(env_ids_) == self.num_envs:
+        if len(env_ids) == self.num_envs:
             # Full batch (initial reset): spread across 0~50% of episode range.
             # This decorrelates terminations while ensuring every env collects
             # at least half an episode of meaningful experience.
@@ -682,52 +690,52 @@ class HeroAgentEnv(DirectRLEnv):
         else:
             # Individual resets: small jitter prevents re-synchronization
             max_jitter = max(1, int(self.max_episode_length * 0.1))
-            self.episode_length_buf[env_ids_] = torch.randint_like(self.episode_length_buf[env_ids_], high=max_jitter)
+            self.episode_length_buf[env_ids] = torch.randint_like(self.episode_length_buf[env_ids], high=max_jitter)
 
-        # Reset action buffers
         for buf in (self._actions, self._prev_actions, self._prev_actions_obs):
-            buf[env_ids_] = 0.0
-        self._cumulative_effort[env_ids_] = 0.0
+            buf[env_ids] = 0.0
+        self._cumulative_effort[env_ids] = 0.0
 
-        # --- 3. Hydrodynamics reset ---
-        self._hydro.reset(env_ids_)
-        self._buoy_hydro.reset(env_ids_)
+    def _reset_physics(self, env_ids: torch.Tensor) -> None:
+        """Reset hydrodynamics, payload, and apply domain randomization."""
+        self._hydro.reset(env_ids)
+        self._buoy_hydro.reset(env_ids)
 
         if self._payload is not None:
-            self._payload.reset(env_ids_, self.cfg.payload_mass, self.cfg.payload_attachment_offset)
+            self._payload.reset(env_ids, self.cfg.payload_mass, self.cfg.payload_attachment_offset)
 
         rand_cfg = self.cfg.randomization
         if rand_cfg.enable:
-            randomize_hydrodynamics(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
-            randomize_body_mass(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
+            randomize_hydrodynamics(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
+            randomize_body_mass(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
             if self._payload_enabled:
-                randomize_payload(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
+                randomize_payload(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
 
         has_ocean_current = any(v > 0 for v in self.cfg.ocean_current.max_velocity)
         if has_ocean_current:
-            randomize_ocean_current(env=self, env_ids=env_ids_)
+            randomize_ocean_current(env=self, env_ids=env_ids)
 
-        # --- 4. Attitude task reset ---
-        self._attitude_task.reset_targets(env_ids_)
+    def _reset_task_and_state(self, env_ids: torch.Tensor) -> None:
+        """Reset attitude targets, robot pose, joint DR, and initialize potentials."""
+        self._attitude_task.reset_targets(env_ids)
 
-        # --- 5. Robot state reset (joint state must precede root pose) ---
+        rand_cfg = self.cfg.randomization
         if rand_cfg.enable:
-            randomize_joint_positions(env=self, env_ids=env_ids_, joint_pos_range=self.cfg.initial_joint_pos_range)
-            randomize_robot_pose(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
+            randomize_joint_positions(env=self, env_ids=env_ids, joint_pos_range=self.cfg.initial_joint_pos_range)
+            randomize_robot_pose(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
         else:
-            reset_joint_positions_default(env=self, env_ids=env_ids_)
-            reset_robot_pose_default(env=self, env_ids=env_ids_, initial_height=self.cfg.initial_height)
+            reset_joint_positions_default(env=self, env_ids=env_ids)
+            reset_robot_pose_default(env=self, env_ids=env_ids, initial_height=self.cfg.initial_height)
 
-        # --- 5.5. Joint actuator DR ---
-        # Always applied: when DR disabled, ranges collapse to defaults (no randomization).
+        # Joint actuator DR: always applied (when DR disabled, ranges collapse to defaults).
         # TDC envs override stiffness/damping in their own _reset_idx().
-        randomize_joint_gains(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
-        randomize_joint_friction(env=self, env_ids=env_ids_, rand_cfg=rand_cfg)
+        randomize_joint_gains(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
+        randomize_joint_friction(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
 
-        # --- 6. Potential initialization (must be after pose reset) ---
-        # Note: write_root_pose_to_sim() immediately updates internal data cache,
+        # Potential initialization (must be after pose reset).
+        # write_root_pose_to_sim() immediately updates internal data cache,
         # so root_quat_w reflects the new pose without needing an explicit update() call.
-        self._attitude_task.initialize_potentials(env_ids_, self._robot.data.root_quat_w[env_ids_])
+        self._attitude_task.initialize_potentials(env_ids, self._robot.data.root_quat_w[env_ids])
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Setup or toggle visibility of debug visualization markers."""
