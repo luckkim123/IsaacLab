@@ -106,44 +106,13 @@ class DomainRandomizationCfg:
         yaw: float = 0.0,
         position: tuple[float, float, float] = (0.0, 0.0, 4.5),
     ) -> None:
-        """Fix all randomization to exact values for controlled experiments."""
-        self.enable = True
-        self.roll_range = (roll, roll)
-        self.pitch_range = (pitch, pitch)
-        self.yaw_range = (yaw, yaw)
-        self.position_x_range = (position[0], position[0])
-        self.position_y_range = (position[1], position[1])
-        self.position_z_range = (position[2], position[2])
-        # Fix all parameter scales to nominal
-        for attr in (
-            "added_mass_scale",
-            "linear_damping_scale",
-            "quadratic_damping_scale",
-            "volume_scale",
-            "inertia_scale",
-            "body_mass_scale",
-        ):
-            setattr(self, attr, (1.0, 1.0))
-        self.water_density_range = (998.0, 998.0)
-        # Fix joint gains to asset defaults
-        self.joint_stiffness_range = (100.0, 100.0)
-        self.joint_damping_range = (3.0, 3.0)
-        self.joint_static_friction_range = (0.0, 0.0)
-        self.joint_viscous_friction_range = (0.0, 0.0)
-        for attr in (
-            "cob_offset_x",
-            "cob_offset_y",
-            "cob_offset_z",
-            "cog_offset_x",
-            "cog_offset_y",
-            "cog_offset_z",
-            "payload_cog_offset_x",
-            "payload_cog_offset_y",
-            "payload_cog_offset_z",
-        ):
-            setattr(self, attr, (0.0, 0.0))
-        # Fix payload mass to nominal (matches HeroAgentEnvCfg.payload_mass default)
-        self.payload_mass_range = (0.5, 0.5)
+        """Fix all randomization to exact values for controlled experiments.
+
+        Delegates to ``fixed_pose()`` and copies all fields to self.
+        """
+        fixed = type(self).fixed_pose(roll, pitch, yaw, position)
+        for field_name in self.__dataclass_fields__:
+            setattr(self, field_name, getattr(fixed, field_name))
 
     @classmethod
     def fixed_pose(
