@@ -58,12 +58,12 @@ class HeroAgentAdaptTDCEnv(HeroAgentEncoderTDCEnv):
         obs["proprio_hist"] = self._proprio_hist.clone()
         return obs
 
-    def _pre_physics_step(self, actions: torch.Tensor):
+    def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Update history buffer before running the TDC control pipeline."""
         self._update_proprio_hist(actions)
         super()._pre_physics_step(actions)
 
-    def _update_proprio_hist(self, actions: torch.Tensor):
+    def _update_proprio_hist(self, actions: torch.Tensor) -> None:
         """Shift ring buffer left and append current proprioception features.
 
         Features (12D):
@@ -97,7 +97,7 @@ class HeroAgentAdaptTDCEnv(HeroAgentEncoderTDCEnv):
         self._proprio_hist = torch.roll(self._proprio_hist, -1, dims=1)
         self._proprio_hist[:, -1] = new_entry
 
-    def _reset_idx(self, env_ids: torch.Tensor | None):
+    def _reset_idx(self, env_ids: torch.Tensor | None) -> None:
         """Reset history buffer for terminated environments."""
         super()._reset_idx(env_ids)
         if env_ids is not None:

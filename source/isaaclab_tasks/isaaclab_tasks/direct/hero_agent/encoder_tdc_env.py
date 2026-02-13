@@ -76,7 +76,7 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
         """
         self._encoder_policy = policy
 
-    def _pre_physics_step(self, actions: torch.Tensor):
+    def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Convert RL actions to TDC gains, extract M_hat from encoder z.
 
         Steps:
@@ -113,7 +113,7 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
         # --- 3. TDC control pipeline (shared with parent) ---
         self._run_tdc_pipeline()
 
-    def _reset_idx(self, env_ids: torch.Tensor | None):
+    def _reset_idx(self, env_ids: torch.Tensor | None) -> None:
         """Reset specified environments including cached M_hat."""
         super()._reset_idx(env_ids)
         # Reset M_hat to defaults for reset envs (will be re-populated from encoder z)

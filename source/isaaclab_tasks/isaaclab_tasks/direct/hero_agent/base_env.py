@@ -416,7 +416,7 @@ class HeroAgentEnv(DirectRLEnv):
             self._prev_actions_obs = self._actions.clone()
         self._control_step_counter += 1
 
-    def _pre_physics_step(self, actions: torch.Tensor):
+    def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Process actions before physics step with control decimation.
 
         Velocity commands are integrated to position targets at control frequency,
@@ -692,7 +692,7 @@ class HeroAgentEnv(DirectRLEnv):
 
         return out_of_height_bounds | too_far | too_fast | bad_state | excessive_tilt, time_out
 
-    def _reset_idx(self, env_ids: torch.Tensor | None):
+    def _reset_idx(self, env_ids: torch.Tensor | None) -> None:
         """Reset specified environments.
 
         Execution order:

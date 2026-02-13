@@ -86,7 +86,7 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         if self._log_interval > 0:
             log_tdc_init(tdc_cfg, self._tdc.F_bu[0].item(), self._tdc_dt)
 
-    def _pre_physics_step(self, actions: torch.Tensor):
+    def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Override RL actions with TDC control output.
 
         TDC runs every control_decimation steps (50Hz). Between TDC steps,
@@ -162,7 +162,7 @@ class HeroAgentTDCEnv(HeroAgentEnv):
                 target_euler=self._target_euler,
             )
 
-    def _reset_idx(self, env_ids: torch.Tensor | None):
+    def _reset_idx(self, env_ids: torch.Tensor | None) -> None:
         """Reset specified environments including TDC controller state.
 
         Args:
