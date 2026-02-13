@@ -66,10 +66,10 @@ class DomainRandomizationCfg:
     yaw_range: tuple[float, float] = (-math.pi, math.pi)
 
     # -- Hydrodynamic Parameter Scales --
-    added_mass_scale: tuple[float, float] = (0.7, 1.3)
+    added_mass_scale: tuple[float, float] = (0.5, 1.5)
     linear_damping_scale: tuple[float, float] = (0.7, 1.3)
     quadratic_damping_scale: tuple[float, float] = (0.6, 1.4)
-    volume_scale: tuple[float, float] = (0.9, 1.1)
+    volume_scale: tuple[float, float] = (0.85, 1.15)
 
     # -- Center of Buoyancy Offset (meters) --
     cob_offset_x: tuple[float, float] = (-0.01, 0.01)
@@ -79,13 +79,13 @@ class DomainRandomizationCfg:
     # -- Center of Gravity Offset (meters) --
     cog_offset_x: tuple[float, float] = (-0.01, 0.01)
     cog_offset_y: tuple[float, float] = (-0.01, 0.01)
-    cog_offset_z: tuple[float, float] = (-0.04, 0.04)
+    cog_offset_z: tuple[float, float] = (-0.06, 0.06)
 
     # -- Inertia (widened: URDF uses uniform-density assumption, Tan et al. use [50%, 150%]) --
     inertia_scale: tuple[float, float] = (0.6, 1.4)
 
     # -- Body Mass Scale (applied uniformly to all bodies) --
-    body_mass_scale: tuple[float, float] = (0.9, 1.1)
+    body_mass_scale: tuple[float, float] = (0.85, 1.15)
 
     # -- Water Density (kg/m^3) --
     water_density_range: tuple[float, float] = (995.0, 1025.0)
@@ -166,24 +166,24 @@ class DomainRandomizationCfg:
     # Models: tether tension variation, sudden current changes, contact forces.
     # ==========================================================================
     enable_perturbation: bool = True
-    perturbation_force_range: tuple[float, float] = (0.0, 5.0)  # N (Hero Agent ~10kg -> 0.5 m/s^2 max)
-    perturbation_torque_range: tuple[float, float] = (0.0, 0.5)  # Nm
-    perturbation_interval: int = 200  # physics steps between events (~1s at 200Hz)
-    perturbation_duration: int = 10  # physics steps active (~0.05s)
+    perturbation_force_range: tuple[float, float] = (0.0, 15.0)  # N (Hero Agent ~10kg -> 1.5 m/s^2 max)
+    perturbation_torque_range: tuple[float, float] = (0.0, 2.0)  # Nm (15N x 0.15m half-body)
+    perturbation_interval: int = 100  # physics steps between events (~0.5s at 200Hz)
+    perturbation_duration: int = 20  # physics steps active (~0.1s)
 
     # ==========================================================================
     # Action Latency (delays RL action application by random physics steps)
     # Models: communication delay, computation latency in real hardware.
     # Sampled per-env at reset time, held constant during episode.
     # ==========================================================================
-    action_latency_range: tuple[int, int] = (0, 2)  # physics steps (0-10ms at 200Hz)
+    action_latency_range: tuple[int, int] = (0, 4)  # physics steps (0-20ms at 200Hz)
 
     # ==========================================================================
     # Payload Randomization (only used when enable_payload=True)
     # Payload is attached to the gripper body (fixed to base via base_to_gripper joint).
     # Offsets are in gripper body frame.
     # ==========================================================================
-    payload_mass_range: tuple[float, float] = (0.0, 1.0)  # kg
+    payload_mass_range: tuple[float, float] = (0.0, 2.0)  # kg (up to 20% body weight)
 
     # -- Payload CoG Offset (meters, relative to attachment point) --
     payload_cog_offset_x: tuple[float, float] = (-0.30, 0.30)
@@ -304,8 +304,8 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
 
     randomization = DomainRandomizationCfg(enable=True)
     ocean_current = OceanCurrentCfg(
-        max_velocity=(0.2, 0.2, 0.1, 0.0, 0.0, 0.0),
-        noise_scale=(0.05, 0.05, 0.02, 0.0, 0.0, 0.0),
+        max_velocity=(0.5, 0.5, 0.25, 0.0, 0.0, 0.0),
+        noise_scale=(0.1, 0.1, 0.05, 0.0, 0.0, 0.0),
     )
     enable_payload: bool = True
     randomize_target_attitude: bool = True

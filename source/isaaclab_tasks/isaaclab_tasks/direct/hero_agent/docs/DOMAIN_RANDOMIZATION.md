@@ -1,10 +1,11 @@
 # Domain Randomization
 
-> **Status**: 2026-02-14 | **Source**: `config.py`, `base_env.py`, `mdp/events.py`
+> **Status**: 2026-02-14 (aggressive strengthening) | **Source**: `config.py`, `base_env.py`, `mdp/events.py`
 >
 > Hero Agent ALBC 환경의 Domain Randomization(DR) 구현 전체 검토.
 > 12개 카테고리, 35+ 파라미터, Fossen 모델 기반 물리적 랜덤화.
 > BIR Survey (Zhu et al. 2023) 및 Sim-to-Real Locomotion (Tan et al. 2018) 분석 반영.
+> **2026-02-14 강화**: 조기 종료율 31% -> 목표 50-60%로 DR aggressive 강화.
 
 ---
 
@@ -38,15 +39,21 @@ Quaternion 기반 회전 (gimbal lock 방지). Position은 기본값에 대한 a
 
 | Item | Range | Method | DOF | Physical Meaning |
 |:---|:---|:---|:---|:---|
-| added_mass_scale | [0.7, 1.3] | Multiplicative | 6 (independent) | Added mass 불확실성 (+-30%) |
+| added_mass_scale | **[0.5, 1.5]** | Multiplicative | 6 (independent) | Added mass 불확실성 (+-50%) |
 | linear_damping_scale | [0.7, 1.3] | Multiplicative | 6 (independent) | 마찰 감쇠 불확실성 (+-30%) |
 | quadratic_damping_scale | [0.6, 1.4] | Multiplicative | 6 (independent) | 형상 항력 불확실성 (+-40%) |
-| volume_scale | [0.9, 1.1] | Multiplicative | scalar | 부력 불확실성 (+-10%) |
+| volume_scale | **[0.85, 1.15]** | Multiplicative | scalar | 부력 불확실성 (+-15%) |
 | cob_offset | +-1cm (xy), +-4cm (z) | Additive | 3 | 부력 중심 오차 |
-| cog_offset | +-1cm (xy), +-4cm (z) | Additive | 3 | 질량 중심 오차 |
+| cog_offset | +-1cm (xy), **+-6cm (z)** | Additive | 3 | 질량 중심 오차 |
 | inertia_scale | **[0.6, 1.4]** | Multiplicative | 3 (independent) | 관성 모멘트 불확실성 (+-40%) |
 
-**Inertia 범위 근거 (2026-02-14 변경)**: Tan et al. (2018)은 관성을 "균일 밀도 가정으로 추정"하여 [50%, 150%]의 넓은 범위를 사용. Hero Agent도 URDF 기반 균일밀도 추정이므로 +-40%로 확대 (이전: +-20%). TDE가 관성 변화를 보상하므로 넓은 범위에서도 안정적.
+**Inertia 범위 근거**: Tan et al. (2018)은 관성을 "균일 밀도 가정으로 추정"하여 [50%, 150%]의 넓은 범위를 사용. Hero Agent도 URDF 기반 균일밀도 추정이므로 +-40%로 확대. TDE가 관성 변화를 보상하므로 넓은 범위에서도 안정적.
+
+**Added mass 범위 근거 (2026-02-14 강화)**: +-30% -> +-50%. 벽/바닥 근접 시 ground effect로 added mass가 크게 변하며, 부착물/fouling에 의한 형상 변화도 크다. Added mass는 수력학 파라미터 중 불확실성이 가장 큰 항목.
+
+**Volume/body mass 범위 근거 (2026-02-14 강화)**: +-10% -> +-15%. 수분 흡수, 생물 부착(fouling), 하우징 내 공기량 변화, 수압에 의한 미세 변형 모델링.
+
+**CoG offset z 범위 근거 (2026-02-14 강화)**: +-4cm -> +-6cm. 페이로드 부착, 케이블 배선 변화, 내부 부품 재배치에 의한 질량 중심 이동. 정적 안정성(복원 토크)에 직접 영향하므로 robustness에 중요.
 
 Implementation: `_randomize_hydro_model()` in `mdp/events.py`. Base tensor는 `_HydroBaseCache`로 캐싱하여 4096 병렬 환경에서의 성능 보장.
 
@@ -54,11 +61,11 @@ Implementation: `_randomize_hydro_model()` in `mdp/events.py`. Base tensor는 `_
 
 | Item | Range | Distribution |
 |:---|:---|:---|
-| linear_x/y | [-0.2, 0.2] m/s + N(0, 0.05) | Uniform + Gaussian |
-| linear_z | [-0.1, 0.1] m/s + N(0, 0.02) | Uniform + Gaussian |
+| linear_x/y | **[-0.5, 0.5] m/s** + N(0, 0.1) | Uniform + Gaussian |
+| linear_z | **[-0.25, 0.25] m/s** + N(0, 0.05) | Uniform + Gaussian |
 | angular_x/y/z | 0 (disabled) | - |
 
-Main body와 buoy에 동일한 해류 적용 (동일 수역). 에피소드 중 일정 (reset-time only). 에피소드 길이 (~15s)가 해류 변동 시간 스케일보다 짧으므로 시변 모델링은 불필요.
+Main body와 buoy에 동일한 해류 적용 (동일 수역). 에피소드 중 일정 (reset-time only). 에피소드 길이 (~15s)가 해류 변동 시간 스케일보다 짧으므로 시변 모델링은 불필요. **0.5 m/s는 약 1 knot으로, 연안/항만 운용 환경의 표준 해류 속도.**
 
 ### D. Joint Initial State (2 parameters)
 
@@ -73,7 +80,7 @@ Payload는 **gripper body**에 적용된다 (base에 고정 조인트로 연결,
 
 | Item | Range | Note |
 |:---|:---|:---|
-| mass | [0.0, 1.0] kg | Weight 모델만 (drag 없음), 0=페이로드 없음 |
+| mass | **[0.0, 2.0] kg** | Weight 모델만 (drag 없음), 0=페이로드 없음 |
 | cog_offset_x | **[-0.30, 0.30] m** | 부착점 기준 CoG 오프셋 |
 | cog_offset_y | **[-0.30, 0.30] m** | 부착점 기준 CoG 오프셋 |
 | cog_offset_z | [-0.20, 0.0] m | 부착점 아래 방향 오프셋 |
@@ -98,7 +105,7 @@ Implementation: `randomize_payload()` in `mdp/events.py`.
 
 | Item | Range | Note |
 |:---|:---|:---|
-| body_mass_scale | [0.9, 1.1] | 모든 rigid body에 동일 스케일 (+-10%) |
+| body_mass_scale | **[0.85, 1.15]** | 모든 rigid body에 동일 스케일 (+-15%) |
 
 PhysX `set_masses()` API 사용. 제조 공차 모델링. 관성은 hydro DR의 `inertia_scale`로 별도 랜덤화.
 
@@ -140,12 +147,12 @@ Per-env tensor. 부력 ($F_b = \rho V g$)과 항력 ($F_d = 0.5 \rho C_d A v^2$)
 | Item | Value | Note |
 |:---|:---|:---|
 | enable_perturbation | True | DR 활성화 시 자동 적용 |
-| force_range | [0.0, 5.0] N | ~10kg 차체에 최대 0.5 m/s^2 가속 |
-| torque_range | [0.0, 0.5] Nm | 랜덤 방향 토크 |
-| interval | 200 physics steps (~1s) | 이벤트 간 쿨다운 |
-| duration | 10 physics steps (~0.05s) | 충격 지속 시간 |
+| force_range | **[0.0, 15.0] N** | ~10kg 차체에 최대 1.5 m/s^2 가속 |
+| torque_range | **[0.0, 2.0] Nm** | 15N x 0.15m (half-body moment arm) |
+| interval | **100 physics steps (~0.5s)** | 이벤트 간 쿨다운 (난류 환경) |
+| duration | **20 physics steps (~0.1s)** | 충격 지속 시간 |
 
-**근거**: Tan et al. (2018)은 200스텝마다 130-220N의 랜덤 외력을 인가하여 균형 회복 능력을 학습시켰다. Hero Agent는 ~10kg 수중 차량으로, 최대 5N (0.5 m/s^2)은 수중 환경에서 발생하는 비정상 외란을 모델링:
+**근거**: Tan et al. (2018)은 200스텝마다 130-220N의 랜덤 외력을 인가하여 균형 회복 능력을 학습시켰다 (25kg 로봇, 5.2-8.8 m/s^2). Hero Agent는 ~10kg 수중 차량으로, 최대 15N (1.5 m/s^2)은 수중 환경에서 발생하는 비정상 외란을 모델링:
 - 해류 급변 (해류는 reset-time에 상수로 설정되나, 실제로는 변동)
 - 테더(tether) 장력 변동
 - 물체 파지 순간 반작용력
@@ -163,11 +170,11 @@ Per-env tensor. 부력 ($F_b = \rho V g$)과 항력 ($F_d = 0.5 \rho C_d A v^2$)
 
 | Item | Value | Note |
 |:---|:---|:---|
-| action_latency_range | [0, 2] physics steps | 0-10ms at 200Hz |
+| action_latency_range | **[0, 4] physics steps** | 0-20ms at 200Hz |
 
 **근거**: Tan et al. (2018) Table I에서 control latency를 [0, 40ms]로 명시적 랜덤화. Hero Agent에서는:
-- 통신 지연: ROV 하드웨어의 RS-485/Ethernet 통신 0~5ms
-- 연산 지연: 정책 추론 + 전처리 ~2-5ms
+- 통신 지연: ROV 하드웨어의 RS-485/Ethernet 통신 0~10ms
+- 연산 지연: 정책 추론 + 전처리 ~2-10ms (임베디드 시스템)
 - TDC 영향: TDE 추정 오차 상한이 sampling period에 비례하므로, 실효 지연이 TDE 정확도에 직접 영향
 
 **Implementation**: `base_env._get_delayed_actions()`.
@@ -277,12 +284,16 @@ Payload    (4D): [mass(1), cog_offset(3)]
 
 | Parameter | Hero Agent | Tan et al. | Rationale |
 |:---|:---|:---|:---|
-| Body mass | +-10% | +-20% | Hero Agent는 정밀 제조 ROV, 별도 payload DR 존재 |
+| Body mass | **+-15%** | +-20% | 수분 흡수, fouling, 케이블 변동 |
+| Added mass | **+-50%** | N/A | 가장 불확실한 파라미터, ground effect |
+| Volume | **+-15%** | N/A | 하우징 공기, 수압 변형 |
 | Inertia | **+-40%** | +-50% | URDF 균일밀도 추정 불확실성 반영 |
 | IMU noise std | **0.02 rad** | 0.05 rad | 일반 MEMS (소비자급보다 양호) |
 | IMU bias | **+-0.02 rad** | +-0.05 rad | 일반 MEMS gyro drift |
-| Control latency | **0-10ms** | 0-40ms | 수중 ROV는 유선 통신 (무선보다 빠름) |
-| Perturbation force | **0-5N** | 130-220N | 체중 비례 (10kg vs 25kg, 수중 vs 지상) |
+| Control latency | **0-20ms** | 0-40ms | 임베디드 시스템 Ethernet/serial |
+| Perturbation force | **0-15N** | 130-220N | 체중 비례 (10kg: 1.5 m/s^2 vs 25kg: 5.2-8.8 m/s^2) |
+| Ocean current | **0.5 m/s (~1kt)** | N/A | 연안/항만 표준 해류 |
+| Payload mass | **0-2.0 kg (20%)** | N/A | 수중 샘플, 센서 장비, 소형 도구 |
 | Payload CoG | **+-0.3m** | N/A | 33cm 차체 대비 현실적 범위 |
 
 ### Resolved Issues
@@ -366,4 +377,4 @@ Payload    (4D): [mass(1), cog_offset(3)]
 ---
 
 **Created**: 2026-02-11
-**Updated**: 2026-02-14 (Random perturbation, action latency 추가. Inertia +-40%, payload CoG +-0.3m, IMU MEMS 수준으로 조정. Tan et al. 2018 비교표 추가.)
+**Updated**: 2026-02-14 (Aggressive DR 강화: perturbation 15N/2Nm/0.5s간격/0.1s지속, ocean current 0.5m/s, latency 0-4steps, payload 2kg, added_mass +-50%, body_mass +-15%, volume +-15%, CoG_z +-6cm)
