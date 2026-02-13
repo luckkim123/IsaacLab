@@ -16,6 +16,9 @@ import torch
 
 from isaaclab.utils.math import euler_xyz_from_quat
 
+# Only roll and pitch are controllable (buoyancy cannot generate yaw torque)
+_ROLL_PITCH_DIMS = 2
+
 
 class AttitudeTask:
     """Manages attitude target, error computation, and potential-based rewards.
@@ -114,7 +117,7 @@ class AttitudeTask:
         """
         self._prev_potentials = self._potentials.clone()
         self._attitude_error = self.compute_error(quat)
-        self._potentials = torch.linalg.norm(self._attitude_error[:, :2], dim=-1)
+        self._potentials = torch.linalg.norm(self._attitude_error[:, :_ROLL_PITCH_DIMS], dim=-1)
 
     def get_attitude_error(self, quat: torch.Tensor) -> torch.Tensor:
         """Compute and cache attitude error for observations.
@@ -156,6 +159,6 @@ class AttitudeTask:
             quat: Root quaternion for the reset envs. Shape: (len(env_ids), 4).
         """
         attitude_error = self.compute_error(quat, env_ids)
-        initial_potential = torch.linalg.norm(attitude_error[:, :2], dim=-1)
+        initial_potential = torch.linalg.norm(attitude_error[:, :_ROLL_PITCH_DIMS], dim=-1)
         self._potentials[env_ids] = initial_potential
         self._prev_potentials[env_ids] = initial_potential

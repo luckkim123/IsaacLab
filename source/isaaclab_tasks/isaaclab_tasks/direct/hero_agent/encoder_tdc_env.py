@@ -37,6 +37,9 @@ from .tdc_env import HeroAgentTDCEnv
 if TYPE_CHECKING:
     from .encoder.actor_critic_encoder import ActorCriticEncoderTDC
 
+# Encoder latent z layout: z[3:5] = [M_hat_roll, M_hat_pitch]
+_Z_M_HAT_SLICE = slice(3, 5)
+
 
 class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
     """Hero Agent environment with encoder-adaptive TDC controller.
@@ -97,7 +100,7 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
         if self._encoder_policy is not None:
             z = self._encoder_policy.get_last_z()
             if z is not None:
-                m_hat = z[:, 3:5]
+                m_hat = z[:, _Z_M_HAT_SLICE]
                 self._encoder_m_hat = m_hat
                 self._tdc.update_controller_params(m_hat=m_hat)
 
