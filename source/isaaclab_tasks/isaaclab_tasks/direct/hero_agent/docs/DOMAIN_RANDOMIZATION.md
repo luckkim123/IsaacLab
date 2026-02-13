@@ -1,11 +1,11 @@
 # Domain Randomization
 
-> **Status**: 2026-02-14 (aggressive strengthening) | **Source**: `config.py`, `base_env.py`, `mdp/events.py`
+> **Status**: 2026-02-14 (aggressive strengthening + rotation suppression) | **Source**: `config.py`, `base_env.py`, `mdp/events.py`
 >
 > Hero Agent ALBC 환경의 Domain Randomization(DR) 구현 전체 검토.
 > 12개 카테고리, 35+ 파라미터, Fossen 모델 기반 물리적 랜덤화.
 > BIR Survey (Zhu et al. 2023) 및 Sim-to-Real Locomotion (Tan et al. 2018) 분석 반영.
-> **2026-02-14 강화**: 조기 종료율 31% -> 목표 50-60%로 DR aggressive 강화.
+> **2026-02-14 2차 강화**: payload 3kg (30%), perturbation 20N/3Nm, max_joint_velocity pi.
 
 ---
 
@@ -80,7 +80,7 @@ Payload는 **gripper body**에 적용된다 (base에 고정 조인트로 연결,
 
 | Item | Range | Note |
 |:---|:---|:---|
-| mass | **[0.0, 2.0] kg** | Weight 모델만 (drag 없음), 0=페이로드 없음 |
+| mass | **[0.0, 3.0] kg** | Weight 모델만 (drag 없음), 0=페이로드 없음 (체중 30%) |
 | cog_offset_x | **[-0.30, 0.30] m** | 부착점 기준 CoG 오프셋 |
 | cog_offset_y | **[-0.30, 0.30] m** | 부착점 기준 CoG 오프셋 |
 | cog_offset_z | [-0.20, 0.0] m | 부착점 아래 방향 오프셋 |
@@ -147,8 +147,8 @@ Per-env tensor. 부력 ($F_b = \rho V g$)과 항력 ($F_d = 0.5 \rho C_d A v^2$)
 | Item | Value | Note |
 |:---|:---|:---|
 | enable_perturbation | True | DR 활성화 시 자동 적용 |
-| force_range | **[0.0, 15.0] N** | ~10kg 차체에 최대 1.5 m/s^2 가속 |
-| torque_range | **[0.0, 2.0] Nm** | 15N x 0.15m (half-body moment arm) |
+| force_range | **[0.0, 20.0] N** | ~10kg 차체에 최대 2.0 m/s^2 가속 |
+| torque_range | **[0.0, 3.0] Nm** | 20N x 0.15m (half-body moment arm) |
 | interval | **100 physics steps (~0.5s)** | 이벤트 간 쿨다운 (난류 환경) |
 | duration | **20 physics steps (~0.1s)** | 충격 지속 시간 |
 
@@ -291,9 +291,9 @@ Payload    (4D): [mass(1), cog_offset(3)]
 | IMU noise std | **0.02 rad** | 0.05 rad | 일반 MEMS (소비자급보다 양호) |
 | IMU bias | **+-0.02 rad** | +-0.05 rad | 일반 MEMS gyro drift |
 | Control latency | **0-20ms** | 0-40ms | 임베디드 시스템 Ethernet/serial |
-| Perturbation force | **0-15N** | 130-220N | 체중 비례 (10kg: 1.5 m/s^2 vs 25kg: 5.2-8.8 m/s^2) |
+| Perturbation force | **0-20N** | 130-220N | 체중 비례 (10kg: 2.0 m/s^2 vs 25kg: 5.2-8.8 m/s^2) |
 | Ocean current | **0.5 m/s (~1kt)** | N/A | 연안/항만 표준 해류 |
-| Payload mass | **0-2.0 kg (20%)** | N/A | 수중 샘플, 센서 장비, 소형 도구 |
+| Payload mass | **0-3.0 kg (30%)** | N/A | 수중 샘플, 센서 장비, 소형 도구 |
 | Payload CoG | **+-0.3m** | N/A | 33cm 차체 대비 현실적 범위 |
 
 ### Resolved Issues
@@ -377,4 +377,4 @@ Payload    (4D): [mass(1), cog_offset(3)]
 ---
 
 **Created**: 2026-02-11
-**Updated**: 2026-02-14 (Aggressive DR 강화: perturbation 15N/2Nm/0.5s간격/0.1s지속, ocean current 0.5m/s, latency 0-4steps, payload 2kg, added_mass +-50%, body_mass +-15%, volume +-15%, CoG_z +-6cm)
+**Updated**: 2026-02-14 (2차 강화: perturbation 20N/3Nm, payload 3kg (30%), max_joint_velocity pi (3.14 rad/s). 1차 강화: perturbation 15N/2Nm, ocean current 0.5m/s, latency 0-4steps, added_mass +-50%, body_mass +-15%, volume +-15%, CoG_z +-6cm)

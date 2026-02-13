@@ -39,6 +39,7 @@ from .mdp import (
     angular_velocity_penalty,
     compute_policy_obs,
     compute_privileged_obs,
+    linear_error_penalty,
     progress_reward,
     tracking_reward,
 )
@@ -92,7 +93,7 @@ class HeroAgentEnv(DirectRLEnv):
 
     Physical Parameters:
         - sim_dt: 1/200 s (200 Hz physics), decimation: 1, control_decimation: 4 (50 Hz control)
-        - max_joint_velocity: 2*pi rad/s (360 deg/s)
+        - max_joint_velocity: pi rad/s (180 deg/s)
         - joint stiffness: 100.0, damping: 3.0 (ImplicitActuator default)
         - joint_limits: from URDF (±2*pi rad, i.e. ±360 deg)
     """
@@ -262,12 +263,13 @@ class HeroAgentEnv(DirectRLEnv):
     def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
         """Build the reward terms dict. Override in subclasses to add/modify terms.
 
-        Base terms (5):
+        Base terms (6):
             1. tracking: Gaussian kernel exp(-e^2/sigma^2), dt-scaled
-            2. progress: telescoping (prev_e - e), NOT dt-scaled
-            3. angular_velocity: squared omega penalty, dt-scaled, curriculum
-            4. action_magnitude: squared action penalty, dt-scaled
-            5. action_rate: squared delta-action penalty, NOT dt-scaled, curriculum
+            2. progress: telescoping (prev_e - e), NOT dt-scaled (disabled by default)
+            3. linear_error: ||error|| penalty, dt-scaled (complements Gaussian at large errors)
+            4. angular_velocity: squared omega penalty, dt-scaled, curriculum
+            5. action_magnitude: squared action penalty, dt-scaled
+            6. action_rate: squared delta-action penalty, NOT dt-scaled, curriculum
         """
         rcfg = self.cfg.reward
         return {
@@ -280,6 +282,10 @@ class HeroAgentEnv(DirectRLEnv):
                 func=progress_reward,
                 weight=rcfg.progress_weight,
                 scale_by_dt=False,
+            ),
+            "linear_error": RewardTermCfg(
+                func=linear_error_penalty,
+                weight=rcfg.linear_error_weight,
             ),
             "angular_velocity": RewardTermCfg(
                 func=angular_velocity_penalty,

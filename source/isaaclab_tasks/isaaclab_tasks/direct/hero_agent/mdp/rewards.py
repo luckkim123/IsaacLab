@@ -45,27 +45,30 @@ class ALBCRewardCfg:
     """ALBC reward configuration with Gaussian tracking + multi-term penalties.
 
     Reward = tracking * w_t * dt
-           + progress * w_p
+           + linear_error * w_le * dt
            + angular_velocity * w_av * dt
            + action_magnitude * w_am * dt
            + action_rate * w_ar
     """
 
     # Tracking (Gaussian kernel)
-    tracking_weight: float = 1.0
+    tracking_weight: float = 3.0
     tracking_sigma: float = 0.25
 
-    # Progress (telescoping, NOT dt-scaled)
-    progress_weight: float = 1.0
+    # Progress (telescoping, NOT dt-scaled) -- disabled, replaced by linear_error
+    progress_weight: float = 0.0
+
+    # Linear error penalty (complements Gaussian tracking at large errors)
+    linear_error_weight: float = -1.0
 
     # Angular velocity penalty (curriculum: starts at 1/10)
-    angular_velocity_weight: float = -1.0
+    angular_velocity_weight: float = -2.0
 
     # Action magnitude penalty
     action_magnitude_weight: float = -1.0
 
     # Action rate penalty (NOT dt-scaled, curriculum: starts at 1/10)
-    action_rate_weight: float = -0.005
+    action_rate_weight: float = -0.01
 
     # Curriculum
     curriculum_end_iter: int = 200
@@ -75,18 +78,18 @@ class ALBCRewardCfg:
 class EncoderTDCRewardCfg(ALBCRewardCfg):
     """Encoder-TDC reward config with adjusted weights and TDE residual penalty.
 
-    Inherits tracking/progress/angular_velocity from ALBCRewardCfg.
+    Inherits tracking/linear_error/angular_velocity from ALBCRewardCfg.
     Overrides action weights for gain-tuning semantics.
-    Adds TDE residual penalty to encourage accurate M_hat.
+    Adds TDE residual penalty (||U_hat||/||tau_total||) to encourage accurate M_hat.
     """
 
     # Lighter action_magnitude: sigmoid midpoint is a reasonable default
     action_magnitude_weight: float = -0.5
 
-    # Heavier action_rate: gain stability is critical for TDC performance
+    # Same as base: angular_velocity penalty indirectly enforces gain smoothness
     action_rate_weight: float = -0.01
 
-    tde_residual_weight: float = -0.05
+    tde_residual_weight: float = -0.5
 
 
 # =============================================================================
@@ -277,6 +280,20 @@ def progress_reward(
     return env._prev_potentials - env._potentials
 
 
+def linear_error_penalty(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+    **_kwargs,
+) -> torch.Tensor:
+    """Linear error magnitude: ||[roll_err, pitch_err]||.
+
+    Provides gradient proportional to error distance. Complements Gaussian
+    tracking which saturates at large errors (>sigma).
+    dt-scaled (instantaneous quality measure). Use with negative weight.
+    """
+    return env._potentials
+
+
 def angular_velocity_penalty(
     _robot: Articulation,
     env: HeroAgentEnv,
@@ -329,16 +346,25 @@ def tde_residual_penalty(
     env: HeroAgentEnv,
     **_kwargs,
 ) -> torch.Tensor:
-    """TDE residual ratio: ||U_hat|| / (||M_hat * u_pd|| + eps).
+    """TDE fraction of total control torque.
 
-    Measures how large the TDE compensation torque is relative to the PD torque.
-    A small ratio indicates accurate M_hat and appropriate gains.
-    Good values < 0.5, problematic > 1.0.
+    Measures controller's reliance on Time Delay Estimation:
+        ratio = ||U_hat|| / ||tau_total||
+    where tau_total = M_hat*u_pd + U_hat + delta_T_b.
+
+    Range [0, 1]: high values indicate heavy TDE dependence (stability risk).
+    Well-conditioned: no singularity near target (denominator includes U_hat).
 
     dt-scaled (instantaneous quality measure). Use with negative weight.
-
     Requires env._tdc to be available (TDC environments only).
     """
-    u_hat_norm = env._tdc.u_hat.norm(dim=-1)
-    pd_norm = env._tdc.pd_torque.norm(dim=-1)
-    return torch.where(pd_norm > 1e-3, u_hat_norm / pd_norm, u_hat_norm)
+    u_hat = env._tdc.u_hat
+    pd_torque = env._tdc.pd_torque
+    delta_T_b = env._tdc.delta_T_b
+    u_hat_norm = u_hat.norm(dim=-1)
+    tau_total_norm = (pd_torque + u_hat + delta_T_b).norm(dim=-1)
+    return torch.where(
+        tau_total_norm > 1e-6,
+        u_hat_norm / tau_total_norm,
+        torch.zeros_like(u_hat_norm),
+    )

@@ -1,6 +1,6 @@
 # Reward Functions
 
-> **Status**: 2026-02-11 | **Source**: `mdp/rewards.py`, `config.py`
+> **Status**: 2026-02-14 | **Source**: `mdp/rewards.py`, `config.py`
 >
 > Hero Agent ALBC 보상함수의 수학적 분석, 설계 근거, 실측 수치.
 > Gaussian kernel 정규화 + multi-term penalty + curriculum 기반 설계.
@@ -9,23 +9,24 @@
 
 ## Overview
 
-Hero Agent ALBC 환경의 보상은 5개 항(Base RL) 또는 6개 항(Encoder-TDC)의 가중합으로 구성된다:
+Hero Agent ALBC 환경의 보상은 6개 항(Base RL) 또는 7개 항(Encoder-TDC)의 가중합으로 구성된다:
 
-$$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tracking}} + \underbrace{w_2 \cdot (\phi_{t-1} - \phi_t)}_{\text{progress}} + \underbrace{w_3 \cdot \|\boldsymbol{\omega}_t\|^2 \cdot \Delta t}_{\text{ang. vel.}} + \underbrace{w_4 \cdot \|\mathbf{a}_t\|^2 \cdot \Delta t}_{\text{action mag.}} + \underbrace{w_5 \cdot \|\Delta\mathbf{a}_t\|^2}_{\text{action rate}} + \underbrace{w_6 \cdot \frac{\|\hat{U}\|}{\|M\hat{u}_{pd}\|} \cdot \Delta t}_{\text{TDE residual (Enc-TDC only)}}$$
+$$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tracking}} + \underbrace{w_{le} \cdot \phi_t \cdot \Delta t}_{\text{linear error}} + \underbrace{w_3 \cdot \|\boldsymbol{\omega}_t\|^2 \cdot \Delta t}_{\text{ang. vel.}} + \underbrace{w_4 \cdot \|\mathbf{a}_t\|^2 \cdot \Delta t}_{\text{action mag.}} + \underbrace{w_5 \cdot \|\Delta\mathbf{a}_t\|^2}_{\text{action rate}} + \underbrace{w_6 \cdot \frac{\|\hat{U}\|}{\|\boldsymbol{\tau}_{total}\|} \cdot \Delta t}_{\text{TDE residual (Enc-TDC only)}}$$
 
-여기서 $\phi_t = \|\mathbf{e}_t^{rp}\|_2$ (roll/pitch 에러의 L2 norm), $\Delta t$ = step_dt, $\sigma$ = tracking sigma이다.
+여기서 $\phi_t = \|\mathbf{e}_t^{rp}\|_2$ (roll/pitch 에러의 L2 norm), $\boldsymbol{\tau}_{total} = M\hat{u}_{pd} + \hat{U} + \Delta T_b$, $\Delta t$ = step_dt, $\sigma$ = tracking sigma이다.
 
 ### Configuration
 
 | Symbol | ALBCRewardCfg (Base RL) | EncoderTDCRewardCfg | Description |
 |:---|:---|:---|:---|
-| $w_1$ | 1.0 | 1.0 | `tracking_weight` |
+| $w_1$ | 3.0 | 3.0 | `tracking_weight` |
 | $\sigma$ | 0.25 rad | 0.25 rad | `tracking_sigma` |
-| $w_2$ | 5.0 | 5.0 | `progress_weight` |
-| $w_3$ | -0.5 | -0.5 | `angular_velocity_weight` |
-| $w_4$ | -0.5 | -0.1 | `action_magnitude_weight` |
-| $w_5$ | -0.005 | -0.01 | `action_rate_weight` (NOT dt-scaled) |
-| $w_6$ | N/A | -0.05 | `tde_residual_weight` |
+| $w_2$ | 0.0 (disabled) | 0.0 (disabled) | `progress_weight` |
+| $w_{le}$ | -1.0 | -1.0 | `linear_error_weight` |
+| $w_3$ | -2.0 | -2.0 | `angular_velocity_weight` |
+| $w_4$ | -1.0 | -0.5 | `action_magnitude_weight` |
+| $w_5$ | -0.01 | -0.01 | `action_rate_weight` (NOT dt-scaled) |
+| $w_6$ | N/A | -0.5 | `tde_residual_weight` |
 | end iter | 200 | 200 | `curriculum_end_iter` |
 | $\Delta t$ | 0.005 | 0.005 | `step_dt` (decimation=1, sim dt=0.005) |
 
@@ -172,7 +173,9 @@ Gaussian은 "목표에 거의 도달한 상태"에서는 gradient가 작아져 �
 
 ---
 
-## Term 2: Progress Reward
+## Term 2: Progress Reward (Disabled)
+
+> **Status**: Disabled (`progress_weight=0.0`). Replaced by linear_error. Kept for backward compatibility.
 
 ### Formula
 
@@ -180,38 +183,51 @@ $$r_{progress} = \phi_{t-1} - \phi_t$$
 
 **Source**: `mdp/rewards.py` (`progress_reward`)
 
+### Why Disabled
+
+Progress reward의 구조적 한계: telescoping 특성으로 인해 per-step 기여가 $\approx (\phi_0 - \phi_T) / T$로, 에피소드 길이에 반비례한다. 수렴 후 per-step ~0.0001 수준으로, 학습 후반에는 유의미한 gradient를 제공하지 못한다. 또한 대오차 영역(>14deg)에서 Gaussian tracking이 ~0이 되는 동안 progress도 방향성 없는 약한 신호만 제공한다.
+
+Linear error (`-||e||`)가 이 두 문제를 동시에 해결: 에러에 비례하는 일정한 gradient + 에피소드 길이 무관.
+
+---
+
+## Term 2b: Linear Error Penalty
+
+### Formula
+
+$$r_{linear} = \phi_t = \|\mathbf{e}_t^{rp}\|_2$$
+
+**Source**: `mdp/rewards.py` (`linear_error_penalty`)
+
 ```python
-def progress_reward(_robot, env, **_kwargs):
-    return env._prev_potentials - env._potentials
+def linear_error_penalty(_robot, env, **_kwargs):
+    return env._potentials
 ```
 
 ### Behavior
 
-| 상황 | $\phi_{t-1}$ | $\phi_t$ | 보상 (w=5.0) |
-|:---|:---|:---|:---|
-| 에러 감소 (개선) | 0.50 | 0.30 | +1.00 |
-| 에러 유지 | 0.50 | 0.50 | 0.00 |
-| 에러 증가 (악화) | 0.50 | 0.80 | -1.50 |
+| $\phi_t$ (에러) | Raw value | 페널티 (w=-1.0, dt-scaled) |
+|:---|:---|:---|
+| 0.0 (완벽) | 0.000 | 0.0000 |
+| 0.1 (~5.7도) | 0.100 | -0.0005 |
+| 0.25 (~14.3도) | 0.250 | -0.00125 |
+| 0.5 (~28.6도) | 0.500 | -0.00250 |
+| 0.785 (~45도) | 0.785 | -0.00393 |
 
 ### Design Rationale
 
-1. **방향 신호**: "현재 상태가 좋은가"가 아니라 "**나아지고 있는가**"를 측정
-2. **원거리 학습**: 목표에서 멀리 있어도 다가가기만 하면 양의 보상 -- 학습 초기에 핵심 신호
-3. **가중치 5.0**: tracking과의 스케일 균형 맞춤 (기존 1.0에서 상향). Episode sum $\approx 5 \times (\phi_0 - \phi_T) \approx 2.25$로, tracking sum과 유사한 크기.
+1. **Gaussian과 상호보완**: 대오차(>14deg)에서 Gaussian $\to$ 0이므로 linear error가 유일한 방향 gradient를 제공. 소오차(<14deg)에서는 Gaussian이 지배하고 linear은 미미.
+2. **에피소드 길이 무관**: per-step 기여가 에러 크기에만 의존 (progress의 telescoping 문제 해결).
+3. **dt-scaled**: 순간 상태 품질 측정이므로 dt-scaled.
+4. **음의 가중치**: `weight=-1.0`으로 사용하여 에러가 클수록 강한 페널티.
 
-### Telescoping Property
+### Tracking + Linear Error 시너지
 
-에피소드 전체에 걸쳐 합산하면 중간 항이 상쇄된다:
-
-$$\sum_{t=1}^{T} (\phi_{t-1} - \phi_t) = \phi_0 - \phi_T$$
-
-에피소드 리턴은 **초기 에러와 최종 에러의 차이**만으로 결정된다. 이 특성은 시뮬레이션 주파수와 무관하므로 dt 스케일링이 불필요하다 (`scale_by_dt=False`).
-
-### dt-Scaling 비적용 근거
-
-Tracking reward는 "순간값"이므로 주파수를 2배로 올리면 스텝 수가 2배가 되어 에피소드 합도 2배가 된다. 이를 보정하기 위해 $\Delta t$를 곱한다.
-
-Progress reward는 "차분값"이므로 주파수를 올리면 한 스텝당 변화량이 작아지지만 스텝 수가 늘어나, 전체 합(텔레스코핑)은 동일하다. 따라서 $\Delta t$ 보정이 불필요하다.
+| Error range | Tracking 기여 | Linear 기여 | 지배 항 |
+|:---|:---|:---|:---|
+| 0 ~ 5 deg | 강함 (0.85~1.0) | 약함 (0~0.09) | Tracking |
+| 5 ~ 14 deg | 중간 (0.37~0.85) | 중간 (0.09~0.25) | 공동 |
+| 14 ~ 45 deg | 약함 (0~0.37) | 강함 (0.25~0.79) | **Linear** |
 
 ---
 
@@ -233,19 +249,19 @@ def angular_velocity_penalty(_robot, env, **_kwargs):
 
 ### Behavior
 
-| $p$ (roll rate) | $q$ (pitch rate) | $\sum \omega^2$ | 페널티 (w=-0.5, dt-scaled) |
+| $p$ (roll rate) | $q$ (pitch rate) | $\sum \omega^2$ | 페널티 (w=-2.0, dt-scaled) |
 |:---|:---|:---|:---|
 | 0.0 | 0.0 | 0.00 | 0.0000 |
-| 0.1 | 0.1 | 0.02 | -0.00005 |
-| 0.5 | 0.5 | 0.50 | -0.00125 |
-| 1.0 | 1.0 | 2.00 | -0.00500 |
-| 2.0 | 2.0 | 8.00 | -0.02000 |
+| 0.1 | 0.1 | 0.02 | -0.0002 |
+| 0.5 | 0.5 | 0.50 | -0.005 |
+| 1.0 | 1.0 | 2.00 | -0.020 |
+| 2.0 | 2.0 | 8.00 | -0.080 |
 
 ### Design Rationale
 
 1. **진동 억제**: 목표 도달 후에도 빠른 회전이 발생하면 페널티. DR로 수중 감쇠가 변동되므로 명시적 페널티 필요.
 2. **L2 penalty**: 작은 속도는 허용하되 큰 속도를 강하게 억제.
-3. **Curriculum**: 초기 $w_3 = -0.05$ (1/10)에서 시작하여 iteration 200까지 $w_3 = -0.5$로 증가. 초기 탐색을 방해하지 않으면서 점진적으로 smooth한 행동을 유도.
+3. **Curriculum**: 초기 $w_3 = -0.2$ (1/10)에서 시작하여 iteration 200까지 $w_3 = -2.0$로 증가. 초기 탐색을 방해하지 않으면서 점진적으로 smooth한 행동을 유도.
 4. **dt-scaled**: 순간 상태 품질 측정이므로 dt-scaled.
 
 ---
@@ -267,19 +283,19 @@ def action_magnitude_penalty(_robot, actions, **_kwargs):
 
 Base RL 환경에서 action space는 2D (관절 2개), 각 action $\in [-1, 1]$:
 
-| $a_1$ | $a_2$ | $\sum a^2$ | 페널티 (Base, w=-0.5, dt) | 페널티 (Enc-TDC, w=-0.1, dt) |
+| $a_1$ | $a_2$ | $\sum a^2$ | 페널티 (Base, w=-1.0, dt) | 페널티 (Enc-TDC, w=-0.5, dt) |
 |:---|:---|:---|:---|:---|
 | 0.0 | 0.0 | 0.00 | 0.0000 | 0.0000 |
-| 0.3 | 0.3 | 0.18 | -0.00045 | -0.00009 |
-| 0.5 | 0.5 | 0.50 | -0.00125 | -0.00025 |
-| 1.0 | 1.0 | 2.00 | -0.00500 | -0.00100 |
+| 0.3 | 0.3 | 0.18 | -0.0009 | -0.00045 |
+| 0.5 | 0.5 | 0.50 | -0.0025 | -0.00125 |
+| 1.0 | 1.0 | 2.00 | -0.0100 | -0.00500 |
 
 ### Design Rationale
 
 1. **L2 (제곱) 페널티**: 작은 행동은 거의 무시, 큰 행동만 강하게 억제.
 2. **환경별 가중치 분리**:
-   - Base RL ($w_4 = -0.5$): 관절 속도 제어. fix1 실험(-1.0)에서 action~0.09로 수렴, v1 실험(-0.1)에서 action~0.47로 불안정. 중간값 -0.5 채택.
-   - Encoder-TDC ($w_4 = -0.1$): sigmoid midpoint가 합리적 기본값이므로 Base의 1/5로 완화. 과한 페널티는 게인을 midpoint에 고착시킴.
+   - Base RL ($w_4 = -1.0$): 관절 속도 제어. fix1 실험에서 검증된 값.
+   - Encoder-TDC ($w_4 = -0.5$): sigmoid midpoint가 합리적 기본값이므로 Base의 1/2로 완화. 과한 페널티는 게인을 midpoint에 고착시킴.
 3. **dt-scaled**: 순간 상태 품질 측정.
 
 ---
@@ -299,21 +315,21 @@ def action_rate_penalty(_robot, actions, prev_actions, **_kwargs):
 
 ### Behavior
 
-| $\Delta a_1$ | $\Delta a_2$ | $\sum (\Delta a)^2$ | 페널티 (Base, w=-0.005) | 페널티 (Enc-TDC, w=-0.01) |
+| $\Delta a_1$ | $\Delta a_2$ | $\sum (\Delta a)^2$ | 페널티 (Base, w=-0.01) | 페널티 (Enc-TDC, w=-0.01) |
 |:---|:---|:---|:---|:---|
 | 0.0 | 0.0 | 0.000 | 0.000 | 0.000 |
-| 0.01 | 0.01 | 0.0002 | -0.000001 | -0.000002 |
-| 0.1 | 0.1 | 0.02 | -0.0001 | -0.0002 |
-| 0.3 | 0.3 | 0.18 | -0.0009 | -0.0018 |
-| 0.5 | 0.5 | 0.50 | -0.0025 | -0.005 |
+| 0.01 | 0.01 | 0.0002 | -0.000002 | -0.000002 |
+| 0.1 | 0.1 | 0.02 | -0.0002 | -0.0002 |
+| 0.3 | 0.3 | 0.18 | -0.0018 | -0.0018 |
+| 0.5 | 0.5 | 0.50 | -0.005 | -0.005 |
 
 ### Design Rationale
 
 1. **Smooth control**: 연속 스텝 간 행동 변화를 최소화하여 부드러운 제어 유도. 특히 TDC에서 게인 급변 방지.
 2. **NOT dt-scaled**: per-step 차분이므로 $\Delta a \sim \Delta t$ 관계에 의해 자연적으로 frequency-invariant. dt를 곱하지 않으므로 weight가 dt-scaled 항보다 작아야 동등한 기여.
 3. **환경별 가중치 분리**:
-   - Base RL ($w_5 = -0.005$): fix1 실험(w=-1.0, dt-scaled)에서 검증된 균형과 동등. 관절 속도 변화는 물리적으로 감쇠됨.
-   - Encoder-TDC ($w_5 = -0.01$): Base의 2배. 게인 안정성이 TDC 성능에 직결 (M_hat * u_pd 항 안정성).
+   - Base RL ($w_5 = -0.01$): Encoder-TDC와 동일 수준으로 강화. 급격한 관절 이동 억제를 위해 이전(-0.005)에서 2배 증가.
+   - Encoder-TDC ($w_5 = -0.01$): 게인 안정성이 TDC 성능에 직결 (M_hat * u_pd 항 안정성).
 4. **Curriculum**: 초기 $w_5 / 10$에서 시작하여 점진적 증가.
 
 ---
@@ -322,36 +338,52 @@ def action_rate_penalty(_robot, actions, prev_actions, **_kwargs):
 
 ### Formula
 
-$$r_{tde} = \frac{\|\hat{U}\|}{\|M\hat{u}_{pd}\| + \epsilon}, \quad \epsilon = 10^{-6}$$
+$$r_{tde} = \frac{\|\hat{U}\|}{\|\boldsymbol{\tau}_{total}\|}, \quad \boldsymbol{\tau}_{total} = M\hat{u}_{pd} + \hat{U} + \Delta T_b$$
 
 여기서:
 - $\hat{U}$: TDE 보상 토크 (dynamics 불확실성 추정치)
 - $M\hat{u}_{pd}$: PD 제어 토크 (설계 관성 * PD 출력)
+- $\Delta T_b$: 복원 토크 변화 ($T_{b,prev} - T_b$)
+- $\boldsymbol{\tau}_{total}$: 전체 제어 토크 (TDC 출력)
+
+분모에 $\hat{U}$ 자체가 포함되므로 range가 자연스럽게 [0, 1]로 bounded된다.
 
 **Source**: `mdp/rewards.py` (`tde_residual_penalty`)
 
 ```python
 def tde_residual_penalty(_robot, env, **_kwargs):
-    u_hat_norm = env._tdc.u_hat.norm(dim=-1)
-    pd_norm = env._tdc.pd_torque.norm(dim=-1) + 1e-6
-    return u_hat_norm / pd_norm
+    u_hat = env._tdc.u_hat
+    pd_torque = env._tdc.pd_torque
+    delta_T_b = env._tdc.delta_T_b
+    u_hat_norm = u_hat.norm(dim=-1)
+    tau_total_norm = (pd_torque + u_hat + delta_T_b).norm(dim=-1)
+    return torch.where(
+        tau_total_norm > 1e-6,
+        u_hat_norm / tau_total_norm,
+        torch.zeros_like(u_hat_norm),
+    )
 ```
 
 ### Behavior
 
-| $\|\hat{U}\| / \|M\hat{u}_{pd}\|$ | 의미 | 페널티 (w=-0.05, dt-scaled) |
+| $\|\hat{U}\| / \|\boldsymbol{\tau}_{total}\|$ | 의미 | 페널티 (w=-0.5, dt-scaled) |
 |:---|:---|:---|
-| 0.0 | 완벽한 M_hat (보상 불필요) | 0.0000 |
-| 0.3 | 양호 (작은 보상 필요) | -0.000075 |
-| 0.5 | 경계 (M_hat 약간 부정확) | -0.000125 |
-| 1.0 | 나쁨 (PD와 보상 토크 동등) | -0.000250 |
-| 3.0 | 매우 나쁨 (게인 부적절) | -0.000750 |
+| 0.0 | 완벽한 M_hat (TDE 불필요) | 0.0000 |
+| 0.2 | 양호 (작은 TDE 의존) | -0.0005 |
+| 0.5 | 중간 (PD와 TDE 균등) | -0.00125 |
+| 0.8 | 높음 (TDE 의존도 과다) | -0.0020 |
+| 1.0 | 최대 (PD + delta_T_b 소실) | -0.0025 |
+
+### Previous Formula (deprecated)
+
+기존: $\|\hat{U}\| / (\|M\hat{u}_{pd}\| + \epsilon)$. 수렴 시 PD 토크(분모)→0이 되어 ratio→∞ 발산하는 구조적 결함. Raw value ~10으로, weight=-0.05에서도 per-step ~0.0025 기여 (tracking과 유사한 크기 -- 의도하지 않은 과대 페널티).
 
 ### Design Rationale
 
-1. **M_hat 정확도 유도**: M_hat이 정확하면 TDE 보상 토크 $\hat{U}$가 작아짐. 이 비율을 최소화하면 간접적으로 정확한 관성 추정을 유도.
-2. **게인 적절성**: 과도한 게인은 큰 PD 토크를 만들어 비율을 낮추지만, action magnitude penalty가 이를 견제. 두 항의 균형으로 적절한 게인 탐색.
-3. **RL-TDC 논문의 안정성 조건의 soft proxy**: 논문의 binary 안정성 조건 $\|[I - M^{-1}\bar{M}] \cdot \hat{M}_t \cdot \hat{M}_{t-L}^{-1}\| < 1$을 직접 구현하지 않는 대신, TDE residual ratio가 같은 의도의 continuous 대리 지표 역할.
+1. **Well-conditioned**: 분모에 $\hat{U}$가 포함되어 singularity 없음. 수렴 시에도 ratio는 [0, 1] 범위 유지.
+2. **M_hat 정확도 유도**: M_hat이 정확하면 TDE 보상 토크 $\hat{U}$가 작아짐. 이 비율을 최소화하면 간접적으로 정확한 관성 추정을 유도.
+3. **게인 적절성**: 과도한 게인은 큰 PD 토크를 만들어 비율을 낮추지만, action magnitude penalty가 이를 견제. 두 항의 균형으로 적절한 게인 탐색.
+4. **RL-TDC 논문의 안정성 조건의 soft proxy**: 논문의 binary 안정성 조건 $\|[I - M^{-1}\bar{M}] \cdot \hat{M}_t \cdot \hat{M}_{t-L}^{-1}\| < 1$을 직접 구현하지 않는 대신, TDE residual ratio가 같은 의도의 continuous 대리 지표 역할.
 
 ### RL-TDC Stability Condition 미사용 근거
 
@@ -372,8 +404,8 @@ $$w(i) = w_{start} + (w_{full} - w_{start}) \cdot \min\!\big(1, \; i / i_{end}\b
 
 | Term | $w_{start}$ | $w_{full}$ | $i_{end}$ |
 |:---|:---|:---|:---|
-| angular_velocity (Base/Enc-TDC) | -0.05 | -0.5 | 200 |
-| action_rate (Base RL) | -0.0005 | -0.005 | 200 |
+| angular_velocity (Base/Enc-TDC) | -0.2 | -2.0 | 200 |
+| action_rate (Base RL) | -0.001 | -0.01 | 200 |
 | action_rate (Enc-TDC) | -0.001 | -0.01 | 200 |
 
 ### Implementation
@@ -409,50 +441,52 @@ raw_env._reward_manager.update_curriculum(iteration, raw_env.cfg.reward.curricul
 
 | Iteration | Progress | $w_3$ |
 |:---|:---|:---|
-| 0 | 0% | -0.050 |
-| 50 | 25% | -0.163 |
-| 100 | 50% | -0.275 |
-| 150 | 75% | -0.388 |
-| 200 | 100% | -0.500 |
-| 300+ | capped | -0.500 |
+| 0 | 0% | -0.200 |
+| 50 | 25% | -0.650 |
+| 100 | 50% | -1.100 |
+| 150 | 75% | -1.550 |
+| 200 | 100% | -2.000 |
+| 300+ | capped | -2.000 |
 
 ---
 
 ## Scale Balance Analysis
 
-### After Convergence (실측: fix1/fix3 iter 599 평균)
+### Expected Per-step Balance (수렴 시 추정)
 
-실험 데이터 기반 (raw magnitude는 weight=|1.0| 실험에서 측정):
+#### Base RL (error ~ 25 deg)
 
-| Term | Raw magnitude | Weight | dt-scaled | Per-step contribution | Ep Sum (3000 steps) |
+| Term | Raw | Weight | dt | Per-step | Share |
 |:---|:---|:---|:---|:---|:---|
-| tracking | 0.67 | 1.0 | x0.005 | +0.00335 | **~10.0** |
-| progress | ~0 (converged) | 5.0 | No | ~0 | **~2.5** (telescoping) |
-| angular_velocity | 0.13 | -0.5 | x0.005 | -0.000325 | -1.0 |
-| action_magnitude | 0.053 | -0.5 | x0.005 | -0.000133 | -0.40 |
-| action_rate | 0.0006 | -0.005 | No | -0.000003 | -0.009 |
+| tracking | 0.303 | 3.0 | 0.005 | **+0.00455** | **42%** |
+| linear_error | 0.44 | -1.0 | 0.005 | -0.00220 | 20% |
+| angular_velocity | 0.219 | -2.0 | 0.005 | -0.00219 | 20% |
+| action_magnitude | 0.043 | -1.0 | 0.005 | -0.00021 | 2% |
+| action_rate | 0.0003 | -0.01 | no | -0.00000 | 0% |
+| **Net** | | | | **-0.00005** | |
 
-**Total**: ~11.1 (tracking 지배적 -- 수렴 상태에서 정상)
+tracking이 최대 항 (42%) -> 올바른 우선순위.
 
-### Early Training (실측: fix1/fix3 iter 0 평균)
+#### Encoder-TDC (error ~ 3.5 deg)
 
-| Term | Raw magnitude | Weight (curriculum) | dt-scaled | Per-step contribution | Ep Sum |
+| Term | Raw(est) | Weight | dt | Per-step | Share |
 |:---|:---|:---|:---|:---|:---|
-| tracking | 0.094 | 1.0 | x0.005 | +0.00047 | 0.7 |
-| progress | 0.002 | 5.0 | No | +0.01 | **~2.5** |
-| angular_velocity | 1.42 | -0.05 (cur.) | x0.005 | -0.00036 | -0.5 |
-| action_magnitude | 1.07 | -0.5 | x0.005 | -0.00268 | -4.0 |
-| action_rate | 1.93 | -0.0005 (cur.) | No | -0.00097 | -1.5 |
+| tracking | 0.833 | 3.0 | 0.005 | **+0.01250** | **64%** |
+| linear_error | 0.061 | -1.0 | 0.005 | -0.00031 | 2% |
+| angular_velocity | 0.227 | -2.0 | 0.005 | -0.00227 | 12% |
+| action_magnitude | 0.117 | -0.5 | 0.005 | -0.00029 | 2% |
+| action_rate | 0.0024 | -0.01 | no | -0.00002 | 0% |
+| tde_residual | ~0.5 | -0.5 | 0.005 | -0.00125 | 6% |
+| **Net** | | | | **+0.00836** | |
 
-**Total**: ~-4.3 (음수 -> 에이전트가 action을 줄여야 양의 return 획득)
+tracking이 64%로 압도적 지배. 모든 페널티 합 < tracking. Net 양수.
 
 ### Key Observations
 
-1. **수렴 시**: tracking이 77% 지배, penalty 총합은 tracking의 ~30% (적절한 regularization)
-2. **학습 초기**: progress가 tracking의 21배 -> Gaussian이 flat한 45deg 영역에서 유일한 방향 신호
-3. **전환점**: ~iter 100에서 tracking이 progress를 추월 (에러 ~15deg, Gaussian gradient 활성화)
-4. **Action cost**: 전 과정에서 약한 regularization. Encoder-TDC에서는 더 약하게 설정 (sigmoid midpoint 허용)
-5. **action_rate**: NOT dt-scaled이므로 weight가 작지만 (0.005), 수렴 시 raw도 매우 작아 (0.0006) 실질 기여 미미
+1. **tracking_weight=3.0**: 이전(1.0) 대비 angular_velocity를 확실히 압도 -> 정책이 "추적"에 집중
+2. **linear_error**: 대오차(>14deg) 영역에서 Gaussian이 0에 수렴할 때 유일한 방향 gradient 제공
+3. **tde_residual [0,1]**: 이전 형태의 분모→0 발산 문제 해결. Well-conditioned ratio.
+4. **progress disabled**: weight=0.0으로 RewardManager가 자동 건너뜀. 함수/필드는 backward compatibility 위해 유지.
 
 ---
 
@@ -468,7 +502,8 @@ _get_rewards() [base_env.py]
     +-- RewardManager.compute()           # iterate active terms
             |
             +-- tracking_reward()            --> * active_weight * dt
-            +-- progress_reward()            --> * active_weight (no dt)
+            +-- [progress_reward()]          --> * active_weight (no dt)  [disabled, w=0]
+            +-- linear_error_penalty()       --> * active_weight * dt
             +-- angular_velocity_penalty()   --> * active_weight * dt  [curriculum]
             +-- action_magnitude_penalty()   --> * active_weight * dt
             +-- action_rate_penalty()        --> * active_weight (no dt)  [curriculum]
@@ -487,16 +522,16 @@ _get_rewards() [base_env.py]
 
 | Environment | Registration | Terms |
 |:---|:---|:---|
-| Base RL (Base-v0 등) | `base_env._init_task_and_rewards()` | 5개 (tracking, progress, ang_vel, action_mag, action_rate) |
-| Encoder-TDC (Encoder-TDC-v0) | `encoder_tdc_env._init_task_and_rewards()` | 6개 (+ tde_residual) |
-| Pure TDC (TDC-v0) | `base_env._init_task_and_rewards()` (상속) | 5개 (action은 dummy) |
+| Base RL (Base-v0 등) | `base_env._init_task_and_rewards()` | 5개 active (tracking, linear_error, ang_vel, action_mag, action_rate; progress disabled) |
+| Encoder-TDC (Encoder-TDC-v0) | `encoder_tdc_env._init_task_and_rewards()` | 6개 active (+ tde_residual) |
+| Pure TDC (TDC-v0) | `base_env._init_task_and_rewards()` (상속) | 5개 active (action은 dummy) |
 
 ### Logging Integration
 
 `RewardManager.reset(env_ids)` 호출 시 리셋되는 환경들의 에피소드 합 평균을 반환한다. 이 값은 `base_env._collect_episode_metrics()`를 통해 WandB/TensorBoard에 기록된다:
 
 - `Episode_Reward/tracking`
-- `Episode_Reward/progress`
+- `Episode_Reward/linear_error`
 - `Episode_Reward/angular_velocity`
 - `Episode_Reward/action_magnitude`
 - `Episode_Reward/action_rate`
@@ -573,4 +608,4 @@ Isaac Gym에서 progress 부호가 반대인 이유: potential 정의 자체가 
 
 ---
 **Created**: 2026-02-11
-**Updated**: 2026-02-11 (Weight tuning: action_rate NOT dt-scaled, scale balance from fix1/fix3 experiments)
+**Updated**: 2026-02-14 (Reward rebalancing: tracking_weight 1->3, progress disabled -> linear_error, tde_residual -> total torque normalization [0,1])

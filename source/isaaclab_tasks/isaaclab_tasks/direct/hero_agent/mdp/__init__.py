@@ -36,6 +36,7 @@ from .rewards import (
     action_magnitude_penalty,
     action_rate_penalty,
     angular_velocity_penalty,
+    linear_error_penalty,
     progress_reward,
     tde_residual_penalty,
     tracking_reward,
@@ -64,6 +65,7 @@ __all__ = [
     # Rewards (functions)
     "tracking_reward",
     "progress_reward",
+    "linear_error_penalty",
     "angular_velocity_penalty",
     "action_rate_penalty",
     "action_magnitude_penalty",

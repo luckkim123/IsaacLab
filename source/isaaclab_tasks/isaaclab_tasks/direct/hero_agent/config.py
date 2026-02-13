@@ -166,8 +166,8 @@ class DomainRandomizationCfg:
     # Models: tether tension variation, sudden current changes, contact forces.
     # ==========================================================================
     enable_perturbation: bool = True
-    perturbation_force_range: tuple[float, float] = (0.0, 15.0)  # N (Hero Agent ~10kg -> 1.5 m/s^2 max)
-    perturbation_torque_range: tuple[float, float] = (0.0, 2.0)  # Nm (15N x 0.15m half-body)
+    perturbation_force_range: tuple[float, float] = (0.0, 20.0)  # N (Hero Agent ~10kg -> 2.0 m/s^2 max)
+    perturbation_torque_range: tuple[float, float] = (0.0, 3.0)  # Nm (20N x 0.15m half-body)
     perturbation_interval: int = 100  # physics steps between events (~0.5s at 200Hz)
     perturbation_duration: int = 20  # physics steps active (~0.1s)
 
@@ -183,7 +183,7 @@ class DomainRandomizationCfg:
     # Payload is attached to the gripper body (fixed to base via base_to_gripper joint).
     # Offsets are in gripper body frame.
     # ==========================================================================
-    payload_mass_range: tuple[float, float] = (0.0, 2.0)  # kg (up to 20% body weight)
+    payload_mass_range: tuple[float, float] = (0.0, 3.0)  # kg (up to 30% body weight)
 
     # -- Payload CoG Offset (meters, relative to attachment point) --
     payload_cog_offset_x: tuple[float, float] = (-0.30, 0.30)
@@ -258,7 +258,7 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # ALBC Joint Control
     # ==========================================================================
     albc_joint_names: list[str] = HERO_AGENT_ALBC_JOINT_NAMES
-    max_joint_velocity: float = 2 * math.pi
+    max_joint_velocity: float = math.pi
     control_decimation: int = 4  # target updates every 4th step = 0.02s (50Hz control)
     initial_joint_pos_range: tuple[float, float] = (-math.pi, math.pi)
 
