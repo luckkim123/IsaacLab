@@ -9,14 +9,13 @@ Provides reward configuration, a lightweight reward manager with curriculum
 support, and reward functions for ALBC (joint-based attitude control) training.
 
 Reward design principles:
-    - Gaussian kernel normalization: positive rewards use exp(-err^2/sigma^2)
-      for natural [0,1] bounding and intuitive weight interpretation.
-    - dt-scaling: "instantaneous state quality" terms are dt-scaled;
-      "telescoping difference" terms are NOT dt-scaled.
+    - Gaussian kernel tracking dominates: positive reward exp(-err^2/sigma^2)
+      provides dense gradient in [0,1]. Penalties are small regularizers
+      (~1/15 of tracking) following the AnymalC penalty-ratio pattern.
+    - dt-scaling: state-quality terms (tracking, action_magnitude) are dt-scaled;
+      action rate is NOT dt-scaled (per-step delta scales with frequency).
     - Environment-specific configs: Base RL and Encoder-TDC have different
       action semantics, so reward weights are separated.
-    - Curriculum: penalty terms start small and increase over training to
-      preserve early exploration.
 """
 
 from __future__ import annotations
@@ -28,6 +27,8 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from isaaclab.utils import configclass
+
+from ..controllers.tdc import compute_M_bb
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
@@ -42,33 +43,37 @@ if TYPE_CHECKING:
 
 @configclass
 class ALBCRewardCfg:
-    """ALBC reward configuration with Gaussian tracking + multi-term penalties.
+    """ALBC reward configuration with Gaussian tracking + regularization penalties.
 
     Reward = tracking * w_t * dt
-           + linear_error * w_le * dt
-           + angular_velocity * w_av * dt
            + action_magnitude * w_am * dt
            + action_rate * w_ar
+
+    Design: tracking dominates (positive, [0,1] Gaussian). Penalties are small
+    regularizers (~1/15 of tracking at max actions) to encourage efficiency,
+    following the AnymalC pattern where penalties << tracking.
     """
 
     # Tracking (Gaussian kernel)
-    tracking_weight: float = 3.0
+    tracking_weight: float = 1.5
     tracking_sigma: float = 0.25
+    tracking_sigma_start: float | None = None  # None = no sigma curriculum
 
-    # Progress (telescoping, NOT dt-scaled) -- disabled, replaced by linear_error
-    progress_weight: float = 0.0
-
-    # Linear error penalty (complements Gaussian tracking at large errors)
-    linear_error_weight: float = -1.0
-
-    # Angular velocity penalty (curriculum: starts at 1/10)
-    angular_velocity_weight: float = -2.0
-
-    # Action magnitude penalty
-    action_magnitude_weight: float = -1.0
+    # Action magnitude penalty (dt-scaled)
+    action_magnitude_weight: float = -0.5
 
     # Action rate penalty (NOT dt-scaled, curriculum: starts at 1/10)
-    action_rate_weight: float = -0.01
+    action_rate_weight: float = -0.03
+
+    # Progress (potential-based shaping): tanh(delta / scale)
+    # tanh prevents telescoping (raw delta cancels to ~0 over episode).
+    # NOT dt-scaled. At weight=0.2, episode sum ≈ tracking level.
+    progress_weight: float = 0.2
+    progress_scale: float = 0.01
+
+    # Angular velocity penalty (dt-scaled, discourages oscillation under DR)
+    # Keep at 0.0 for attitude control: robot needs angular velocity to correct errors.
+    angular_velocity_weight: float = 0.0
 
     # Curriculum
     curriculum_end_iter: int = 200
@@ -76,20 +81,35 @@ class ALBCRewardCfg:
 
 @configclass
 class EncoderTDCRewardCfg(ALBCRewardCfg):
-    """Encoder-TDC reward config with adjusted weights and TDE residual penalty.
+    """Encoder-TDC reward config with M_hat accuracy bonus.
 
-    Inherits tracking/linear_error/angular_velocity from ALBCRewardCfg.
-    Overrides action weights for gain-tuning semantics.
-    Adds TDE residual penalty (||U_hat||/||tau_total||) to encourage accurate M_hat.
+    Inherits tracking + action penalties from ALBCRewardCfg.
+
+    Active terms:
+        - tracking (Gaussian): main performance signal
+        - mhat_accuracy (Cauchy): M_hat accuracy pressure
+        - action_magnitude: prevents gain saturation at sigmoid extremes
+        - action_rate: gain smoothness
     """
 
-    # Lighter action_magnitude: sigmoid midpoint is a reasonable default
-    action_magnitude_weight: float = -0.5
+    # Fixed sigma (no sigma curriculum -- sigma annealing destroys reward signal)
+    tracking_sigma: float = 0.25
+    tracking_sigma_start: float | None = None
+    curriculum_end_iter: int = 300  # Match DRCurriculumCfg.end_iter
 
-    # Same as base: angular_velocity penalty indirectly enforces gain smoothness
-    action_rate_weight: float = -0.01
+    # Penalize extreme raw actions to discourage gain saturation at max.
+    # Softplus: raw~1.2 -> Kp~80. Penalizing raw magnitude limits gain extremes.
+    action_magnitude_weight: float = -0.3
 
-    tde_residual_weight: float = -0.5
+    # Half of base RL value (-0.01) because gains need dynamic adaptation.
+    action_rate_weight: float = -0.005
+
+    # M_hat accuracy bonus (Cauchy kernel on relative error)
+    # Cauchy: 1/(1 + rel_err_sq / sigma^2) -- heavy tail, never saturates
+    # sigma=0.5: reward=0.5 at ~35% per-axis relative error.
+    mhat_accuracy_weight: float = 0.5
+    mhat_accuracy_sigma: float = 0.5
+    mhat_accuracy_kernel: str = "cauchy"  # "cauchy" or "gaussian"
 
 
 # =============================================================================
@@ -157,6 +177,17 @@ class RewardManager:
             for cfg in self._term_cfgs
         ]
 
+        # Sigma curriculum: linearly ramp sigma from start to end value.
+        self._sigma_curriculum: tuple[float, float] | None = None
+        for name, term_cfg in zip(self._term_names, self._term_cfgs):
+            if name == "tracking" and "sigma" in term_cfg.params:
+                start_sigma = term_cfg.params.pop("_sigma_start", None)
+                if start_sigma is not None:
+                    end_sigma = term_cfg.params["sigma"]
+                    self._sigma_curriculum = (start_sigma, end_sigma)
+                    term_cfg.params["sigma"] = start_sigma
+                break
+
         # Per-step raw (unweighted, un-dt-scaled) mean values for diagnostics.
         # Updated each compute() call; read by _collect_episode_metrics().
         self._step_raw_means: dict[str, float] = {name: 0.0 for name in self._term_names}
@@ -187,6 +218,14 @@ class RewardManager:
         """Current active weight per term (curriculum-adjusted)."""
         return {name: self._active_weights[i] for i, name in enumerate(self._term_names)}
 
+    @property
+    def current_sigma(self) -> float | None:
+        """Current tracking sigma value (None if no sigma curriculum)."""
+        for name, cfg in zip(self._term_names, self._term_cfgs):
+            if name == "tracking" and "sigma" in cfg.params:
+                return cfg.params["sigma"]
+        return None
+
     def update_curriculum(self, iteration: int, end_iter: int) -> None:
         """Update penalty weights based on training progress.
 
@@ -205,6 +244,15 @@ class RewardManager:
                 start = term_cfg.curriculum_start_weight
                 full = term_cfg.weight
                 self._active_weights[i] = start + (full - start) * progress
+
+        # Sigma curriculum: anneal tracking kernel width
+        if self._sigma_curriculum is not None:
+            sigma_start, sigma_end = self._sigma_curriculum
+            sigma = sigma_start + (sigma_end - sigma_start) * progress
+            for name, term_cfg in zip(self._term_names, self._term_cfgs):
+                if name == "tracking" and "sigma" in term_cfg.params:
+                    term_cfg.params["sigma"] = sigma
+                    break
 
     def compute(
         self,
@@ -267,47 +315,6 @@ def tracking_reward(
     return torch.exp(-err_sq / (sigma**2))
 
 
-def progress_reward(
-    _robot: Articulation,
-    env: HeroAgentEnv,
-    **_kwargs,
-) -> torch.Tensor:
-    """Telescoping progress reward: prev_potential - current_potential.
-
-    Positive when error decreases. Episode sum = phi_0 - phi_T (initial - final error).
-    NOT dt-scaled because the telescoping sum is naturally frequency-invariant.
-    """
-    return env._prev_potentials - env._potentials
-
-
-def linear_error_penalty(
-    _robot: Articulation,
-    env: HeroAgentEnv,
-    **_kwargs,
-) -> torch.Tensor:
-    """Linear error magnitude: ||[roll_err, pitch_err]||.
-
-    Provides gradient proportional to error distance. Complements Gaussian
-    tracking which saturates at large errors (>sigma).
-    dt-scaled (instantaneous quality measure). Use with negative weight.
-    """
-    return env._potentials
-
-
-def angular_velocity_penalty(
-    _robot: Articulation,
-    env: HeroAgentEnv,
-    **_kwargs,
-) -> torch.Tensor:
-    """Sum of squared body angular velocities (roll rate, pitch rate).
-
-    Penalizes fast rotations to suppress oscillation after reaching the target.
-    Use with negative weight. dt-scaled (instantaneous quality measure).
-    """
-    ang_vel = env._robot.data.root_ang_vel_b[:, :2]  # [p, q]
-    return torch.sum(ang_vel**2, dim=-1)
-
-
 def action_rate_penalty(
     _robot: Articulation,
     actions: torch.Tensor,
@@ -336,35 +343,94 @@ def action_magnitude_penalty(
     return torch.sum(actions**2, dim=-1)
 
 
+def progress_reward(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+    scale: float = 0.01,
+    **_kwargs,
+) -> torch.Tensor:
+    """Potential-based progress reward: tanh((prev - curr) / scale).
+
+    tanh breaks the telescoping property of raw delta (which sums to ~0 over
+    an episode as positive/negative steps cancel). With tanh, each convergence
+    step contributes ~0.3-0.5 regardless of cancellation.
+
+    NOT dt-scaled. Use weight to control relative importance vs tracking.
+
+    Args:
+        env: Environment instance (provides _prev_potentials, _potentials).
+        scale: Normalization scale for tanh input.
+    """
+    delta = env._prev_potentials - env._potentials
+    return torch.tanh(delta / scale)
+
+
+def angular_velocity_penalty(
+    robot: Articulation,
+    **_kwargs,
+) -> torch.Tensor:
+    """Sum of squared body-frame angular velocities.
+
+    Penalizes oscillatory motion to encourage smooth settling.
+    dt-scaled (instantaneous quality measure). Use with negative weight.
+
+    Returns:
+        (num_envs,) penalty value (positive; apply negative weight).
+    """
+    return torch.sum(robot.data.root_ang_vel_b**2, dim=-1)
+
+
 # =============================================================================
 # Encoder-TDC Exclusive Reward Functions
 # =============================================================================
 
 
-def tde_residual_penalty(
+def mhat_accuracy_reward(
     _robot: Articulation,
     env: HeroAgentEnv,
+    sigma: float = 10.0,
+    kernel: str = "cauchy",
     **_kwargs,
 ) -> torch.Tensor:
-    """TDE fraction of total control torque.
+    """Reward for M_hat accuracy relative to true M_bb(gamma).
 
-    Measures controller's reliance on Time Delay Estimation:
-        ratio = ||U_hat|| / ||tau_total||
-    where tau_total = M_hat*u_pd + U_hat + delta_T_b.
+    Computes configuration-dependent true inertia M_bb(gamma) using the
+    parallel axis theorem, then rewards M_hat closeness via configurable kernel
+    on relative error.
 
-    Range [0, 1]: high values indicate heavy TDE dependence (stability risk).
-    Well-conditioned: no singularity near target (denominator includes U_hat).
+    Kernels:
+        cauchy:   1 / (1 + sum(rel_err^2) / sigma^2)  -- heavy tail, never saturates
+        gaussian: exp(-sum(rel_err^2) / sigma^2)       -- fast decay at large errors
 
-    dt-scaled (instantaneous quality measure). Use with negative weight.
-    Requires env._tdc to be available (TDC environments only).
+    M_true formula (DYNAMICS_ANALYSIS.md Section 3.7):
+        I_p = I_ROV_roll + m_A * (y_bu^2 + h^2)
+        I_q = I_ROV_pitch + m_A * (x_bu^2 + h^2)
+    where (x_bu, y_bu) = FK(gamma_1, gamma_2).
+
+    Output [0, 1]. Use with positive weight. dt-scaled.
+    Requires: env._tdc, env._kinematics, env._hydro, env._buoy_hydro.
+
+    Args:
+        env: Encoder-TDC environment instance.
+        sigma: Kernel width for relative error.
+        kernel: "cauchy" (default) or "gaussian".
     """
-    u_hat = env._tdc.u_hat
-    pd_torque = env._tdc.pd_torque
-    delta_T_b = env._tdc.delta_T_b
-    u_hat_norm = u_hat.norm(dim=-1)
-    tau_total_norm = (pd_torque + u_hat + delta_T_b).norm(dim=-1)
-    return torch.where(
-        tau_total_norm > 1e-6,
-        u_hat_norm / tau_total_norm,
-        torch.zeros_like(u_hat_norm),
+    joint_pos = env._robot.data.joint_pos[:, env._albc_joint_ids]
+    p_EE = env._kinematics.forward(joint_pos)
+
+    M_true = compute_M_bb(
+        I_ROV=env._hydro.rigid_body_inertia[:, :2],
+        m_A=env._buoy_hydro.added_mass_matrix[:, 0, 0],
+        x_bu=p_EE[:, 0],
+        y_bu=p_EE[:, 1],
+        h=env.cfg.tdc.h,
     )
+
+    M_hat = env._tdc._m_hat
+    rel_error_sq = ((M_hat - M_true) / M_true.clamp(min=1e-4)) ** 2
+    score = rel_error_sq.sum(dim=-1) / (sigma**2)
+
+    if kernel == "cauchy":
+        return 1.0 / (1.0 + score)
+    else:
+        return torch.exp(-score)

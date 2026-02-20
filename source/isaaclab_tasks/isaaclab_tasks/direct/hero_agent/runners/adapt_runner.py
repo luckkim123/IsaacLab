@@ -31,9 +31,7 @@ import torch
 logger = logging.getLogger(__name__)
 
 from ..encoder.normalization import RunningMeanStd
-from ..utils.env_utils import connect_encoder_to_env, unwrap_env
-from ..utils.logging import flush_metrics, pearson_r
-from ..utils.logging_encoder import log_encoder_tdc_metrics
+from ..utils.logging import connect_encoder_to_env, flush_metrics, log_encoder_tdc_metrics, pearson_r, unwrap_env
 
 
 class _WandbTBWriter:
@@ -318,18 +316,19 @@ class AdaptRunner:
             for i in range(per_dim_loss.shape[0]):
                 metrics[f"Adapt/l2_loss_dim{i}"] = per_dim_loss[i].item()
 
-        # M_hat from z_hat[3:5] and estimation error %
-        if z_hat is not None and z_hat.shape[-1] > 4:
-            metrics["Adapt/m_hat_roll_mean"] = z_hat[:, 3].mean().item()
-            metrics["Adapt/m_hat_pitch_mean"] = z_hat[:, 4].mean().item()
+        # Decomposed z[3:6] = [m_A_hat, I_roll_hat, I_pitch_hat] stats and error %
+        if z_hat is not None and z_hat.shape[-1] >= 6:
+            metrics["Adapt/z_mA_hat_mean"] = z_hat[:, 3].mean().item()
+            metrics["Adapt/z_I_roll_hat_mean"] = z_hat[:, 4].mean().item()
+            metrics["Adapt/z_I_pitch_hat_mean"] = z_hat[:, 5].mean().item()
 
-            if z_gt is not None and z_gt.shape[-1] > 4:
-                for i, axis in enumerate(("roll", "pitch")):
+            if z_gt is not None and z_gt.shape[-1] >= 6:
+                for i, name in enumerate(("mA", "I_roll", "I_pitch")):
                     idx = 3 + i
                     gt_val = z_gt[:, idx].mean().item()
                     hat_val = z_hat[:, idx].mean().item()
                     pct_err = abs(hat_val - gt_val) / max(abs(gt_val), 1e-8) * 100
-                    metrics[f"Adapt/m_hat_{axis}_error_pct"] = pct_err
+                    metrics[f"Adapt/z_{name}_error_pct"] = pct_err
 
         # TDC integration metrics (accumulates into same dict)
         log_encoder_tdc_metrics(

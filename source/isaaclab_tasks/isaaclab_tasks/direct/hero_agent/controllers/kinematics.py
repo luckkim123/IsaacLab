@@ -166,17 +166,26 @@ class ALBCKinematics:
         target_position: torch.Tensor,
         current_joint_angles: torch.Tensor,
         lambda_dls: float = 0.15,
+        num_iterations: int = 1,
+        learning_rate: float = 1.0,
     ) -> torch.Tensor:
-        """Compute joint angle update from desired EE position using DLS IK.
+        """Compute joint angle update from desired EE position using iterative DLS IK.
 
         Uses Jacobian DLS (Damped Least Squares) pseudo-inverse with
         Yoshikawa-style adaptive damping. The DLS solver is dimension-independent
         via torch.linalg.solve, so this method works for any arm geometry
         without modification.
 
-        DLS formula:
-            delta_q = J^T (J J^T + lambda^2 I)^{-1} (p_target - p_current)
-            q_new = q_current + delta_q
+        Iterative mode (num_iterations > 1, learning_rate < 1.0):
+            Recomputes FK, Jacobian, and adaptive lambda each iteration,
+            matching the C++ reference (learning_rate=0.02, 500-3000 iters).
+            Converges accurately even for large displacements where the single-step
+            linear Jacobian approximation would overshoot.
+
+        DLS formula (per iteration):
+            dp = p_target - FK(q)
+            delta_q = J^T (J J^T + lambda^2 I)^{-1} dp
+            q = q + learning_rate * delta_q
 
         Adaptive lambda (Yoshikawa):
             w = det(JJ^T)^(1/(2m))  (dimension-normalized manipulability)
@@ -191,21 +200,29 @@ class ALBCKinematics:
                 Shape: (num_envs, num_joints).
             lambda_dls: Base DLS damping factor. Larger = more damping near
                 singularity. Default 0.15 (from C++ reference).
+            num_iterations: Number of IK iterations. 1 = single-step (original
+                behavior). Higher values improve accuracy for large displacements.
+            learning_rate: Step size per iteration. 1.0 = full step (original
+                behavior). Smaller values (e.g. 0.02) with more iterations give
+                smoother convergence matching the C++ reference.
 
         Returns:
             New joint angles in radians. Shape: (num_envs, num_joints).
         """
-        p_current = self.forward(current_joint_angles)
-        dp = target_position - p_current
+        q = current_joint_angles.clone()
+        for _ in range(num_iterations):
+            p_current = self.forward(q)
+            dp = target_position - p_current
 
-        J = self.jacobian(current_joint_angles)
+            J = self.jacobian(q)
 
-        # Yoshikawa-style adaptive lambda
-        w = self.manipulability(J)
-        lam2 = (lambda_dls * torch.clamp(1.0 - w / self._w_max, min=0.0)) ** 2
+            # Yoshikawa-style adaptive lambda (recomputed each iteration)
+            w = self.manipulability(J)
+            lam2 = (lambda_dls * torch.clamp(1.0 - w / self._w_max, min=0.0)) ** 2
 
-        dq = self._dls_solve(J, dp, lam2)
-        return current_joint_angles + dq
+            dq = self._dls_solve(J, dp, lam2)
+            q = q + learning_rate * dq
+        return q
 
     def _dls_solve(
         self,

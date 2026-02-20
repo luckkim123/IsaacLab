@@ -1,11 +1,11 @@
 # Domain Randomization
 
-> **Status**: 2026-02-14 (aggressive strengthening + rotation suppression) | **Source**: `config.py`, `base_env.py`, `mdp/events.py`
+> **Status**: 2026-02-14 (4차 극단 강화: TDE stability boundary 초과) | **Source**: `config.py`, `base_env.py`, `mdp/events.py`
 >
 > Hero Agent ALBC 환경의 Domain Randomization(DR) 구현 전체 검토.
 > 12개 카테고리, 35+ 파라미터, Fossen 모델 기반 물리적 랜덤화.
 > BIR Survey (Zhu et al. 2023) 및 Sim-to-Real Locomotion (Tan et al. 2018) 분석 반영.
-> **2026-02-14 2차 강화**: payload 3kg (30%), perturbation 20N/3Nm, max_joint_velocity pi.
+> **2026-02-14 4차 극단 강화**: inertia [0.4,2.5], added_mass [0.3,2.0], volume/body_mass +-30%, payload 5kg. TDE stability boundary M_true/M_hat > 2를 의도적으로 초과하여 adaptive M_hat 학습 유도.
 
 ---
 
@@ -39,13 +39,13 @@ Quaternion 기반 회전 (gimbal lock 방지). Position은 기본값에 대한 a
 
 | Item | Range | Method | DOF | Physical Meaning |
 |:---|:---|:---|:---|:---|
-| added_mass_scale | **[0.5, 1.5]** | Multiplicative | 6 (independent) | Added mass 불확실성 (+-50%) |
+| added_mass_scale | **[0.3, 2.0]** | Multiplicative | 6 (independent) | Added mass 불확실성 (+-70/+100%) |
 | linear_damping_scale | [0.7, 1.3] | Multiplicative | 6 (independent) | 마찰 감쇠 불확실성 (+-30%) |
 | quadratic_damping_scale | [0.6, 1.4] | Multiplicative | 6 (independent) | 형상 항력 불확실성 (+-40%) |
-| volume_scale | **[0.85, 1.15]** | Multiplicative | scalar | 부력 불확실성 (+-15%) |
+| volume_scale | **[0.7, 1.3]** | Multiplicative | scalar | 부력 불확실성 (+-30%) |
 | cob_offset | +-1cm (xy), +-4cm (z) | Additive | 3 | 부력 중심 오차 |
 | cog_offset | +-1cm (xy), **+-6cm (z)** | Additive | 3 | 질량 중심 오차 |
-| inertia_scale | **[0.6, 1.4]** | Multiplicative | 3 (independent) | 관성 모멘트 불확실성 (+-40%) |
+| inertia_scale | **[0.4, 2.5]** | Multiplicative | 3 (independent) | 관성 모멘트 불확실성 (-60/+150%, TDE stability boundary 초과 의도) |
 
 **Inertia 범위 근거**: Tan et al. (2018)은 관성을 "균일 밀도 가정으로 추정"하여 [50%, 150%]의 넓은 범위를 사용. Hero Agent도 URDF 기반 균일밀도 추정이므로 +-40%로 확대. TDE가 관성 변화를 보상하므로 넓은 범위에서도 안정적.
 
@@ -61,11 +61,11 @@ Implementation: `_randomize_hydro_model()` in `mdp/events.py`. Base tensor는 `_
 
 | Item | Range | Distribution |
 |:---|:---|:---|
-| linear_x/y | **[-0.5, 0.5] m/s** + N(0, 0.1) | Uniform + Gaussian |
-| linear_z | **[-0.25, 0.25] m/s** + N(0, 0.05) | Uniform + Gaussian |
+| linear_x/y | **[-0.75, 0.75] m/s** + N(0, 0.15) | Uniform + Gaussian |
+| linear_z | **[-0.375, 0.375] m/s** + N(0, 0.075) | Uniform + Gaussian |
 | angular_x/y/z | 0 (disabled) | - |
 
-Main body와 buoy에 동일한 해류 적용 (동일 수역). 에피소드 중 일정 (reset-time only). 에피소드 길이 (~15s)가 해류 변동 시간 스케일보다 짧으므로 시변 모델링은 불필요. **0.5 m/s는 약 1 knot으로, 연안/항만 운용 환경의 표준 해류 속도.**
+Main body와 buoy에 동일한 해류 적용 (동일 수역). 에피소드 중 일정 (reset-time only). 에피소드 길이 (~15s)가 해류 변동 시간 스케일보다 짧으므로 시변 모델링은 불필요. **0.75 m/s는 약 1.5 knots로, 연안/항만 운용 환경의 중-강 해류 속도.**
 
 ### D. Joint Initial State (2 parameters)
 
@@ -80,7 +80,7 @@ Payload는 **gripper body**에 적용된다 (base에 고정 조인트로 연결,
 
 | Item | Range | Note |
 |:---|:---|:---|
-| mass | **[0.0, 3.0] kg** | Weight 모델만 (drag 없음), 0=페이로드 없음 (체중 30%) |
+| mass | **[0.0, 5.0] kg** | Weight 모델만 (drag 없음), 0=페이로드 없음 (체중 50%) |
 | cog_offset_x | **[-0.30, 0.30] m** | 부착점 기준 CoG 오프셋 |
 | cog_offset_y | **[-0.30, 0.30] m** | 부착점 기준 CoG 오프셋 |
 | cog_offset_z | [-0.20, 0.0] m | 부착점 아래 방향 오프셋 |
@@ -105,7 +105,7 @@ Implementation: `randomize_payload()` in `mdp/events.py`.
 
 | Item | Range | Note |
 |:---|:---|:---|
-| body_mass_scale | **[0.85, 1.15]** | 모든 rigid body에 동일 스케일 (+-15%) |
+| body_mass_scale | **[0.7, 1.3]** | 모든 rigid body에 동일 스케일 (+-30%) |
 
 PhysX `set_masses()` API 사용. 제조 공차 모델링. 관성은 hydro DR의 `inertia_scale`로 별도 랜덤화.
 
@@ -147,8 +147,8 @@ Per-env tensor. 부력 ($F_b = \rho V g$)과 항력 ($F_d = 0.5 \rho C_d A v^2$)
 | Item | Value | Note |
 |:---|:---|:---|
 | enable_perturbation | True | DR 활성화 시 자동 적용 |
-| force_range | **[0.0, 20.0] N** | ~10kg 차체에 최대 2.0 m/s^2 가속 |
-| torque_range | **[0.0, 3.0] Nm** | 20N x 0.15m (half-body moment arm) |
+| force_range | **[0.0, 30.0] N** | ~10kg 차체에 최대 3.0 m/s^2 가속 |
+| torque_range | **[0.0, 4.5] Nm** | 30N x 0.15m (half-body moment arm) |
 | interval | **100 physics steps (~0.5s)** | 이벤트 간 쿨다운 (난류 환경) |
 | duration | **20 physics steps (~0.1s)** | 충격 지속 시간 |
 
@@ -284,16 +284,16 @@ Payload    (4D): [mass(1), cog_offset(3)]
 
 | Parameter | Hero Agent | Tan et al. | Rationale |
 |:---|:---|:---|:---|
-| Body mass | **+-15%** | +-20% | 수분 흡수, fouling, 케이블 변동 |
-| Added mass | **+-50%** | N/A | 가장 불확실한 파라미터, ground effect |
-| Volume | **+-15%** | N/A | 하우징 공기, 수압 변형 |
-| Inertia | **+-40%** | +-50% | URDF 균일밀도 추정 불확실성 반영 |
+| Body mass | **+-30%** | +-20% | 수분 흡수, fouling, 케이블 변동 |
+| Added mass | **-70/+100%** | N/A | 가장 불확실한 파라미터, ground effect, TDE 경계 초과 의도 |
+| Volume | **+-30%** | N/A | 하우징 공기, 수압 변형, 부력 불확실성 강화 |
+| Inertia | **-60/+150%** | +-50% | TDE stability boundary 초과 의도 (M_true/M_hat > 2) |
 | IMU noise std | **0.02 rad** | 0.05 rad | 일반 MEMS (소비자급보다 양호) |
 | IMU bias | **+-0.02 rad** | +-0.05 rad | 일반 MEMS gyro drift |
 | Control latency | **0-20ms** | 0-40ms | 임베디드 시스템 Ethernet/serial |
-| Perturbation force | **0-20N** | 130-220N | 체중 비례 (10kg: 2.0 m/s^2 vs 25kg: 5.2-8.8 m/s^2) |
-| Ocean current | **0.5 m/s (~1kt)** | N/A | 연안/항만 표준 해류 |
-| Payload mass | **0-3.0 kg (30%)** | N/A | 수중 샘플, 센서 장비, 소형 도구 |
+| Perturbation force | **0-30N** | 130-220N | 체중 비례 (10kg: 3.0 m/s^2 vs 25kg: 5.2-8.8 m/s^2) |
+| Ocean current | **0.75 m/s (~1.5kt)** | N/A | 연안/항만 중-강 해류 |
+| Payload mass | **0-5.0 kg (50%)** | N/A | 수중 샘플, 센서 장비, 중형 도구 |
 | Payload CoG | **+-0.3m** | N/A | 33cm 차체 대비 현실적 범위 |
 
 ### Resolved Issues
@@ -377,4 +377,4 @@ Payload    (4D): [mass(1), cog_offset(3)]
 ---
 
 **Created**: 2026-02-11
-**Updated**: 2026-02-14 (2차 강화: perturbation 20N/3Nm, payload 3kg (30%), max_joint_velocity pi (3.14 rad/s). 1차 강화: perturbation 15N/2Nm, ocean current 0.5m/s, latency 0-4steps, added_mass +-50%, body_mass +-15%, volume +-15%, CoG_z +-6cm)
+**Updated**: 2026-02-14 (4차 극단 강화: inertia [0.4,2.5], added_mass [0.3,2.0], volume/body_mass +-30%, payload 5kg -- TDE stability boundary 초과 의도. 3차: perturbation 30N/4.5Nm, ocean current 0.75m/s, target +-0.5rad. 2차: perturbation 20N/3Nm, payload 3kg. 1차: perturbation 15N/2Nm, ocean current 0.5m/s)

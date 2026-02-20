@@ -10,20 +10,17 @@ This module provides the encoder-based actor-critic networks:
     - ActorCriticEncoderTDC: Encoder with z exposure for TDC M_hat extraction
 
 Architecture:
-    Encoder: privileged (24D) -> MLP -> softplus + z_min -> z (6D)
-    Actor:   cat([policy_obs, z]) = 19D -> MLP -> actions
-    Critic:  cat([policy_obs, z]) = 19D -> MLP -> value (1D)
+    Encoder: privileged (18D) -> MLP [256, 128, 64] -> z (6D)
+    Actor:   cat([policy_obs, z]) = 19D -> MLP [256, 128, 64] -> actions
+    Critic:  cat([policy_obs, z]) = 19D -> MLP [256, 128, 64] -> value (1D)
 
 Note: Critic does NOT receive privileged info directly (symmetric with actor).
 This forces the encoder to compress useful information into z.
 
 Design choices:
-    - Softplus instead of scaled sigmoid: Avoids gradient saturation at bounds.
-      z = softplus(raw) + z_min guarantees z > z_min with no upper bound.
-    - 6D latent: Matches 6-DOF convention [surge,sway,heave,roll,pitch,yaw].
-    - 24D privileged (not 64D): Core hydrostatic parameters only (volume, CoG,
-      CoB, inertia) + payload (mass, cog_offset). Damping/added_mass excluded
-      as they don't affect attitude dynamics in the ALBC task.
+    - 6D latent: general compressed representation of extrinsic parameters.
+    - 18D privileged: Buoyancy/geometry parameters (volume, CoG, CoB) per body
+      + payload (mass, cog_offset). Inertia and added mass excluded.
 
 Reference:
     - HORA: Heuristic-Free Online Robust Adaptation (Qi et al., 2023)
@@ -69,16 +66,17 @@ class ActorCriticEncoder(nn.Module):
         num_actions: int,
         # Encoder parameters
         policy_obs_dim: int = 13,
-        privileged_dim: int = 24,
-        encoder_hidden_dims: list[int] | tuple[int, ...] = (64, 32),
+        privileged_dim: int = 18,
+        encoder_hidden_dims: list[int] | tuple[int, ...] = (256, 128, 64),
         encoder_latent_dim: int = 6,
-        encoder_activation: str = "elu",
-        z_min: float = 0.1,
+        encoder_activation: str = "relu",
+        encoder_output_activation: str = "softplus",
+        z_min: float = 0.01,
         # Actor-Critic parameters
         actor_obs_normalization: bool = False,
         critic_obs_normalization: bool = False,
-        actor_hidden_dims: list[int] | tuple[int, ...] = (64, 64),
-        critic_hidden_dims: list[int] | tuple[int, ...] = (64, 64),
+        actor_hidden_dims: list[int] | tuple[int, ...] = (256, 128, 64),
+        critic_hidden_dims: list[int] | tuple[int, ...] = (256, 128, 64),
         activation: str = "elu",
         init_noise_std: float = 1.0,
         noise_std_type: str = "scalar",
@@ -97,6 +95,7 @@ class ActorCriticEncoder(nn.Module):
         self.policy_obs_dim = policy_obs_dim
         self.privileged_dim = privileged_dim
         self.encoder_latent_dim = encoder_latent_dim
+        self.encoder_output_activation = encoder_output_activation
         self.z_min = z_min
         self.state_dependent_std = state_dependent_std
 
@@ -122,7 +121,16 @@ class ActorCriticEncoder(nn.Module):
             raise ValueError(f"Privileged dim {privileged_shape[-1]} != expected {privileged_dim}")
 
         # Encoder: privileged -> z
-        self.encoder = MLP(privileged_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
+        if encoder_output_activation == "tanh":
+            self.encoder = MLP(
+                privileged_dim,
+                encoder_latent_dim,
+                list(encoder_hidden_dims),
+                encoder_activation,
+                last_activation="tanh",
+            )
+        else:
+            self.encoder = MLP(privileged_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
         logger.info("Encoder MLP: %s", self.encoder)
 
         # Actor/Critic input: policy_obs + z (symmetric design)
@@ -213,11 +221,13 @@ class ActorCriticEncoder(nn.Module):
         return F.softplus(raw) + self.z_min
 
     def _encode(self, privileged: torch.Tensor) -> torch.Tensor:
-        """Encode privileged info into positive latent z via softplus.
+        """Encode privileged info into latent z.
 
-        z = softplus(encoder_output) + z_min
-        Guarantees z > z_min, no gradient saturation at large values.
+        For softplus mode: z = softplus(encoder_output) + z_min (positive, no saturation).
+        For tanh mode: z = tanh(encoder_output) in [-1, 1] (built into MLP last layer).
         """
+        if self.encoder_output_activation == "tanh":
+            return self.encoder(privileged)
         return self._softplus_z(self.encoder(privileged))
 
     def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
@@ -310,8 +320,8 @@ class ActorCriticEncoderTDC(ActorCriticEncoder):
     """ActorCriticEncoder with z exposure for TDC M_hat extraction.
 
     Overrides _get_combined_obs() to cache the encoder latent z after each
-    forward pass. The environment retrieves z via get_last_z() to set
-    TDC M_hat = z[3:5].
+    forward pass. The environment retrieves z via get_last_z() to compute
+    TDC M_hat from decomposed z[3:6] + FK joint positions.
 
     Timing:
         RSL-RL loop: obs = env.get_observations() -> action = policy.act(obs)

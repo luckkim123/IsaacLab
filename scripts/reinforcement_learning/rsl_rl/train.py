@@ -210,10 +210,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print("[INFO] Using ConstrainedEncoderRunner for constrained TDC training.")
             runner = ConstrainedEncoderRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
         elif use_encoder_runner:
-            from isaaclab_tasks.direct.hero_agent.runners import EncoderRunner
+            agent_dict = agent_cfg.to_dict()
+            diagnostic_mode = agent_dict.get("diagnostic_mode", "none")
+            if diagnostic_mode != "none":
+                from isaaclab_tasks.direct.hero_agent.runners import DiagnosticEncoderRunner
 
-            print("[INFO] Using EncoderRunner for Hero Agent (curriculum + encoder metrics).")
-            runner = EncoderRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+                print(f"[INFO] Using DiagnosticEncoderRunner (mode={diagnostic_mode}).")
+                runner = DiagnosticEncoderRunner(env, agent_dict, log_dir=log_dir, device=agent_cfg.device)
+            else:
+                from isaaclab_tasks.direct.hero_agent.runners import EncoderRunner
+
+                print("[INFO] Using EncoderRunner for Hero Agent (curriculum + encoder metrics).")
+                runner = EncoderRunner(env, agent_dict, log_dir=log_dir, device=agent_cfg.device)
         else:
             runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":

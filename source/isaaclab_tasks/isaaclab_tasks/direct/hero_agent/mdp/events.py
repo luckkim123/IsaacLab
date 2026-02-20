@@ -454,6 +454,33 @@ def randomize_payload(
             device,
         )
 
+        # Clamp effective offset so max payload moment <= buoy restoring moment.
+        # Constraint: m * g * |r_eff| <= F_bu * h
+        # => |r_eff| <= F_bu * h / (m * g)
+        if hasattr(env, "_buoy_hydro"):
+            F_bu = env._buoy_hydro.buoyancy_force[env_ids]  # (N,)
+            h = rand_cfg.buoy_moment_arm  # scalar
+            mass = env._payload_mass[env_ids]  # (N,)
+            g = 9.81
+
+            # effective_offset = attachment_offset + cog_offset
+            effective = env._payload_attachment_offset[env_ids] + env._payload_cog_offset[env_ids]  # (N, 3)
+            current_norm = effective.norm(dim=-1)  # (N,)
+
+            # max offset magnitude per-env (inf when mass=0)
+            max_norm = torch.where(
+                mass > 1e-6,
+                (F_bu * h) / (mass * g),
+                torch.full_like(mass, float("inf")),
+            )
+
+            # Scale down effective_offset if exceeding max, keep direction
+            scale = torch.clamp(max_norm / current_norm.clamp(min=1e-8), max=1.0)  # (N,)
+            clamped_effective = effective * scale.unsqueeze(-1)  # (N, 3)
+
+            # Write back cog_offset = clamped_effective - attachment_offset
+            env._payload_cog_offset[env_ids] = clamped_effective - env._payload_attachment_offset[env_ids]
+
 
 # -----------------------------------------------------------------------------
 # Joint Actuator Gain Randomization

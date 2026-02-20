@@ -12,10 +12,11 @@ This module provides:
 """
 
 from .kinematics import ALBCKinematics
-from .tdc import TDCController, TDCControllerCfg
+from .tdc import TDCController, TDCControllerCfg, compute_M_bb
 
 __all__ = [
     "ALBCKinematics",
     "TDCController",
     "TDCControllerCfg",
+    "compute_M_bb",
 ]

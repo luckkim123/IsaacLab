@@ -63,6 +63,11 @@ class TDCControllerCfg:
     # IK DLS damping (Yoshikawa-style adaptive)
     ik_dls_lambda: float = 0.15
 
+    # Iterative IK: C++ reference uses learning_rate=0.02 with 500-3000 iterations.
+    # num_iterations=1, learning_rate=1.0 reverts to single-step behavior.
+    ik_num_iterations: int = 100
+    ik_learning_rate: float = 0.02
+
     # Joint rate limiting (rad/s)
     max_joint_velocity: float = 2.5
 
@@ -141,6 +146,8 @@ class TDCController:
         self._u_hat = torch.zeros(num_envs, 2, device=device)
         self._m_hat_u_pd = torch.zeros(num_envs, 2, device=device)
         self._delta_T_b = torch.zeros(num_envs, 2, device=device)
+        self._u_hat_prev = torch.zeros(num_envs, 2, device=device)
+        self._epsilon_approx = torch.zeros(num_envs, 2, device=device)
 
         # --- Scratch buffers (reused each step to avoid per-step allocation) ---
         # WARNING: These are returned by reference from _compute_lambda_and_inv() and
@@ -230,12 +237,19 @@ class TDCController:
         """Restoring torque change from last compute(). Shape: (num_envs, 2)."""
         return self._delta_T_b
 
+    @property
+    def epsilon_approx(self) -> torch.Tensor:
+        """TDE error proxy (consecutive U_hat difference). Shape: (num_envs, 2)."""
+        return self._epsilon_approx
+
     def compute(
         self,
         roll: torch.Tensor,
         pitch: torch.Tensor,
         ang_vel_body: torch.Tensor,
         target_euler: torch.Tensor,
+        external_u_pd: torch.Tensor | None = None,
+        residual_tau: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute desired end-effector position using TDC law.
 
@@ -244,6 +258,12 @@ class TDCController:
             pitch: Current pitch angle (theta) in radians. Shape: (num_envs,).
             ang_vel_body: Body angular velocity [p, q, r]. Shape: (num_envs, 3).
             target_euler: Target [roll, pitch, yaw] in radians. Shape: (num_envs, 3).
+            external_u_pd: External control input replacing linear PD. Shape: (num_envs, 2).
+                When provided, skips internal _compute_pd_torque() and uses
+                M_hat * external_u_pd directly. Used by Neural TDC (RL replaces PD).
+            residual_tau: Additive residual torque from RL. Shape: (num_envs, 2).
+                Added to tau_desired after TDC law, before Lambda_inv conversion.
+                Used by Residual TDC (RL augments TDC, PD stays intact).
 
         Returns:
             Desired EE position [x, y] in meters. Shape: (num_envs, 2).
@@ -257,8 +277,12 @@ class TDCController:
         Lambda, Lambda_inv = self._compute_lambda_and_inv(roll, pitch)
         T_b = self._compute_restoring_torque(roll, pitch)
 
-        # Step 3: PD control torque
-        m_hat_u_pd = self._compute_pd_torque(roll, pitch, nu, target_euler)
+        # Step 3: PD control torque (or external RL replacement)
+        if external_u_pd is not None:
+            m_hat_u_pd = self._m_hat * external_u_pd
+            self._m_hat_u_pd.copy_(m_hat_u_pd)
+        else:
+            m_hat_u_pd = self._compute_pd_torque(roll, pitch, nu, target_euler)
 
         # Step 4: TDE compensation torque
         tde_term = self._compute_tde_torque(T_b)
@@ -267,6 +291,10 @@ class TDCController:
         tau_full = tde_term + m_hat_u_pd
         init_mask = self._is_initialized.unsqueeze(-1)
         tau_desired = torch.where(init_mask, tau_full, m_hat_u_pd)
+
+        # Step 5b: Add residual torque from RL if provided (Residual TDC)
+        if residual_tau is not None:
+            tau_desired = tau_desired + residual_tau
 
         # Step 6: Convert torque to EE position
         p_EE = self._torque_to_ee_position(Lambda_inv, tau_desired)
@@ -291,6 +319,8 @@ class TDCController:
         self._u_hat[env_ids] = 0.0
         self._m_hat_u_pd[env_ids] = 0.0
         self._delta_T_b[env_ids] = 0.0
+        self._u_hat_prev[env_ids] = 0.0
+        self._epsilon_approx[env_ids] = 0.0
 
         # Reset PD gains to defaults for reset environments
         self._kp[env_ids] = self._kp_default
@@ -412,6 +442,8 @@ class TDCController:
         tde_lambda_p = torch.bmm(self._Lambda_prev, self._p_EE_prev.unsqueeze(-1)).squeeze(-1)
         U_hat = tde_lambda_p - self._m_hat * self._nu_dot_filtered
         delta_T_b = self._T_b_prev - T_b
+        self._epsilon_approx.copy_(U_hat - self._u_hat_prev)
+        self._u_hat_prev.copy_(U_hat)
         self._u_hat.copy_(U_hat)
         self._delta_T_b.copy_(delta_T_b)
         return U_hat + delta_T_b
@@ -454,3 +486,75 @@ class TDCController:
         self._Lambda_prev.copy_(Lambda)
         self._T_b_prev.copy_(T_b)
         self._is_initialized[:] = True
+
+
+# ======================================================================
+# Module-level utilities
+# ======================================================================
+
+
+def compute_M_bb(
+    I_ROV: torch.Tensor,
+    m_A: torch.Tensor,
+    x_bu: torch.Tensor,
+    y_bu: torch.Tensor,
+    h: float,
+) -> torch.Tensor:
+    """Compute configuration-dependent true inertia M_bb via parallel axis theorem.
+
+    M_bb_roll  = I_ROV_roll  + m_A * (y_bu^2 + h^2)
+    M_bb_pitch = I_ROV_pitch + m_A * (x_bu^2 + h^2)
+
+    Args:
+        I_ROV: Rigid body inertia [I_roll, I_pitch]. Shape: (num_envs, 2).
+        m_A: Added mass (scalar diagonal entry). Shape: (num_envs,).
+        x_bu: Buoy x-position from FK. Shape: (num_envs,).
+        y_bu: Buoy y-position from FK. Shape: (num_envs,).
+        h: CoG-to-ABPC vertical offset in meters.
+
+    Returns:
+        True inertia M_bb [roll, pitch]. Shape: (num_envs, 2).
+    """
+    return torch.stack(
+        [
+            I_ROV[:, 0] + m_A * (y_bu**2 + h**2),
+            I_ROV[:, 1] + m_A * (x_bu**2 + h**2),
+        ],
+        dim=-1,
+    )
+
+
+def compute_M_hat_from_z(
+    z_decomposed: torch.Tensor,
+    p_EE: torch.Tensor,
+    h: float,
+    m_hat_max: float = 0.5,
+) -> torch.Tensor:
+    """Compute M_hat from decomposed encoder z and current FK position.
+
+    Uses the parallel axis theorem with encoder-predicted episode-level constants
+    and step-level FK position:
+        M_hat_roll  = I_roll_hat  + m_A_hat * (y_bu^2 + h^2)
+        M_hat_pitch = I_pitch_hat + m_A_hat * (x_bu^2 + h^2)
+
+    Args:
+        z_decomposed: Decomposed encoder output [m_A_hat, I_roll_hat, I_pitch_hat].
+            Shape: (num_envs, 3).
+        p_EE: EE position [x_bu, y_bu] from FK. Shape: (num_envs, 2).
+        h: CoG-to-ABPC vertical offset in meters.
+        m_hat_max: Upper clamp for M_hat (prevents unbounded growth from softplus z).
+            True M_bb ~ 0.13-0.18; default 0.5 gives ~3x safety margin.
+
+    Returns:
+        Design inertia M_hat [roll, pitch]. Shape: (num_envs, 2).
+    """
+    m_A_hat = z_decomposed[:, 0]
+    I_roll_hat = z_decomposed[:, 1]
+    I_pitch_hat = z_decomposed[:, 2]
+    return torch.stack(
+        [
+            I_roll_hat + m_A_hat * (p_EE[:, 1] ** 2 + h**2),
+            I_pitch_hat + m_A_hat * (p_EE[:, 0] ** 2 + h**2),
+        ],
+        dim=-1,
+    ).clamp(max=m_hat_max)

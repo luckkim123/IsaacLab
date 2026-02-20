@@ -23,8 +23,7 @@ import logging
 
 from rsl_rl.runners import OnPolicyRunner
 
-from ..utils.env_utils import connect_encoder_to_env, unwrap_env
-from ..utils.logging_encoder import log_encoder_metrics, log_encoder_tdc_metrics
+from ..utils.logging import connect_encoder_to_env, log_encoder_metrics, log_encoder_tdc_metrics, unwrap_env
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +79,26 @@ class EncoderRunner(OnPolicyRunner):
         raw_env = unwrap_env(self.env)
         if hasattr(raw_env, "_reward_manager") and hasattr(raw_env.cfg, "reward"):
             raw_env._reward_manager.update_curriculum(iteration, raw_env.cfg.reward.curriculum_end_iter)
+
+        # Update DR curriculum (ramp perturbation/inertia/mass ranges)
+        if hasattr(raw_env, "update_dr_curriculum"):
+            raw_env.update_dr_curriculum(iteration)
+
+        # Log DR curriculum progress
+        if (
+            hasattr(raw_env, "_dr_curriculum_cfg")
+            and raw_env._dr_curriculum_cfg is not None
+            and self.log_dir is not None
+            and not self.disable_logs
+        ):
+            dr_cur = raw_env._dr_curriculum_cfg
+            progress = min(1.0, iteration / max(1, dr_cur.end_iter))
+            rand = raw_env.cfg.randomization
+            self.writer.add_scalar("DR_Curriculum/progress", progress, iteration)
+            self.writer.add_scalar("DR_Curriculum/perturbation_force_max", rand.perturbation_force_range[1], iteration)
+            self.writer.add_scalar("DR_Curriculum/inertia_scale_hi", rand.inertia_scale[1], iteration)
+            self.writer.add_scalar("DR_Curriculum/payload_mass_max", rand.payload_mass_range[1], iteration)
+            self.writer.add_scalar("DR_Curriculum/cog_offset_z_max", rand.cog_offset_z[1], iteration)
 
         # Log encoder metrics if encoder exists and logging is enabled
         if self._has_encoder and self.log_dir is not None and not self.disable_logs:

@@ -16,6 +16,7 @@ This module consolidates all environment configurations:
 - HeroAgentEncoderTrainEnvCfg: Encoder training with privileged info
 - HeroAgentTDCEnvCfg: Classical TDC control (no RL)
 - HeroAgentEncoderTDCEnvCfg: Encoder-TDC integration (RL adaptive gains + M_hat)
+- HeroAgentUnifiedTDCEnvCfg: General encoder + RL-output M_hat/Kp/Kd
 - HeroAgentAdaptTDCEnvCfg: Phase 2 adaptation (proprio history -> z_hat)
 """
 
@@ -66,10 +67,10 @@ class DomainRandomizationCfg:
     yaw_range: tuple[float, float] = (-math.pi, math.pi)
 
     # -- Hydrodynamic Parameter Scales --
-    added_mass_scale: tuple[float, float] = (0.5, 1.5)
+    added_mass_scale: tuple[float, float] = (0.8, 1.2)
     linear_damping_scale: tuple[float, float] = (0.7, 1.3)
     quadratic_damping_scale: tuple[float, float] = (0.6, 1.4)
-    volume_scale: tuple[float, float] = (0.85, 1.15)
+    volume_scale: tuple[float, float] = (0.7, 1.3)
 
     # -- Center of Buoyancy Offset (meters) --
     cob_offset_x: tuple[float, float] = (-0.01, 0.01)
@@ -81,11 +82,11 @@ class DomainRandomizationCfg:
     cog_offset_y: tuple[float, float] = (-0.01, 0.01)
     cog_offset_z: tuple[float, float] = (-0.06, 0.06)
 
-    # -- Inertia (widened: URDF uses uniform-density assumption, Tan et al. use [50%, 150%]) --
-    inertia_scale: tuple[float, float] = (0.6, 1.4)
+    # -- Inertia (aggressive: push beyond TDE stability boundary M_true/M_hat > 2) --
+    inertia_scale: tuple[float, float] = (0.4, 2.5)
 
     # -- Body Mass Scale (applied uniformly to all bodies) --
-    body_mass_scale: tuple[float, float] = (0.85, 1.15)
+    body_mass_scale: tuple[float, float] = (0.7, 1.3)
 
     # -- Water Density (kg/m^3) --
     water_density_range: tuple[float, float] = (995.0, 1025.0)
@@ -166,8 +167,8 @@ class DomainRandomizationCfg:
     # Models: tether tension variation, sudden current changes, contact forces.
     # ==========================================================================
     enable_perturbation: bool = True
-    perturbation_force_range: tuple[float, float] = (0.0, 20.0)  # N (Hero Agent ~10kg -> 2.0 m/s^2 max)
-    perturbation_torque_range: tuple[float, float] = (0.0, 3.0)  # Nm (20N x 0.15m half-body)
+    perturbation_force_range: tuple[float, float] = (0.0, 10.0)  # N (Hero Agent ~10kg -> 1.0 m/s^2 max)
+    perturbation_torque_range: tuple[float, float] = (0.0, 1.5)  # Nm (10N x 0.15m half-body)
     perturbation_interval: int = 100  # physics steps between events (~0.5s at 200Hz)
     perturbation_duration: int = 20  # physics steps active (~0.1s)
 
@@ -183,12 +184,44 @@ class DomainRandomizationCfg:
     # Payload is attached to the gripper body (fixed to base via base_to_gripper joint).
     # Offsets are in gripper body frame.
     # ==========================================================================
-    payload_mass_range: tuple[float, float] = (0.0, 3.0)  # kg (up to 30% body weight)
+    payload_mass_range: tuple[float, float] = (0.0, 1.5)  # kg (up to ~15% body weight)
 
     # -- Payload CoG Offset (meters, relative to attachment point) --
     payload_cog_offset_x: tuple[float, float] = (-0.30, 0.30)
     payload_cog_offset_y: tuple[float, float] = (-0.30, 0.30)
     payload_cog_offset_z: tuple[float, float] = (-0.20, 0.0)
+
+    # Physical constant: CoG-to-ABPC vertical offset for buoy moment calculation.
+    # Used to limit payload CoG offset so max payload moment <= buoy restoring moment.
+    buoy_moment_arm: float = 0.180  # m (matches TDCControllerCfg.h)
+
+
+@configclass
+class DRCurriculumCfg:
+    """Linearly ramp DR ranges from mild (start) to full (DomainRandomizationCfg values).
+
+    The "full" values are whatever DomainRandomizationCfg has. Start values define the
+    initial easy regime. Linear interpolation over end_iter training iterations.
+    """
+
+    enable: bool = False
+    end_iter: int = 500
+
+    # Per-step perturbation start ranges (full values from DomainRandomizationCfg)
+    perturbation_force_range_start: tuple[float, float] = (0.0, 2.0)
+    perturbation_torque_range_start: tuple[float, float] = (0.0, 0.3)
+
+    # Episode-level DR start ranges
+    inertia_scale_start: tuple[float, float] = (0.8, 1.2)
+    body_mass_scale_start: tuple[float, float] = (0.9, 1.1)
+    volume_scale_start: tuple[float, float] = (0.9, 1.1)
+    added_mass_scale_start: tuple[float, float] = (0.9, 1.1)
+    payload_mass_range_start: tuple[float, float] = (0.0, 0.3)
+
+    # High-impact stability parameters (start near nominal, ramp to full range)
+    cog_offset_z_start: tuple[float, float] = (-0.01, 0.01)
+    cob_offset_z_start: tuple[float, float] = (-0.005, 0.005)
+    action_latency_range_start: tuple[int, int] = (0, 0)
 
 
 @configclass
@@ -270,7 +303,7 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # because buoyancy control cannot generate Z-axis torque
     target_attitude: tuple[float, float, float] = (0.0, 0.0, 0.0)
     randomize_target_attitude: bool = False
-    target_attitude_range: tuple[float, float, float] = (0.3, 0.3, 0.0)
+    target_attitude_range: tuple[float, float, float] = (0.5, 0.5, 0.0)
 
     reward: ALBCRewardCfg = ALBCRewardCfg()
 
@@ -288,6 +321,7 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # Domain Randomization
     # ==========================================================================
     randomization: DomainRandomizationCfg = DomainRandomizationCfg()
+    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg()
 
     # ==========================================================================
     # Virtual Payload Configuration (simple weight model)
@@ -304,8 +338,8 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
 
     randomization = DomainRandomizationCfg(enable=True)
     ocean_current = OceanCurrentCfg(
-        max_velocity=(0.5, 0.5, 0.25, 0.0, 0.0, 0.0),
-        noise_scale=(0.1, 0.1, 0.05, 0.0, 0.0, 0.0),
+        max_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        noise_scale=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
     )
     enable_payload: bool = True
     randomize_target_attitude: bool = True
@@ -331,23 +365,39 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
 class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
     """Hero Agent encoder training with privileged hydrodynamic info.
 
-    state_space=24 returns compact privileged information for HORA/RMA Phase 1 training.
-    Main body (10D) + Buoy (10D) + Payload (4D) = 24D.
-    Payload privileged info: mass (1D) + cog_offset (3D).
+    state_space=26 returns privileged information for HORA/RMA Phase 1 training.
+    Main hydro (7D) + Buoy hydro (7D) + Main dynamics (4D) + Buoy dynamics (4D) + Payload (4D) = 26D.
+    Inertia and added mass are excluded from privileged obs; the encoder learns
+    a general latent representation from buoyancy/geometry parameters.
 
     Network Input Dimensions (ActorCriticEncoder):
         - observation_space (13): Used for gym.spaces.Box definition only
-        - state_space (24): Privileged info, returned as observations["privileged"]
-        - Encoder: privileged(24D) -> latent z(6D)
+        - state_space (26): Privileged info, returned as observations["privileged"]
+        - Encoder: privileged(26D) -> latent z(6D)
         - Actual Actor/Critic input: policy_obs(13) + z(6) = 19D
     """
 
-    state_space: int = 24
+    state_space: int = 26
+    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=True)
 
 
 # =============================================================================
 # TDC (Time Delay Control) Configurations
 # =============================================================================
+
+
+def _tdc_randomization() -> DomainRandomizationCfg:
+    """Create DomainRandomizationCfg with TDC-specific overrides.
+
+    TDC envs need higher joint gains (centered at Kp=200, Kd=10) and no action
+    latency (TDC overrides _pre_physics_step entirely).
+    """
+    return DomainRandomizationCfg(
+        enable=True,
+        joint_stiffness_range=(160.0, 240.0),
+        joint_damping_range=(8.0, 12.0),
+        action_latency_range=(0, 0),
+    )
 
 
 @configclass
@@ -373,14 +423,8 @@ class HeroAgentTDCEnvCfg(HeroAgentTrainEnvCfg):
     # No privileged obs for pure TDC (classical control, no encoder)
     state_space: int = 0
 
-    # Override joint gain ranges for TDC (centered at Kp=200, Kd=10)
-    # Action latency disabled: TDC overrides _pre_physics_step entirely
-    randomization: DomainRandomizationCfg = DomainRandomizationCfg(
-        enable=True,
-        joint_stiffness_range=(160.0, 240.0),
-        joint_damping_range=(8.0, 12.0),
-        action_latency_range=(0, 0),
-    )
+    # TDC-specific DR: higher joint gains (Kp=200, Kd=10), no action latency
+    randomization: DomainRandomizationCfg = _tdc_randomization()
 
 
 @configclass
@@ -388,8 +432,13 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTrainEnvCfg):
     """Encoder-TDC integration: RL learns adaptive gains + M_hat for TDC.
 
     The RL actor outputs 4D actions [Kp_roll, Kp_pitch, Kd_roll, Kd_pitch],
-    which are converted to TDC gains via sigmoid scaling. The encoder latent
-    z[3:5] provides adaptive M_hat for the TDC controller.
+    which are converted to TDC gains via softplus scaling with hard max clamp.
+    The encoder latent z[3:6] provides decomposed constants [m_A_hat, I_roll_hat,
+    I_pitch_hat], combined with FK position to compute per-step M_hat.
+
+    Gain scaling (softplus): raw=0 -> default, clamped at max.
+        kp = softplus(raw) * (kp_default / log(2)), clamp(max=kp_max)
+    No hard minimum -- reward incentivizes active control when needed.
 
     Inherits DR, ocean current, and payload from HeroAgentTrainEnvCfg.
     Joint gains centered at TDC-optimal values (Kp=200, Kd=10).
@@ -400,25 +449,52 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTrainEnvCfg):
     # TDC timing: control_decimation=4 (50Hz TDC)
     control_decimation: int = 4
 
-    state_space: int = 24  # privileged obs for encoder
+    state_space: int = 26  # privileged obs for encoder
     action_space: int = 4  # Kp_roll, Kp_pitch, Kd_roll, Kd_pitch
     observation_space: int = 13  # same policy obs
 
-    # Gain bounds (after sigmoid scaling in env)
-    kp_range: tuple[float, float] = (10.0, 100.0)
-    kd_range: tuple[float, float] = (2.0, 30.0)
+    # Gain softplus mapping: raw=0 -> default, clamp(max=kp_max)
+    # kp = softplus(raw) * (kp_default / log(2)), clamp(max=kp_max)
+    kp_max: float = 80.0
+    kp_default: float = 40.0
+    kd_max: float = 20.0
+    kd_default: float = 12.0
 
     # Encoder-TDC specific reward config (adjusted weights + TDE residual)
     reward: EncoderTDCRewardCfg = EncoderTDCRewardCfg()
 
-    # Override joint gain ranges for TDC (centered at Kp=200, Kd=10)
-    # Action latency disabled: Encoder-TDC overrides _pre_physics_step entirely
-    randomization: DomainRandomizationCfg = DomainRandomizationCfg(
-        enable=True,
-        joint_stiffness_range=(160.0, 240.0),
-        joint_damping_range=(8.0, 12.0),
-        action_latency_range=(0, 0),
-    )
+    # TDC-specific DR: higher joint gains (Kp=200, Kd=10), no action latency
+    randomization: DomainRandomizationCfg = _tdc_randomization()
+
+
+@configclass
+class HeroAgentUnifiedTDCEnvCfg(HeroAgentTrainEnvCfg):
+    """Unified TDC: General encoder + RL-output M_hat/Kp/Kd.
+
+    Encoder produces general 13D latent z (no physics interpretation).
+    Actor receives [policy_obs + z] and outputs 6D TDC params via sigmoid:
+        [M_hat(2), Kp(2), Kd(2)]
+
+    Observation: policy(13D) via "policy" key, privileged(26D) via "privileged" key.
+    Action: [M_hat_r, M_hat_p, Kp_r, Kp_p, Kd_r, Kd_p] (6D).
+    """
+
+    tdc: TDCControllerCfg = TDCControllerCfg(log_interval=0)
+    control_decimation: int = 4  # 50Hz TDC
+
+    state_space: int = 26  # privileged obs for encoder
+    action_space: int = 6  # [M_hat(2), Kp(2), Kd(2)]
+    observation_space: int = 13  # policy obs
+
+    # Parameter bounds (after sigmoid scaling in env)
+    m_hat_range: tuple[float, float] = (0.05, 0.5)
+    kp_range: tuple[float, float] = (10.0, 100.0)
+    kd_range: tuple[float, float] = (2.0, 30.0)
+
+    reward: EncoderTDCRewardCfg = EncoderTDCRewardCfg()
+
+    # TDC-specific DR: higher joint gains (Kp=200, Kd=10), no action latency
+    randomization: DomainRandomizationCfg = _tdc_randomization()
 
 
 @configclass

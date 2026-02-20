@@ -15,6 +15,7 @@ Available Tasks:
     - Isaac-HeroAgent-Encoder-Base-v0: Encoder training with privileged info
     - Isaac-HeroAgent-TDC-v0: Classical TDC control (no RL)
     - Isaac-HeroAgent-Encoder-TDC-v0: Encoder-TDC integration (RL adaptive gains + M_hat)
+    - Isaac-HeroAgent-Unified-TDC-v0: General encoder + RL-output M_hat/Kp/Kd
     - Isaac-HeroAgent-Adapt-TDC-v0: Phase 2 adaptation (proprio history -> z_hat)
 """
 
@@ -30,10 +31,12 @@ from .config import (
     HeroAgentEnvCfg,
     HeroAgentTDCEnvCfg,
     HeroAgentTrainEnvCfg,
+    HeroAgentUnifiedTDCEnvCfg,
 )
 from .controllers import TDCControllerCfg
 from .encoder_tdc_env import HeroAgentEncoderTDCEnv
 from .tdc_env import HeroAgentTDCEnv
+from .unified_tdc_env import HeroAgentUnifiedTDCEnv
 
 ##
 # Register Gym environments
@@ -94,6 +97,17 @@ gym.register(
     },
 )
 
+# Unified TDC (general encoder + RL-output M_hat/Kp/Kd)
+gym.register(
+    id="Isaac-HeroAgent-Unified-TDC-v0",
+    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentUnifiedTDCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentUnifiedTDCEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentUnifiedTDCPPORunnerCfg",
+    },
+)
+
 # Phase 2: Adaptation module (proprio history -> z_hat, supervised training)
 gym.register(
     id="Isaac-HeroAgent-Adapt-TDC-v0",
@@ -110,6 +124,7 @@ __all__ = [
     "HeroAgentEnv",
     "HeroAgentTDCEnv",
     "HeroAgentEncoderTDCEnv",
+    "HeroAgentUnifiedTDCEnv",
     "HeroAgentAdaptTDCEnv",
     # Configurations
     "HeroAgentEnvCfg",
@@ -117,6 +132,7 @@ __all__ = [
     "HeroAgentTDCEnvCfg",
     "HeroAgentEncoderTrainEnvCfg",
     "HeroAgentEncoderTDCEnvCfg",
+    "HeroAgentUnifiedTDCEnvCfg",
     "HeroAgentAdaptTDCEnvCfg",
     "DomainRandomizationCfg",
     "TDCControllerCfg",

@@ -29,16 +29,15 @@ if TYPE_CHECKING:
 
 
 def _hydro_privileged_info(hydro: HydrodynamicsModel) -> torch.Tensor:
-    """Pack hydrodynamic parameters into a 10D privileged observation vector.
+    """Pack hydrodynamic parameters into a 7D privileged observation vector.
 
-    Returns: (num_envs, 10) = [volume(1), r_cg(3), r_cb(3), inertia(3)].
+    Returns: (num_envs, 7) = [volume(1), r_cg(3), r_cb(3)].
     """
     return torch.cat(
         [
             hydro.volume.unsqueeze(-1),
             hydro.center_of_gravity,
             hydro.center_of_buoyancy,
-            hydro.rigid_body_inertia,
         ],
         dim=-1,
     )
@@ -88,12 +87,14 @@ def compute_privileged_obs(
 ) -> torch.Tensor:
     """Compute privileged observations for asymmetric training.
 
-    Returns compact privileged info containing hydrostatic parameters:
-        - Main body (10D): volume, r_cg (3), r_cb (3), inertia (3)
-        - Buoy body (10D): volume, r_cg (3), r_cb (3), inertia (3)
+    Returns privileged info containing hydrostatic + dynamics parameters:
+        - Main body (7D): volume, r_cg (3), r_cb (3)
+        - Buoy body (7D): volume, r_cg (3), r_cb (3)
+        - Main body dynamics (4D): inertia Ixx/Iyy/Izz (3), m_A surge (1)
+        - Buoy dynamics (4D): inertia Ixx/Iyy/Izz (3), m_A surge (1)
         - Payload (4D, optional): mass, cog_offset (3)
 
-    Total: 24D when payload is included, 20D otherwise.
+    Total: 26D when payload is included, 22D otherwise.
 
     Args:
         env: The Hero Agent environment instance.
@@ -101,14 +102,24 @@ def compute_privileged_obs(
     Returns:
         Privileged observation tensor of shape (num_envs, state_space).
     """
-    priv_obs = [_hydro_privileged_info(env._hydro), _hydro_privileged_info(env._buoy_hydro)]
+    priv_obs = [
+        _hydro_privileged_info(env._hydro),  # 7D: volume, CoG, CoB
+        _hydro_privileged_info(env._buoy_hydro),  # 7D: volume, CoG, CoB
+    ]
+
+    # Dynamics parameters affected by DR (inertia_scale, added_mass_scale)
+    # Each body is independently randomized by _randomize_hydro_model()
+    priv_obs.append(env._hydro.rigid_body_inertia)  # 3D: main Ixx, Iyy, Izz
+    priv_obs.append(env._hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1))  # 1D: main m_A
+    priv_obs.append(env._buoy_hydro.rigid_body_inertia)  # 3D: buoy Ixx, Iyy, Izz
+    priv_obs.append(env._buoy_hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1))  # 1D: buoy m_A
 
     # Include payload info if enabled and state_space is large enough
-    if env._payload_mass is not None and env._payload_cog_offset is not None and env.cfg.state_space >= 24:
+    if env._payload_mass is not None and env._payload_cog_offset is not None and env.cfg.state_space >= 26:
         payload_priv = torch.cat(
             [env._payload_mass.unsqueeze(-1), env._payload_cog_offset],
             dim=-1,
         )
-        priv_obs.append(payload_priv)
+        priv_obs.append(payload_priv)  # 4D: mass, cog_offset_xyz
 
     return torch.cat(priv_obs, dim=-1)

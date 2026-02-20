@@ -12,6 +12,7 @@ This module provides:
     - HeroAgentPPORunnerCfg: Standard PPO for joint-based attitude control
     - HeroAgentEncoderPPORunnerCfg: HORA Phase 1 with extrinsics encoder
     - HeroAgentEncoderTDCPPORunnerCfg: Encoder-TDC integration
+    - HeroAgentUnifiedTDCPPORunnerCfg: General encoder + RL-output M_hat/Kp/Kd
     - HeroAgentAdaptTDCRunnerCfg: Phase 2 adaptation (supervised, non-PPO)
 """
 
@@ -21,9 +22,11 @@ from .rsl_rl_ppo_cfg import (
     HeroAgentEncoderPPORunnerCfg,
     HeroAgentEncoderTDCPPORunnerCfg,
     HeroAgentPPORunnerCfg,
+    HeroAgentUnifiedTDCPPORunnerCfg,
     RslRlPpoActorCriticEncoderCfg,
     RslRlPpoActorCriticEncoderTDCAdaptCfg,
     RslRlPpoActorCriticEncoderTDCCfg,
+    RslRlPpoActorCriticUnifiedTDCCfg,
 )
 
 __all__ = [
@@ -33,8 +36,10 @@ __all__ = [
     "HeroAgentPPORunnerCfg",
     "HeroAgentEncoderPPORunnerCfg",
     "HeroAgentEncoderTDCPPORunnerCfg",
+    "HeroAgentUnifiedTDCPPORunnerCfg",
     "HeroAgentAdaptTDCRunnerCfg",
     "RslRlPpoActorCriticEncoderCfg",
     "RslRlPpoActorCriticEncoderTDCCfg",
     "RslRlPpoActorCriticEncoderTDCAdaptCfg",
+    "RslRlPpoActorCriticUnifiedTDCCfg",
 ]

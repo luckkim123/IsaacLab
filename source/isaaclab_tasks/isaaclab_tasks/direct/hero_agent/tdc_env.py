@@ -28,7 +28,9 @@ from isaaclab.utils.math import euler_xyz_from_quat
 from .base_env import HeroAgentEnv
 from .config import HeroAgentTDCEnvCfg
 from .controllers import ALBCKinematics, TDCController
-from .utils.logging_tdc import log_tdc_control_state, log_tdc_init, log_tdc_reset_info
+from .controllers.tdc import compute_M_hat_from_z
+from .mdp import RewardTermCfg, mhat_accuracy_reward
+from .utils.logging import log_tdc_control_state, log_tdc_init, log_tdc_reset_info
 
 
 class HeroAgentTDCEnv(HeroAgentEnv):
@@ -86,6 +88,55 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         if self._log_interval > 0:
             log_tdc_init(tdc_cfg, self._tdc.F_bu[0].item(), self._tdc_dt)
 
+        # Encoder policy reference (set by runner via set_encoder_policy)
+        self._encoder_policy = None
+
+    def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
+        """Build reward terms: base terms + M_hat accuracy if configured."""
+        terms = super()._build_reward_terms()
+        rcfg = self.cfg.reward
+
+        if hasattr(rcfg, "mhat_accuracy_weight") and rcfg.mhat_accuracy_weight != 0.0:
+            kernel = getattr(rcfg, "mhat_accuracy_kernel", "cauchy")
+            terms["mhat_accuracy"] = RewardTermCfg(
+                func=mhat_accuracy_reward,
+                weight=rcfg.mhat_accuracy_weight,
+                params={"sigma": rcfg.mhat_accuracy_sigma, "kernel": kernel},
+            )
+
+        return terms
+
+    def set_encoder_policy(self, policy: object) -> None:
+        """Register the encoder policy for z -> M_hat extraction.
+
+        Called by the runner after policy creation to enable M_hat transfer.
+
+        Args:
+            policy: Policy instance with get_last_z() method.
+        """
+        self._encoder_policy = policy
+
+    def _create_m_hat_buffer(self) -> torch.Tensor:
+        """Create an M_hat buffer initialized with config defaults.
+
+        Returns:
+            M_hat buffer. Shape: (num_envs, 2).
+        """
+        m_hat_default = torch.tensor(self.cfg.tdc.m_hat, device=self.device, dtype=torch.float32)
+        return m_hat_default.unsqueeze(0).expand(self.num_envs, -1).clone()
+
+    def _reset_m_hat_defaults(self, env_ids: torch.Tensor) -> None:
+        """Reset M_hat to config defaults for specified envs and push to TDC controller.
+
+        Args:
+            env_ids: Environment indices to reset.
+        """
+        m_hat_default = torch.tensor(self.cfg.tdc.m_hat, device=self.device, dtype=torch.float32)
+        self._tdc.update_controller_params(
+            m_hat=m_hat_default.unsqueeze(0).expand(len(env_ids), -1),
+            env_ids=env_ids,
+        )
+
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Override RL actions with TDC control output.
 
@@ -103,11 +154,15 @@ class HeroAgentTDCEnv(HeroAgentEnv):
 
         self._run_tdc_pipeline()
 
-    def _run_tdc_pipeline(self) -> None:
+    def _run_tdc_pipeline(self, **compute_kwargs) -> None:
         """Run the TDC control pipeline: orientation -> TDC -> IK -> rate limit -> anti-windup.
 
-        Shared between HeroAgentTDCEnv and HeroAgentEncoderTDCEnv.
+        Shared between HeroAgentTDCEnv, HeroAgentEncoderTDCEnv, and HeroAgentNeuralTDCEnv.
         Subclasses should update TDC params (M_hat, gains) before calling this.
+
+        Args:
+            **compute_kwargs: Extra keyword arguments forwarded to TDCController.compute().
+                Used by Neural TDC to pass external_u_pd.
         """
         # 1. Get current orientation
         roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
@@ -121,6 +176,7 @@ class HeroAgentTDCEnv(HeroAgentEnv):
             pitch=pitch,
             ang_vel_body=ang_vel_body,
             target_euler=self._target_euler,
+            **compute_kwargs,
         )
 
         # 4. DLS inverse kinematics -> joint angles
@@ -129,6 +185,8 @@ class HeroAgentTDCEnv(HeroAgentEnv):
             p_EE_desired,
             current_joint_angles=current_joints,
             lambda_dls=self.cfg.tdc.ik_dls_lambda,
+            num_iterations=self.cfg.tdc.ik_num_iterations,
+            learning_rate=self.cfg.tdc.ik_learning_rate,
         )
 
         # 5. Clamp to joint limits
@@ -187,3 +245,20 @@ class HeroAgentTDCEnv(HeroAgentEnv):
 
         # Update buoyancy force for reset envs (may have changed from DR)
         self._tdc.update_controller_params(F_bu=self._buoy_hydro.buoyancy_force[env_ids_], env_ids=env_ids_)
+
+    def _compute_m_hat_from_encoder_z(self, z_decomposed: torch.Tensor) -> torch.Tensor:
+        """Compute M_hat from decomposed encoder z components + current FK joint positions.
+
+        Shared helper for encoder_tdc_env, unified_tdc_env, and adapt_tdc_env.
+        Uses parallel axis theorem: M_hat = I_hat + m_A_hat * (p_EE^2 + h^2).
+
+        Args:
+            z_decomposed: Decomposed z = [m_A_hat, I_roll_hat, I_pitch_hat].
+                Shape: (num_envs, 3).
+
+        Returns:
+            Design inertia M_hat [roll, pitch]. Shape: (num_envs, 2).
+        """
+        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
+        p_EE = self._kinematics.forward(joint_pos)
+        return compute_M_hat_from_z(z_decomposed, p_EE, self.cfg.tdc.h)

@@ -12,9 +12,9 @@ without access to privileged information.
 
 Data Flow (Phase 2):
     proprio_hist (N, H, 12) -->  AdaptTConv  -->  z_hat (6D)
-    privileged (24D) --> Frozen Encoder --> z_gt (6D)   [supervision only]
+    privileged (25D) --> Frozen Encoder --> z_gt (6D)   [supervision only]
     z_hat --> [policy_obs + z_hat] --> Frozen Actor --> actions (4D)
-    z_hat[3:5] --> M_hat --> TDC Controller --> joint targets
+    z_hat[3:6] + FK --> M_hat --> TDC Controller --> joint targets
 
 History feature vector (12D per timestep):
     [roll(1), pitch(1), p(1), q(1), joint_pos_normalized(2), joint_vel(2), actions(4)]
