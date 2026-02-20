@@ -50,9 +50,10 @@ class _RslRlPpoEncoderBaseCfg(RslRlPpoActorCriticCfg):
     across 3 config classes.
     """
 
-    # Override inherited "scalar" -> "log" for numerical stability.
-    # scalar: self.std = nn.Parameter(...) can go negative/NaN under strong gradients.
-    # log: std = exp(log_std), always positive with continuous gradient flow.
+    # log: std = exp(log_std), always positive, no NaN risk from negative std.
+    # Previous "scalar kills encoder" hypothesis was wrong -- root cause was
+    # seed-dependent encoder init landing in softplus dead zone (now fixed
+    # with positive bias init in ActorCriticEncoder.__init__).
     noise_std_type: str = "log"
 
     encoder_hidden_dims: list[int] = [256, 128, 64]

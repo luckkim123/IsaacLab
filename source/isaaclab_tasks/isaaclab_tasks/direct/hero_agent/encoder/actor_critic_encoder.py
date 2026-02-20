@@ -131,6 +131,16 @@ class ActorCriticEncoder(nn.Module):
             )
         else:
             self.encoder = MLP(privileged_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
+
+        # Initialize last encoder layer bias to positive value so that
+        # softplus(output) starts in the active gradient region regardless of seed.
+        # Without this, some seeds produce negative-biased outputs where
+        # softplus ≈ 0 and gradient ≈ 0, causing permanent encoder collapse.
+        if encoder_output_activation != "tanh":
+            last_linear = self.encoder[-1]
+            assert isinstance(last_linear, nn.Linear), f"Expected last encoder layer to be Linear, got {type(last_linear)}"
+            nn.init.constant_(last_linear.bias, 0.5)
+
         logger.info("Encoder MLP: %s", self.encoder)
 
         # Actor/Critic input: policy_obs + z (symmetric design)
@@ -252,11 +262,11 @@ class ActorCriticEncoder(nn.Module):
         """
         if self.state_dependent_std:
             if self.noise_std_type == "scalar":
-                return std_or_mean.clamp(min=1e-6)
+                return std_or_mean
             assert log_std is not None, "log_std required for state_dependent_std with log noise_std_type"
             return torch.exp(log_std)
         elif self.noise_std_type == "scalar":
-            return self.std.clamp(min=1e-6).expand_as(std_or_mean)
+            return self.std.expand_as(std_or_mean)
         else:
             return torch.exp(self.log_std).expand_as(std_or_mean)
 
