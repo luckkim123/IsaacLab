@@ -102,7 +102,7 @@ class RslRlPpoActorCriticEncoderTDCAdaptCfg(_RslRlPpoEncoderBaseCfg):
     class_name: str = "ActorCriticEncoderTDCAdapt"
 
     # Adaptation module parameters
-    proprio_history_len: int = 30
+    proprio_history_len: int = 15
     proprio_feature_dim: int = 12
 
 
@@ -299,6 +299,77 @@ class HeroAgentAdaptTDCRunnerCfg(RslRlOnPolicyRunnerCfg):
 
 
 # =============================================================================
+# Single-Phase TDC: Joint adapt_tconv + actor/critic with aux M_hat loss
+# =============================================================================
+
+
+@configclass
+class HeroAgentSinglePhaseTDCRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO configuration for single-phase Encoder-TDC training.
+
+    Trains adapt_tconv + actor + critic jointly via PPO with auxiliary MSE loss
+    on z[3:6]. No Phase 1 teacher required.
+
+    Network (ActorCriticEncoderTDCAdapt):
+        - adapt_tconv: proprio_hist (N, 30, 12) -> z_hat (6D, softplus + z_min)
+        - z_hat[3:6] + FK -> M_hat (2D) -> TDC controller
+        - Actor: cat([policy_obs, z_hat]) = 19D -> 4D [Kp_r, Kp_p, Kd_r, Kd_p]
+        - Critic: cat([policy_obs, z_hat]) = 19D -> value
+
+    Gradient sources for adapt_tconv:
+        1. PPO surrogate loss (via actor)
+        2. PPO value loss (via critic)
+        3. Auxiliary MSE: ||z_hat[3:6] - z_true||^2 (direct supervision)
+    """
+
+    class_name: str = "SinglePhaseTDCRunner"
+
+    seed = 42
+    num_steps_per_env = 32
+    max_iterations = 1500
+    save_interval = 50
+    experiment_name = "hero_agent_single_phase_tdc"
+    empirical_normalization = False
+
+    obs_groups = {
+        "policy": ["policy", "privileged"],
+        "critic": ["policy", "privileged"],
+    }
+
+    policy = RslRlPpoActorCriticEncoderTDCAdaptCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.005,
+        num_learning_epochs=8,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
+
+    # -- Single-phase specific parameters --
+
+    aux_mhat_loss_weight: float = 1.0
+    """Weight for auxiliary MSE loss on z_hat[3:6] vs ground truth physics params.
+    At 1.0, aux loss is on the same scale as surrogate + value losses."""
+
+    z_true_privileged_indices: tuple[int, ...] = (21, 14, 15)
+    """Indices into privileged obs (26D) for z_true [buoy_m_A, main_Ixx, main_Iyy]."""
+
+
+# =============================================================================
 # Unified TDC: General Encoder + Policy-Output M_hat/Kp/Kd
 # =============================================================================
 
@@ -353,7 +424,7 @@ class HeroAgentUnifiedTDCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.01,
+        entropy_coef=0.005,
         num_learning_epochs=8,
         num_mini_batches=4,
         learning_rate=3.0e-4,

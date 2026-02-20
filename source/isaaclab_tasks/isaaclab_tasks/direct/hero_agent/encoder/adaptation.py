@@ -54,12 +54,20 @@ class ProprioAdaptTConv(nn.Module):
     2. Temporal aggregation (1D convolutions)
     3. Low-dimensional projection to latent z
 
-    The Conv1d architecture reduces temporal dimension:
-        H=30 -> Conv(k=9,s=2) -> 11 -> Conv(k=5,s=1) -> 7 -> Conv(k=5,s=1) -> 3
+    Conv1d kernel/stride presets by history_len:
+        H=30: kernels=[9,5,5], strides=[2,1,1] -> 11 -> 7 -> 3
+        H=15: kernels=[3,3,3], strides=[2,1,1] -> 7 -> 5 -> 3
     """
 
-    KERNELS = [9, 5, 5]
-    STRIDES = [2, 1, 1]
+    # Default kernels/strides for H=30 (original HORA)
+    DEFAULT_KERNELS = [9, 5, 5]
+    DEFAULT_STRIDES = [2, 1, 1]
+
+    # Presets for common history lengths
+    _PRESETS: dict[int, tuple[list[int], list[int]]] = {
+        30: ([9, 5, 5], [2, 1, 1]),  # -> 11 -> 7 -> 3
+        15: ([3, 3, 3], [2, 1, 1]),  # -> 7 -> 5 -> 3
+    }
 
     def __init__(
         self,
@@ -67,8 +75,26 @@ class ProprioAdaptTConv(nn.Module):
         hidden_dim: int = 32,
         output_dim: int = 6,
         history_len: int = 30,
+        conv_kernels: list[int] | None = None,
+        conv_strides: list[int] | None = None,
     ):
         super().__init__()
+
+        # Auto-select kernels/strides from preset if not explicitly provided
+        if conv_kernels is None or conv_strides is None:
+            if history_len in self._PRESETS:
+                kernels, strides = self._PRESETS[history_len]
+            else:
+                kernels, strides = self.DEFAULT_KERNELS, self.DEFAULT_STRIDES
+        else:
+            kernels, strides = conv_kernels, conv_strides
+
+        final_time_steps = _compute_conv_output_len(history_len, kernels, strides)
+        if final_time_steps < 1:
+            raise ValueError(
+                f"Conv kernels {kernels} with strides {strides} produce 0 output "
+                f"for history_len={history_len}. Use smaller kernels."
+            )
 
         self.channel_transform = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -77,16 +103,12 @@ class ProprioAdaptTConv(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        self.temporal_aggregation = nn.Sequential(
-            nn.Conv1d(hidden_dim, hidden_dim, self.KERNELS[0], stride=self.STRIDES[0]),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(hidden_dim, hidden_dim, self.KERNELS[1], stride=self.STRIDES[1]),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(hidden_dim, hidden_dim, self.KERNELS[2], stride=self.STRIDES[2]),
-            nn.ReLU(inplace=True),
-        )
+        layers: list[nn.Module] = []
+        for k, s in zip(kernels, strides):
+            layers.append(nn.Conv1d(hidden_dim, hidden_dim, k, stride=s))
+            layers.append(nn.ReLU(inplace=True))
+        self.temporal_aggregation = nn.Sequential(*layers)
 
-        final_time_steps = _compute_conv_output_len(history_len, self.KERNELS, self.STRIDES)
         self.low_dim_proj = nn.Linear(hidden_dim * final_time_steps, output_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

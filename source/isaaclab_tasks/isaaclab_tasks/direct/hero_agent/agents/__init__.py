@@ -14,6 +14,7 @@ This module provides:
     - HeroAgentEncoderTDCPPORunnerCfg: Encoder-TDC integration
     - HeroAgentUnifiedTDCPPORunnerCfg: General encoder + RL-output M_hat/Kp/Kd
     - HeroAgentAdaptTDCRunnerCfg: Phase 2 adaptation (supervised, non-PPO)
+    - HeroAgentSinglePhaseTDCRunnerCfg: Single-phase joint training (PPO + aux M_hat loss)
 """
 
 from ..encoder import ActorCriticEncoder, ActorCriticEncoderTDC, ActorCriticEncoderTDCAdapt
@@ -22,6 +23,7 @@ from .rsl_rl_ppo_cfg import (
     HeroAgentEncoderPPORunnerCfg,
     HeroAgentEncoderTDCPPORunnerCfg,
     HeroAgentPPORunnerCfg,
+    HeroAgentSinglePhaseTDCRunnerCfg,
     HeroAgentUnifiedTDCPPORunnerCfg,
     RslRlPpoActorCriticEncoderCfg,
     RslRlPpoActorCriticEncoderTDCAdaptCfg,
@@ -38,6 +40,7 @@ __all__ = [
     "HeroAgentEncoderTDCPPORunnerCfg",
     "HeroAgentUnifiedTDCPPORunnerCfg",
     "HeroAgentAdaptTDCRunnerCfg",
+    "HeroAgentSinglePhaseTDCRunnerCfg",
     "RslRlPpoActorCriticEncoderCfg",
     "RslRlPpoActorCriticEncoderTDCCfg",
     "RslRlPpoActorCriticEncoderTDCAdaptCfg",

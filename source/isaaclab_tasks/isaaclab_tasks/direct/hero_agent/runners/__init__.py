@@ -7,5 +7,6 @@
 
 from .adapt_runner import AdaptRunner
 from .encoder_runner import EncoderRunner
+from .single_phase_runner import SinglePhaseTDCRunner
 
-__all__ = ["EncoderRunner", "AdaptRunner"]
+__all__ = ["EncoderRunner", "AdaptRunner", "SinglePhaseTDCRunner"]

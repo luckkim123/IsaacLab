@@ -75,6 +75,20 @@ class ALBCRewardCfg:
     # Keep at 0.0 for attitude control: robot needs angular velocity to correct errors.
     angular_velocity_weight: float = 0.0
 
+    # TDC stability gate: multiply total reward by 0 when |1 - M_hat/M_true| >= 1
+    # Only effective in TDC envs. Based on Baek et al. (ACC 2022).
+    stability_gate_enable: bool = False
+
+    # -- TDC-specific rewards (defaults 0.0: inactive in base RL envs) --
+
+    # M_hat accuracy reward (Cauchy/Gaussian kernel on relative error, dt-scaled)
+    mhat_accuracy_weight: float = 0.0
+    mhat_accuracy_sigma: float = 0.5
+    mhat_accuracy_kernel: str = "cauchy"
+
+    # TDC torque penalty: ||tau_desired||^2 (actual control effort, dt-scaled)
+    tdc_torque_weight: float = 0.0
+
     # Curriculum
     curriculum_end_iter: int = 200
 
@@ -381,6 +395,27 @@ def angular_velocity_penalty(
     return torch.sum(robot.data.root_ang_vel_b**2, dim=-1)
 
 
+def tdc_torque_penalty(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+    **_kwargs,
+) -> torch.Tensor:
+    """Mean of squared TDC desired torque (tau_desired = U_hat + delta_T_b + M_hat*u_pd).
+
+    Penalizes large control effort from the TDC controller. Unlike action_magnitude
+    which penalizes raw gain logits (meaningless for TDC), this penalizes the actual
+    physical torque command.
+
+    dt-scaled (instantaneous quality measure). Use with negative weight.
+    Requires: env._tdc (TDCController with pd_torque, u_hat, delta_T_b properties).
+
+    Returns:
+        (num_envs,) penalty value (positive; apply negative weight).
+    """
+    tau = env._tdc.pd_torque + env._tdc.u_hat + env._tdc.delta_T_b
+    return torch.mean(tau**2, dim=-1)
+
+
 # =============================================================================
 # Encoder-TDC Exclusive Reward Functions
 # =============================================================================
@@ -435,3 +470,40 @@ def mhat_accuracy_reward(
         return 1.0 / (1.0 + score)
     else:
         return torch.exp(-score)
+
+
+def compute_stability_gate(env: HeroAgentEnv) -> torch.Tensor:
+    """Compute TDC stability gate: 1.0 if stable, 0.0 if violated.
+
+    TDC stability condition (diagonal form):
+        |1 - M_hat_i / M_true_i| < 1  for each axis i in {roll, pitch}
+
+    Equivalent to: 0 < M_hat / M_true < 2 (M_hat within 2x of true value).
+
+    Based on Baek et al. (ACC 2022): when stability condition is violated,
+    total reward is zeroed as a hard gate, forcing the policy to learn
+    parameters that satisfy the stability constraint.
+
+    Requires: env._tdc, env._kinematics, env._hydro, env._buoy_hydro.
+
+    Args:
+        env: TDC environment instance.
+
+    Returns:
+        Gate mask (num_envs,): 1.0 if all axes stable, 0.0 if any axis violated.
+    """
+    joint_pos = env._robot.data.joint_pos[:, env._albc_joint_ids]
+    p_EE = env._kinematics.forward(joint_pos)
+
+    M_true = compute_M_bb(
+        I_ROV=env._hydro.rigid_body_inertia[:, :2],
+        m_A=env._buoy_hydro.added_mass_matrix[:, 0, 0],
+        x_bu=p_EE[:, 0],
+        y_bu=p_EE[:, 1],
+        h=env.cfg.tdc.h,
+    )
+
+    M_hat = env._tdc._m_hat
+    ratio = M_hat / M_true.clamp(min=1e-6)
+    stability_norm = (1.0 - ratio).abs().max(dim=-1).values
+    return (stability_norm < 1.0).float()

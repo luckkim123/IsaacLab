@@ -42,7 +42,7 @@ from isaaclab_assets.robots.uuv import (
 )
 
 from .controllers import TDCControllerCfg
-from .mdp import ALBCRewardCfg, EncoderTDCRewardCfg
+from .mdp import ALBCRewardCfg
 
 
 @configclass
@@ -311,9 +311,6 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # Initialization and Termination
     # ==========================================================================
     initial_height: float = 4.5
-    min_height: float = -10.0
-    max_height: float = 10.0
-    max_distance_from_origin: float = 10.0
     max_angular_velocity: float = 3.14159  # rad/s (~180 deg/s); terminate if roll/pitch rate exceeds this
     max_attitude_angle: float = 1.5708  # rad (~90 deg), prevents Lambda sign reversal
 
@@ -460,11 +457,19 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTrainEnvCfg):
     kd_max: float = 20.0
     kd_default: float = 12.0
 
-    # Encoder-TDC specific reward config (adjusted weights + TDE residual)
-    reward: EncoderTDCRewardCfg = EncoderTDCRewardCfg()
+    # Reward config: tracking + action regularization + stability gate.
+    # Matches Unified-TDC settings (proven effective).
+    reward: ALBCRewardCfg = ALBCRewardCfg(
+        action_magnitude_weight=-0.5,
+        action_rate_weight=-0.025,
+        stability_gate_enable=True,
+    )
 
-    # TDC-specific DR: higher joint gains (Kp=200, Kd=10), no action latency
-    randomization: DomainRandomizationCfg = _tdc_randomization()
+    # DR curriculum: ramp DR difficulty over training iterations
+    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=True)
+
+    # Standard DR (same as Encoder-Base, not TDC-specific)
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg(enable=True)
 
 
 @configclass
@@ -496,8 +501,14 @@ class HeroAgentUnifiedTDCEnvCfg(HeroAgentTrainEnvCfg):
     kp_range: tuple[float, float] = (10.0, 100.0)
     kd_range: tuple[float, float] = (2.0, 30.0)
 
-    # Same reward as Encoder-Base (ALBCRewardCfg default)
-    reward: ALBCRewardCfg = ALBCRewardCfg()
+    # Halved action penalties vs Encoder-Base: 6D sigmoid actions have
+    # inherently larger raw magnitudes (~2.4) than 2D joint velocities (~0.7).
+    # Stability gate enabled: reward zeroed when |1 - M_hat/M_true| >= 1.
+    reward: ALBCRewardCfg = ALBCRewardCfg(
+        action_magnitude_weight=-0.5,
+        action_rate_weight=-0.025,
+        stability_gate_enable=True,
+    )
 
     # DR curriculum enabled (same as Encoder-Base)
     dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=True)
@@ -513,7 +524,23 @@ class HeroAgentAdaptTDCEnvCfg(HeroAgentEncoderTDCEnvCfg):
     Adds proprioception history buffer for the adaptation module.
     Per-timestep feature (12D):
         [roll(1), pitch(1), p(1), q(1), joint_pos_norm(2), joint_vel(2), actions(4)]
+
+    Stability gate disabled: in single-phase training, M_hat starts wrong and
+    the gate would zero out all reward, preventing policy learning. The aux MSE
+    loss on z[3:6] handles M_hat accuracy directly.
     """
 
-    proprio_history_len: int = 30
+    proprio_history_len: int = 15
     proprio_feature_dim: int = 12  # body(4) + joint_pos(2) + joint_vel(2) + actions(4)
+
+    # TDC-specific reward design:
+    # - action_magnitude REMOVED: penalizing gain logits is meaningless for TDC
+    # - tdc_torque ADDED: penalizes actual control effort (||tau_desired||^2)
+    # - action_rate KEPT: prevents gain chattering
+    # - stability_gate ON: gates reward by M_hat stability condition (Baek et al. ACC 2022)
+    reward: ALBCRewardCfg = ALBCRewardCfg(
+        action_magnitude_weight=0.0,
+        action_rate_weight=-0.025,
+        stability_gate_enable=True,
+        tdc_torque_weight=-0.02,
+    )

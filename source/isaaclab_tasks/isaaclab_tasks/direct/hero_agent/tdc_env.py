@@ -29,7 +29,7 @@ from .base_env import HeroAgentEnv
 from .config import HeroAgentTDCEnvCfg
 from .controllers import ALBCKinematics, TDCController
 from .controllers.tdc import compute_M_hat_from_z
-from .mdp import RewardTermCfg, mhat_accuracy_reward
+from .mdp import RewardTermCfg, compute_stability_gate, mhat_accuracy_reward, tdc_torque_penalty
 from .utils.logging import log_tdc_control_state, log_tdc_init, log_tdc_reset_info
 
 
@@ -91,6 +91,11 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         # Encoder policy reference (set by runner via set_encoder_policy)
         self._encoder_policy = None
 
+        # Stability gate episode tracking (gate=1 means reward passed through)
+        if cfg.reward.stability_gate_enable:
+            self._gate_episode_sum = torch.zeros(self.num_envs, device=self.device)
+            self._gate_episode_steps = torch.zeros(self.num_envs, device=self.device)
+
     def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
         """Build reward terms: base terms + M_hat accuracy if configured."""
         terms = super()._build_reward_terms()
@@ -104,7 +109,52 @@ class HeroAgentTDCEnv(HeroAgentEnv):
                 params={"sigma": rcfg.mhat_accuracy_sigma, "kernel": kernel},
             )
 
+        if hasattr(rcfg, "tdc_torque_weight") and rcfg.tdc_torque_weight != 0.0:
+            terms["tdc_torque"] = RewardTermCfg(
+                func=tdc_torque_penalty,
+                weight=rcfg.tdc_torque_weight,
+            )
+
         return terms
+
+    def _get_rewards(self) -> torch.Tensor:
+        """Compute rewards with optional TDC stability gate.
+
+        When stability_gate_enable is True, total reward is multiplied by a
+        binary gate: 1.0 if |1 - M_hat/M_true| < 1 on all axes, 0.0 otherwise.
+        This forces the policy to learn M_hat values within the stable region.
+
+        Based on Baek et al., "RL-based Adaptive TDC" (ACC 2022).
+        """
+        reward = super()._get_rewards()
+
+        if self.cfg.reward.stability_gate_enable:
+            gate = compute_stability_gate(self)
+            reward = reward * gate
+
+            # Track gate fraction for instantaneous logging
+            self._stability_gate_frac = 1.0 - gate.mean().item()
+
+            # Accumulate per-episode gate statistics
+            self._gate_episode_sum += gate
+            self._gate_episode_steps += 1
+
+        return reward
+
+    def _collect_episode_metrics(
+        self, env_ids: torch.Tensor, reward_sums: dict[str, torch.Tensor]
+    ) -> dict[str, float | torch.Tensor]:
+        """Add stability gate open fraction to episode metrics."""
+        log = super()._collect_episode_metrics(env_ids, reward_sums)
+
+        if self.cfg.reward.stability_gate_enable and len(env_ids) > 0:
+            steps = self._gate_episode_steps[env_ids]
+            sums = self._gate_episode_sum[env_ids]
+            valid = steps > 0
+            open_frac = torch.where(valid, sums / steps, torch.ones_like(steps))
+            log["Episode_Reward/stability_gate_open_frac"] = open_frac.mean().item()
+
+        return log
 
     def set_encoder_policy(self, policy: object) -> None:
         """Register the encoder policy for z -> M_hat extraction.
@@ -245,6 +295,11 @@ class HeroAgentTDCEnv(HeroAgentEnv):
 
         # Update buoyancy force for reset envs (may have changed from DR)
         self._tdc.update_controller_params(F_bu=self._buoy_hydro.buoyancy_force[env_ids_], env_ids=env_ids_)
+
+        # Reset stability gate episode accumulators (logging already happened in super)
+        if self.cfg.reward.stability_gate_enable:
+            self._gate_episode_sum[env_ids_] = 0
+            self._gate_episode_steps[env_ids_] = 0
 
     def _compute_m_hat_from_encoder_z(self, z_decomposed: torch.Tensor) -> torch.Tensor:
         """Compute M_hat from decomposed encoder z components + current FK joint positions.

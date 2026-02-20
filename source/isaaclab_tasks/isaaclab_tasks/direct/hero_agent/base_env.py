@@ -746,21 +746,11 @@ class HeroAgentEnv(DirectRLEnv):
         """Compute termination conditions.
 
         Termination triggers:
-            1. Height out of bounds (z < min_height or z > max_height)
-            2. Horizontal distance from origin exceeds max_distance_from_origin
-            3. Angular velocity exceeds max_angular_velocity (simulation instability)
-            4. NaN detected in root state (PhysX failure)
-            5. Attitude angle exceeds max_attitude_angle (prevents Lambda sign reversal)
+            1. Angular velocity exceeds max_angular_velocity (simulation instability)
+            2. NaN detected in root state (PhysX failure)
+            3. Attitude angle exceeds max_attitude_angle (prevents Lambda sign reversal)
         """
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-
-        # Height bounds check
-        height = self._robot.data.root_pos_w[:, 2]
-        out_of_height_bounds = (height < self.cfg.min_height) | (height > self.cfg.max_height)
-
-        # Horizontal distance from origin check
-        xy_displacement = self._robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
-        too_far = torch.linalg.norm(xy_displacement, dim=1) > self.cfg.max_distance_from_origin
 
         # Angular velocity check (roll/pitch rate)
         ang_vel_rp = self._robot.data.root_ang_vel_b[:, :2]
@@ -778,7 +768,7 @@ class HeroAgentEnv(DirectRLEnv):
         roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
         excessive_tilt = (roll.abs() > self.cfg.max_attitude_angle) | (pitch.abs() > self.cfg.max_attitude_angle)
 
-        return out_of_height_bounds | too_far | too_fast | bad_state | excessive_tilt, time_out
+        return too_fast | bad_state | excessive_tilt, time_out
 
     def _coerce_env_ids(self, env_ids: torch.Tensor | None) -> torch.Tensor:
         """Normalize env_ids to a concrete tensor.

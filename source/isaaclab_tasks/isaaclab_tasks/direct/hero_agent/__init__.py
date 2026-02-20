@@ -17,6 +17,7 @@ Available Tasks:
     - Isaac-HeroAgent-Encoder-TDC-v0: Encoder-TDC integration (RL adaptive gains + M_hat)
     - Isaac-HeroAgent-Unified-TDC-v0: General encoder + RL-output M_hat/Kp/Kd
     - Isaac-HeroAgent-Adapt-TDC-v0: Phase 2 adaptation (proprio history -> z_hat)
+    - Isaac-HeroAgent-SinglePhase-TDC-v0: Single-phase joint training (PPO + aux M_hat loss)
 """
 
 import gymnasium as gym
@@ -116,6 +117,17 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentAdaptTDCEnvCfg",
         "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentAdaptTDCRunnerCfg",
+    },
+)
+
+# Single-phase: Joint adapt_tconv + actor/critic with aux M_hat loss (no Phase 1)
+gym.register(
+    id="Isaac-HeroAgent-SinglePhase-TDC-v0",
+    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentAdaptTDCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentAdaptTDCEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentSinglePhaseTDCRunnerCfg",
     },
 )
 

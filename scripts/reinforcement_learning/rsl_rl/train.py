@@ -196,7 +196,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     # create runner from rsl-rl
-    if agent_cfg.class_name == "OnPolicyRunner":
+    if agent_cfg.class_name == "SinglePhaseTDCRunner":
+        from isaaclab_tasks.direct.hero_agent.runners import SinglePhaseTDCRunner
+
+        print("[INFO] Using SinglePhaseTDCRunner for single-phase Encoder-TDC training.")
+        runner = SinglePhaseTDCRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    elif agent_cfg.class_name == "OnPolicyRunner":
         # Hero Agent tasks use EncoderRunner for curriculum + encoder logging
         is_hero_agent = args_cli.task.startswith("Isaac-HeroAgent") if args_cli.task else False
         policy_class_name = getattr(agent_cfg.policy, "class_name", None)

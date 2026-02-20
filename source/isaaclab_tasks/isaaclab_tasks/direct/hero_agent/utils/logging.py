@@ -302,9 +302,13 @@ def log_tdc_diagnostics(
                 h=env.cfg.tdc.h,
             )
             M_hat = tdc._m_hat
-            ratio = M_bb / M_hat.clamp(min=1e-6)
+            ratio = M_hat / M_bb.clamp(min=1e-6)
             stability_norm = (1.0 - ratio).abs().max(dim=-1).values
             log["TDC/stability_violated_frac"] = (stability_norm >= 1.0).float().mean().item()
+
+            # Log active stability gate fraction (only when gate is enabled and affecting rewards)
+            if hasattr(env, "_stability_gate_frac"):
+                log["TDC/stability_gate_frac"] = env._stability_gate_frac
 
 
 # =============================================================================
