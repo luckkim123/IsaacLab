@@ -14,13 +14,16 @@ Architecture:
         Input: (N, H, D) proprioception history (D=12 for ALBC)
         -> channel_transform: per-timestep MLP (D -> 32 -> 32)
         -> temporal_aggregation: 3x Conv1d (H -> 3 time steps)
-        -> low_dim_proj: Linear(32*3 -> 6)
-        -> softplus + z_min: guarantees z > z_min (matching encoder output space)
+        -> low_dim_proj: Linear(32*3 -> output_dim)
+        -> raw output (activation applied externally)
 
     ActorCriticEncoderTDCAdapt:
         Overrides _get_combined_obs() to use adapt_tconv(proprio_hist) instead
-        of _encode(privileged). The frozen encoder is still available via
-        compute_z_gt() for supervised training.
+        of _encode(privileged). z_hat activation uses sigmoid scaling with
+        per-dim min/max ranges for bounded positive output.
+
+        The frozen encoder is still available via compute_z_gt() for
+        supervised training.
 
 Reference:
     HORA ProprioAdaptTConv (references/hora/hora/algo/models/models.py)
@@ -118,7 +121,7 @@ class ProprioAdaptTConv(nn.Module):
             x: Proprioception history. Shape: (N, H, input_dim).
 
         Returns:
-            Raw latent vector (before softplus). Shape: (N, output_dim).
+            Raw latent vector (before activation). Shape: (N, output_dim).
         """
         x = self.channel_transform(x)  # (N, H, hidden_dim)
         x = x.permute(0, 2, 1)  # (N, hidden_dim, H) for Conv1d
@@ -127,19 +130,39 @@ class ProprioAdaptTConv(nn.Module):
 
 
 class ActorCriticEncoderTDCAdapt(ActorCriticEncoderTDC):
-    """Phase 2 network: adaptation module replaces encoder for z estimation.
+    """Phase 2 / single-phase network: adaptation module replaces encoder for z estimation.
 
-    During Phase 2 training:
-        - adapt_tconv is trainable (supervised L2 loss against frozen encoder z)
-        - All other weights (encoder, actor, critic) are frozen
+    During single-phase training:
+        - adapt_tconv is trainable (PPO gradient via actor/critic + aux MSE loss)
         - _get_combined_obs() uses z_hat from adapt_tconv (not z from encoder)
+        - z_hat is NOT detached: PPO gradient flows through z_hat to adapt_tconv
         - get_last_z() transparently returns z_hat for env M_hat extraction
+
+    Gradient sources for adapt_tconv:
+        1. PPO surrogate loss (via actor -> z_hat -> adapt_tconv)
+        2. PPO value loss (via critic -> z_hat -> adapt_tconv)
+        3. Aux MSE loss (z_hat vs z_true from privileged obs)
+
+    z_hat activation: sigmoid scaling with per-dim [min, max] ranges.
+    sigmoid(0) = 0.5 -> midpoint of each range at initialization.
+    Unlike softplus, sigmoid naturally bounds output and avoids the
+    vanishing gradient collapse that caused z_hat to stick at z_min.
 
     The frozen encoder remains available via compute_z_gt() for computing
     the supervision target during training.
     """
 
-    def __init__(self, *args, proprio_history_len: int = 30, proprio_feature_dim: int = 12, **kwargs) -> None:
+    # Default ranges for 3D decomposed output [m_A, I_roll, I_pitch]
+    _DEFAULT_Z_HAT_RANGES = [(0.01, 0.5), (0.005, 0.3), (0.005, 0.3)]
+
+    def __init__(
+        self,
+        *args,
+        proprio_history_len: int = 30,
+        proprio_feature_dim: int = 12,
+        z_hat_ranges: list[tuple[float, float]] | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
 
         self.adapt_tconv = ProprioAdaptTConv(
@@ -149,6 +172,18 @@ class ActorCriticEncoderTDCAdapt(ActorCriticEncoderTDC):
             history_len=proprio_history_len,
         )
 
+        # Sigmoid output ranges: z_hat = min + sigmoid(raw) * (max - min)
+        ranges = z_hat_ranges if z_hat_ranges is not None else self._DEFAULT_Z_HAT_RANGES
+        if len(ranges) != self.encoder_latent_dim:
+            raise ValueError(
+                f"z_hat_ranges length ({len(ranges)}) must match "
+                f"encoder_latent_dim ({self.encoder_latent_dim})"
+            )
+        z_min = torch.tensor([r[0] for r in ranges], dtype=torch.float32)
+        z_max = torch.tensor([r[1] for r in ranges], dtype=torch.float32)
+        self.register_buffer("_z_hat_min", z_min)
+        self.register_buffer("_z_hat_max", z_max)
+
         self._proprio_hist_key = "proprio_hist"
         self._last_z_hat: torch.Tensor | None = None
 
@@ -156,14 +191,24 @@ class ActorCriticEncoderTDCAdapt(ActorCriticEncoderTDC):
         """Use z_hat from adaptation module instead of z from encoder.
 
         The adapt_tconv processes proprioception history to produce z_hat,
-        which replaces the encoder output. softplus + z_min maps the raw
-        output to the same positive space as the Phase 1 encoder.
+        which replaces the encoder output.
+
+        Activation: sigmoid scaling with per-dim [min, max] ranges.
+        z_hat = z_min + sigmoid(raw) * (z_max - z_min).
+        At initialization (raw near 0), sigmoid(0) = 0.5 maps to the
+        midpoint of each range -- a safe starting point near typical
+        physical parameter values.
+
+        z_hat is NOT detached: PPO gradient flows through z_hat into
+        adapt_tconv, providing additional learning signal beyond the
+        aux MSE loss. Separate gradient clipping (adapt_max_grad_norm)
+        prevents PPO gradient from dominating adapt_tconv updates.
         """
         policy_obs = obs[self._policy_obs_key]
         z_hat_raw = self.adapt_tconv(obs[self._proprio_hist_key])
-        z_hat = self._softplus_z(z_hat_raw)
-        self._last_z = z_hat  # For env M_hat extraction via get_last_z()
-        self._last_z_hat = z_hat  # For loss computation in runner
+        z_hat = self._z_hat_min + torch.sigmoid(z_hat_raw) * (self._z_hat_max - self._z_hat_min)
+        self._last_z = z_hat  # For aux loss and env M_hat extraction
+        self._last_z_hat = z_hat
         return torch.cat([policy_obs, z_hat], dim=-1)
 
     def compute_z_gt(self, obs: TensorDict) -> torch.Tensor:

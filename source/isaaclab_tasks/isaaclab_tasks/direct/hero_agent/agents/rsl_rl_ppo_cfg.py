@@ -105,6 +105,11 @@ class RslRlPpoActorCriticEncoderTDCAdaptCfg(_RslRlPpoEncoderBaseCfg):
     proprio_history_len: int = 15
     proprio_feature_dim: int = 12
 
+    # Sigmoid output ranges for z_hat dimensions.
+    # Each tuple = (min, max) for one latent dim.
+    # Default 3D: [m_A, I_roll, I_pitch] decomposed physical params.
+    z_hat_ranges: list[tuple[float, float]] | None = None
+
 
 # =============================================================================
 # Runner Configurations
@@ -201,7 +206,7 @@ class HeroAgentEncoderTDCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for Encoder-TDC integration.
 
     Uses ActorCriticEncoderTDC that:
-        - Encodes privileged (26D) -> z (6D), z[3:6] decomposed -> M_hat via FK
+        - Encodes privileged (26D) -> z (6D), _extract_z_decomposed(z) -> M_hat via FK
         - Actor: cat([policy_obs, z]) = 19D -> 4D gains (Kp_r, Kp_p, Kd_r, Kd_p)
         - Critic: cat([policy_obs, z]) = 19D -> value (symmetric)
     """
@@ -308,18 +313,21 @@ class HeroAgentSinglePhaseTDCRunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for single-phase Encoder-TDC training.
 
     Trains adapt_tconv + actor + critic jointly via PPO with auxiliary MSE loss
-    on z[3:6]. No Phase 1 teacher required.
+    on z_hat. No Phase 1 teacher required.
 
     Network (ActorCriticEncoderTDCAdapt):
-        - adapt_tconv: proprio_hist (N, 30, 12) -> z_hat (6D, softplus + z_min)
-        - z_hat[3:6] + FK -> M_hat (2D) -> TDC controller
-        - Actor: cat([policy_obs, z_hat]) = 19D -> 4D [Kp_r, Kp_p, Kd_r, Kd_p]
-        - Critic: cat([policy_obs, z_hat]) = 19D -> value
+        - adapt_tconv: proprio_hist (N, 15, 12) -> z_hat (3D, sigmoid scaling)
+        - z_hat = [m_A, I_roll, I_pitch] + FK -> M_hat (2D) -> TDC controller
+        - Actor: cat([policy_obs, z_hat]) = 16D -> 4D [Kp_r, Kp_p, Kd_r, Kd_p]
+        - Critic: cat([policy_obs, z_hat]) = 16D -> value
 
     Gradient sources for adapt_tconv:
-        1. PPO surrogate loss (via actor)
-        2. PPO value loss (via critic)
-        3. Auxiliary MSE: ||z_hat[3:6] - z_true||^2 (direct supervision)
+        1. PPO surrogate loss (via actor -> z_hat -> adapt_tconv)
+        2. PPO value loss (via critic -> z_hat -> adapt_tconv)
+        3. Aux MSE: ||z_hat - z_true||^2 (direct supervision)
+
+    Separate grad clipping: adapt_max_grad_norm=10.0 for adapt_tconv,
+    max_grad_norm=1.0 for actor/critic (prevents gradient starvation).
     """
 
     class_name: str = "SinglePhaseTDCRunner"
@@ -343,6 +351,8 @@ class HeroAgentSinglePhaseTDCRunnerCfg(RslRlOnPolicyRunnerCfg):
         actor_hidden_dims=[256, 128, 64],
         critic_hidden_dims=[256, 128, 64],
         activation="elu",
+        encoder_latent_dim=3,
+        z_hat_ranges=[(0.01, 0.5), (0.005, 0.3), (0.005, 0.3)],
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
@@ -362,11 +372,15 @@ class HeroAgentSinglePhaseTDCRunnerCfg(RslRlOnPolicyRunnerCfg):
     # -- Single-phase specific parameters --
 
     aux_mhat_loss_weight: float = 1.0
-    """Weight for auxiliary MSE loss on z_hat[3:6] vs ground truth physics params.
+    """Weight for auxiliary MSE loss on z_hat vs ground truth physics params.
     At 1.0, aux loss is on the same scale as surrogate + value losses."""
 
     z_true_privileged_indices: tuple[int, ...] = (21, 14, 15)
     """Indices into privileged obs (26D) for z_true [buoy_m_A, main_Ixx, main_Iyy]."""
+
+    adapt_max_grad_norm: float = 10.0
+    """Separate gradient clipping for adapt_tconv. Relaxed vs PPO (1.0) to prevent
+    combined clipping from starving adapt_tconv of gradient signal."""
 
 
 # =============================================================================
@@ -379,8 +393,9 @@ class RslRlPpoActorCriticUnifiedTDCCfg(_RslRlPpoEncoderBaseCfg):
     """PPO actor-critic configuration for Unified TDC.
 
     Same encoder as Encoder-Base: ReLU+softplus, 13D latent z (z > z_min).
-    Actor receives [policy_obs(13D) + z(13D)] = 26D and outputs 6D TDC params:
-        [M_hat(2), Kp(2), Kd(2)] decoded via sigmoid scaling.
+    Actor receives [policy_obs(13D) + z(13D)] = 26D and outputs 7D TDC params:
+        [m_A(1), I_roll(1), I_pitch(1), Kp(2), Kd(2)] decoded via sigmoid scaling.
+    M_hat computed from decomposed components via parallel axis theorem + FK.
     """
 
     class_name: str = "ActorCriticEncoderTDC"
@@ -394,9 +409,10 @@ class HeroAgentUnifiedTDCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for Unified TDC.
 
     Same as HeroAgentEncoderPPORunnerCfg (ReLU+softplus encoder, same PPO params)
-    except actor outputs 6D TDC params instead of 2D joint velocities:
+    except actor outputs 7D TDC params instead of 2D joint velocities:
         - Encodes privileged (26D) -> softplus -> z (13D), z > z_min
-        - Actor: cat([policy_obs, z]) = 26D -> 6D [M_hat(2), Kp(2), Kd(2)]
+        - Actor: cat([policy_obs, z]) = 26D -> 7D [m_A(1), I_r(1), I_p(1), Kp(2), Kd(2)]
+        - [m_A, I_roll, I_pitch] + FK -> M_hat (parallel axis theorem)
         - Critic: cat([policy_obs, z]) = 26D -> value (symmetric)
     """
 

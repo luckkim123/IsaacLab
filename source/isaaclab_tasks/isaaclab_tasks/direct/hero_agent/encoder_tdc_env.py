@@ -66,15 +66,29 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
         # Flag: True = this env needs z[3:6] latched on next control step
         self._needs_z_latch = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
 
+    def _extract_z_decomposed(self, z: torch.Tensor) -> torch.Tensor:
+        """Extract decomposed [m_A, I_roll, I_pitch] from encoder z.
+
+        For the Encoder-TDC env, z is 6D and dims 3:6 contain the decomposed
+        physical parameters. Override in subclasses with different z layouts.
+
+        Args:
+            z: Full latent vector from encoder/adaptation. Shape: (num_envs, latent_dim).
+
+        Returns:
+            Decomposed components [m_A, I_roll, I_pitch]. Shape: (num_envs, 3).
+        """
+        return z[:, 3:6]
+
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Convert RL actions to TDC gains, extract M_hat from encoder z.
 
-        M_hat uses episode-latched z[3:6] (physical constants) combined with
-        current FK position (which changes as joints move). z[3:6] is latched
+        M_hat uses episode-latched decomposed z (physical constants) combined with
+        current FK position (which changes as joints move). Decomposed z is latched
         on the first control step after each env reset.
 
         Steps:
-            1. Latch z[3:6] for newly-reset envs, compute M_hat from latched z + FK
+            1. Latch decomposed z for newly-reset envs, compute M_hat from latched z + FK
             2. Convert 4D RL actions to TDC gains via softplus + max clamp
             3. Run TDC control pipeline (inherited mechanics)
 
@@ -91,16 +105,18 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
         if self._encoder_policy is not None:
             z = self._encoder_policy.get_last_z()
             if z is not None:
-                # Latch z[3:6] for envs that just reset
+                z_decomposed = self._extract_z_decomposed(z)
+
+                # Latch decomposed z for envs that just reset
                 if self._needs_z_latch.any():
                     latch_ids = self._needs_z_latch.nonzero(as_tuple=False).squeeze(-1)
                     if self._latched_z_decomposed is None:
-                        self._latched_z_decomposed = z[:, 3:6].clone()
+                        self._latched_z_decomposed = z_decomposed.clone()
                     else:
-                        self._latched_z_decomposed[latch_ids] = z[latch_ids, 3:6]
+                        self._latched_z_decomposed[latch_ids] = z_decomposed[latch_ids]
                     self._needs_z_latch[latch_ids] = False
 
-                # Compute M_hat from latched z[3:6] + current FK position
+                # Compute M_hat from latched decomposed z + current FK position
                 if self._latched_z_decomposed is not None:
                     self._encoder_z_decomposed = self._latched_z_decomposed
                     m_hat = self._compute_m_hat_from_encoder_z(self._latched_z_decomposed)

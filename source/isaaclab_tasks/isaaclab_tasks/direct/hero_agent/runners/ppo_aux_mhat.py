@@ -3,25 +3,27 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""PPO with auxiliary MSE loss on z[3:6] for direct M_hat supervision.
+"""PPO with auxiliary MSE loss on z_hat for direct M_hat supervision.
 
 Subclasses RSL-RL's PPO to inject an auxiliary MSE loss between the adaptation
-module's z_hat[3:6] and ground truth decomposed physics parameters from
-privileged observations. This provides a direct gradient signal for the
-adapt_tconv module to learn M_hat-relevant parameters, bypassing the TDE
-Robustness Paradox where TDC's error correction makes reward insensitive to
-M_hat accuracy.
+module's z_hat and ground truth decomposed physics parameters from privileged
+observations. This provides a direct gradient signal for the adapt_tconv module
+to learn M_hat-relevant parameters, bypassing the TDE Robustness Paradox where
+TDC's error correction makes reward insensitive to M_hat accuracy.
 
 Gradient flow through adapt_tconv:
-    1. PPO surrogate loss -> act() -> adapt_tconv -> z_hat -> actor -> log_prob
-    2. PPO value loss -> evaluate() -> adapt_tconv -> z_hat -> critic -> value
-    3. Aux MSE loss -> z_hat[3:6] vs z_true (privileged obs indices)
-    All three losses backprop through adapt_tconv parameters jointly.
+    1. PPO surrogate loss (via actor -> z_hat -> adapt_tconv)
+    2. PPO value loss (via critic -> z_hat -> adapt_tconv)
+    3. Aux MSE loss (z_hat vs z_true from privileged obs)
+
+    z_hat is NOT detached: all three gradient sources reach adapt_tconv.
+    Separate gradient clipping (adapt_max_grad_norm) prevents PPO gradient
+    from dominating adapt_tconv updates.
 
 z_true mapping (from compute_privileged_obs):
-    z[3] = m_A (buoy added mass) -> privileged[:, 21]
-    z[4] = I_roll (main body Ixx) -> privileged[:, 14]
-    z[5] = I_pitch (main body Iyy) -> privileged[:, 15]
+    z_hat[0] = m_A (buoy added mass) -> privileged[:, 21]
+    z_hat[1] = I_roll (main body Ixx) -> privileged[:, 14]
+    z_hat[2] = I_pitch (main body Iyy) -> privileged[:, 15]
 
 Note:
     This file overrides PPO.update() from rsl_rl v2.3.0. If upgrading RSL-RL,
@@ -38,15 +40,15 @@ from rsl_rl.algorithms.ppo import PPO
 
 
 class PPOWithMHatAuxLoss(PPO):
-    """PPO with auxiliary MSE loss on z[3:6] for M_hat supervision.
+    """PPO with auxiliary MSE loss on z_hat for M_hat supervision.
 
     Extends the standard PPO loss with:
         loss_total = surrogate + value_coef * value_loss - entropy_coef * entropy
-                   + aux_mhat_weight * MSE(z_hat[3:6], z_true)
+                   + aux_mhat_weight * MSE(z_hat, z_true)
 
     The aux loss provides a direct supervised signal to the adapt_tconv module,
     enabling M_hat learning that PPO reward alone cannot achieve (TDE Robustness
-    Paradox).
+    Paradox). Uses separate gradient clipping for adapt_tconv parameters.
     """
 
     def __init__(
@@ -55,22 +57,27 @@ class PPOWithMHatAuxLoss(PPO):
         aux_mhat_weight: float = 1.0,
         z_true_priv_indices: tuple[int, ...] = (21, 14, 15),
         privileged_key: str = "privileged",
+        adapt_max_grad_norm: float = 10.0,
         **kwargs,
     ):
         """Initialize PPO with auxiliary M_hat loss.
 
         Args:
             policy: ActorCriticEncoderTDCAdapt network.
-            aux_mhat_weight: Weight for the auxiliary MSE loss on z[3:6].
+            aux_mhat_weight: Weight for the auxiliary MSE loss on z_hat.
             z_true_priv_indices: Indices into privileged obs for z_true.
                 Default (21, 14, 15) maps to [buoy_m_A, main_Ixx, main_Iyy].
             privileged_key: Key in obs TensorDict for privileged observations.
+            adapt_max_grad_norm: Separate gradient clipping for adapt_tconv.
+                Relaxed vs PPO (1.0) to prevent combined clipping from
+                starving adapt_tconv of gradient signal.
             **kwargs: Forwarded to PPO.__init__().
         """
         super().__init__(policy, **kwargs)
         self.aux_mhat_weight = aux_mhat_weight
         self.z_true_priv_indices = list(z_true_priv_indices)
         self._privileged_key = privileged_key
+        self.adapt_max_grad_norm = adapt_max_grad_norm
 
     def update(self) -> dict[str, float]:
         mean_value_loss = 0
@@ -181,12 +188,13 @@ class PPOWithMHatAuxLoss(PPO):
             # AUXILIARY M_HAT LOSS (single-phase Encoder-TDC extension)
             # z_hat is set by evaluate() -> _get_combined_obs() -> adapt_tconv
             # z_true comes from privileged obs (ground truth physics params)
+            # With 3D output, z_hat IS the decomposed [m_A, I_roll, I_pitch].
             # ================================================================
             if self.aux_mhat_weight > 0:
-                z_hat = self.policy._last_z[:original_batch_size]  # (batch, 6)
+                z_hat = self.policy._last_z[:original_batch_size]  # (batch, latent_dim)
                 priv = obs_batch[self._privileged_key][:original_batch_size]  # (batch, 26)
                 z_true = priv[:, self.z_true_priv_indices]  # (batch, 3)
-                aux_mhat_loss = F.mse_loss(z_hat[:, 3:6], z_true)
+                aux_mhat_loss = F.mse_loss(z_hat, z_true)
                 loss = loss + self.aux_mhat_weight * aux_mhat_loss
             else:
                 aux_mhat_loss = torch.tensor(0.0, device=self.device)
@@ -229,7 +237,17 @@ class PPOWithMHatAuxLoss(PPO):
                 rnd_loss.backward()
             if self.is_multi_gpu:
                 self.reduce_parameters()
-            nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+
+            # Separate gradient clipping: adapt_tconv uses relaxed threshold
+            # to prevent PPO gradient norm from dominating and zeroing
+            # adapt_tconv updates via combined clip_grad_norm_.
+            adapt_params = [p for n, p in self.policy.named_parameters() if "adapt_tconv" in n and p.grad is not None]
+            other_params = [p for n, p in self.policy.named_parameters() if "adapt_tconv" not in n and p.grad is not None]
+            if adapt_params:
+                nn.utils.clip_grad_norm_(adapt_params, self.adapt_max_grad_norm)
+            if other_params:
+                nn.utils.clip_grad_norm_(other_params, self.max_grad_norm)
+
             self.optimizer.step()
             if self.rnd_optimizer:
                 self.rnd_optimizer.step()

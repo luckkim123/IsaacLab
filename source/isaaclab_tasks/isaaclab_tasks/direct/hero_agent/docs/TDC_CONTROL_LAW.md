@@ -278,11 +278,11 @@ $$\mathbf{p}_{EE,t}=\Lambda^{-1}_t\left[\Lambda_{t-L}\mathbf{p}_{EE,t-L}-\bar{M}
 | `dls_lambda_damping` | 0.01 | Lambda DLS damping |
 | `ik_dls_lambda` | 0.15 | IK DLS 최대 damping |
 | `nu_dot_ema_alpha` | 0.05 | 각가속도 필터 계수 |
-| `max_joint_velocity` | 3.0 | Rate limiter (rad/s) |
-| `base_position` | (0.0, 0.0) | EE 기본 위치 (m) |
+| `max_joint_velocity` | 2.5 | Rate limiter (rad/s) |
+| `base_position` | (0.002, 0.002) | EE 기본 위치 (m) |
 | TDC dt | 0.02 s (50 Hz) | `step_dt * control_decimation` |
 
 ---
 
 **Created**: 2026-02-09
-**Updated**: 2026-02-11 (Consolidated from research notes 04, 05. Implementation extensions verified against code.)
+**Updated**: 2026-02-21 (Synced parameter table with TDCControllerCfg actual values.)

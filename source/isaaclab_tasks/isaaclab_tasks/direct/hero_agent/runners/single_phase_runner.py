@@ -7,17 +7,19 @@
 
 Unlike the two-phase HORA approach (Phase 1: privileged encoder + RL, Phase 2:
 supervised adaptation), this runner trains all components jointly in one phase:
-    - adapt_tconv: proprio_hist -> z_hat (gradient from PPO + aux MSE loss)
+    - adapt_tconv: proprio_hist -> z_hat (3D: [m_A, I_roll, I_pitch])
     - actor: policy_obs + z_hat -> Kp/Kd (gradient from PPO surrogate loss)
     - critic: policy_obs + z_hat -> value (gradient from PPO value loss)
     - encoder: UNUSED (exists in module for checkpoint compatibility)
 
-The auxiliary MSE loss on z[3:6] provides direct gradient for M_hat-relevant
-parameters, bypassing the TDE Robustness Paradox where TDC's error correction
-makes PPO reward insensitive to M_hat accuracy.
+Gradient flow:
+    - z_hat is NOT detached: PPO gradient flows through actor/critic -> z_hat -> adapt_tconv
+    - Aux MSE loss provides additional supervised signal on z_hat
+    - Separate gradient clipping (adapt_max_grad_norm=10.0) prevents PPO gradient
+      norm from dominating and starving adapt_tconv of gradient signal
 
 Extends OnPolicyRunner with:
-    1. PPOWithMHatAuxLoss instead of standard PPO
+    1. PPOWithMHatAuxLoss instead of standard PPO (separate grad clip)
     2. RunningMeanStd normalizer for proprio_hist (applied during rollout)
     3. connect_encoder_to_env for M_hat extraction
     4. DR curriculum and TDC metric logging
@@ -57,7 +59,7 @@ class SinglePhaseTDCRunner(OnPolicyRunner):
     adapt_tconv(proprio_hist), not from encoder(privileged).
 
     Key differences from OnPolicyRunner:
-        - PPOWithMHatAuxLoss: aux MSE loss on z[3:6] for M_hat supervision
+        - PPOWithMHatAuxLoss: aux MSE loss on z_hat for M_hat supervision
         - RunningMeanStd: normalizes proprio_hist before policy forward passes
         - connect_encoder_to_env: wires z_hat -> env for M_hat extraction
         - DR/reward curriculum: ramps difficulty over training iterations
@@ -67,6 +69,7 @@ class SinglePhaseTDCRunner(OnPolicyRunner):
         # Extract single-phase config before super().__init__ pops dict keys
         self._aux_mhat_weight = train_cfg.get("aux_mhat_loss_weight", 1.0)
         self._z_true_indices = tuple(train_cfg.get("z_true_privileged_indices", (21, 14, 15)))
+        self._adapt_max_grad_norm = train_cfg.get("adapt_max_grad_norm", 10.0)
         self._proprio_shape = (
             train_cfg["policy"].get("proprio_history_len", 30),
             train_cfg["policy"].get("proprio_feature_dim", 12),
@@ -116,6 +119,7 @@ class SinglePhaseTDCRunner(OnPolicyRunner):
             actor_critic,
             aux_mhat_weight=self._aux_mhat_weight,
             z_true_priv_indices=self._z_true_indices,
+            adapt_max_grad_norm=self._adapt_max_grad_norm,
             device=self.device,
             **self.alg_cfg,
             multi_gpu_cfg=self.multi_gpu_cfg,
@@ -279,7 +283,7 @@ class SinglePhaseTDCRunner(OnPolicyRunner):
             z_hat = getattr(self.alg.policy, "_last_z", None)
             if z_hat is not None:
                 with torch.no_grad():
-                    for i in range(min(z_hat.shape[-1], 6)):
+                    for i in range(z_hat.shape[-1]):
                         self.writer.add_scalar(f"z_hat/dim{i}_mean", z_hat[:, i].mean().item(), iteration)
                         self.writer.add_scalar(f"z_hat/dim{i}_std", z_hat[:, i].std().item(), iteration)
 

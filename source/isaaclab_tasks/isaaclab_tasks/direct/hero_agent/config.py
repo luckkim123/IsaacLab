@@ -474,16 +474,17 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTrainEnvCfg):
 
 @configclass
 class HeroAgentUnifiedTDCEnvCfg(HeroAgentTrainEnvCfg):
-    """Unified TDC: Encoder + RL-output M_hat/Kp/Kd.
+    """Unified TDC: Encoder + RL-output decomposed M_hat components + Kp/Kd.
 
     Identical to HeroAgentEncoderTrainEnvCfg (same encoder, DR, rewards,
     DR curriculum) except:
         1. TDC controller is appended to the control pipeline
-        2. Actor outputs 6D TDC params instead of 2D joint velocities:
-            [M_hat(2), Kp(2), Kd(2)] decoded via sigmoid scaling
+        2. Actor outputs 7D TDC params instead of 2D joint velocities:
+            [m_A(1), I_roll(1), I_pitch(1), Kp(2), Kd(2)] decoded via sigmoid
+        3. M_hat computed from decomposed components via parallel axis theorem
 
     Encoder: privileged(26D) -> ReLU+softplus -> z(13D), same as Encoder-Base.
-    Actor: cat([policy_obs(13D), z(13D)]) = 26D -> 6D TDC params.
+    Actor: cat([policy_obs(13D), z(13D)]) = 26D -> 7D TDC params.
 
     DR is identical to Encoder-Base (same joint gains, action latency, etc.).
     Action latency is applied to raw TDC param logits before sigmoid decoding.
@@ -493,15 +494,18 @@ class HeroAgentUnifiedTDCEnvCfg(HeroAgentTrainEnvCfg):
     control_decimation: int = 4  # 50Hz TDC
 
     state_space: int = 26  # privileged obs for encoder
-    action_space: int = 6  # [M_hat(2), Kp(2), Kd(2)]
+    action_space: int = 7  # [m_A(1), I_roll(1), I_pitch(1), Kp(2), Kd(2)]
     observation_space: int = 13  # policy obs
 
-    # Parameter bounds (after sigmoid scaling in env)
-    m_hat_range: tuple[float, float] = (0.05, 0.5)
+    # Decomposed M_hat component ranges (after sigmoid scaling in env)
+    m_A_range: tuple[float, float] = (0.01, 0.5)
+    I_range: tuple[float, float] = (0.005, 0.3)
+
+    # Gain ranges (after sigmoid scaling in env)
     kp_range: tuple[float, float] = (10.0, 100.0)
     kd_range: tuple[float, float] = (2.0, 30.0)
 
-    # Halved action penalties vs Encoder-Base: 6D sigmoid actions have
+    # Halved action penalties vs Encoder-Base: 7D sigmoid actions have
     # inherently larger raw magnitudes (~2.4) than 2D joint velocities (~0.7).
     # Stability gate enabled: reward zeroed when |1 - M_hat/M_true| >= 1.
     reward: ALBCRewardCfg = ALBCRewardCfg(
@@ -527,7 +531,7 @@ class HeroAgentAdaptTDCEnvCfg(HeroAgentEncoderTDCEnvCfg):
 
     Stability gate disabled: in single-phase training, M_hat starts wrong and
     the gate would zero out all reward, preventing policy learning. The aux MSE
-    loss on z[3:6] handles M_hat accuracy directly.
+    loss on z_hat handles M_hat accuracy directly.
     """
 
     proprio_history_len: int = 15
@@ -537,10 +541,10 @@ class HeroAgentAdaptTDCEnvCfg(HeroAgentEncoderTDCEnvCfg):
     # - action_magnitude REMOVED: penalizing gain logits is meaningless for TDC
     # - tdc_torque ADDED: penalizes actual control effort (||tau_desired||^2)
     # - action_rate KEPT: prevents gain chattering
-    # - stability_gate ON: gates reward by M_hat stability condition (Baek et al. ACC 2022)
+    # - stability_gate OFF: z_hat.detach() + aux loss handles M_hat learning
     reward: ALBCRewardCfg = ALBCRewardCfg(
         action_magnitude_weight=0.0,
         action_rate_weight=-0.025,
-        stability_gate_enable=True,
+        stability_gate_enable=False,
         tdc_torque_weight=-0.02,
     )

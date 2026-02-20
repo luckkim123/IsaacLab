@@ -36,13 +36,23 @@ from .encoder_tdc_env import HeroAgentEncoderTDCEnv
 
 
 class HeroAgentAdaptTDCEnv(HeroAgentEncoderTDCEnv):
-    """Phase 2 adaptation environment with proprioception history buffer.
+    """Phase 2 / single-phase adaptation environment with proprioception history buffer.
 
     Inherits the full Encoder-TDC pipeline (TDC init, kinematics, IK,
     rate-limiting, gain sigmoid scaling, M_hat extraction). Adds a ring
     buffer that accumulates proprioception features for the adaptation
     module to consume.
     """
+
+    def _extract_z_decomposed(self, z: torch.Tensor) -> torch.Tensor:
+        """Adapt output IS the decomposed components [m_A, I_roll, I_pitch].
+
+        In single-phase mode, adapt_tconv outputs 3D directly (no unused dims).
+        In phase-2 mode with 6D output, fall back to parent's z[:, 3:6] slicing.
+        """
+        if z.shape[-1] == 3:
+            return z
+        return super()._extract_z_decomposed(z)
 
     cfg: HeroAgentAdaptTDCEnvCfg
 
