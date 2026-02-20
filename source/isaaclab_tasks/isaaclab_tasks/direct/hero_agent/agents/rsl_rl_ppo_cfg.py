@@ -50,6 +50,11 @@ class _RslRlPpoEncoderBaseCfg(RslRlPpoActorCriticCfg):
     across 3 config classes.
     """
 
+    # Override inherited "scalar" -> "log" for numerical stability.
+    # scalar: self.std = nn.Parameter(...) can go negative/NaN under strong gradients.
+    # log: std = exp(log_std), always positive with continuous gradient flow.
+    noise_std_type: str = "log"
+
     encoder_hidden_dims: list[int] = [256, 128, 64]
     encoder_latent_dim: int = 6
     encoder_activation: str = "relu"
@@ -301,30 +306,31 @@ class HeroAgentAdaptTDCRunnerCfg(RslRlOnPolicyRunnerCfg):
 class RslRlPpoActorCriticUnifiedTDCCfg(_RslRlPpoEncoderBaseCfg):
     """PPO actor-critic configuration for Unified TDC.
 
-    General 13D latent z (no physics decomposition) with tanh output in [-1,1].
+    Same encoder as Encoder-Base: ReLU+softplus, 13D latent z (z > z_min).
     Actor receives [policy_obs(13D) + z(13D)] = 26D and outputs 6D TDC params:
         [M_hat(2), Kp(2), Kd(2)] decoded via sigmoid scaling.
     """
 
     class_name: str = "ActorCriticEncoderTDC"
     encoder_latent_dim: int = 13
-    encoder_output_activation: str = "tanh"
-    encoder_activation: str = "elu"
+    encoder_output_activation: str = "softplus"
+    encoder_activation: str = "relu"
 
 
 @configclass
 class HeroAgentUnifiedTDCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for Unified TDC.
 
-    Uses ActorCriticEncoderTDC with general 13D latent (ELU + tanh encoder):
-        - Encodes privileged (26D) -> z (13D) in [-1, 1]
+    Same as HeroAgentEncoderPPORunnerCfg (ReLU+softplus encoder, same PPO params)
+    except actor outputs 6D TDC params instead of 2D joint velocities:
+        - Encodes privileged (26D) -> softplus -> z (13D), z > z_min
         - Actor: cat([policy_obs, z]) = 26D -> 6D [M_hat(2), Kp(2), Kd(2)]
         - Critic: cat([policy_obs, z]) = 26D -> value (symmetric)
     """
 
     seed = 42
     num_steps_per_env = 32
-    max_iterations = 600
+    max_iterations = 1500
     save_interval = 50
     experiment_name = "hero_agent_unified_tdc"
     empirical_normalization = False

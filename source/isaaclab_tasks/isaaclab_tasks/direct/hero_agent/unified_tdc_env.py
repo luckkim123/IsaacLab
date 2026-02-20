@@ -3,17 +3,15 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Hero Agent Unified TDC Environment: General encoder + RL-output M_hat/Kp/Kd.
+"""Hero Agent Unified TDC Environment: Encoder + RL-output M_hat/Kp/Kd.
 
-This module combines encoder-based context compression with direct TDC parameter
-output from the RL policy:
-- Encoder produces general 13D latent z (no physics interpretation)
-- Policy receives [policy_obs(13D) + z(13D)] = 26D and outputs 6D:
+Identical to Encoder-Base (same encoder, DR, rewards, DR curriculum) except:
+1. TDC controller is appended to the control pipeline
+2. Actor outputs 6D TDC params instead of 2D joint velocities:
     [M_hat(2), Kp(2), Kd(2)] decoded via sigmoid scaling
-- TDC controller uses these adaptive parameters for attitude stabilization
 
 Data Flow:
-    Privileged (18D) -> Encoder [ELU + tanh] -> z (13D), z in [-1, 1]
+    Privileged (26D) -> Encoder [ReLU + softplus] -> z (13D), z > z_min
     policy_obs (13D) + z (13D) -> Actor -> 6D raw params
         sigmoid -> M_hat(2D), Kp(2D), Kd(2D)
         M_hat -> TDC.update_controller_params()
@@ -23,7 +21,7 @@ Data Flow:
 Key simplifications vs Encoder-TDC:
 - z is general latent (no decomposed m_A/I_roll/I_pitch)
 - M_hat from actor output directly (no FK + parallel axis theorem)
-- Encoder uses ELU+tanh (not ReLU+softplus)
+- No episode-level z latching (z not physically interpreted)
 """
 
 from __future__ import annotations
@@ -59,11 +57,9 @@ class HeroAgentUnifiedTDCEnv(HeroAgentTDCEnv):
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Decode 6D actions into TDC params and run TDC pipeline.
 
-        Steps:
-            1. Decode M_hat from actions[:, 0:2] via sigmoid
-            2. Decode Kp from actions[:, 2:4] via sigmoid
-            3. Decode Kd from actions[:, 4:6] via sigmoid
-            4. Run TDC control pipeline
+        Action latency is applied before TDC param decoding (same mechanism as
+        Encoder-Base). The delayed raw logits are then sigmoid-decoded into
+        M_hat/Kp/Kd values.
 
         Args:
             actions: RL actions [M_hat_r, M_hat_p, Kp_r, Kp_p, Kd_r, Kd_p]. Shape: (num_envs, 6).
@@ -74,16 +70,19 @@ class HeroAgentUnifiedTDCEnv(HeroAgentTDCEnv):
         if self._control_step_counter % self.cfg.control_decimation != 0:
             return
 
+        # Apply action latency (same as Encoder-Base)
+        effective_actions = self._get_delayed_actions(self._actions)
+
         # --- 1. Decode M_hat from actions via sigmoid scaling ---
-        m_hat_raw = actions[:, :2]
+        m_hat_raw = effective_actions[:, :2]
         m_min, m_max = self.cfg.m_hat_range
         m_hat = m_min + torch.sigmoid(m_hat_raw) * (m_max - m_min)
         self._unified_m_hat = m_hat
         self._tdc.update_controller_params(m_hat=m_hat)
 
         # --- 2. Decode Kp, Kd from actions via sigmoid scaling ---
-        kp_raw = actions[:, 2:4]
-        kd_raw = actions[:, 4:6]
+        kp_raw = effective_actions[:, 2:4]
+        kd_raw = effective_actions[:, 4:6]
         kp_min, kp_max = self.cfg.kp_range
         kd_min, kd_max = self.cfg.kd_range
         kp = kp_min + torch.sigmoid(kp_raw) * (kp_max - kp_min)

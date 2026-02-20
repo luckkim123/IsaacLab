@@ -469,14 +469,19 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTrainEnvCfg):
 
 @configclass
 class HeroAgentUnifiedTDCEnvCfg(HeroAgentTrainEnvCfg):
-    """Unified TDC: General encoder + RL-output M_hat/Kp/Kd.
+    """Unified TDC: Encoder + RL-output M_hat/Kp/Kd.
 
-    Encoder produces general 13D latent z (no physics interpretation).
-    Actor receives [policy_obs + z] and outputs 6D TDC params via sigmoid:
-        [M_hat(2), Kp(2), Kd(2)]
+    Identical to HeroAgentEncoderTrainEnvCfg (same encoder, DR, rewards,
+    DR curriculum) except:
+        1. TDC controller is appended to the control pipeline
+        2. Actor outputs 6D TDC params instead of 2D joint velocities:
+            [M_hat(2), Kp(2), Kd(2)] decoded via sigmoid scaling
 
-    Observation: policy(13D) via "policy" key, privileged(26D) via "privileged" key.
-    Action: [M_hat_r, M_hat_p, Kp_r, Kp_p, Kd_r, Kd_p] (6D).
+    Encoder: privileged(26D) -> ReLU+softplus -> z(13D), same as Encoder-Base.
+    Actor: cat([policy_obs(13D), z(13D)]) = 26D -> 6D TDC params.
+
+    DR is identical to Encoder-Base (same joint gains, action latency, etc.).
+    Action latency is applied to raw TDC param logits before sigmoid decoding.
     """
 
     tdc: TDCControllerCfg = TDCControllerCfg(log_interval=0)
@@ -491,10 +496,14 @@ class HeroAgentUnifiedTDCEnvCfg(HeroAgentTrainEnvCfg):
     kp_range: tuple[float, float] = (10.0, 100.0)
     kd_range: tuple[float, float] = (2.0, 30.0)
 
-    reward: EncoderTDCRewardCfg = EncoderTDCRewardCfg()
+    # Same reward as Encoder-Base (ALBCRewardCfg default)
+    reward: ALBCRewardCfg = ALBCRewardCfg()
 
-    # TDC-specific DR: higher joint gains (Kp=200, Kd=10), no action latency
-    randomization: DomainRandomizationCfg = _tdc_randomization()
+    # DR curriculum enabled (same as Encoder-Base)
+    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=True)
+
+    # Same DR as Encoder-Base (standard joint gains, action latency enabled)
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg(enable=True)
 
 
 @configclass

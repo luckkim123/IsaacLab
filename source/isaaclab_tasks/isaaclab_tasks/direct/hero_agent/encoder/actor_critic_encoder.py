@@ -252,11 +252,11 @@ class ActorCriticEncoder(nn.Module):
         """
         if self.state_dependent_std:
             if self.noise_std_type == "scalar":
-                return std_or_mean
+                return std_or_mean.clamp(min=1e-6)
             assert log_std is not None, "log_std required for state_dependent_std with log noise_std_type"
             return torch.exp(log_std)
         elif self.noise_std_type == "scalar":
-            return self.std.expand_as(std_or_mean)
+            return self.std.clamp(min=1e-6).expand_as(std_or_mean)
         else:
             return torch.exp(self.log_std).expand_as(std_or_mean)
 

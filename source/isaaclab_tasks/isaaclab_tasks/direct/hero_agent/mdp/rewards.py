@@ -60,10 +60,10 @@ class ALBCRewardCfg:
     tracking_sigma_start: float | None = None  # None = no sigma curriculum
 
     # Action magnitude penalty (dt-scaled)
-    action_magnitude_weight: float = -0.5
+    action_magnitude_weight: float = -1.0
 
     # Action rate penalty (NOT dt-scaled, curriculum: starts at 1/10)
-    action_rate_weight: float = -0.03
+    action_rate_weight: float = -0.05
 
     # Progress (potential-based shaping): tanh(delta / scale)
     # tanh prevents telescoping (raw delta cancels to ~0 over episode).
@@ -321,14 +321,14 @@ def action_rate_penalty(
     prev_actions: torch.Tensor,
     **_kwargs,
 ) -> torch.Tensor:
-    """Sum of squared action differences between consecutive steps.
+    """Mean of squared action differences between consecutive steps.
 
     Penalizes abrupt action changes to encourage smooth control.
-    NOT dt-scaled: per-step delta naturally scales with frequency
-    (halving dt -> halving delta -> quartering squared delta, but doubling steps).
+    Uses mean (not sum) so the penalty magnitude is independent of action_space dim.
+    NOT dt-scaled: per-step delta naturally scales with frequency.
     Use with negative weight.
     """
-    return torch.sum((actions - prev_actions) ** 2, dim=-1)
+    return torch.mean((actions - prev_actions) ** 2, dim=-1)
 
 
 def action_magnitude_penalty(
@@ -336,11 +336,12 @@ def action_magnitude_penalty(
     actions: torch.Tensor,
     **_kwargs,
 ) -> torch.Tensor:
-    """Sum of squared actions. Penalizes large control effort.
+    """Mean of squared actions. Penalizes large control effort.
 
+    Uses mean (not sum) so the penalty magnitude is independent of action_space dim.
     dt-scaled (instantaneous quality measure). Use with negative weight.
     """
-    return torch.sum(actions**2, dim=-1)
+    return torch.mean(actions**2, dim=-1)
 
 
 def progress_reward(

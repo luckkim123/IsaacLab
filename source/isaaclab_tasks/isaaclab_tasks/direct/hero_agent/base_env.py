@@ -750,6 +750,7 @@ class HeroAgentEnv(DirectRLEnv):
             2. Horizontal distance from origin exceeds max_distance_from_origin
             3. Angular velocity exceeds max_angular_velocity (simulation instability)
             4. NaN detected in root state (PhysX failure)
+            5. Attitude angle exceeds max_attitude_angle (prevents Lambda sign reversal)
         """
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
