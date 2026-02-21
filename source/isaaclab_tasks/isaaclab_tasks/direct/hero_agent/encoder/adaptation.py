@@ -11,7 +11,7 @@ This module provides:
 
 Architecture:
     ProprioAdaptTConv:
-        Input: (N, H, D) proprioception history (D=12 for ALBC)
+        Input: (N, H, D) proprioception history (D=6: roll, pitch, p, q, joint_cmd)
         -> channel_transform: per-timestep MLP (D -> 32 -> 32)
         -> temporal_aggregation: 3x Conv1d (H -> 3 time steps)
         -> low_dim_proj: Linear(32*3 -> output_dim)
@@ -164,7 +164,7 @@ class ActorCriticEncoderTDCAdapt(ActorCriticEncoderTDC):
         self,
         *args,
         proprio_history_len: int = 30,
-        proprio_feature_dim: int = 12,
+        proprio_feature_dim: int = 6,
         z_hat_ranges: list[tuple[float, float]] | None = None,
         z_hat_nominal: list[float] | None = None,
         **kwargs,
