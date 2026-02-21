@@ -55,7 +55,7 @@ class ALBCRewardCfg:
     """
 
     # Tracking (Gaussian kernel)
-    tracking_weight: float = 1.5
+    tracking_weight: float = 3.0
     tracking_sigma: float = 0.25
     tracking_sigma_start: float | None = None  # None = no sigma curriculum
 

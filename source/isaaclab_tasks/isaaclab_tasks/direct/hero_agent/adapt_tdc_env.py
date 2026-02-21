@@ -10,24 +10,23 @@ the adaptation module (student). The history stores per-timestep proprioception
 features that the temporal convolution network uses to estimate the latent z
 without access to privileged information.
 
-Data Flow (Phase 2):
-    proprio_hist (N, H, 12) -->  AdaptTConv  -->  z_hat (3D: [m_A, I_roll, I_pitch])
-    privileged (26D) --> Frozen Encoder --> z_gt (6D)   [supervision only]
-    z_hat --> [policy_obs + z_hat] --> Frozen Actor --> actions (4D)
-    z_hat + FK --> M_hat --> TDC Controller --> joint targets
+Data Flow (Single-Phase):
+    proprio_hist (N, H, 6) -->  AdaptTConv  -->  z_hat (3D: [m_A, I_roll, I_pitch])
+    z_hat + FK --> M_hat --> TDC Controller --> joint_pos_target
+    z_hat --> [policy_obs + z_hat] --> Actor --> actions (4D: Kp/Kd gains)
 
-History feature vector (12D per timestep):
-    [roll(1), pitch(1), p(1), q(1), joint_pos_normalized(2), joint_vel(2),
-     nu_dot_filtered(2), u_hat(2)]
+History feature vector (6D per timestep, all at 200Hz sim rate):
+    [roll(1), pitch(1), p(1), q(1), joint_pos_target(2)]
 
-TDC dynamics signals (nu_dot_filtered, u_hat) replace RL actions (gain logits)
-which carry no dynamics information. These signals are critical for observability:
-    - nu_dot = tau / M_true: angular acceleration directly encodes M_true
-    - U_hat = Lambda_prev @ p_EE_prev - M_hat * nu_dot: contains (M_true - M_hat)
-      error information via TDE one-step delay
-Without these signals, proprio history under TDC closed-loop control carries
-insufficient information to distinguish different M_true values (TDE Robustness
-Paradox at observation level).
+Design: pure input-output features (HORA-style, no controller internals).
+The adapt module learns dynamics from the command-response relationship:
+    - joint_pos_target (command): TDC output, 50Hz staircase in 200Hz history
+    - p, q (response): angular velocity, directly encodes M_true
+    - Same command + different M_true -> different angular velocity response
+
+Previous 12D design used nu_dot_filtered and u_hat (TDC internals), which
+created a circular dependency (u_hat depends on M_hat, M_hat depends on z_hat)
+and caused z_hat collapse to the population mean.
 """
 
 from __future__ import annotations
@@ -75,47 +74,29 @@ class HeroAgentAdaptTDCEnv(HeroAgentEncoderTDCEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Update history buffer before running the TDC control pipeline."""
-        self._update_proprio_hist(actions)
+        self._update_proprio_hist()
         super()._pre_physics_step(actions)
 
-    def _update_proprio_hist(self, actions: torch.Tensor) -> None:
+    def _update_proprio_hist(self) -> None:
         """Shift ring buffer left and append current proprioception features.
 
-        Features (12D):
-            - roll, pitch: body euler angles (rad)
+        Features (6D, all updated at 200Hz sim rate):
+            - roll, pitch: body euler angles from IMU (rad)
             - p, q: body angular velocities in body frame (rad/s)
-            - joint_pos_normalized: joint positions normalized to [-1, 1]
-            - joint_vel: raw joint velocities (rad/s)
-            - nu_dot_filtered: TDC angular acceleration estimate (2D, from prev step)
-            - u_hat: TDE compensation torque (2D, from prev step)
-
-        TDC signals are from the previous control step (since _update_proprio_hist
-        runs before _run_tdc_pipeline). TDC updates every control_decimation steps,
-        so these values stay constant between updates. The temporal conv handles
-        this naturally.
+            - joint_pos_target: TDC-computed joint position targets (rad)
+              Updates at 50Hz (control_decimation=4), appears as staircase
+              in 200Hz history. The temporal conv learns to extract dynamics
+              from the command-response relationship.
         """
-        # Body orientation: roll, pitch (rad)
         roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
-        # Body angular velocity in body frame: p (roll rate), q (pitch rate)
         ang_vel_b = self._robot.data.root_ang_vel_b
         p = ang_vel_b[:, 0:1]
         q = ang_vel_b[:, 1:2]
 
-        # Joint positions normalized to [-1, 1]
-        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
-        joint_pos_norm = 2.0 * (joint_pos - self._joint_limits_lower) / self._joint_limits_range - 1.0
+        # Joint position targets from TDC controller (50Hz staircase)
+        joint_pos_target = self._joint_pos_targets  # (num_envs, 2)
 
-        # Joint velocities (raw rad/s)
-        joint_vel = self._robot.data.joint_vel[:, self._albc_joint_ids]
-
-        # TDC dynamics signals (from previous control step)
-        nu_dot = self._tdc._nu_dot_filtered  # (num_envs, 2)
-        u_hat = self._tdc._u_hat  # (num_envs, 2)
-
-        # Assemble 12D feature: [body(4), joint(4), tdc_dynamics(4)]
-        new_entry = torch.cat(
-            [roll.unsqueeze(-1), pitch.unsqueeze(-1), p, q, joint_pos_norm, joint_vel, nu_dot, u_hat], dim=-1
-        )
+        new_entry = torch.cat([roll.unsqueeze(-1), pitch.unsqueeze(-1), p, q, joint_pos_target], dim=-1)
 
         # Roll buffer left (oldest entry dropped) and insert new entry at end
         self._proprio_hist = torch.roll(self._proprio_hist, -1, dims=1)

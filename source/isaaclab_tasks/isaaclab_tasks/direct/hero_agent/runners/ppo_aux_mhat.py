@@ -219,12 +219,21 @@ class PPOWithMHatAuxLoss(PPO):
             # z_hat is set by evaluate() -> _get_combined_obs() -> adapt_tconv
             # z_true comes from privileged obs (ground truth physics params)
             # With 3D output, z_hat IS the decomposed [m_A, I_roll, I_pitch].
+            #
+            # Normalized MSE: both z_hat and z_true are mapped to [0,1] using
+            # the sigmoid output ranges. This equalizes the gradient contribution
+            # across dims with different physical scales (m_A ~1.5 vs Ixx ~0.04).
             # ================================================================
             if self.aux_mhat_weight > 0:
                 z_hat = self.policy._last_z[:original_batch_size]  # (batch, latent_dim)
                 priv = obs_batch[self._privileged_key][:original_batch_size]  # (batch, 26)
                 z_true = priv[:, self.z_true_priv_indices]  # (batch, 3)
-                aux_mhat_loss = F.mse_loss(z_hat, z_true)
+                # Normalize to [0,1] using sigmoid output ranges
+                z_min = self.policy._z_hat_min  # (latent_dim,)
+                z_range = self.policy._z_hat_max - z_min  # (latent_dim,)
+                z_hat_norm = (z_hat - z_min) / z_range
+                z_true_norm = (z_true - z_min) / z_range
+                aux_mhat_loss = F.mse_loss(z_hat_norm, z_true_norm)
                 loss = loss + self.aux_mhat_weight * aux_mhat_loss
             else:
                 aux_mhat_loss = torch.tensor(0.0, device=self.device)

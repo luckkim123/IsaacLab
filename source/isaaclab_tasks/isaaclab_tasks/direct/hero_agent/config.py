@@ -516,16 +516,20 @@ class HeroAgentAdaptTDCEnvCfg(HeroAgentEncoderTDCEnvCfg):
     """Phase 2 adaptation training config.
 
     Adds proprioception history buffer for the adaptation module.
-    Per-timestep feature (12D):
-        [roll(1), pitch(1), p(1), q(1), joint_pos_norm(2), joint_vel(2), actions(4)]
+    Per-timestep feature (6D):
+        [roll(1), pitch(1), p(1), q(1), joint_pos_target(2)]
 
-    Stability gate disabled: in single-phase training, M_hat starts wrong and
-    the gate would zero out all reward, preventing policy learning. The aux MSE
-    loss on z_hat handles M_hat accuracy directly.
+    Pure input-output features (no controller internals):
+        - Body state (roll, pitch): measured by IMU
+        - Angular velocity (p, q): response to commands, encodes M_true
+        - Joint position target: TDC command output (50Hz staircase in 200Hz history)
+
+    The temporal conv learns dynamics from the command-response relationship:
+    same joint target with different M_true produces different angular velocity.
     """
 
     proprio_history_len: int = 30
-    proprio_feature_dim: int = 12  # body(4) + joint(4) + nu_dot(2) + u_hat(2)
+    proprio_feature_dim: int = 6  # body_state(2) + ang_vel(2) + joint_cmd(2)
 
     # TDC-specific reward design:
     # - action_magnitude REMOVED: penalizing gain logits is meaningless for TDC
@@ -537,6 +541,7 @@ class HeroAgentAdaptTDCEnvCfg(HeroAgentEncoderTDCEnvCfg):
     dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=False)
 
     reward: ALBCRewardCfg = ALBCRewardCfg(
+        tracking_sigma=0.15,
         action_magnitude_weight=0.0,
         action_rate_weight=-0.025,
         stability_gate_enable=True,
