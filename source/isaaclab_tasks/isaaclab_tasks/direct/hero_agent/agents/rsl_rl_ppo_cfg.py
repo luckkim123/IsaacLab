@@ -110,6 +110,10 @@ class RslRlPpoActorCriticEncoderTDCAdaptCfg(_RslRlPpoEncoderBaseCfg):
     # Default 3D: [m_A, I_roll, I_pitch] decomposed physical params.
     z_hat_ranges: list[tuple[float, float]] | None = None
 
+    # Nominal values for bias initialization (logit of nominal -> sigmoid -> z_hat ≈ nominal).
+    # Default: [m_A=0.08, I_roll=0.04, I_pitch=0.05] from URDF + added mass.
+    z_hat_nominal: list[float] | None = None
+
 
 # =============================================================================
 # Runner Configurations

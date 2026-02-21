@@ -11,18 +11,23 @@ features that the temporal convolution network uses to estimate the latent z
 without access to privileged information.
 
 Data Flow (Phase 2):
-    proprio_hist (N, H, 12) -->  AdaptTConv  -->  z_hat (6D)
-    privileged (25D) --> Frozen Encoder --> z_gt (6D)   [supervision only]
+    proprio_hist (N, H, 16) -->  AdaptTConv  -->  z_hat (3D or 6D)
+    privileged (26D) --> Frozen Encoder --> z_gt (6D)   [supervision only]
     z_hat --> [policy_obs + z_hat] --> Frozen Actor --> actions (4D)
     z_hat[3:6] + FK --> M_hat --> TDC Controller --> joint targets
 
 History feature vector (12D per timestep):
-    [roll(1), pitch(1), p(1), q(1), joint_pos_normalized(2), joint_vel(2), actions(4)]
+    [roll(1), pitch(1), p(1), q(1), joint_pos_normalized(2), joint_vel(2),
+     nu_dot_filtered(2), u_hat(2)]
 
-Body orientation (roll, pitch) and angular rates (p, q) are included because they
-directly reveal hydrodynamic parameter effects: restoring torque T_b manifests in
-roll/pitch response, and effective inertia M_eff manifests in angular acceleration.
-Arm joint state alone provides only indirect information about body dynamics.
+TDC dynamics signals (nu_dot_filtered, u_hat) replace RL actions (gain logits)
+which carry no dynamics information. These signals are critical for observability:
+    - nu_dot = tau / M_true: angular acceleration directly encodes M_true
+    - U_hat = Lambda_prev @ p_EE_prev - M_hat * nu_dot: contains (M_true - M_hat)
+      error information via TDE one-step delay
+Without these signals, proprio history under TDC closed-loop control carries
+insufficient information to distinguish different M_true values (TDE Robustness
+Paradox at observation level).
 """
 
 from __future__ import annotations
@@ -81,7 +86,13 @@ class HeroAgentAdaptTDCEnv(HeroAgentEncoderTDCEnv):
             - p, q: body angular velocities in body frame (rad/s)
             - joint_pos_normalized: joint positions normalized to [-1, 1]
             - joint_vel: raw joint velocities (rad/s)
-            - actions: current RL actions (4D: Kp_r, Kp_p, Kd_r, Kd_p)
+            - nu_dot_filtered: TDC angular acceleration estimate (2D, from prev step)
+            - u_hat: TDE compensation torque (2D, from prev step)
+
+        TDC signals are from the previous control step (since _update_proprio_hist
+        runs before _run_tdc_pipeline). TDC updates every control_decimation steps,
+        so these values stay constant between updates. The temporal conv handles
+        this naturally.
         """
         # Body orientation: roll, pitch (rad)
         roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
@@ -97,11 +108,14 @@ class HeroAgentAdaptTDCEnv(HeroAgentEncoderTDCEnv):
         # Joint velocities (raw rad/s)
         joint_vel = self._robot.data.joint_vel[:, self._albc_joint_ids]
 
-        # Actions (clamped to [-1, 1] for consistency)
-        act = actions.clamp(-1.0, 1.0)
+        # TDC dynamics signals (from previous control step)
+        nu_dot = self._tdc._nu_dot_filtered  # (num_envs, 2)
+        u_hat = self._tdc._u_hat  # (num_envs, 2)
 
-        # Assemble 12D feature: [roll, pitch, p, q, joint_pos_norm(2), joint_vel(2), actions(4)]
-        new_entry = torch.cat([roll.unsqueeze(-1), pitch.unsqueeze(-1), p, q, joint_pos_norm, joint_vel, act], dim=-1)
+        # Assemble 12D feature: [body(4), joint(4), tdc_dynamics(4)]
+        new_entry = torch.cat(
+            [roll.unsqueeze(-1), pitch.unsqueeze(-1), p, q, joint_pos_norm, joint_vel, nu_dot, u_hat], dim=-1
+        )
 
         # Roll buffer left (oldest entry dropped) and insert new entry at end
         self._proprio_hist = torch.roll(self._proprio_hist, -1, dims=1)

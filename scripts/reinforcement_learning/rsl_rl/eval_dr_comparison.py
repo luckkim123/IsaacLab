@@ -623,7 +623,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     # ---- Create runner + load policy ----
     if use_checkpoint and resume_path:
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-        runner.load(resume_path)
+        runner.load(resume_path, load_optimizer=False)
         policy = runner.get_inference_policy(device=device)
         try:
             policy_nn = runner.alg.policy

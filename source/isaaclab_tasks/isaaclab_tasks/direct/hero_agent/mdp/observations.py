@@ -112,7 +112,7 @@ def compute_privileged_obs(
     priv_obs.append(env._hydro.rigid_body_inertia)  # 3D: main Ixx, Iyy, Izz
     priv_obs.append(env._hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1))  # 1D: main m_A
     priv_obs.append(env._buoy_hydro.rigid_body_inertia)  # 3D: buoy Ixx, Iyy, Izz
-    priv_obs.append(env._buoy_hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1))  # 1D: buoy m_A
+    priv_obs.append(env._buoy_hydro.added_mass_matrix[:, 1, 1].unsqueeze(-1))  # 1D: buoy m_A (sway)
 
     # Include payload info if enabled and state_space is large enough
     if env._payload_mass is not None and env._payload_cog_offset is not None and env.cfg.state_space >= 26:

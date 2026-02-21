@@ -525,13 +525,17 @@ class HeroAgentAdaptTDCEnvCfg(HeroAgentEncoderTDCEnvCfg):
     """
 
     proprio_history_len: int = 30
-    proprio_feature_dim: int = 12  # body(4) + joint_pos(2) + joint_vel(2) + actions(4)
+    proprio_feature_dim: int = 12  # body(4) + joint(4) + nu_dot(2) + u_hat(2)
 
     # TDC-specific reward design:
     # - action_magnitude REMOVED: penalizing gain logits is meaningless for TDC
     # - tdc_torque REMOVED: u_hat (disturbance compensation) dominates tau, conflicts with tracking
     # - action_rate KEPT: prevents gain chattering
     # - stability_gate ON: forces M_hat within stable region (M_hat > M_true/2)
+    # Disable DR curriculum: let adapt_tconv learn full DR range from the start
+    # instead of racing against curriculum ramp that increases aux_mhat_loss.
+    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=False)
+
     reward: ALBCRewardCfg = ALBCRewardCfg(
         action_magnitude_weight=0.0,
         action_rate_weight=-0.025,

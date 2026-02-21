@@ -154,6 +154,9 @@ class ActorCriticEncoderTDCAdapt(ActorCriticEncoderTDC):
 
     # Default ranges for 3D decomposed output [m_A, I_roll, I_pitch]
     _DEFAULT_Z_HAT_RANGES = [(0.01, 0.5), (0.005, 0.3), (0.005, 0.3)]
+    # Nominal physical parameter values for bias initialization
+    # m_A ~ 0.08 (buoy added mass), I_roll ~ 0.04 (Ixx), I_pitch ~ 0.05 (Iyy)
+    _DEFAULT_Z_HAT_NOMINAL = [0.08, 0.04, 0.05]
 
     def __init__(
         self,
@@ -161,6 +164,7 @@ class ActorCriticEncoderTDCAdapt(ActorCriticEncoderTDC):
         proprio_history_len: int = 30,
         proprio_feature_dim: int = 12,
         z_hat_ranges: list[tuple[float, float]] | None = None,
+        z_hat_nominal: list[float] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -184,6 +188,20 @@ class ActorCriticEncoderTDCAdapt(ActorCriticEncoderTDC):
         self.register_buffer("_z_hat_min", z_min)
         self.register_buffer("_z_hat_max", z_max)
 
+        # Initialize low_dim_proj bias to logit of nominal values so that
+        # initial z_hat ≈ nominal physical parameters (not range midpoint).
+        # Weight scaled down so bias dominates initial output.
+        nominal = z_hat_nominal if z_hat_nominal is not None else self._DEFAULT_Z_HAT_NOMINAL
+        nominal_t = torch.tensor(nominal, dtype=torch.float32)
+        # sigmoid^{-1}(p) = log(p / (1-p))  where p = (nominal - z_min) / (z_max - z_min)
+        p = (nominal_t - z_min) / (z_max - z_min)
+        p = p.clamp(0.01, 0.99)  # numerical safety
+        logit_bias = torch.log(p / (1.0 - p))
+        with torch.no_grad():
+            self.adapt_tconv.low_dim_proj.bias.copy_(logit_bias)
+            # Scale down weights so initial output ≈ bias (network learns deviations)
+            self.adapt_tconv.low_dim_proj.weight.mul_(0.01)
+
         self._proprio_hist_key = "proprio_hist"
         self._last_z_hat: torch.Tensor | None = None
 
@@ -195,9 +213,9 @@ class ActorCriticEncoderTDCAdapt(ActorCriticEncoderTDC):
 
         Activation: sigmoid scaling with per-dim [min, max] ranges.
         z_hat = z_min + sigmoid(raw) * (z_max - z_min).
-        At initialization (raw near 0), sigmoid(0) = 0.5 maps to the
-        midpoint of each range -- a safe starting point near typical
-        physical parameter values.
+        At initialization, low_dim_proj bias is set to logit(nominal)
+        so z_hat starts near nominal physical parameter values
+        (not the range midpoint).
 
         z_hat is DETACHED before actor/critic input so PPO gradient does
         not interfere with aux loss supervision. _last_z stores the
