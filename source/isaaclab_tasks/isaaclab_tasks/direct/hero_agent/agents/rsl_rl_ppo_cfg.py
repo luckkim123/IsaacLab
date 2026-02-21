@@ -126,7 +126,7 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     seed = 42
     num_steps_per_env = 32
-    max_iterations = 600
+    max_iterations = 1500
     save_interval = 50
     experiment_name = "hero_agent_albc"
     empirical_normalization = False
@@ -135,8 +135,8 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         init_noise_std=1.0,
         actor_obs_normalization=False,
         critic_obs_normalization=False,
-        actor_hidden_dims=[128, 128],
-        critic_hidden_dims=[128, 128],
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
         activation="elu",
     )
     algorithm = RslRlPpoAlgorithmCfg(
@@ -150,7 +150,7 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
-        desired_kl=0.01,
+        desired_kl=0.02,
         max_grad_norm=1.0,
     )
 
@@ -189,14 +189,14 @@ class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.01,
+        entropy_coef=0.005,
         num_learning_epochs=8,
         num_mini_batches=4,
         learning_rate=3.0e-4,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
-        desired_kl=0.01,
+        desired_kl=0.02,
         max_grad_norm=1.0,
     )
 
@@ -213,7 +213,7 @@ class HeroAgentEncoderTDCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     seed = 42
     num_steps_per_env = 32
-    max_iterations = 600
+    max_iterations = 1500
     save_interval = 50
     experiment_name = "hero_agent_encoder_tdc"
     empirical_normalization = False
@@ -235,14 +235,14 @@ class HeroAgentEncoderTDCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.002,
+        entropy_coef=0.005,
         num_learning_epochs=8,
         num_mini_batches=4,
         learning_rate=3.0e-4,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
-        desired_kl=0.01,
+        desired_kl=0.02,
         max_grad_norm=1.0,
     )
 
@@ -457,6 +457,6 @@ class HeroAgentUnifiedTDCPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
-        desired_kl=0.01,
+        desired_kl=0.02,
         max_grad_norm=1.0,
     )

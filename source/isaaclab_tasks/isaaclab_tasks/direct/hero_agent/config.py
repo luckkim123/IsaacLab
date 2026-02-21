@@ -334,6 +334,7 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
     """Hero Agent ALBC training environment with domain randomization."""
 
     randomization = DomainRandomizationCfg(enable=True)
+    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=True)
     ocean_current = OceanCurrentCfg(
         max_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         noise_scale=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
@@ -375,7 +376,6 @@ class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
     """
 
     state_space: int = 26
-    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=True)
 
 
 # =============================================================================
@@ -465,11 +465,6 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTrainEnvCfg):
         stability_gate_enable=True,
     )
 
-    # DR curriculum: ramp DR difficulty over training iterations
-    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=True)
-
-    # Standard DR (same as Encoder-Base, not TDC-specific)
-    randomization: DomainRandomizationCfg = DomainRandomizationCfg(enable=True)
 
 
 @configclass
@@ -514,11 +509,6 @@ class HeroAgentUnifiedTDCEnvCfg(HeroAgentTrainEnvCfg):
         stability_gate_enable=True,
     )
 
-    # DR curriculum enabled (same as Encoder-Base)
-    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=True)
-
-    # Same DR as Encoder-Base (standard joint gains, action latency enabled)
-    randomization: DomainRandomizationCfg = DomainRandomizationCfg(enable=True)
 
 
 @configclass
