@@ -302,7 +302,7 @@ def log_tdc_diagnostics(
                 h=env.cfg.tdc.h,
             )
             M_hat = tdc._m_hat
-            ratio = M_hat / M_bb.clamp(min=1e-6)
+            ratio = M_bb / M_hat.clamp(min=1e-6)
             stability_norm = (1.0 - ratio).abs().max(dim=-1).values
             log["TDC/stability_violated_frac"] = (stability_norm >= 1.0).float().mean().item()
 
@@ -450,10 +450,11 @@ def log_encoder_tdc_metrics(
         metrics = {}
 
     with torch.no_grad():
-        # M_hat and Kp mean per axis (no std variants)
+        # M_hat, Kp, Kd mean per axis
         for i, axis in enumerate(_ROLL_PITCH):
             metrics[f"TDC/m_hat_{axis}_mean"] = tdc._m_hat[:, i].mean().item()
             metrics[f"TDC/kp_{axis}_mean"] = tdc._kp[:, i].mean().item()
+            metrics[f"TDC/kd_{axis}_mean"] = tdc._kd[:, i].mean().item()
 
         # M_hat vs true M_bb: relative MAE only (no correlation, no absolute MAE)
         if hasattr(raw_env, "_kinematics") and hasattr(raw_env, "_buoy_hydro"):

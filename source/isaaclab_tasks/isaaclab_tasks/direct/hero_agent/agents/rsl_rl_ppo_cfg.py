@@ -102,7 +102,7 @@ class RslRlPpoActorCriticEncoderTDCAdaptCfg(_RslRlPpoEncoderBaseCfg):
     class_name: str = "ActorCriticEncoderTDCAdapt"
 
     # Adaptation module parameters
-    proprio_history_len: int = 15
+    proprio_history_len: int = 30
     proprio_feature_dim: int = 12
 
     # Sigmoid output ranges for z_hat dimensions.
@@ -316,15 +316,15 @@ class HeroAgentSinglePhaseTDCRunnerCfg(RslRlOnPolicyRunnerCfg):
     on z_hat. No Phase 1 teacher required.
 
     Network (ActorCriticEncoderTDCAdapt):
-        - adapt_tconv: proprio_hist (N, 15, 12) -> z_hat (3D, sigmoid scaling)
+        - adapt_tconv: proprio_hist (N, 30, 12) -> z_hat (3D, sigmoid scaling)
         - z_hat = [m_A, I_roll, I_pitch] + FK -> M_hat (2D) -> TDC controller
         - Actor: cat([policy_obs, z_hat]) = 16D -> 4D [Kp_r, Kp_p, Kd_r, Kd_p]
         - Critic: cat([policy_obs, z_hat]) = 16D -> value
 
     Gradient sources for adapt_tconv:
-        1. PPO surrogate loss (via actor -> z_hat -> adapt_tconv)
-        2. PPO value loss (via critic -> z_hat -> adapt_tconv)
-        3. Aux MSE: ||z_hat - z_true||^2 (direct supervision)
+        - Aux MSE loss only (z_hat vs z_true from privileged obs)
+        - z_hat is DETACHED in _get_combined_obs(): PPO gradient does NOT
+          reach adapt_tconv. Only aux loss trains adapt_tconv.
 
     Separate grad clipping: adapt_max_grad_norm=10.0 for adapt_tconv,
     max_grad_norm=1.0 for actor/critic (prevents gradient starvation).
@@ -365,7 +365,7 @@ class HeroAgentSinglePhaseTDCRunnerCfg(RslRlOnPolicyRunnerCfg):
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
-        desired_kl=0.01,
+        desired_kl=0.02,
         max_grad_norm=1.0,
     )
 
@@ -381,6 +381,16 @@ class HeroAgentSinglePhaseTDCRunnerCfg(RslRlOnPolicyRunnerCfg):
     adapt_max_grad_norm: float = 10.0
     """Separate gradient clipping for adapt_tconv. Relaxed vs PPO (1.0) to prevent
     combined clipping from starving adapt_tconv of gradient signal."""
+
+    adapt_lr: float = 3e-4
+    """Fixed learning rate for adapt_tconv optimizer (Adam). Independent of
+    the KL-adaptive schedule that controls actor/critic LR. Prevents adapt_tconv
+    from being starved when actor KL spikes drive PPO LR to min."""
+
+    min_lr: float = 1e-4
+    """Minimum learning rate floor for PPO adaptive schedule. RSL-RL default is
+    1e-5 which causes LR death under aggressive DR. 1e-4 keeps actor/critic
+    learning even during KL spikes from DR curriculum."""
 
 
 # =============================================================================

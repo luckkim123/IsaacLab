@@ -475,14 +475,10 @@ def mhat_accuracy_reward(
 def compute_stability_gate(env: HeroAgentEnv) -> torch.Tensor:
     """Compute TDC stability gate: 1.0 if stable, 0.0 if violated.
 
-    TDC stability condition (diagonal form):
-        |1 - M_hat_i / M_true_i| < 1  for each axis i in {roll, pitch}
-
-    Equivalent to: 0 < M_hat / M_true < 2 (M_hat within 2x of true value).
-
-    Based on Baek et al. (ACC 2022): when stability condition is violated,
-    total reward is zeroed as a hard gate, forcing the policy to learn
-    parameters that satisfy the stability constraint.
+    TDC stability condition (Hsia & Gao 1990, diagonal form):
+        rho(I - M_hat^{-1} M_true) < 1
+        => |1 - M_true_i / M_hat_i| < 1  for each axis i in {roll, pitch}
+        => M_hat > M_true / 2  (underestimation is dangerous, not overestimation)
 
     Requires: env._tdc, env._kinematics, env._hydro, env._buoy_hydro.
 
@@ -504,6 +500,6 @@ def compute_stability_gate(env: HeroAgentEnv) -> torch.Tensor:
     )
 
     M_hat = env._tdc._m_hat
-    ratio = M_hat / M_true.clamp(min=1e-6)
+    ratio = M_true / M_hat.clamp(min=1e-6)
     stability_norm = (1.0 - ratio).abs().max(dim=-1).values
     return (stability_norm < 1.0).float()

@@ -452,7 +452,7 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTrainEnvCfg):
 
     # Gain softplus mapping: raw=0 -> default, clamp(max=kp_max)
     # kp = softplus(raw) * (kp_default / log(2)), clamp(max=kp_max)
-    kp_max: float = 80.0
+    kp_max: float = 60.0
     kp_default: float = 40.0
     kd_max: float = 20.0
     kd_default: float = 12.0
@@ -534,17 +534,17 @@ class HeroAgentAdaptTDCEnvCfg(HeroAgentEncoderTDCEnvCfg):
     loss on z_hat handles M_hat accuracy directly.
     """
 
-    proprio_history_len: int = 15
+    proprio_history_len: int = 30
     proprio_feature_dim: int = 12  # body(4) + joint_pos(2) + joint_vel(2) + actions(4)
 
     # TDC-specific reward design:
     # - action_magnitude REMOVED: penalizing gain logits is meaningless for TDC
-    # - tdc_torque ADDED: penalizes actual control effort (||tau_desired||^2)
+    # - tdc_torque REMOVED: u_hat (disturbance compensation) dominates tau, conflicts with tracking
     # - action_rate KEPT: prevents gain chattering
-    # - stability_gate OFF: z_hat.detach() + aux loss handles M_hat learning
+    # - stability_gate ON: forces M_hat within stable region (M_hat > M_true/2)
     reward: ALBCRewardCfg = ALBCRewardCfg(
         action_magnitude_weight=0.0,
         action_rate_weight=-0.025,
-        stability_gate_enable=False,
-        tdc_torque_weight=-0.02,
+        stability_gate_enable=True,
+        tdc_torque_weight=0.0,
     )

@@ -11,14 +11,21 @@ observations. This provides a direct gradient signal for the adapt_tconv module
 to learn M_hat-relevant parameters, bypassing the TDE Robustness Paradox where
 TDC's error correction makes reward insensitive to M_hat accuracy.
 
-Gradient flow through adapt_tconv:
-    1. PPO surrogate loss (via actor -> z_hat -> adapt_tconv)
-    2. PPO value loss (via critic -> z_hat -> adapt_tconv)
-    3. Aux MSE loss (z_hat vs z_true from privileged obs)
+Optimizer architecture:
+    - PPO optimizer (adaptive LR): actor + critic + encoder params
+    - Adapt optimizer (fixed LR): adapt_tconv params only
+    This separation prevents the KL-adaptive LR schedule from starving
+    adapt_tconv: actor/critic KL spikes drive PPO LR to min (1e-5),
+    but adapt_tconv's fixed LR continues learning unaffected.
 
-    z_hat is NOT detached: all three gradient sources reach adapt_tconv.
-    Separate gradient clipping (adapt_max_grad_norm) prevents PPO gradient
-    from dominating adapt_tconv updates.
+Gradient flow through adapt_tconv:
+    - Aux MSE loss only (z_hat vs z_true from privileged obs)
+    - z_hat is DETACHED in _get_combined_obs(): PPO gradient does NOT
+      reach adapt_tconv. Only aux loss trains adapt_tconv.
+    - _last_z stores the non-detached z_hat so aux MSE gradient flows
+      through sigmoid -> adapt_tconv.
+    - Separate gradient clipping (adapt_max_grad_norm) still applies
+      as a safety measure.
 
 z_true mapping (from compute_privileged_obs):
     z_hat[0] = m_A (buoy added mass) -> privileged[:, 21]
@@ -35,6 +42,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 
 from rsl_rl.algorithms.ppo import PPO
 
@@ -46,9 +54,13 @@ class PPOWithMHatAuxLoss(PPO):
         loss_total = surrogate + value_coef * value_loss - entropy_coef * entropy
                    + aux_mhat_weight * MSE(z_hat, z_true)
 
+    Uses two separate optimizers:
+        - self.optimizer (Adam, adaptive LR): actor + critic + encoder params
+        - self.adapt_optimizer (Adam, fixed LR): adapt_tconv params only
+
     The aux loss provides a direct supervised signal to the adapt_tconv module,
     enabling M_hat learning that PPO reward alone cannot achieve (TDE Robustness
-    Paradox). Uses separate gradient clipping for adapt_tconv parameters.
+    Paradox).
     """
 
     def __init__(
@@ -58,6 +70,8 @@ class PPOWithMHatAuxLoss(PPO):
         z_true_priv_indices: tuple[int, ...] = (21, 14, 15),
         privileged_key: str = "privileged",
         adapt_max_grad_norm: float = 10.0,
+        adapt_lr: float = 3e-4,
+        min_lr: float = 1e-4,
         **kwargs,
     ):
         """Initialize PPO with auxiliary M_hat loss.
@@ -71,6 +85,11 @@ class PPOWithMHatAuxLoss(PPO):
             adapt_max_grad_norm: Separate gradient clipping for adapt_tconv.
                 Relaxed vs PPO (1.0) to prevent combined clipping from
                 starving adapt_tconv of gradient signal.
+            adapt_lr: Fixed learning rate for adapt_tconv optimizer. Independent
+                of the KL-adaptive schedule that controls actor/critic LR.
+            min_lr: Minimum learning rate floor for PPO adaptive schedule.
+                RSL-RL default is 1e-5 which causes LR death. 1e-4 prevents
+                the actor/critic from stalling during DR curriculum ramp.
             **kwargs: Forwarded to PPO.__init__().
         """
         super().__init__(policy, **kwargs)
@@ -78,6 +97,17 @@ class PPOWithMHatAuxLoss(PPO):
         self.z_true_priv_indices = list(z_true_priv_indices)
         self._privileged_key = privileged_key
         self.adapt_max_grad_norm = adapt_max_grad_norm
+        self.adapt_lr = adapt_lr
+        self.min_lr = min_lr
+
+        # Replace parent's single optimizer with two separate ones.
+        # PPO.__init__ creates self.optimizer with ALL policy params.
+        # We split: adapt_tconv -> self.adapt_optimizer (fixed LR),
+        #           everything else -> self.optimizer (adaptive LR).
+        adapt_param_ids = set(id(p) for p in policy.adapt_tconv.parameters())
+        ppo_params = [p for p in policy.parameters() if id(p) not in adapt_param_ids]
+        self.optimizer = optim.Adam(ppo_params, lr=self.learning_rate)
+        self.adapt_optimizer = optim.Adam(policy.adapt_tconv.parameters(), lr=adapt_lr)
 
     def update(self) -> dict[str, float]:
         mean_value_loss = 0
@@ -153,7 +183,7 @@ class PPOWithMHatAuxLoss(PPO):
                         kl_mean /= self.gpu_world_size
                     if self.gpu_global_rank == 0:
                         if kl_mean > self.desired_kl * 2.0:
-                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                            self.learning_rate = max(self.min_lr, self.learning_rate / 1.5)
                         elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
                             self.learning_rate = min(1e-2, self.learning_rate * 1.5)
                     if self.is_multi_gpu:
@@ -229,8 +259,9 @@ class PPOWithMHatAuxLoss(PPO):
                 mseloss = torch.nn.MSELoss()
                 rnd_loss = mseloss(predicted_embedding, target_embedding)
 
-            # Backward pass
+            # Backward pass (single pass: detach separates gradients naturally)
             self.optimizer.zero_grad()
+            self.adapt_optimizer.zero_grad()
             loss.backward()
             if self.rnd:
                 self.rnd_optimizer.zero_grad()
@@ -238,17 +269,19 @@ class PPOWithMHatAuxLoss(PPO):
             if self.is_multi_gpu:
                 self.reduce_parameters()
 
-            # Separate gradient clipping: adapt_tconv uses relaxed threshold
-            # to prevent PPO gradient norm from dominating and zeroing
-            # adapt_tconv updates via combined clip_grad_norm_.
-            adapt_params = [p for n, p in self.policy.named_parameters() if "adapt_tconv" in n and p.grad is not None]
+            # Separate gradient clipping per optimizer group
+            adapt_params = [p for p in self.policy.adapt_tconv.parameters() if p.grad is not None]
             other_params = [p for n, p in self.policy.named_parameters() if "adapt_tconv" not in n and p.grad is not None]
             if adapt_params:
                 nn.utils.clip_grad_norm_(adapt_params, self.adapt_max_grad_norm)
             if other_params:
                 nn.utils.clip_grad_norm_(other_params, self.max_grad_norm)
 
+            # Step both optimizers independently:
+            # - self.optimizer: actor/critic, LR managed by adaptive schedule
+            # - self.adapt_optimizer: adapt_tconv, fixed LR (immune to KL spikes)
             self.optimizer.step()
+            self.adapt_optimizer.step()
             if self.rnd_optimizer:
                 self.rnd_optimizer.step()
 

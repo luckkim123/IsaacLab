@@ -13,10 +13,10 @@ supervised adaptation), this runner trains all components jointly in one phase:
     - encoder: UNUSED (exists in module for checkpoint compatibility)
 
 Gradient flow:
-    - z_hat is NOT detached: PPO gradient flows through actor/critic -> z_hat -> adapt_tconv
-    - Aux MSE loss provides additional supervised signal on z_hat
-    - Separate gradient clipping (adapt_max_grad_norm=10.0) prevents PPO gradient
-      norm from dominating and starving adapt_tconv of gradient signal
+    - z_hat is DETACHED in _get_combined_obs(): PPO gradient does NOT reach adapt_tconv
+    - Only aux MSE loss trains adapt_tconv (z_hat vs z_true from privileged obs)
+    - Separate optimizer: adapt_tconv uses fixed LR (adapt_lr), immune to KL-adaptive schedule
+    - Separate gradient clipping (adapt_max_grad_norm=10.0) as safety measure
 
 Extends OnPolicyRunner with:
     1. PPOWithMHatAuxLoss instead of standard PPO (separate grad clip)
@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import logging
 import os
-import statistics
 import time
 import warnings
 from collections import deque
@@ -37,11 +36,10 @@ from collections import deque
 import torch
 from tensordict import TensorDict
 
-import rsl_rl
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import resolve_rnd_config, resolve_symmetry_config
 from rsl_rl.runners.on_policy_runner import OnPolicyRunner
-from rsl_rl.utils import resolve_obs_groups, store_code_state
+from rsl_rl.utils import store_code_state
 
 from ..encoder.adaptation import ActorCriticEncoderTDCAdapt  # noqa: F401 — needed by eval()
 from ..encoder.normalization import RunningMeanStd
@@ -70,6 +68,8 @@ class SinglePhaseTDCRunner(OnPolicyRunner):
         self._aux_mhat_weight = train_cfg.get("aux_mhat_loss_weight", 1.0)
         self._z_true_indices = tuple(train_cfg.get("z_true_privileged_indices", (21, 14, 15)))
         self._adapt_max_grad_norm = train_cfg.get("adapt_max_grad_norm", 10.0)
+        self._adapt_lr = train_cfg.get("adapt_lr", 3e-4)
+        self._min_lr = train_cfg.get("min_lr", 1e-4)
         self._proprio_shape = (
             train_cfg["policy"].get("proprio_history_len", 30),
             train_cfg["policy"].get("proprio_feature_dim", 12),
@@ -120,6 +120,8 @@ class SinglePhaseTDCRunner(OnPolicyRunner):
             aux_mhat_weight=self._aux_mhat_weight,
             z_true_priv_indices=self._z_true_indices,
             adapt_max_grad_norm=self._adapt_max_grad_norm,
+            adapt_lr=self._adapt_lr,
+            min_lr=self._min_lr,
             device=self.device,
             **self.alg_cfg,
             multi_gpu_cfg=self.multi_gpu_cfg,
@@ -278,6 +280,11 @@ class SinglePhaseTDCRunner(OnPolicyRunner):
             self.writer.add_scalar("DR_Curriculum/perturbation_force_max", rand.perturbation_force_range[1], iteration)
             self.writer.add_scalar("DR_Curriculum/inertia_scale_hi", rand.inertia_scale[1], iteration)
 
+        # Log learning rates (adapt_lr fixed, min_lr floor for PPO schedule)
+        if self.log_dir is not None and not self.disable_logs:
+            self.writer.add_scalar("Loss/adapt_lr", self.alg.adapt_lr, iteration)
+            self.writer.add_scalar("Loss/min_lr", self.alg.min_lr, iteration)
+
         # Log z_hat statistics (from last policy forward pass)
         if self.log_dir is not None and not self.disable_logs:
             z_hat = getattr(self.alg.policy, "_last_z", None)
@@ -302,10 +309,11 @@ class SinglePhaseTDCRunner(OnPolicyRunner):
                 flush_metrics(self.writer, metrics, iteration, getattr(self, "logger_type", "tensorboard"))
 
     def save(self, path: str, infos: dict | None = None) -> None:
-        """Save checkpoint including hist_normalizer state."""
+        """Save checkpoint including hist_normalizer and adapt_optimizer state."""
         saved_dict = {
             "model_state_dict": self.alg.policy.state_dict(),
             "optimizer_state_dict": self.alg.optimizer.state_dict(),
+            "adapt_optimizer_state_dict": self.alg.adapt_optimizer.state_dict(),
             "iter": self.current_learning_iteration,
             "infos": infos,
             "hist_normalizer_state_dict": self.hist_normalizer.state_dict(),
@@ -319,7 +327,7 @@ class SinglePhaseTDCRunner(OnPolicyRunner):
             self.writer.save_model(path, self.current_learning_iteration)
 
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
-        """Load checkpoint including hist_normalizer state."""
+        """Load checkpoint including hist_normalizer and adapt_optimizer state."""
         loaded_dict = torch.load(path, weights_only=False, map_location=map_location)
 
         resumed_training = self.alg.policy.load_state_dict(loaded_dict["model_state_dict"])
@@ -327,6 +335,8 @@ class SinglePhaseTDCRunner(OnPolicyRunner):
             self.alg.rnd.load_state_dict(loaded_dict["rnd_state_dict"])
         if load_optimizer and resumed_training:
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+            if "adapt_optimizer_state_dict" in loaded_dict:
+                self.alg.adapt_optimizer.load_state_dict(loaded_dict["adapt_optimizer_state_dict"])
             if hasattr(self.alg, "rnd") and self.alg.rnd:
                 self.alg.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
         if resumed_training:

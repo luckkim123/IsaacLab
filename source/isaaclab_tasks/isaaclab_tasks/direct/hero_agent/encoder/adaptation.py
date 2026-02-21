@@ -133,15 +133,15 @@ class ActorCriticEncoderTDCAdapt(ActorCriticEncoderTDC):
     """Phase 2 / single-phase network: adaptation module replaces encoder for z estimation.
 
     During single-phase training:
-        - adapt_tconv is trainable (PPO gradient via actor/critic + aux MSE loss)
+        - adapt_tconv is trainable (aux MSE loss only)
         - _get_combined_obs() uses z_hat from adapt_tconv (not z from encoder)
-        - z_hat is NOT detached: PPO gradient flows through z_hat to adapt_tconv
+        - z_hat is DETACHED before actor/critic: PPO gradient does NOT reach adapt_tconv
+        - _last_z stores the non-detached z_hat for aux loss gradient
         - get_last_z() transparently returns z_hat for env M_hat extraction
 
-    Gradient sources for adapt_tconv:
-        1. PPO surrogate loss (via actor -> z_hat -> adapt_tconv)
-        2. PPO value loss (via critic -> z_hat -> adapt_tconv)
-        3. Aux MSE loss (z_hat vs z_true from privileged obs)
+    Gradient source for adapt_tconv:
+        - Aux MSE loss only (z_hat vs z_true from privileged obs)
+        - PPO gradient is blocked by detach to prevent interference
 
     z_hat activation: sigmoid scaling with per-dim [min, max] ranges.
     sigmoid(0) = 0.5 -> midpoint of each range at initialization.
@@ -199,17 +199,16 @@ class ActorCriticEncoderTDCAdapt(ActorCriticEncoderTDC):
         midpoint of each range -- a safe starting point near typical
         physical parameter values.
 
-        z_hat is NOT detached: PPO gradient flows through z_hat into
-        adapt_tconv, providing additional learning signal beyond the
-        aux MSE loss. Separate gradient clipping (adapt_max_grad_norm)
-        prevents PPO gradient from dominating adapt_tconv updates.
+        z_hat is DETACHED before actor/critic input so PPO gradient does
+        not interfere with aux loss supervision. _last_z stores the
+        non-detached z_hat for aux MSE gradient to flow through.
         """
         policy_obs = obs[self._policy_obs_key]
         z_hat_raw = self.adapt_tconv(obs[self._proprio_hist_key])
         z_hat = self._z_hat_min + torch.sigmoid(z_hat_raw) * (self._z_hat_max - self._z_hat_min)
-        self._last_z = z_hat  # For aux loss and env M_hat extraction
+        self._last_z = z_hat  # Non-detached: aux loss gradient flows through here
         self._last_z_hat = z_hat
-        return torch.cat([policy_obs, z_hat], dim=-1)
+        return torch.cat([policy_obs, z_hat.detach()], dim=-1)
 
     def compute_z_gt(self, obs: TensorDict) -> torch.Tensor:
         """Compute ground truth z from frozen Phase 1 encoder.
