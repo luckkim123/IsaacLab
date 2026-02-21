@@ -111,7 +111,7 @@ class RslRlPpoActorCriticEncoderTDCAdaptCfg(_RslRlPpoEncoderBaseCfg):
     z_hat_ranges: list[tuple[float, float]] | None = None
 
     # Nominal values for bias initialization (logit of nominal -> sigmoid -> z_hat ≈ nominal).
-    # Default: [m_A=0.08, I_roll=0.04, I_pitch=0.05] from URDF + added mass.
+    # Default: [m_A=1.5 (buoy sway), I_roll=0.04, I_pitch=0.05].
     z_hat_nominal: list[float] | None = None
 
 
@@ -356,7 +356,7 @@ class HeroAgentSinglePhaseTDCRunnerCfg(RslRlOnPolicyRunnerCfg):
         critic_hidden_dims=[256, 128, 64],
         activation="elu",
         encoder_latent_dim=3,
-        z_hat_ranges=[(0.01, 0.5), (0.005, 0.3), (0.005, 0.3)],
+        z_hat_ranges=[(0.1, 3.0), (0.005, 0.3), (0.005, 0.3)],
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,

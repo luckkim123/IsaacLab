@@ -12,8 +12,8 @@ DR parameters are linearly scaled from 0% (none) to 100% (hard = training DR):
     medium -> 60%  of training DR
     hard   -> 100% of training DR (matches DomainRandomizationCfg defaults)
 
-All levels start from 0 deg initial pose. Each segment is held for 10 s to
-ensure at least 5 s of steady-state observation after settling.
+All levels start from 0 deg initial pose. Each segment is held for 5 s
+(configurable via --segment_duration).
 
 Usage:
     # Pure TDC baseline
@@ -40,7 +40,7 @@ parser = argparse.ArgumentParser(description="Evaluate DR robustness of RL / TDC
 parser.add_argument("--task", type=str, required=True, help="Task name (e.g. Isaac-HeroAgent-Encoder-Base-v0)")
 parser.add_argument("--num_envs", type=int, default=64, help="Number of parallel environments.")
 parser.add_argument("--output_dir", type=str, default=None, help="Output directory (default: logs/eval_dr/<task>/<ts>)")
-parser.add_argument("--segment_duration", type=float, default=10.0, help="Duration per segment in seconds (default 10).")
+parser.add_argument("--segment_duration", type=float, default=5.0, help="Duration per segment in seconds (default 5).")
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="RSL-RL config entry point."

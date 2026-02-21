@@ -28,7 +28,7 @@ Gradient flow through adapt_tconv:
       as a safety measure.
 
 z_true mapping (from compute_privileged_obs):
-    z_hat[0] = m_A (buoy added mass) -> privileged[:, 21]
+    z_hat[0] = m_A (buoy sway added mass) -> privileged[:, 21]
     z_hat[1] = I_roll (main body Ixx) -> privileged[:, 14]
     z_hat[2] = I_pitch (main body Iyy) -> privileged[:, 15]
 

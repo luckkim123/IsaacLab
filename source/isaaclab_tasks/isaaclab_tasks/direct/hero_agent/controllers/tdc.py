@@ -528,7 +528,7 @@ def compute_M_hat_from_z(
     z_decomposed: torch.Tensor,
     p_EE: torch.Tensor,
     h: float,
-    m_hat_max: float = 0.5,
+    m_hat_max: float = 1.0,
 ) -> torch.Tensor:
     """Compute M_hat from decomposed encoder z and current FK position.
 
@@ -542,8 +542,8 @@ def compute_M_hat_from_z(
             Shape: (num_envs, 3).
         p_EE: EE position [x_bu, y_bu] from FK. Shape: (num_envs, 2).
         h: CoG-to-ABPC vertical offset in meters.
-        m_hat_max: Upper clamp for M_hat (prevents unbounded growth from softplus z).
-            True M_bb ~ 0.13-0.18; default 0.5 gives ~3x safety margin.
+        m_hat_max: Upper clamp for M_hat (prevents unbounded growth).
+            With m_A=1.5(sway), M_hat ~ 0.45-0.59; default 1.0 gives safety margin.
 
     Returns:
         Design inertia M_hat [roll, pitch]. Shape: (num_envs, 2).

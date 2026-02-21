@@ -153,10 +153,12 @@ class ActorCriticEncoderTDCAdapt(ActorCriticEncoderTDC):
     """
 
     # Default ranges for 3D decomposed output [m_A, I_roll, I_pitch]
-    _DEFAULT_Z_HAT_RANGES = [(0.01, 0.5), (0.005, 0.3), (0.005, 0.3)]
+    # m_A = buoy sway added mass (~1.5 kg, DR 0.8-1.2x -> [1.2, 1.8])
+    # I_roll/I_pitch = main body rotational inertia (DR 0.4-2.5x -> [0.016, 0.125])
+    _DEFAULT_Z_HAT_RANGES = [(0.1, 3.0), (0.005, 0.3), (0.005, 0.3)]
     # Nominal physical parameter values for bias initialization
-    # m_A ~ 0.08 (buoy added mass), I_roll ~ 0.04 (Ixx), I_pitch ~ 0.05 (Iyy)
-    _DEFAULT_Z_HAT_NOMINAL = [0.08, 0.04, 0.05]
+    # m_A ~ 1.5 (buoy sway added mass), I_roll ~ 0.04 (Ixx), I_pitch ~ 0.05 (Iyy)
+    _DEFAULT_Z_HAT_NOMINAL = [1.5, 0.04, 0.05]
 
     def __init__(
         self,

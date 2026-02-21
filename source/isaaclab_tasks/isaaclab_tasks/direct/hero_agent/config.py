@@ -493,7 +493,7 @@ class HeroAgentUnifiedTDCEnvCfg(HeroAgentTrainEnvCfg):
     observation_space: int = 13  # policy obs
 
     # Decomposed M_hat component ranges (after sigmoid scaling in env)
-    m_A_range: tuple[float, float] = (0.01, 0.5)
+    m_A_range: tuple[float, float] = (0.1, 3.0)
     I_range: tuple[float, float] = (0.005, 0.3)
 
     # Gain ranges (after sigmoid scaling in env)

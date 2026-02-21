@@ -11,10 +11,10 @@ features that the temporal convolution network uses to estimate the latent z
 without access to privileged information.
 
 Data Flow (Phase 2):
-    proprio_hist (N, H, 16) -->  AdaptTConv  -->  z_hat (3D or 6D)
+    proprio_hist (N, H, 12) -->  AdaptTConv  -->  z_hat (3D: [m_A, I_roll, I_pitch])
     privileged (26D) --> Frozen Encoder --> z_gt (6D)   [supervision only]
     z_hat --> [policy_obs + z_hat] --> Frozen Actor --> actions (4D)
-    z_hat[3:6] + FK --> M_hat --> TDC Controller --> joint targets
+    z_hat + FK --> M_hat --> TDC Controller --> joint targets
 
 History feature vector (12D per timestep):
     [roll(1), pitch(1), p(1), q(1), joint_pos_normalized(2), joint_vel(2),

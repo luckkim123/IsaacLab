@@ -91,7 +91,7 @@ def compute_privileged_obs(
         - Main body (7D): volume, r_cg (3), r_cb (3)
         - Buoy body (7D): volume, r_cg (3), r_cb (3)
         - Main body dynamics (4D): inertia Ixx/Iyy/Izz (3), m_A surge (1)
-        - Buoy dynamics (4D): inertia Ixx/Iyy/Izz (3), m_A surge (1)
+        - Buoy dynamics (4D): inertia Ixx/Iyy/Izz (3), m_A sway (1)
         - Payload (4D, optional): mass, cog_offset (3)
 
     Total: 26D when payload is included, 22D otherwise.
