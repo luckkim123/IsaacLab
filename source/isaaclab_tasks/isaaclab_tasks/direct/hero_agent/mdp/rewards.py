@@ -100,7 +100,7 @@ class ALBCRewardCfg:
     tdc_torque_weight: float = 0.0
 
     # Curriculum
-    curriculum_end_iter: int = 200
+    curriculum_end_iter: int = 500
 
 
 # =============================================================================

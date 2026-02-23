@@ -359,10 +359,10 @@ class HeroAgentEnv(DirectRLEnv):
         # NOTE: Do NOT call update_dr_curriculum(0) here.
         # Mutating cfg.randomization at init causes env.yaml to save curriculum
         # start values instead of the actual target values (the YAML is dumped
-        # between env creation and runner.learn()).  The runner's training loop
-        # calls update_dr_curriculum(iteration) at the start of each iteration,
-        # so iteration 0 will apply the start ranges before any data is used
-        # for gradient updates.
+        # between env creation and runner.learn()).
+        # Instead, runners call update_dr_curriculum(0) + env.reset() before the
+        # first rollout. The reset is critical: without it, all envs keep the
+        # full-DR parameters sampled during the initial reset (in __init__).
 
     def update_dr_curriculum(self, iteration: int) -> None:
         """Linearly ramp DR ranges from start to full over curriculum period."""

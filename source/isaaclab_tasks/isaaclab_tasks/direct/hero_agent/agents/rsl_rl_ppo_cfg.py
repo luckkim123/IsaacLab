@@ -53,6 +53,7 @@ class _RslRlPpoEncoderBaseCfg(RslRlPpoActorCriticCfg):
     encoder_latent_dim: int = 13
     encoder_activation: str = "relu"
     encoder_output_activation: str = "softplus"
+    encoder_obs_normalization: bool = True
     z_min: float = 0.01
     policy_obs_dim: int = 13
     privileged_dim: int = 26
@@ -103,7 +104,7 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """
 
     seed = 42
-    num_steps_per_env = 32
+    num_steps_per_env = 128
     max_iterations = 1500
     save_interval = 50
     experiment_name = "hero_agent_albc"
@@ -122,13 +123,13 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         use_clipped_value_loss=True,
         clip_param=0.2,
         entropy_coef=0.005,
-        num_learning_epochs=8,
+        num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=3.0e-4,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
-        desired_kl=0.02,
+        desired_kl=0.01,
         max_grad_norm=1.0,
     )
 
@@ -144,7 +145,7 @@ class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """
 
     seed = 42
-    num_steps_per_env = 32
+    num_steps_per_env = 128
     max_iterations = 1500
     save_interval = 50
     experiment_name = "hero_agent_albc_encoder"
@@ -168,13 +169,13 @@ class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         use_clipped_value_loss=True,
         clip_param=0.2,
         entropy_coef=0.005,
-        num_learning_epochs=8,
+        num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=3.0e-4,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
-        desired_kl=0.02,
+        desired_kl=0.01,
         max_grad_norm=1.0,
     )
 

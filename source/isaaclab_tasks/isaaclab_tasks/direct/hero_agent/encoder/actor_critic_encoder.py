@@ -65,6 +65,7 @@ class ActorCriticEncoder(nn.Module):
         encoder_latent_dim: int = 6,
         encoder_activation: str = "relu",
         encoder_output_activation: str = "softplus",
+        encoder_obs_normalization: bool = False,
         z_min: float = 0.01,
         # Actor-Critic parameters
         actor_obs_normalization: bool = False,
@@ -92,6 +93,14 @@ class ActorCriticEncoder(nn.Module):
         self.encoder_output_activation = encoder_output_activation
         self.z_min = z_min
         self.state_dependent_std = state_dependent_std
+
+        # Encoder input normalization (Welford's online mean/var)
+        # Fixes privileged obs scale mismatch (volume ~0.01 vs body_mass ~10).
+        # Only updates stats in training mode; Phase 2 (frozen encoder) is safe.
+        self.encoder_obs_normalization = encoder_obs_normalization
+        self.encoder_obs_normalizer = (
+            EmpiricalNormalization(privileged_dim) if encoder_obs_normalization else nn.Identity()
+        )
 
         # Extract obs key names from obs_groups for direct TensorDict access
         policy_groups = obs_groups["policy"]
@@ -231,10 +240,14 @@ class ActorCriticEncoder(nn.Module):
 
         For softplus mode: z = softplus(encoder_output) + z_min (positive, no saturation).
         For tanh mode: z = tanh(encoder_output) in [-1, 1] (built into MLP last layer).
+
+        Privileged obs is normalized before the encoder MLP when
+        encoder_obs_normalization is enabled (fixes 1000x scale mismatch).
         """
+        normalized = self.encoder_obs_normalizer(privileged)
         if self.encoder_output_activation == "tanh":
-            return self.encoder(privileged)
-        return self._softplus_z(self.encoder(privileged))
+            return self.encoder(normalized)
+        return self._softplus_z(self.encoder(normalized))
 
     def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
         """Get combined observation: cat([policy_obs, z]).
@@ -303,7 +316,13 @@ class ActorCriticEncoder(nn.Module):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def update_normalization(self, obs: TensorDict) -> None:
-        """Update observation normalization statistics."""
+        """Update observation normalization statistics.
+
+        Updates encoder, actor, and critic normalizers independently.
+        Encoder normalizer uses raw privileged obs; actor/critic use combined obs.
+        """
+        if self.encoder_obs_normalization and hasattr(self.encoder_obs_normalizer, "update"):
+            self.encoder_obs_normalizer.update(obs[self._privileged_key])  # type: ignore[union-attr]
         if self.actor_obs_normalization or self.critic_obs_normalization:
             combined_obs = self._get_combined_obs(obs)
             if self.actor_obs_normalization and hasattr(self.actor_obs_normalizer, "update"):
@@ -312,11 +331,20 @@ class ActorCriticEncoder(nn.Module):
                 self.critic_obs_normalizer.update(combined_obs)  # type: ignore[union-attr]
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
-        """Load model parameters.
+        """Load model parameters with backward compatibility.
 
         Matches the RSL-RL ActorCritic API contract by returning True to indicate
         resumed training. OnPolicyRunner.load() uses this return value to decide
         whether to restore optimizer state and iteration counter.
+
+        Backward compat: injects default encoder_obs_normalizer state when loading
+        checkpoints from before encoder normalization was added.
         """
+        if self.encoder_obs_normalization:
+            prefix = "encoder_obs_normalizer."
+            if not any(k.startswith(prefix) for k in state_dict):
+                logger.info("Old checkpoint: injecting default encoder_obs_normalizer state.")
+                for k, v in self.encoder_obs_normalizer.state_dict().items():
+                    state_dict[prefix + k] = v
         super().load_state_dict(state_dict, strict=strict)
         return True

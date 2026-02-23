@@ -385,9 +385,32 @@ class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
         - state_space (26): Privileged info, returned as observations["privileged"]
         - Encoder: privileged(26D) -> latent z(13D)
         - Actual Actor/Critic input: policy_obs(13) + z(13) = 26D
+
+    DR curriculum is disabled (full DR from iter 0) to prevent encoder z collapse.
+    With curriculum, early training has near-identical dynamics across envs, so the
+    encoder learns to output constant z -> gradient vanishes -> softplus dead zone.
     """
 
     state_space: int = 26
+
+    # Encoder-friendly DR curriculum: start at ~50% of full DR range.
+    # Old defaults (~10-20%) starved the encoder (z collapse).
+    # Full DR from iter 0 fixed encoder but made early policy learning too hard.
+    # 50% start preserves encoder gradients while allowing faster early convergence.
+    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(
+        enable=True,
+        end_iter=300,
+        inertia_scale_start=(0.6, 1.8),
+        body_mass_scale_start=(0.8, 1.2),
+        volume_scale_start=(0.8, 1.2),
+        added_mass_scale_start=(0.85, 1.15),
+        payload_mass_range_start=(0.0, 0.8),
+        perturbation_force_range_start=(0.0, 5.0),
+        perturbation_torque_range_start=(0.0, 0.8),
+        cog_offset_z_start=(-0.03, 0.03),
+        cob_offset_z_start=(-0.02, 0.02),
+        action_latency_range_start=(0, 2),
+    )
 
 
 # =============================================================================

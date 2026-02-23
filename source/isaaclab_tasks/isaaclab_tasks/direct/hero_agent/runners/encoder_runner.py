@@ -59,6 +59,25 @@ class EncoderRunner(OnPolicyRunner):
         if self._has_encoder:
             connect_encoder_to_env(self.env, self.alg.policy, "EncoderRunner")
 
+    def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
+        """Override learn() to apply DR curriculum start values before the first rollout.
+
+        Two problems solved:
+            1. OnPolicyRunner.learn() updates curriculum inside log(), which runs AFTER
+               each iteration's rollout. Without this override, the first iteration
+               runs with full DR ranges.
+            2. The initial env reset (during env.__init__) samples DR from the full
+               config before curriculum exists. We force a reset here so all envs
+               re-sample from the curriculum start values.
+        """
+        raw_env = unwrap_env(self.env)
+        if hasattr(raw_env, "update_dr_curriculum"):
+            raw_env.update_dr_curriculum(0)
+            # Force re-randomize: initial envs were spawned with full DR ranges
+            # before curriculum was applied. Reset so they sample start values.
+            self.env.reset()
+        super().learn(num_learning_iterations, init_at_random_ep_len)
+
     def log(self, locs: dict, width: int = 80, pad: int = 35) -> None:
         """Extended log method that adds encoder-specific metrics.
 

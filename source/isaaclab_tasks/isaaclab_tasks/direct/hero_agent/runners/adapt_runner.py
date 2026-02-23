@@ -154,7 +154,6 @@ class AdaptRunner:
         max_grad_norm = self.cfg.get("max_grad_norm", 10.0)
         adapt_lr = self.cfg.get("adapt_lr", 3e-4)
 
-        obs_dict = self.env.get_observations()
         num_envs = self.env.num_envs
         iteration = 0
         last_save_steps = 0
@@ -180,6 +179,15 @@ class AdaptRunner:
         # Curriculum support: get raw env for reward manager access
         raw_env = unwrap_env(self.env)
         has_curriculum = hasattr(raw_env, "_reward_manager") and hasattr(raw_env.cfg, "reward")
+
+        # Apply curriculum start values and force re-randomize.
+        # Initial envs were spawned with full DR ranges (before curriculum existed).
+        # Reset all envs so they sample from curriculum start values.
+        if hasattr(raw_env, "update_dr_curriculum"):
+            raw_env.update_dr_curriculum(0)
+            self.env.reset()
+
+        obs_dict = self.env.get_observations()
 
         while self.agent_steps < max_agent_steps:
             obs_dict, loss, rewards, z_hat, z_gt = self._train_step(obs_dict, max_grad_norm)
