@@ -159,11 +159,11 @@ def unwrap_env(env: Any) -> Any:
 
 
 def connect_encoder_to_env(env: Any, policy: Any, caller_name: str = "Runner") -> None:
-    """Wire encoder policy to environment for M_hat extraction via get_last_z().
+    """Wire encoder policy to environment for encoder z access.
 
     Args:
         env: Wrapped environment (will be unwrapped).
-        policy: Policy with get_last_z() method.
+        policy: Policy with encoder (ActorCriticEncoder or subclass).
         caller_name: Name for log message.
     """
     raw_env = unwrap_env(env)
@@ -314,7 +314,7 @@ def log_tdc_diagnostics(
             p_EE = env._kinematics.forward(joint_pos)
             M_bb = compute_M_bb(
                 I_ROV=env._hydro.rigid_body_inertia[:, :2],
-                m_A=env._buoy_hydro.added_mass_matrix[:, 0, 0],
+                m_A=env._buoy_hydro.added_mass_matrix[:, 1, 1],
                 x_bu=p_EE[:, 0],
                 y_bu=p_EE[:, 1],
                 h=env.cfg.tdc.h,
@@ -432,24 +432,23 @@ def log_encoder_metrics(
 
 def log_encoder_tdc_metrics(
     writer: Any,
-    policy: Any,
+    _policy: Any,
     env: Any,
     iteration: int,
     device: str | torch.device,
     logger_type: str = "tensorboard",
     metrics: dict[str, float] | None = None,
 ) -> None:
-    """Log essential Encoder-TDC integration metrics.
+    """Log essential TDC integration metrics.
 
-    Metrics kept (7):
+    Metrics kept (6):
         - TDC/m_hat_roll_mean, m_hat_pitch_mean: M_hat health
         - TDC/m_hat_roll_rel_mae, m_hat_pitch_rel_mae: M_hat accuracy
         - TDC/kp_roll_mean, kp_pitch_mean: gain health
-        - TDC/z_mA: decomposed z monitoring
 
     Args:
         writer: TensorBoard SummaryWriter or equivalent logger.
-        policy: Policy with get_last_z() method (ActorCriticEncoderTDC).
+        _policy: Unused (kept for API compatibility).
         env: Wrapped environment (will be unwrapped to access TDC state).
         iteration: Current training iteration.
         device: Computation device.
@@ -480,7 +479,7 @@ def log_encoder_tdc_metrics(
             p_EE = raw_env._kinematics.forward(joint_pos)
             M_true = compute_M_bb(
                 I_ROV=raw_env._hydro.rigid_body_inertia[:, :2],
-                m_A=raw_env._buoy_hydro.added_mass_matrix[:, 0, 0],
+                m_A=raw_env._buoy_hydro.added_mass_matrix[:, 1, 1],
                 x_bu=p_EE[:, 0],
                 y_bu=p_EE[:, 1],
                 h=raw_env.cfg.tdc.h,
@@ -490,12 +489,6 @@ def log_encoder_tdc_metrics(
                 metrics[f"TDC/m_hat_{axis}_rel_mae"] = (
                     ((M_hat[:, i] - M_true[:, i]) / M_true[:, i].clamp(min=1e-4)).abs().mean().item()
                 )
-
-        # Raw z[3] = m_A_hat (only for 6D encoder with physics decomposition)
-        if hasattr(policy, "get_last_z"):
-            z = policy.get_last_z()
-            if z is not None and z.shape[-1] == 6:
-                metrics["TDC/z_mA"] = z[:, 3].mean().item()
 
     if flush_after:
         flush_metrics(writer, metrics, iteration, logger_type)

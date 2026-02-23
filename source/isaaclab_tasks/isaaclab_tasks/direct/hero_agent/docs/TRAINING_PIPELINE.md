@@ -1,29 +1,28 @@
 # Training Pipeline
 
-> **Status**: 2026-02-11 | **Source**: `config.py`, `encoder/`, `agents/rsl_rl_ppo_cfg.py`, `adapt_tdc_env.py`
+> **Status**: 2026-02-23 | **Source**: `config.py`, `encoder/`, `agents/rsl_rl_ppo_cfg.py`, `adapt_base_env.py`
 >
 > RMA/HORA 2-phase 학습 파이프라인의 구현 현황.
-> Phase 1 (Teacher) + Phase 2 (Student) + Deployment 구조.
+> Phase 1 (Teacher, base RL) + Phase 2 (Student, base RL) + Deployment 구조.
 
 ---
 
 ## 1. Pipeline Overview
 
-RMA/HORA의 2-phase 학습 구조를 수중 UVMS TDC 제어에 적용한다:
+RMA/HORA의 2-phase 학습 구조를 수중 UVMS 자세 제어에 적용한다:
 
 ```
-Phase 1: Teacher Training (PPO + Encoder)
-    Privileged Info (24D) --> Encoder --> z (6D)
-    Policy Obs (13D) + z --> Actor --> 4D gains [Kp_r, Kp_p, Kd_r, Kd_p]
-    z[3:5] --> M_hat --> TDC Controller
+Phase 1: Teacher Training (PPO + Encoder, base RL)
+    Privileged Info (26D) --> Encoder --> z (13D)
+    Policy Obs (13D) + z --> Actor --> 2D velocity actions
 
-Phase 2: Adaptation Module Training (Supervised)
-    Proprio History (N, 30, 12) --> AdaptTConv --> z_hat (6D)
-    Frozen Encoder(Privileged) --> z_gt (6D)
+Phase 2: Adaptation Module Training (Supervised, base RL)
+    Proprio History (N, 30, 8) --> AdaptTConv --> z_hat (13D)
+    Frozen Encoder(Privileged) --> z_gt (13D)
     Loss = ||z_hat - z_gt||^2
 
 Deployment: Real World
-    Proprio History --> AdaptTConv --> z_hat --> Actor --> TDC
+    Proprio History --> AdaptTConv --> z_hat --> Frozen Actor --> velocity actions
     (No privileged info, no additional training)
 ```
 
@@ -31,26 +30,26 @@ Deployment: Real World
 
 | Phase | Environment | Config | Runner | Task ID |
 |:---|:---|:---|:---|:---|
-| 1 (Teacher) | `HeroAgentEncoderTDCEnv` | `HeroAgentEncoderTDCEnvCfg` | RSL-RL `OnPolicyRunner` | `Isaac-HeroAgent-Encoder-TDC-v0` |
-| 2 (Student) | `HeroAgentAdaptTDCEnv` | `HeroAgentAdaptTDCEnvCfg` | Custom `AdaptRunner` | `Isaac-HeroAgent-Adapt-TDC-v0` |
+| 1 (Teacher) | `HeroAgentEnv` | `HeroAgentEncoderTrainEnvCfg` | `EncoderRunner` | `Isaac-HeroAgent-Encoder-Base-v0` |
+| 2 (Student) | `HeroAgentAdaptBaseEnv` | `HeroAgentAdaptBaseEnvCfg` | Custom `AdaptRunner` | `Isaac-HeroAgent-Adapt-Base-v0` |
 | Deploy | (real robot) | - | - | - |
 
 ---
 
-## 2. Phase 1: Encoder-TDC Teacher Training
+## 2. Phase 1: Encoder-Base Teacher Training
 
 ### 2.1 Network Architecture
 
 ```
-Encoder:  Privileged (24D) --> MLP [64, 32] --> softplus + z_min=0.1 --> z (6D)
-Actor:    cat([policy_obs(13D), z(6D)]) = 19D --> MLP [64, 64] --> 4D raw gains
-Critic:   cat([policy_obs(13D), z(6D)]) = 19D --> MLP [64, 64] --> 1D value
+Encoder:  Privileged (26D) --> MLP [256, 128, 64] --> softplus + z_min=0.01 --> z (13D)
+Actor:    cat([policy_obs(13D), z(13D)]) = 26D --> MLP [256, 128, 64] --> 2D velocity actions
+Critic:   cat([policy_obs(13D), z(13D)]) = 26D --> MLP [256, 128, 64] --> 1D value
 ```
 
 Critic은 Actor와 동일한 입력(policy_obs + z)을 받는다 (symmetric).
 Privileged info를 직접 받지 않으므로, encoder가 유용한 정보를 z에 압축하도록 강제된다.
 
-구현 클래스: `ActorCriticEncoderTDC` (`encoder/actor_critic_encoder.py`)
+구현 클래스: `ActorCriticEncoder` (`encoder/actor_critic_encoder.py`)
 
 ### 2.2 I/O Variable Map
 
@@ -134,13 +133,8 @@ tdc.update_controller_params(m_hat=m_hat)
 
 ### 2.4 Training Command
 
-```bash
-cd /workspace/isaaclab
-./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
-    --task Isaac-HeroAgent-Encoder-TDC-v0 \
-    --num_envs 4096 --max_iterations 600 \
-    --headless --logger wandb --log_project_name hero_agent
-```
+Phase 1 teacher training은 `Isaac-HeroAgent-Encoder-TDC-v0` task 등록이 제거되었으므로,
+workflow 스크립트를 통해 실행한다. 자세한 사용법은 `workflows/` 디렉토리 참조.
 
 ---
 
@@ -158,7 +152,7 @@ Flatten + Linear:  (N, 480) --> Linear --> z_hat (6D)
 Activation:        softplus + z_min (same as encoder)
 ```
 
-구현 클래스: `ActorCriticEncoderTDCAdapt` (`encoder/actor_critic_encoder.py`)
+구현 클래스: `ActorCriticEncoderAdapt` (`encoder/adaptation.py`)
 
 ### 3.2 Proprioception History (12D per timestep)
 
@@ -181,7 +175,7 @@ Ring buffer: `(num_envs, 30, 12)`, 리셋 시 0으로 초기화.
 HORA와의 차이: HORA (Allegro hand)에서는 joint state = dynamics state이므로 joint 정보만으로 충분하다.
 ALBC에서는 arm state $\neq$ body dynamics state이므로, body orientation + angular rates를 포함해야 한다.
 
-Source: `adapt_tdc_env.py:66-98` (`_update_proprio_hist`)
+Source: `adapt_base_env.py` (`_update_proprio_hist`)
 
 ### 3.3 Supervised Training
 

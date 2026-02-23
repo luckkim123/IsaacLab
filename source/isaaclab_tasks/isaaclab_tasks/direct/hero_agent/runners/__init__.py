@@ -10,6 +10,5 @@ SAC-MPC runner (SACMPCRunner) is in hero_agent_mpc.runners.
 
 from .adapt_runner import AdaptRunner
 from .encoder_runner import EncoderRunner
-from .single_phase_runner import SinglePhaseTDCRunner
 
-__all__ = ["EncoderRunner", "AdaptRunner", "SinglePhaseTDCRunner"]
+__all__ = ["EncoderRunner", "AdaptRunner"]

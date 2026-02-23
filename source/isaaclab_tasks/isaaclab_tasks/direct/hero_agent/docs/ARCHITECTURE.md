@@ -27,20 +27,19 @@ System net buoyancy: ~+3N (약한 양의 부력 -> 수동 안정성).
 
 ```
 hero_agent/
-├── __init__.py                 # Gym environment registration (6 environments)
+├── __init__.py                 # Gym environment registration (5 environments)
 ├── base_env.py                 # Base RL environment (HeroAgentEnv)
 ├── tdc_env.py                  # TDC controller environment (HeroAgentTDCEnv)
-├── encoder_tdc_env.py          # Encoder-TDC env (HeroAgentEncoderTDCEnv)
-├── adapt_tdc_env.py            # Phase 2 adaptation env (HeroAgentAdaptTDCEnv)
+├── adapt_base_env.py           # Phase 2 adaptation env (HeroAgentAdaptBaseEnv)
 ├── config.py                   # All configuration classes
 ├── agents/                     # RL agent configs
-│   └── rsl_rl_ppo_cfg.py       # PPO runner + network config (4 variants)
+│   └── rsl_rl_ppo_cfg.py       # PPO runner + network config (3 variants)
 ├── controllers/
 │   ├── tdc.py                  # TDC controller + TDCControllerCfg
 │   └── kinematics.py           # ALBCKinematics: 2-link DLS IK/FK/Jacobian
 ├── encoder/                    # HORA encoder networks
-│   ├── actor_critic_encoder.py # ActorCriticEncoder, EncoderTDC, EncoderTDCAdapt
-│   ├── adaptation.py           # ProprioAdaptTConv
+│   ├── actor_critic_encoder.py # ActorCriticEncoder
+│   ├── adaptation.py           # ActorCriticEncoderAdapt, ProprioAdaptTConv
 │   └── normalization.py        # EmpiricalNormalization
 ├── runners/                    # Training runners
 │   ├── encoder_runner.py       # Phase 1 PPO (EncoderRunner)
@@ -239,16 +238,14 @@ Payload    (4D):  [mass(1), cog_offset_xyz(3)]
 | `Isaac-HeroAgent-Base-v0` | `HeroAgentTrainEnvCfg` | `HeroAgentEnv` | ON | ON | ON | 13D |
 | `Isaac-HeroAgent-Encoder-Base-v0` | `HeroAgentEncoderTrainEnvCfg` | `HeroAgentEnv` | ON | ON | ON | 13D+24D |
 | `Isaac-HeroAgent-TDC-v0` | `HeroAgentTDCEnvCfg` | `HeroAgentTDCEnv` | ON | ON | ON | 13D |
-| `Isaac-HeroAgent-Encoder-TDC-v0` | `HeroAgentEncoderTDCEnvCfg` | `HeroAgentEncoderTDCEnv` | ON | ON | ON | 13D+24D |
-| `Isaac-HeroAgent-Adapt-TDC-v0` | `HeroAgentAdaptTDCEnvCfg` | `HeroAgentAdaptTDCEnv` | ON | ON | ON | 13D+24D+hist |
+| `Isaac-HeroAgent-Adapt-Base-v0` | `HeroAgentAdaptBaseEnvCfg` | `HeroAgentAdaptBaseEnv` | ON | ON | ON | 13D+26D+hist |
 
 ### Environment Inheritance
 
 ```
 HeroAgentEnv (base_env.py)                    # Base RL: 2D joint velocity actions
-  └── HeroAgentTDCEnv (tdc_env.py)            # TDC: classical controller replaces RL actions
-       └── HeroAgentEncoderTDCEnv (encoder_tdc_env.py)  # Encoder-TDC: 4D gain actions
-            └── HeroAgentAdaptTDCEnv (adapt_tdc_env.py)  # Phase 2: proprio history buffer
+  ├── HeroAgentTDCEnv (tdc_env.py)            # TDC: classical controller replaces RL actions
+  └── HeroAgentAdaptBaseEnv (adapt_base_env.py)  # Phase 2: proprio history buffer (base RL)
 ```
 
 ### Config Inheritance
@@ -256,10 +253,9 @@ HeroAgentEnv (base_env.py)                    # Base RL: 2D joint velocity actio
 ```
 HeroAgentEnvCfg (debug, no DR)
   └── HeroAgentTrainEnvCfg (DR + current + payload)
-       ├── HeroAgentEncoderTrainEnvCfg (+ 24D privileged obs)
-       ├── HeroAgentTDCEnvCfg (+ TDC config, TDC joint gains)
-       ├── HeroAgentEncoderTDCEnvCfg (+ TDC + encoder + 4D actions)
-       └── HeroAgentAdaptTDCEnvCfg (+ proprio history)
+       ├── HeroAgentEncoderTrainEnvCfg (+ 26D privileged obs)
+       │    └── HeroAgentAdaptBaseEnvCfg (+ proprio history)
+       └── HeroAgentTDCEnvCfg (+ TDC config, TDC joint gains)
 ```
 
 ---

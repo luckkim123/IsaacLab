@@ -28,7 +28,6 @@ from isaaclab.utils.math import euler_xyz_from_quat
 from .base_env import HeroAgentEnv
 from .config import HeroAgentTDCEnvCfg
 from .controllers import ALBCKinematics, TDCController
-from .controllers.tdc import compute_M_hat_from_z
 from .mdp import RewardTermCfg, compute_stability_gate, mhat_accuracy_reward, tdc_torque_penalty
 from .utils.logging import log_tdc_control_state, log_tdc_init, log_tdc_reset_info
 
@@ -207,7 +206,7 @@ class HeroAgentTDCEnv(HeroAgentEnv):
     def _run_tdc_pipeline(self, **compute_kwargs) -> None:
         """Run the TDC control pipeline: orientation -> TDC -> IK -> rate limit -> anti-windup.
 
-        Shared between HeroAgentTDCEnv, HeroAgentEncoderTDCEnv, and HeroAgentNeuralTDCEnv.
+        Shared TDC control pipeline.
         Subclasses should update TDC params (M_hat, gains) before calling this.
 
         Args:
@@ -300,20 +299,3 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         if self.cfg.reward.stability_gate_enable:
             self._gate_episode_sum[env_ids_] = 0
             self._gate_episode_steps[env_ids_] = 0
-
-    def _compute_m_hat_from_encoder_z(self, z_decomposed: torch.Tensor) -> torch.Tensor:
-        """Compute M_hat from decomposed encoder z components + current FK joint positions.
-
-        Shared helper for encoder_tdc_env, unified_tdc_env, and adapt_tdc_env.
-        Uses parallel axis theorem: M_hat = I_hat + m_A_hat * (p_EE^2 + h^2).
-
-        Args:
-            z_decomposed: Decomposed z = [m_A_hat, I_roll_hat, I_pitch_hat].
-                Shape: (num_envs, 3).
-
-        Returns:
-            Design inertia M_hat [roll, pitch]. Shape: (num_envs, 2).
-        """
-        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
-        p_EE = self._kinematics.forward(joint_pos)
-        return compute_M_hat_from_z(z_decomposed, p_EE, self.cfg.tdc.h)

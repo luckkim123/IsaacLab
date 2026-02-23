@@ -17,14 +17,14 @@
 
 Hero Agent ALBC (Active Linear Buoyancy Controller) is a reinforcement learning environment for NVIDIA Isaac Lab that trains an underwater vehicle to stabilize its attitude without thrusters. Instead of conventional propulsion, the robot repositions a buoyancy element through a 2-link revolute arm (l1 = l2 = 0.233 m), generating restoring torques from buoyancy forces alone.
 
-The package implements a multi-phase training pipeline combining classical Time Delay Control (TDC) with HORA/RMA-style online adaptation. An encoder compresses 24D privileged hydrodynamic information into a 6D latent; a temporal convolution adaptation module then reconstructs this latent from proprioception history alone, enabling sim-to-real transfer without access to simulator-internal parameters.
+The package implements a multi-phase training pipeline with HORA/RMA-style online adaptation. An encoder compresses 26D privileged hydrodynamic information into a 13D latent; a temporal convolution adaptation module then reconstructs this latent from proprioception history alone, enabling sim-to-real transfer without access to simulator-internal parameters. A separate classical TDC controller environment is also provided for comparison.
 
 Domain randomization spans 15+ physical parameters (hydrodynamics, ocean currents, payloads, sensor noise) to bridge the sim-to-real gap.
 
 ## Key Features
 
 - **Thruster-Free Control**: Attitude stabilization using only buoyancy manipulation through a 2-DOF revolute arm, eliminating thruster noise and energy consumption
-- **Multi-Phase Training Pipeline**: Pure RL (PPO), classical TDC, encoder-TDC hybrid (HORA/RMA), and supervised adaptation -- each registered as a Gymnasium environment
+- **Multi-Phase Training Pipeline**: Pure RL (PPO), classical TDC, HORA encoder (Phase 1), and supervised adaptation (Phase 2) -- each registered as a Gymnasium environment
 - **Sim-to-Real Transfer**: Domain randomization across 15+ physical parameters with HORA encoder for online adaptation via proprioception history
 - **Deployment Export**: JIT-scriptable module exports TorchScript/ONNX models with baked-in gain scaling for direct C++ TDC controller integration
 - **GPU-Accelerated Simulation**: Runs 4096+ parallel environments on a single GPU via Isaac Lab and PhysX, with Fossen-model 6-DOF hydrodynamics
@@ -73,8 +73,7 @@ Train a base RL policy for attitude stabilization:
 | `Isaac-HeroAgent-Base-v0` | 13 / -- / 2 | Base training (DR + ocean current + payload) |
 | `Isaac-HeroAgent-Encoder-Base-v0` | 13 / 24 / 2 | HORA Phase 1 encoder training |
 | `Isaac-HeroAgent-TDC-v0` | 13 / -- / 2 | Classical TDC control (no RL actions) |
-| `Isaac-HeroAgent-Encoder-TDC-v0` | 13 / 24 / 4 | Encoder-TDC (RL adaptive gains + M_hat) |
-| `Isaac-HeroAgent-Adapt-TDC-v0` | 13 / 24 / 4 | Phase 2 adaptation (proprio history) |
+| `Isaac-HeroAgent-Adapt-Base-v0` | 13 / 26 / 2 | Phase 2 adaptation (proprio history, base RL) |
 
 <details>
 <summary><strong>Observation and Action Spaces</strong></summary>
@@ -96,8 +95,8 @@ Train a base RL policy for attitude stabilization:
 ```
 
 **Actions**:
-- Base RL (2D): joint velocity commands [-1, 1]
-- Encoder-TDC (4D): [Kp_roll, Kp_pitch, Kd_roll, Kd_pitch] via sigmoid scaling
+- Base RL / Adapt-Base (2D): joint velocity commands [-1, 1]
+- TDC (2D): actions ignored (classical controller overrides)
 
 </details>
 
@@ -105,24 +104,23 @@ Train a base RL policy for attitude stabilization:
 <summary><strong>Multi-Phase Training Pipeline</strong></summary>
 
 ```
-Phase 1: Encoder-TDC Teacher          Phase 2: Adaptation           Phase 3: Deploy
+Phase 1: Encoder-Base Teacher          Phase 2: Adapt-Base           Phase 3: Deploy
 
-privileged (24D) --> Encoder --> z(6D)  proprio_hist (30x12D)         adapt_tconv
-                     z[3:5] --> M_hat   --> adapt_tconv --> z_hat     + actor + TDC cfg
-policy_obs (13D) + z --> Actor --> 4D   L2 loss: ||z_hat - z_gt||    --> TorchScript/ONNX
-                         |                                            --> C++ TDC
+privileged (26D) --> Encoder --> z(13D) proprio_hist (30x8D)          adapt_tconv
+policy_obs (13D) + z --> Actor --> 2D   --> adapt_tconv --> z_hat     + frozen actor
+                         |              L2 loss: ||z_hat - z_gt||    --> TorchScript/ONNX
                          v
-                    Kp, Kd --> TDC --> joint targets
+                    velocity --> joint targets
 ```
 
-#### Phase 1: Encoder-TDC Teacher Training
+#### Phase 1: Encoder-Base Teacher Training
 
-Train the encoder to compress privileged hydrodynamic information (24D) into a 6D latent, while the actor learns adaptive TDC gains:
+Train the encoder to compress privileged hydrodynamic information (26D) into a 13D latent, while the actor learns velocity commands:
 
 ```bash
 ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
-    --task Isaac-HeroAgent-Encoder-TDC-v0 \
-    --num_envs 4096 --max_iterations 600
+    --task Isaac-HeroAgent-Encoder-Base-v0 \
+    --num_envs 4096 --max_iterations 1500 --headless
 ```
 
 #### Phase 2: Adaptation Module Training
@@ -131,18 +129,18 @@ Train a temporal convolution network to estimate the encoder latent from proprio
 
 ```bash
 ./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/hero_agent/workflows/train_adaptation.py \
-    --task Isaac-HeroAgent-Adapt-TDC-v0 \
-    --phase1_checkpoint logs/rsl_rl/<encoder_tdc_run>/model_600.pt \
+    --task Isaac-HeroAgent-Adapt-Base-v0 \
+    --phase1_checkpoint logs/rsl_rl/<encoder_base_run>/model_1500.pt \
     --num_envs 4096
 ```
 
 #### Phase 3: Deploy Export
 
-Evaluate the complete pipeline and export TorchScript/ONNX models for C++ TDC controller integration:
+Evaluate the complete pipeline and export models:
 
 ```bash
 ./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/hero_agent/workflows/play_phase3.py \
-    --task Isaac-HeroAgent-Adapt-TDC-v0 \
+    --task Isaac-HeroAgent-Adapt-Base-v0 \
     --checkpoint logs/rsl_rl/<adapt_run>/model_final.pt \
     --export-jit --export-onnx --headless
 ```
@@ -209,13 +207,12 @@ See `tdc_env.py` for a complete example.
 
 ```
 hero_agent/
-├── __init__.py           # Gymnasium environment registration (6 tasks)
+├── __init__.py           # Gymnasium environment registration (5 tasks)
 ├── config.py             # All environment configuration classes
 ├── config_benchmark.py   # Benchmark scenario presets (nominal/easy/hard/extreme)
 ├── base_env.py           # Base RL environment (HeroAgentEnv)
 ├── tdc_env.py            # Classical TDC controller environment
-├── encoder_tdc_env.py    # Encoder-TDC integration environment
-├── adapt_tdc_env.py      # Phase 2 adaptation environment
+├── adapt_base_env.py     # Phase 2 adaptation environment (base RL)
 ├── controllers/          # TDC controller + 2-link arm kinematics (IK/FK)
 ├── encoder/              # HORA encoder networks + adaptation module
 ├── agents/               # RSL-RL PPO runner configurations

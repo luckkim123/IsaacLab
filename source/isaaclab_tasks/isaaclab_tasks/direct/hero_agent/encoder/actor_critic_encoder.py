@@ -5,22 +5,16 @@
 
 """ActorCritic with extrinsics encoder for HORA/RMA training.
 
-This module provides the encoder-based actor-critic networks:
+This module provides the encoder-based actor-critic network:
     - ActorCriticEncoder: Base encoder network (Phase 1 teacher training)
-    - ActorCriticEncoderTDC: Encoder with z exposure for TDC M_hat extraction
 
 Architecture:
-    Encoder: privileged (18D) -> MLP [256, 128, 64] -> z (6D)
-    Actor:   cat([policy_obs, z]) = 19D -> MLP [256, 128, 64] -> actions
-    Critic:  cat([policy_obs, z]) = 19D -> MLP [256, 128, 64] -> value (1D)
+    Encoder: privileged (26D) -> MLP [256, 128, 64] -> z (13D)
+    Actor:   cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> actions
+    Critic:  cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> value (1D)
 
 Note: Critic does NOT receive privileged info directly (symmetric with actor).
 This forces the encoder to compress useful information into z.
-
-Design choices:
-    - 6D latent: general compressed representation of extrinsic parameters.
-    - 18D privileged: Buoyancy/geometry parameters (volume, CoG, CoB) per body
-      + payload (mass, cog_offset). Inertia and added mass excluded.
 
 Reference:
     - HORA: Heuristic-Free Online Robust Adaptation (Qi et al., 2023)
@@ -138,7 +132,9 @@ class ActorCriticEncoder(nn.Module):
         # softplus ≈ 0 and gradient ≈ 0, causing permanent encoder collapse.
         if encoder_output_activation != "tanh":
             last_linear = self.encoder[-1]
-            assert isinstance(last_linear, nn.Linear), f"Expected last encoder layer to be Linear, got {type(last_linear)}"
+            assert isinstance(last_linear, nn.Linear), (
+                f"Expected last encoder layer to be Linear, got {type(last_linear)}"
+            )
             nn.init.constant_(last_linear.bias, 0.5)
 
         logger.info("Encoder MLP: %s", self.encoder)
@@ -324,42 +320,3 @@ class ActorCriticEncoder(nn.Module):
         """
         super().load_state_dict(state_dict, strict=strict)
         return True
-
-
-class ActorCriticEncoderTDC(ActorCriticEncoder):
-    """ActorCriticEncoder with z exposure for TDC M_hat extraction.
-
-    Overrides _get_combined_obs() to cache the encoder latent z after each
-    forward pass. The environment retrieves z via get_last_z() to compute
-    TDC M_hat from decomposed z[3:6] + FK joint positions.
-
-    Timing:
-        RSL-RL loop: obs = env.get_observations() -> action = policy.act(obs)
-                     -> env.step(action) [calls _pre_physics_step]
-        So _last_z is computed in act() and available when _pre_physics_step() runs.
-    """
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._last_z: torch.Tensor | None = None
-
-    def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
-        """Get combined observation and cache z for environment access.
-
-        Both actor and critic use the same combined observation (symmetric design).
-        The cached _last_z enables the environment to extract M_hat from the
-        encoder output without re-running the encoder.
-        """
-        policy_obs = obs[self._policy_obs_key]
-        z = self._encode(obs[self._privileged_key])
-        self._last_z = z
-        return torch.cat([policy_obs, z], dim=-1)
-
-    def get_last_z(self) -> torch.Tensor | None:
-        """Return the last computed encoder latent z.
-
-        Returns:
-            z tensor of shape (num_envs, encoder_latent_dim), or None if
-            act() has not been called yet.
-        """
-        return self._last_z

@@ -101,39 +101,6 @@ class ALBCRewardCfg:
     curriculum_end_iter: int = 200
 
 
-@configclass
-class EncoderTDCRewardCfg(ALBCRewardCfg):
-    """Encoder-TDC reward config with M_hat accuracy bonus.
-
-    Inherits tracking + action penalties from ALBCRewardCfg.
-
-    Active terms:
-        - tracking (Gaussian): main performance signal
-        - mhat_accuracy (Cauchy): M_hat accuracy pressure
-        - action_magnitude: prevents gain saturation at sigmoid extremes
-        - action_rate: gain smoothness
-    """
-
-    # Fixed sigma (no sigma curriculum -- sigma annealing destroys reward signal)
-    tracking_sigma: float = 0.25
-    tracking_sigma_start: float | None = None
-    curriculum_end_iter: int = 300  # Match DRCurriculumCfg.end_iter
-
-    # Penalize extreme raw actions to discourage gain saturation at max.
-    # Softplus: raw~1.2 -> Kp~80. Penalizing raw magnitude limits gain extremes.
-    action_magnitude_weight: float = -0.3
-
-    # Half of base RL value (-0.01) because gains need dynamic adaptation.
-    action_rate_weight: float = -0.005
-
-    # M_hat accuracy bonus (Cauchy kernel on relative error)
-    # Cauchy: 1/(1 + rel_err_sq / sigma^2) -- heavy tail, never saturates
-    # sigma=0.5: reward=0.5 at ~35% per-axis relative error.
-    mhat_accuracy_weight: float = 0.5
-    mhat_accuracy_sigma: float = 0.5
-    mhat_accuracy_kernel: str = "cauchy"  # "cauchy" or "gaussian"
-
-
 # =============================================================================
 # Reward Term Configuration
 # =============================================================================
@@ -507,7 +474,7 @@ def mhat_accuracy_reward(
 
     M_true = compute_M_bb(
         I_ROV=env._hydro.rigid_body_inertia[:, :2],
-        m_A=env._buoy_hydro.added_mass_matrix[:, 0, 0],
+        m_A=env._buoy_hydro.added_mass_matrix[:, 1, 1],
         x_bu=p_EE[:, 0],
         y_bu=p_EE[:, 1],
         h=env.cfg.tdc.h,
@@ -544,7 +511,7 @@ def compute_stability_gate(env: HeroAgentEnv) -> torch.Tensor:
 
     M_true = compute_M_bb(
         I_ROV=env._hydro.rigid_body_inertia[:, :2],
-        m_A=env._buoy_hydro.added_mass_matrix[:, 0, 0],
+        m_A=env._buoy_hydro.added_mass_matrix[:, 1, 1],
         x_bu=p_EE[:, 0],
         y_bu=p_EE[:, 1],
         h=env.cfg.tdc.h,

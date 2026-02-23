@@ -14,32 +14,25 @@ Available Tasks:
     - Isaac-HeroAgent-Base-v0: Base training with DR and ocean current
     - Isaac-HeroAgent-Encoder-Base-v0: Encoder training with privileged info
     - Isaac-HeroAgent-TDC-v0: Classical TDC control (no RL)
-    - Isaac-HeroAgent-Encoder-TDC-v0: Encoder-TDC integration (RL adaptive gains + M_hat)
-    - Isaac-HeroAgent-Unified-TDC-v0: General encoder + RL-output M_hat/Kp/Kd
-    - Isaac-HeroAgent-Adapt-TDC-v0: Phase 2 adaptation (proprio history -> z_hat)
-    - Isaac-HeroAgent-SinglePhase-TDC-v0: Single-phase joint training (PPO + aux M_hat loss)
+    - Isaac-HeroAgent-Adapt-Base-v0: Phase 2 adaptation (proprio history -> z_hat, base RL)
 
 MPC environments are in the separate hero_agent_mpc package.
 """
 
 import gymnasium as gym
 
-from .adapt_tdc_env import HeroAgentAdaptTDCEnv
+from .adapt_base_env import HeroAgentAdaptBaseEnv
 from .base_env import HeroAgentEnv
 from .config import (
     DomainRandomizationCfg,
-    HeroAgentAdaptTDCEnvCfg,
-    HeroAgentEncoderTDCEnvCfg,
+    HeroAgentAdaptBaseEnvCfg,
     HeroAgentEncoderTrainEnvCfg,
     HeroAgentEnvCfg,
     HeroAgentTDCEnvCfg,
     HeroAgentTrainEnvCfg,
-    HeroAgentUnifiedTDCEnvCfg,
 )
 from .controllers import TDCControllerCfg
-from .encoder_tdc_env import HeroAgentEncoderTDCEnv
 from .tdc_env import HeroAgentTDCEnv
-from .unified_tdc_env import HeroAgentUnifiedTDCEnv
 
 ##
 # Register Gym environments
@@ -89,47 +82,14 @@ gym.register(
     },
 )
 
-# Encoder-TDC integration (RL adaptive gains + encoder M_hat)
+# Phase 2: Adaptation module (proprio history -> z_hat, base RL pipeline)
 gym.register(
-    id="Isaac-HeroAgent-Encoder-TDC-v0",
-    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEncoderTDCEnv",
+    id="Isaac-HeroAgent-Adapt-Base-v0",
+    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentAdaptBaseEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentEncoderTDCEnvCfg",
-        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentEncoderTDCPPORunnerCfg",
-    },
-)
-
-# Unified TDC (general encoder + RL-output M_hat/Kp/Kd)
-gym.register(
-    id="Isaac-HeroAgent-Unified-TDC-v0",
-    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentUnifiedTDCEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentUnifiedTDCEnvCfg",
-        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentUnifiedTDCPPORunnerCfg",
-    },
-)
-
-# Phase 2: Adaptation module (proprio history -> z_hat, supervised training)
-gym.register(
-    id="Isaac-HeroAgent-Adapt-TDC-v0",
-    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentAdaptTDCEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentAdaptTDCEnvCfg",
-        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentAdaptTDCRunnerCfg",
-    },
-)
-
-# Single-phase: Joint adapt_tconv + actor/critic with aux M_hat loss (no Phase 1)
-gym.register(
-    id="Isaac-HeroAgent-SinglePhase-TDC-v0",
-    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentAdaptTDCEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentAdaptTDCEnvCfg",
-        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentSinglePhaseTDCRunnerCfg",
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentAdaptBaseEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentAdaptBaseRunnerCfg",
     },
 )
 
@@ -137,17 +97,13 @@ __all__ = [
     # Environments
     "HeroAgentEnv",
     "HeroAgentTDCEnv",
-    "HeroAgentEncoderTDCEnv",
-    "HeroAgentUnifiedTDCEnv",
-    "HeroAgentAdaptTDCEnv",
+    "HeroAgentAdaptBaseEnv",
     # Configurations
     "HeroAgentEnvCfg",
     "HeroAgentTrainEnvCfg",
     "HeroAgentTDCEnvCfg",
     "HeroAgentEncoderTrainEnvCfg",
-    "HeroAgentEncoderTDCEnvCfg",
-    "HeroAgentUnifiedTDCEnvCfg",
-    "HeroAgentAdaptTDCEnvCfg",
+    "HeroAgentAdaptBaseEnvCfg",
     "DomainRandomizationCfg",
     "TDCControllerCfg",
 ]

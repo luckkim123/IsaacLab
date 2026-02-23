@@ -7,44 +7,29 @@
 
 This module provides:
     - ActorCriticEncoder: Custom network for HORA Phase 1 teacher training
-    - ActorCriticEncoderTDC: Encoder variant exposing z for TDC M_hat
-    - ActorCriticEncoderTDCAdapt: Phase 2 adaptation (proprio history -> z_hat)
+    - ActorCriticEncoderAdapt: Phase 2 adaptation (proprio history -> z_hat)
     - HeroAgentPPORunnerCfg: Standard PPO for joint-based attitude control
     - HeroAgentEncoderPPORunnerCfg: HORA Phase 1 with extrinsics encoder
-    - HeroAgentEncoderTDCPPORunnerCfg: Encoder-TDC integration
-    - HeroAgentUnifiedTDCPPORunnerCfg: General encoder + RL-output M_hat/Kp/Kd
-    - HeroAgentAdaptTDCRunnerCfg: Phase 2 adaptation (supervised, non-PPO)
-    - HeroAgentSinglePhaseTDCRunnerCfg: Single-phase joint training (PPO + aux M_hat loss)
+    - HeroAgentAdaptBaseRunnerCfg: Phase 2 adaptation (supervised, base RL)
 
 MPC agent configurations are in the hero_agent_mpc.agents package.
 """
 
-from ..encoder import ActorCriticEncoder, ActorCriticEncoderTDC, ActorCriticEncoderTDCAdapt
+from ..encoder import ActorCriticEncoder, ActorCriticEncoderAdapt
 from .rsl_rl_ppo_cfg import (
-    HeroAgentAdaptTDCRunnerCfg,
+    HeroAgentAdaptBaseRunnerCfg,
     HeroAgentEncoderPPORunnerCfg,
-    HeroAgentEncoderTDCPPORunnerCfg,
     HeroAgentPPORunnerCfg,
-    HeroAgentSinglePhaseTDCRunnerCfg,
-    HeroAgentUnifiedTDCPPORunnerCfg,
+    RslRlPpoActorCriticEncoderAdaptCfg,
     RslRlPpoActorCriticEncoderCfg,
-    RslRlPpoActorCriticEncoderTDCAdaptCfg,
-    RslRlPpoActorCriticEncoderTDCCfg,
-    RslRlPpoActorCriticUnifiedTDCCfg,
 )
 
 __all__ = [
     "ActorCriticEncoder",
-    "ActorCriticEncoderTDC",
-    "ActorCriticEncoderTDCAdapt",
+    "ActorCriticEncoderAdapt",
     "HeroAgentPPORunnerCfg",
     "HeroAgentEncoderPPORunnerCfg",
-    "HeroAgentEncoderTDCPPORunnerCfg",
-    "HeroAgentUnifiedTDCPPORunnerCfg",
-    "HeroAgentAdaptTDCRunnerCfg",
-    "HeroAgentSinglePhaseTDCRunnerCfg",
+    "HeroAgentAdaptBaseRunnerCfg",
     "RslRlPpoActorCriticEncoderCfg",
-    "RslRlPpoActorCriticEncoderTDCCfg",
-    "RslRlPpoActorCriticEncoderTDCAdaptCfg",
-    "RslRlPpoActorCriticUnifiedTDCCfg",
+    "RslRlPpoActorCriticEncoderAdaptCfg",
 ]

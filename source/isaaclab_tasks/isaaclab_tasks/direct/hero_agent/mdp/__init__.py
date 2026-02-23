@@ -30,7 +30,6 @@ from .observations import (
 )
 from .rewards import (
     ALBCRewardCfg,
-    EncoderTDCRewardCfg,
     RewardManager,
     RewardTermCfg,
     action_magnitude_penalty,
@@ -62,7 +61,6 @@ __all__ = [
     "compute_privileged_obs",
     # Rewards (configs)
     "ALBCRewardCfg",
-    "EncoderTDCRewardCfg",
     "RewardManager",
     "RewardTermCfg",
     # Rewards (functions)

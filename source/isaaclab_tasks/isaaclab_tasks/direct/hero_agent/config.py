@@ -15,9 +15,7 @@ This module consolidates all environment configurations:
 - HeroAgentTrainEnvCfg: Training config (DR + ocean current + payload)
 - HeroAgentEncoderTrainEnvCfg: Encoder training with privileged info
 - HeroAgentTDCEnvCfg: Classical TDC control (no RL)
-- HeroAgentEncoderTDCEnvCfg: Encoder-TDC integration (RL adaptive gains + M_hat)
-- HeroAgentUnifiedTDCEnvCfg: General encoder + RL-output M_hat/Kp/Kd
-- HeroAgentAdaptTDCEnvCfg: Phase 2 adaptation (proprio history -> z_hat)
+- HeroAgentAdaptBaseEnvCfg: Phase 2 adaptation (proprio history -> z_hat, base RL)
 
 MPC configurations are in the separate hero_agent_mpc package.
 """
@@ -366,15 +364,15 @@ class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
     """Hero Agent encoder training with privileged hydrodynamic info.
 
     state_space=26 returns privileged information for HORA/RMA Phase 1 training.
-    Main hydro (7D) + Buoy hydro (7D) + Main dynamics (4D) + Buoy dynamics (4D) + Payload (4D) = 26D.
-    Inertia and added mass are excluded from privileged obs; the encoder learns
-    a general latent representation from buoyancy/geometry parameters.
+    Main hydro (7D) + Buoy hydro (7D) + Main dynamics (4D: Ixx,Iyy,Izz,m_A)
+    + Buoy dynamics (4D) + Payload (4D: mass, cog_offset_xyz) = 26D.
+    Includes inertia and added mass for both bodies in privileged obs.
 
     Network Input Dimensions (ActorCriticEncoder):
         - observation_space (13): Used for gym.spaces.Box definition only
         - state_space (26): Privileged info, returned as observations["privileged"]
-        - Encoder: privileged(26D) -> latent z(6D)
-        - Actual Actor/Critic input: policy_obs(13) + z(6) = 19D
+        - Encoder: privileged(26D) -> latent z(13D)
+        - Actual Actor/Critic input: policy_obs(13) + z(13) = 26D
     """
 
     state_space: int = 26
@@ -427,123 +425,18 @@ class HeroAgentTDCEnvCfg(HeroAgentTrainEnvCfg):
 
 
 @configclass
-class HeroAgentEncoderTDCEnvCfg(HeroAgentTrainEnvCfg):
-    """Encoder-TDC integration: RL learns adaptive gains + M_hat for TDC.
+class HeroAgentAdaptBaseEnvCfg(HeroAgentEncoderTrainEnvCfg):
+    """Phase 2 adaptation training config (base RL pipeline).
 
-    The RL actor outputs 4D actions [Kp_roll, Kp_pitch, Kd_roll, Kd_pitch],
-    which are converted to TDC gains via softplus scaling with hard max clamp.
-    The encoder latent z[3:6] provides decomposed constants [m_A_hat, I_roll_hat,
-    I_pitch_hat], combined with FK position to compute per-step M_hat.
-
-    Gain scaling (softplus): raw=0 -> default, clamped at max.
-        kp = softplus(raw) * (kp_default / log(2)), clamp(max=kp_max)
-    No hard minimum -- reward incentivizes active control when needed.
-
-    Inherits DR, ocean current, and payload from HeroAgentTrainEnvCfg.
-    Joint gains centered at TDC-optimal values (Kp=200, Kd=10).
-    """
-
-    tdc: TDCControllerCfg = TDCControllerCfg(log_interval=0)
-
-    # TDC timing: control_decimation=4 (50Hz TDC)
-    control_decimation: int = 4
-
-    state_space: int = 26  # privileged obs for encoder
-    action_space: int = 4  # Kp_roll, Kp_pitch, Kd_roll, Kd_pitch
-    observation_space: int = 13  # same policy obs
-
-    # Gain softplus mapping: raw=0 -> default, clamp(max=kp_max)
-    # kp = softplus(raw) * (kp_default / log(2)), clamp(max=kp_max)
-    kp_max: float = 60.0
-    kp_default: float = 40.0
-    kd_max: float = 20.0
-    kd_default: float = 12.0
-
-    # Reward config: tracking + action regularization + stability gate.
-    # Matches Unified-TDC settings (proven effective).
-    reward: ALBCRewardCfg = ALBCRewardCfg(
-        action_magnitude_weight=-0.5,
-        action_rate_weight=-0.025,
-        stability_gate_enable=True,
-    )
-
-
-
-@configclass
-class HeroAgentUnifiedTDCEnvCfg(HeroAgentTrainEnvCfg):
-    """Unified TDC: Encoder + RL-output decomposed M_hat components + Kp/Kd.
-
-    Identical to HeroAgentEncoderTrainEnvCfg (same encoder, DR, rewards,
-    DR curriculum) except:
-        1. TDC controller is appended to the control pipeline
-        2. Actor outputs 7D TDC params instead of 2D joint velocities:
-            [m_A(1), I_roll(1), I_pitch(1), Kp(2), Kd(2)] decoded via sigmoid
-        3. M_hat computed from decomposed components via parallel axis theorem
-
-    Encoder: privileged(26D) -> ReLU+softplus -> z(13D), same as Encoder-Base.
-    Actor: cat([policy_obs(13D), z(13D)]) = 26D -> 7D TDC params.
-
-    DR is identical to Encoder-Base (same joint gains, action latency, etc.).
-    Action latency is applied to raw TDC param logits before sigmoid decoding.
-    """
-
-    tdc: TDCControllerCfg = TDCControllerCfg(log_interval=0)
-    control_decimation: int = 4  # 50Hz TDC
-
-    state_space: int = 26  # privileged obs for encoder
-    action_space: int = 7  # [m_A(1), I_roll(1), I_pitch(1), Kp(2), Kd(2)]
-    observation_space: int = 13  # policy obs
-
-    # Decomposed M_hat component ranges (after sigmoid scaling in env)
-    m_A_range: tuple[float, float] = (0.1, 3.0)
-    I_range: tuple[float, float] = (0.005, 0.3)
-
-    # Gain ranges (after sigmoid scaling in env)
-    kp_range: tuple[float, float] = (10.0, 100.0)
-    kd_range: tuple[float, float] = (2.0, 30.0)
-
-    # Halved action penalties vs Encoder-Base: 7D sigmoid actions have
-    # inherently larger raw magnitudes (~2.4) than 2D joint velocities (~0.7).
-    # Stability gate enabled: reward zeroed when |1 - M_hat/M_true| >= 1.
-    reward: ALBCRewardCfg = ALBCRewardCfg(
-        action_magnitude_weight=-0.5,
-        action_rate_weight=-0.025,
-        stability_gate_enable=True,
-    )
-
-
-
-@configclass
-class HeroAgentAdaptTDCEnvCfg(HeroAgentEncoderTDCEnvCfg):
-    """Phase 2 adaptation training config.
-
+    Inherits from HeroAgentEncoderTrainEnvCfg (state_space=26 for privileged z_gt).
     Adds proprioception history buffer for the adaptation module.
-    Per-timestep feature (6D):
-        [roll(1), pitch(1), p(1), q(1), joint_pos_target(2)]
 
-    Pure input-output features (no controller internals):
-        - Body state (roll, pitch): measured by IMU
-        - Angular velocity (p, q): response to commands, encodes M_true
-        - Joint position target: TDC command output (50Hz staircase in 200Hz history)
+    Per-timestep feature (8D):
+        [roll(1), pitch(1), p(1), q(1), joint_pos_norm(2), prev_actions(2)]
 
     The temporal conv learns dynamics from the command-response relationship:
-    same joint target with different M_true produces different angular velocity.
+    same action with different physical parameters produces different angular velocity.
     """
 
     proprio_history_len: int = 30
-    proprio_feature_dim: int = 6  # body_state(2) + ang_vel(2) + joint_cmd(2)
-
-    # TDC-specific reward design:
-    # - action_magnitude REMOVED: penalizing gain logits is meaningless for TDC
-    # - tdc_torque REMOVED: u_hat (disturbance compensation) dominates tau, conflicts with tracking
-    # - action_rate KEPT: prevents gain chattering
-    # - stability_gate ON: forces M_hat within stable region (M_hat > M_true/2)
-    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=False)
-
-    reward: ALBCRewardCfg = ALBCRewardCfg(
-        tracking_sigma=0.15,
-        action_magnitude_weight=0.0,
-        action_rate_weight=-0.025,
-        stability_gate_enable=True,
-        tdc_torque_weight=0.0,
-    )
+    proprio_feature_dim: int = 8  # body_state(2) + ang_vel(2) + joint_pos(2) + prev_actions(2)
