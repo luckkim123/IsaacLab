@@ -20,7 +20,7 @@ Architecture:
     ActorCriticEncoderAdapt:
         Inherits ActorCriticEncoder directly (base RL, NOT TDC chain).
         Overrides _get_combined_obs() to use adapt_tconv(proprio_hist) instead
-        of _encode(privileged). z_hat uses softplus + z_min (matching Phase 1).
+        of _encode(privileged). z_hat uses _activate_z() (tanh, matching Phase 1).
 
         The frozen encoder is still available via compute_z_gt() for
         supervised training.
@@ -150,7 +150,7 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
         - z_hat is DETACHED before actor/critic: PPO gradient does NOT reach adapt_tconv
         - AdaptRunner recomputes z_hat independently for L2 loss gradient
 
-    z_hat activation: softplus + z_min (matching Phase 1 encoder output).
+    z_hat activation: matches Phase 1 encoder (tanh by default).
 
     The frozen encoder remains available via compute_z_gt() for computing
     the supervision target during training.
@@ -177,14 +177,14 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
     def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
         """Use z_hat from adaptation module instead of z from encoder.
 
-        z_hat activation: softplus + z_min (matching Phase 1 encoder).
+        z_hat activation matches Phase 1 encoder (tanh via _activate_z).
         z_hat is DETACHED before actor/critic input so PPO gradient does
         not interfere with L2 loss supervision. AdaptRunner recomputes z_hat
         independently for L2 gradient flow.
         """
         policy_obs = obs[self._policy_obs_key]
         z_hat_raw = self.adapt_tconv(obs[self._proprio_hist_key])
-        z_hat = self._softplus_z(z_hat_raw)
+        z_hat = self._activate_z(z_hat_raw)
         return torch.cat([policy_obs, z_hat.detach()], dim=-1)
 
     def compute_z_gt(self, obs: TensorDict) -> torch.Tensor:

@@ -51,10 +51,11 @@ class _RslRlPpoEncoderBaseCfg(RslRlPpoActorCriticCfg):
 
     encoder_hidden_dims: list[int] = [256, 128, 64]
     encoder_latent_dim: int = 13
-    encoder_activation: str = "relu"
-    encoder_output_activation: str = "softplus"
+    encoder_activation: str = "elu"
+    encoder_output_activation: str = "tanh"
     encoder_obs_normalization: bool = True
     z_min: float = 0.01
+    z_max: float = 2.0
     policy_obs_dim: int = 13
     privileged_dim: int = 26
 
@@ -69,8 +70,8 @@ class RslRlPpoActorCriticEncoderCfg(_RslRlPpoEncoderBaseCfg):
 
     class_name: str = "ActorCriticEncoder"
     encoder_latent_dim: int = 13
-    encoder_activation: str = "relu"
-    encoder_output_activation: str = "softplus"
+    encoder_activation: str = "elu"
+    encoder_output_activation: str = "tanh"
 
 
 @configclass
@@ -133,13 +134,41 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
+    # -- Adaptive entropy (reward-reactive, axPPO-inspired) --
+    # Fields defined here for future expansion. Base RL uses OnPolicyRunner
+    # directly (not EncoderRunner), so these are not read yet.
+
+    adaptive_entropy: bool = True
+    """Enable reward-reactive entropy coefficient. When reward drops, entropy increases."""
+
+    entropy_base: float = 0.005
+    """Base entropy coefficient (used when reward is stable). Matches algorithm.entropy_coef."""
+
+    entropy_scale: float = 5.0
+    """Amplification factor: entropy = base * (1 + scale * drop_ratio)."""
+
+    entropy_min: float = 0.001
+    """Minimum entropy coefficient (floor)."""
+
+    entropy_max: float = 0.02
+    """Maximum entropy coefficient (ceiling)."""
+
+    entropy_fast_alpha: float = 0.1
+    """EMA alpha for fast reward tracker (~10 iteration response)."""
+
+    entropy_slow_alpha: float = 0.01
+    """EMA alpha for slow reward baseline (~100 iteration response)."""
+
+    entropy_std_target: float = 0.4
+    """Target mean_noise_std. Below this, entropy boost activates to resist collapse."""
+
 
 @configclass
 class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for Hero Agent encoder training (HORA Phase 1).
 
     Uses ActorCriticEncoder that compresses privileged info into latent z:
-        - Encoder: privileged (26D) -> softplus -> z (13D)
+        - Encoder: privileged (26D) -> tanh -> z (13D) in [-1, 1]
         - Actor: cat([policy_obs, z]) = 26D -> actions
         - Critic: cat([policy_obs, z]) = 26D -> value (symmetric, forces encoder learning)
     """
@@ -178,6 +207,32 @@ class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+    # -- Adaptive entropy (reward-reactive, axPPO-inspired) --
+
+    adaptive_entropy: bool = True
+    """Enable reward-reactive entropy coefficient. When reward drops, entropy increases."""
+
+    entropy_base: float = 0.005
+    """Base entropy coefficient (used when reward is stable). Matches algorithm.entropy_coef."""
+
+    entropy_scale: float = 5.0
+    """Amplification factor: entropy = base * (1 + scale * drop_ratio)."""
+
+    entropy_min: float = 0.001
+    """Minimum entropy coefficient (floor)."""
+
+    entropy_max: float = 0.02
+    """Maximum entropy coefficient (ceiling)."""
+
+    entropy_fast_alpha: float = 0.1
+    """EMA alpha for fast reward tracker (~10 iteration response)."""
+
+    entropy_slow_alpha: float = 0.01
+    """EMA alpha for slow reward baseline (~100 iteration response)."""
+
+    entropy_std_target: float = 0.4
+    """Target mean_noise_std. Below this, entropy boost activates to resist collapse."""
 
 
 @configclass

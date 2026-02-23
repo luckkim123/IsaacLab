@@ -41,10 +41,12 @@ if TYPE_CHECKING:
 class ActorCriticEncoder(nn.Module):
     """ActorCritic with extrinsics encoder for HORA Phase 1 teacher policy.
 
-    The encoder compresses privileged information into a positive latent vector z
-    using softplus: z = softplus(raw_output) + z_min.
-    This guarantees z > z_min (positive). Unlike scaled sigmoid, softplus has
-    no gradient saturation at large values.
+    The encoder compresses privileged information into a bounded latent vector z.
+
+    Activation modes:
+        - "tanh": z = tanh(raw) in [-1, 1]. Built into MLP last layer. Default (matches HORA).
+        - "sigmoid": z = z_min + sigmoid(raw) * (z_max - z_min). Bounded in [z_min, z_max].
+        - "softplus": z = softplus(raw) + z_min. Legacy, can collapse to z_min.
 
     Gradient flow: During PPO update, stored observations are replayed through
     the full network (encoder + actor/critic), so encoder gradients flow via
@@ -64,9 +66,10 @@ class ActorCriticEncoder(nn.Module):
         encoder_hidden_dims: list[int] | tuple[int, ...] = (256, 128, 64),
         encoder_latent_dim: int = 6,
         encoder_activation: str = "relu",
-        encoder_output_activation: str = "softplus",
+        encoder_output_activation: str = "sigmoid",
         encoder_obs_normalization: bool = False,
         z_min: float = 0.01,
+        z_max: float = 2.0,
         # Actor-Critic parameters
         actor_obs_normalization: bool = False,
         critic_obs_normalization: bool = False,
@@ -92,6 +95,7 @@ class ActorCriticEncoder(nn.Module):
         self.encoder_latent_dim = encoder_latent_dim
         self.encoder_output_activation = encoder_output_activation
         self.z_min = z_min
+        self.z_max = z_max
         self.state_dependent_std = state_dependent_std
 
         # Encoder input normalization (Welford's online mean/var)
@@ -135,11 +139,19 @@ class ActorCriticEncoder(nn.Module):
         else:
             self.encoder = MLP(privileged_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
 
-        # Initialize last encoder layer bias to positive value so that
-        # softplus(output) starts in the active gradient region regardless of seed.
-        # Without this, some seeds produce negative-biased outputs where
-        # softplus ≈ 0 and gradient ≈ 0, causing permanent encoder collapse.
-        if encoder_output_activation != "tanh":
+        # Initialize last encoder layer bias so activation starts in a
+        # region with good gradient signal, regardless of random seed.
+        if encoder_output_activation == "sigmoid":
+            last_linear = self.encoder[-1]
+            assert isinstance(last_linear, nn.Linear), (
+                f"Expected last encoder layer to be Linear, got {type(last_linear)}"
+            )
+            # Bias init: logit((nominal - z_min) / (z_max - z_min)) so z starts
+            # near mid-range (~0.5 * (z_max - z_min) + z_min). sigmoid(0) = 0.5.
+            # Small weights + zero bias => sigmoid output starts near 0.5.
+            nn.init.constant_(last_linear.bias, 0.0)
+            nn.init.normal_(last_linear.weight, std=0.01)
+        elif encoder_output_activation == "softplus":
             last_linear = self.encoder[-1]
             assert isinstance(last_linear, nn.Linear), (
                 f"Expected last encoder layer to be Linear, got {type(last_linear)}"
@@ -226,20 +238,30 @@ class ActorCriticEncoder(nn.Module):
 
     # --- Observation processing ---
 
-    def _softplus_z(self, raw: torch.Tensor) -> torch.Tensor:
-        """Apply softplus + z_min to guarantee z > z_min (positive latent).
+    def _activate_z(self, raw: torch.Tensor) -> torch.Tensor:
+        """Apply output activation to raw encoder/adaptation output.
 
         This is the canonical activation for all encoder/adaptation z outputs.
         Centralizing here ensures consistency across Phase 1 encoder, Phase 2
         adaptation, and the adaptation runner.
+
+        Modes:
+            tanh: tanh(raw) in [-1, 1]. Default (matches HORA).
+            sigmoid: z_min + sigmoid(raw) * (z_max - z_min). Bounded.
+            softplus: softplus(raw) + z_min. Legacy, can collapse.
         """
+        if self.encoder_output_activation == "tanh":
+            return torch.tanh(raw)
+        if self.encoder_output_activation == "sigmoid":
+            return self.z_min + torch.sigmoid(raw) * (self.z_max - self.z_min)
         return F.softplus(raw) + self.z_min
 
     def _encode(self, privileged: torch.Tensor) -> torch.Tensor:
         """Encode privileged info into latent z.
 
-        For softplus mode: z = softplus(encoder_output) + z_min (positive, no saturation).
-        For tanh mode: z = tanh(encoder_output) in [-1, 1] (built into MLP last layer).
+        For tanh mode: z = tanh(raw) in [-1, 1] (built into MLP last layer). Default.
+        For sigmoid mode: z = z_min + sigmoid(raw) * (z_max - z_min). Bounded.
+        For softplus mode: z = softplus(raw) + z_min. Legacy, can collapse.
 
         Privileged obs is normalized before the encoder MLP when
         encoder_obs_normalization is enabled (fixes 1000x scale mismatch).
@@ -247,7 +269,7 @@ class ActorCriticEncoder(nn.Module):
         normalized = self.encoder_obs_normalizer(privileged)
         if self.encoder_output_activation == "tanh":
             return self.encoder(normalized)
-        return self._softplus_z(self.encoder(normalized))
+        return self._activate_z(self.encoder(normalized))
 
     def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
         """Get combined observation: cat([policy_obs, z]).

@@ -288,6 +288,9 @@ class HeroAgentEnv(DirectRLEnv):
         tracking_params = {"sigma": rcfg.tracking_sigma}
         if rcfg.tracking_sigma_start is not None:
             tracking_params["_sigma_start"] = rcfg.tracking_sigma_start
+        if rcfg.tracking_sigma_mid is not None:
+            tracking_params["_sigma_mid"] = rcfg.tracking_sigma_mid
+            tracking_params["_sigma_phase1_fraction"] = rcfg.sigma_phase1_fraction
         terms = {
             "tracking": RewardTermCfg(
                 func=tracking_reward,

@@ -205,22 +205,22 @@ class DRCurriculumCfg:
     """
 
     enable: bool = False
-    end_iter: int = 500
+    end_iter: int = 1000
 
-    # Per-step perturbation start ranges (full values from DomainRandomizationCfg)
-    perturbation_force_range_start: tuple[float, float] = (0.0, 2.0)
-    perturbation_torque_range_start: tuple[float, float] = (0.0, 0.3)
+    # Per-step perturbation start ranges (baseline-equivalent, ramp to full)
+    perturbation_force_range_start: tuple[float, float] = (0.0, 1.5)
+    perturbation_torque_range_start: tuple[float, float] = (0.0, 0.2)
 
-    # Episode-level DR start ranges
-    inertia_scale_start: tuple[float, float] = (0.8, 1.2)
-    body_mass_scale_start: tuple[float, float] = (0.9, 1.1)
-    volume_scale_start: tuple[float, float] = (0.9, 1.1)
-    added_mass_scale_start: tuple[float, float] = (0.9, 1.1)
-    payload_mass_range_start: tuple[float, float] = (0.0, 0.3)
+    # Episode-level DR start ranges (baseline-equivalent)
+    inertia_scale_start: tuple[float, float] = (0.85, 1.15)
+    body_mass_scale_start: tuple[float, float] = (0.92, 1.08)
+    volume_scale_start: tuple[float, float] = (0.92, 1.08)
+    added_mass_scale_start: tuple[float, float] = (0.92, 1.08)
+    payload_mass_range_start: tuple[float, float] = (0.0, 0.2)
 
     # High-impact stability parameters (start near nominal, ramp to full range)
-    cog_offset_z_start: tuple[float, float] = (-0.01, 0.01)
-    cob_offset_z_start: tuple[float, float] = (-0.005, 0.005)
+    cog_offset_z_start: tuple[float, float] = (-0.008, 0.008)
+    cob_offset_z_start: tuple[float, float] = (-0.004, 0.004)
     action_latency_range_start: tuple[int, int] = (0, 0)
 
 
@@ -346,6 +346,10 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
     """Hero Agent ALBC training environment with domain randomization."""
 
     randomization = DomainRandomizationCfg(enable=True)
+
+    # DR curriculum: baseline-equivalent start -> full DR over 1000 iters.
+    # Defaults in DRCurriculumCfg are the new baseline-equivalent values.
+    # Shared by all training envs (Base, Encoder, TDC, Adapt).
     dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=True)
     ocean_current = OceanCurrentCfg(
         max_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
@@ -386,31 +390,12 @@ class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
         - Encoder: privileged(26D) -> latent z(13D)
         - Actual Actor/Critic input: policy_obs(13) + z(13) = 26D
 
-    DR curriculum is disabled (full DR from iter 0) to prevent encoder z collapse.
-    With curriculum, early training has near-identical dynamics across envs, so the
-    encoder learns to output constant z -> gradient vanishes -> softplus dead zone.
+    DR curriculum is inherited from HeroAgentTrainEnvCfg (shared across all
+    training envs). Sigmoid encoder activation prevents z collapse even with
+    mild early DR.
     """
 
     state_space: int = 26
-
-    # Encoder-friendly DR curriculum: start at ~50% of full DR range.
-    # Old defaults (~10-20%) starved the encoder (z collapse).
-    # Full DR from iter 0 fixed encoder but made early policy learning too hard.
-    # 50% start preserves encoder gradients while allowing faster early convergence.
-    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(
-        enable=True,
-        end_iter=300,
-        inertia_scale_start=(0.6, 1.8),
-        body_mass_scale_start=(0.8, 1.2),
-        volume_scale_start=(0.8, 1.2),
-        added_mass_scale_start=(0.85, 1.15),
-        payload_mass_range_start=(0.0, 0.8),
-        perturbation_force_range_start=(0.0, 5.0),
-        perturbation_torque_range_start=(0.0, 0.8),
-        cog_offset_z_start=(-0.03, 0.03),
-        cob_offset_z_start=(-0.02, 0.02),
-        action_latency_range_start=(0, 2),
-    )
 
 
 # =============================================================================

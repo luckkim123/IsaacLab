@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import statistics
 
 from rsl_rl.runners import OnPolicyRunner
 
@@ -59,6 +60,32 @@ class EncoderRunner(OnPolicyRunner):
         if self._has_encoder:
             connect_encoder_to_env(self.env, self.alg.policy, "EncoderRunner")
 
+        # Adaptive entropy: dual EMA reward tracking (axPPO-inspired).
+        # When reward drops (fast EMA < slow EMA), entropy_coef increases
+        # to boost exploration and escape local optima.
+        self._adaptive_entropy_cfg = {
+            "enable": self.cfg.get("adaptive_entropy", True),
+            "base": self.cfg.get("entropy_base", self.alg.entropy_coef),
+            "scale": self.cfg.get("entropy_scale", 5.0),
+            "min": self.cfg.get("entropy_min", 0.001),
+            "max": self.cfg.get("entropy_max", 0.05),
+            "fast_alpha": self.cfg.get("entropy_fast_alpha", 0.1),
+            "slow_alpha": self.cfg.get("entropy_slow_alpha", 0.01),
+            "std_target": self.cfg.get("entropy_std_target", 0.7),
+        }
+        self._reward_ema_fast: float | None = None
+        self._reward_ema_slow: float | None = None
+        self._entropy_warmup_iters = 10
+
+        if self._adaptive_entropy_cfg["enable"]:
+            logger.info(
+                "[EncoderRunner] Adaptive entropy enabled: base=%.4f, scale=%.1f, range=[%.4f, %.4f]",
+                self._adaptive_entropy_cfg["base"],
+                self._adaptive_entropy_cfg["scale"],
+                self._adaptive_entropy_cfg["min"],
+                self._adaptive_entropy_cfg["max"],
+            )
+
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         """Override learn() to apply DR curriculum start values before the first rollout.
 
@@ -92,12 +119,19 @@ class EncoderRunner(OnPolicyRunner):
         # Call parent log method first (handles all standard logging)
         super().log(locs, width, pad)
 
+        # Adaptive entropy: adjust entropy_coef based on reward trajectory
+        if self._adaptive_entropy_cfg["enable"]:
+            self._update_adaptive_entropy(locs)
+
         # Update reward curriculum after logging so logged data matches the
         # curriculum that produced it (avoids 1-interval offset)
         iteration = locs["it"]
         raw_env = unwrap_env(self.env)
         if hasattr(raw_env, "_reward_manager") and hasattr(raw_env.cfg, "reward"):
-            raw_env._reward_manager.update_curriculum(iteration, raw_env.cfg.reward.curriculum_end_iter)
+            end_iter = raw_env.cfg.reward.curriculum_end_iter
+            if end_iter is None and hasattr(raw_env.cfg, "dr_curriculum"):
+                end_iter = raw_env.cfg.dr_curriculum.end_iter
+            raw_env._reward_manager.update_curriculum(iteration, end_iter or 500)
 
         # Update DR curriculum (ramp perturbation/inertia/mass ranges)
         if hasattr(raw_env, "update_dr_curriculum"):
@@ -136,3 +170,60 @@ class EncoderRunner(OnPolicyRunner):
                 iteration=locs["it"],
                 logger_type=self.logger_type,
             )
+
+    def _update_adaptive_entropy(self, locs: dict) -> None:
+        """Update entropy_coef using combined noise-std and reward-reactive signals.
+
+        Two independent signals, max wins:
+            1. Noise-std reactive (PROACTIVE): When mean action std drops below
+               std_target, entropy boost grows proportionally to resist collapse.
+               Active from the start — prevents premature exploration loss.
+            2. Reward-reactive (REACTIVE): When fast EMA drops below slow EMA,
+               entropy increases to escape local optima during DR curriculum ramp.
+
+        Args:
+            locs: Local variables from the training loop. Must contain
+                ``rewbuffer`` (deque of recent episode rewards) and ``it``
+                (current iteration number).
+        """
+        cfg = self._adaptive_entropy_cfg
+
+        # Signal 1: Noise-std reactive (proactive, always active after warmup)
+        current_std = self.alg.policy.action_std.mean().item()
+        std_target = cfg["std_target"]
+        std_boost = max(0.0, (std_target - current_std) / std_target) if std_target > 0 else 0.0
+
+        # Signal 2: Reward-reactive (existing dual EMA logic)
+        rewbuffer = locs.get("rewbuffer", [])
+        drop = 0.0
+        if len(rewbuffer) > 0:
+            mean_reward = statistics.mean(rewbuffer)
+
+            if self._reward_ema_fast is None:
+                self._reward_ema_fast = mean_reward
+                self._reward_ema_slow = mean_reward
+            else:
+                ema_fast = (1 - cfg["fast_alpha"]) * self._reward_ema_fast + cfg["fast_alpha"] * mean_reward
+                ema_slow = (1 - cfg["slow_alpha"]) * self._reward_ema_slow + cfg["slow_alpha"] * mean_reward
+                self._reward_ema_fast = ema_fast
+                self._reward_ema_slow = ema_slow
+
+                if locs["it"] >= self._entropy_warmup_iters:
+                    denominator = max(abs(ema_slow), 1e-6)
+                    drop = max(0.0, (ema_slow - ema_fast) / denominator)
+
+        # Combined: stronger signal wins
+        boost = max(std_boost, drop)
+        new_coef = cfg["base"] * (1.0 + cfg["scale"] * boost)
+        self.alg.entropy_coef = max(cfg["min"], min(cfg["max"], new_coef))
+
+        # Log all signals
+        iteration = locs["it"]
+        if self.log_dir is not None and not self.disable_logs:
+            self.writer.add_scalar("Entropy/entropy_coef", self.alg.entropy_coef, iteration)
+            self.writer.add_scalar("Entropy/std_boost", std_boost, iteration)
+            self.writer.add_scalar("Entropy/reward_drop", drop, iteration)
+            self.writer.add_scalar("Entropy/boost", boost, iteration)
+            if self._reward_ema_fast is not None:
+                self.writer.add_scalar("Entropy/reward_ema_fast", self._reward_ema_fast, iteration)
+                self.writer.add_scalar("Entropy/reward_ema_slow", self._reward_ema_slow, iteration)

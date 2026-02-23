@@ -196,7 +196,10 @@ class AdaptRunner:
 
             # Update reward curriculum
             if has_curriculum:
-                raw_env._reward_manager.update_curriculum(iteration, raw_env.cfg.reward.curriculum_end_iter)
+                end_iter = raw_env.cfg.reward.curriculum_end_iter
+                if end_iter is None and hasattr(raw_env.cfg, "dr_curriculum"):
+                    end_iter = raw_env.cfg.dr_curriculum.end_iter
+                raw_env._reward_manager.update_curriculum(iteration, end_iter or 500)
 
             # Update DR curriculum (perturbation/inertia/mass ramp)
             if hasattr(raw_env, "update_dr_curriculum"):
@@ -257,7 +260,7 @@ class AdaptRunner:
         # Compute z_hat (with gradients) and z_gt (frozen)
         policy_obs = obs_dict_normalized[self.policy._policy_obs_key]
         z_hat_raw = self.policy.adapt_tconv(obs_dict_normalized[self.policy._proprio_hist_key])
-        z_hat = self.policy._softplus_z(z_hat_raw)
+        z_hat = self.policy._activate_z(z_hat_raw)
         z_gt = self.policy.compute_z_gt(obs_dict_normalized)
 
         # L2 supervised loss

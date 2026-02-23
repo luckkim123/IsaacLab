@@ -15,8 +15,8 @@ Reward design principles:
     - dt-scaling: state-quality terms (tracking, settling, action_magnitude) are
       dt-scaled; action rate is NOT dt-scaled (per-step delta scales with frequency).
     - PBRS progress shaping (Ng 1999): preserves optimal policy guarantee.
-    - Sigma curriculum: tracking kernel anneals from wide (0.5) to narrow (0.25)
-      for initial broad basin then progressive precision.
+    - Sigma curriculum: two-phase annealing 0.5 -> 0.25 (70%) -> 0.10 (100%)
+      for initial broad basin, then sub-5-degree precision.
 """
 
 from __future__ import annotations
@@ -59,25 +59,27 @@ class ALBCRewardCfg:
 
     # Tracking (Gaussian kernel)
     tracking_weight: float = 3.0
-    tracking_sigma: float = 0.25
-    tracking_sigma_start: float | None = 0.5  # sigma curriculum 0.5 -> 0.25
+    tracking_sigma: float = 0.10  # final sigma (was 0.25, narrowed for sub-5-deg precision)
+    tracking_sigma_start: float | None = 0.5  # sigma curriculum start
+    tracking_sigma_mid: float | None = 0.25  # two-phase: start->mid->end
+    sigma_phase1_fraction: float = 0.7  # fraction of curriculum for phase 1 (start->mid)
 
     # Action magnitude penalty (dt-scaled)
-    action_magnitude_weight: float = -0.1
+    action_magnitude_weight: float = -0.2
 
     # Action rate penalty (NOT dt-scaled, curriculum: starts at 1/10)
     action_rate_weight: float = -0.01
 
     # Progress (potential-based shaping): PBRS (Ng 1999) preserves optimal policy.
-    # NOT dt-scaled. At weight=0.2, episode sum ~ tracking level.
-    progress_weight: float = 0.2
+    # NOT dt-scaled.
+    progress_weight: float = 1.2
     progress_scale: float = 0.01
     progress_mode: str = "pbrs"  # "tanh" or "pbrs" (SAC-safe, policy-preserving)
     progress_gamma: float = 0.99  # discount factor for PBRS (match PPO gamma)
 
     # Settling bonus: sigmoid(sharpness * (threshold - error)), dt-scaled.
     # Dense gradient near target where Gaussian tracking has flat top.
-    settling_weight: float = 1.0
+    settling_weight: float = 2.0
     settling_threshold: float = 0.10  # radians (~5.7 deg)
     settling_sharpness: float = 30.0  # 1/radians
 
@@ -99,8 +101,9 @@ class ALBCRewardCfg:
     # TDC torque penalty: ||tau_desired||^2 (actual control effort, dt-scaled)
     tdc_torque_weight: float = 0.0
 
-    # Curriculum
-    curriculum_end_iter: int = 500
+    # Curriculum end iteration. When None, uses dr_curriculum.end_iter from env config
+    # (single source of truth). Set explicitly only to decouple from DR schedule.
+    curriculum_end_iter: int | None = None
 
 
 # =============================================================================
@@ -168,14 +171,22 @@ class RewardManager:
             for cfg in self._term_cfgs
         ]
 
-        # Sigma curriculum: linearly ramp sigma from start to end value.
+        # Sigma curriculum: ramp sigma from start to end, optionally via mid-point.
+        # Two-phase: start -> mid (over phase1_fraction), then mid -> end (remaining).
+        # Single-phase: start -> end (linear over full curriculum).
         self._sigma_curriculum: tuple[float, float] | None = None
+        self._sigma_mid: float | None = None
+        self._sigma_phase1_frac: float = 0.7
         for name, term_cfg in zip(self._term_names, self._term_cfgs):
             if name == "tracking" and "sigma" in term_cfg.params:
                 start_sigma = term_cfg.params.pop("_sigma_start", None)
+                mid_sigma = term_cfg.params.pop("_sigma_mid", None)
+                phase1_frac = term_cfg.params.pop("_sigma_phase1_fraction", 0.7)
                 if start_sigma is not None:
                     end_sigma = term_cfg.params["sigma"]
                     self._sigma_curriculum = (start_sigma, end_sigma)
+                    self._sigma_mid = mid_sigma
+                    self._sigma_phase1_frac = phase1_frac
                     term_cfg.params["sigma"] = start_sigma
                 break
 
@@ -239,7 +250,16 @@ class RewardManager:
         # Sigma curriculum: anneal tracking kernel width
         if self._sigma_curriculum is not None:
             sigma_start, sigma_end = self._sigma_curriculum
-            sigma = sigma_start + (sigma_end - sigma_start) * progress
+            if self._sigma_mid is not None:
+                # Two-phase: start -> mid (phase 1), mid -> end (phase 2)
+                f = self._sigma_phase1_frac
+                if progress <= f:
+                    sigma = sigma_start + (self._sigma_mid - sigma_start) * (progress / f)
+                else:
+                    t = (progress - f) / (1.0 - f)
+                    sigma = self._sigma_mid + (sigma_end - self._sigma_mid) * t
+            else:
+                sigma = sigma_start + (sigma_end - sigma_start) * progress
             for name, term_cfg in zip(self._term_names, self._term_cfgs):
                 if name == "tracking" and "sigma" in term_cfg.params:
                     term_cfg.params["sigma"] = sigma
