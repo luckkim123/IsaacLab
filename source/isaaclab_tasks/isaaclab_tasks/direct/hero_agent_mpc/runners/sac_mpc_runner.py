@@ -97,10 +97,16 @@ class SACMPCRunner:
         # giving the critic flexible, config-driven input composition.
         critic_cfg = train_cfg.get("critic", {})
         critic_obs_keys = obs_groups.get("critic", ["policy"])
-        missing = [k for k in critic_obs_keys if k not in obs]
+        # "pred_error" is a special key injected by SAC from the replay buffer,
+        # not an env obs key. Its dimension equals the dynamics physical state_dim (8).
+        pred_error_dim = self.actor.dynamics.state_dim  # 8
+        missing = [k for k in critic_obs_keys if k != "pred_error" and k not in obs]
         if missing:
             raise ValueError(f"critic_obs_keys {missing} not found in obs dict (available: {list(obs.keys())})")
-        critic_obs_dim = sum(obs[k].shape[-1] for k in critic_obs_keys)
+        critic_obs_dim = sum(
+            pred_error_dim if k == "pred_error" else obs[k].shape[-1]
+            for k in critic_obs_keys
+        )
         self._critic_obs_keys = critic_obs_keys
         self.critic = TwinQNetwork(
             policy_obs_dim=critic_obs_dim,

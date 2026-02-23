@@ -321,6 +321,11 @@ class SAC:
         self._adaptive_weights_ema = adaptive_weights_ema
         self._adaptive_dim_weights: torch.Tensor | None = None
 
+        # pred_error dimension for critic input injection.
+        # When "pred_error" is in critic_obs_keys, _build_critic_obs() appends
+        # pred_error (or zeros) at the corresponding position.
+        self._pred_error_dim = actor.dynamics.state_dim  # 8
+
         # Update counter
         self._update_count = 0
         self._diag_interval = max(1, dynamics_diag_interval)
@@ -444,20 +449,37 @@ class SAC:
         self._update_count += 1
         return metrics
 
-    def _build_critic_obs(self, obs_dict: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Concatenate obs keys for critic input.
+    def _build_critic_obs(
+        self,
+        obs_dict: dict[str, torch.Tensor],
+        pred_error: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Concatenate obs keys for critic input, injecting pred_error if configured.
+
+        When "pred_error" appears in critic_obs_keys, the corresponding tensor
+        is taken from the ``pred_error`` argument (not from obs_dict, since env
+        observations do not include it). If pred_error is None, zeros are used.
 
         Args:
             obs_dict: Observation dictionary from a Transition batch.
+            pred_error: Dynamics prediction error. Shape: (batch, 8). None -> zeros.
 
         Returns:
             Concatenated critic input tensor. Shape: (batch, critic_obs_dim).
-
-        Raises:
-            KeyError: If any key in critic_obs_keys is absent from obs_dict.
         """
         if self.critic_obs_keys is not None:
-            return torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=-1)
+            parts = []
+            for k in self.critic_obs_keys:
+                if k == "pred_error":
+                    if pred_error is not None:
+                        parts.append(pred_error)
+                    else:
+                        # Infer batch size from first available obs tensor
+                        ref = next(iter(obs_dict.values()))
+                        parts.append(torch.zeros(ref.shape[0], self._pred_error_dim, device=ref.device))
+                else:
+                    parts.append(obs_dict[k])
+            return torch.cat(parts, dim=-1)
         # Fallback: policy_obs only
         return obs_dict[self.policy_obs_key]
 
@@ -470,7 +492,7 @@ class SAC:
             )
 
             next_q1, next_q2 = self.target_critic(
-                self._build_critic_obs(batch.next_obs),
+                self._build_critic_obs(batch.next_obs, pred_error=batch.pred_error),
                 None,
                 next_action,
             )
@@ -481,7 +503,7 @@ class SAC:
                 target_q = target_q.clamp(-self._max_q, self._max_q)
 
         q1, q2 = self.critic(
-            self._build_critic_obs(batch.obs),
+            self._build_critic_obs(batch.obs, pred_error=batch.pred_error),
             None,
             batch.action,
         )
@@ -507,7 +529,7 @@ class SAC:
         action, log_prob = self.actor.sample(batch.obs, pred_error=batch.pred_error)
 
         q1, q2 = self.critic(
-            self._build_critic_obs(batch.obs),
+            self._build_critic_obs(batch.obs, pred_error=batch.pred_error),
             None,
             action,
         )
@@ -794,7 +816,8 @@ class SAC:
         # position so autograd can trace dQ/ds through the critic forward pass.
         obs_sub = {k: v[:n].detach() for k, v in batch.obs.items() if isinstance(v, torch.Tensor)}
         obs_sub[mpc_state_key] = state_sub
-        critic_obs_sub = self._build_critic_obs(obs_sub)
+        pe_sub = batch.pred_error[:n].detach() if batch.pred_error is not None else None
+        critic_obs_sub = self._build_critic_obs(obs_sub, pred_error=pe_sub)
         action_sub = batch.action[:n].detach()
 
         q1, q2 = self.critic(critic_obs_sub, None, action_sub)
