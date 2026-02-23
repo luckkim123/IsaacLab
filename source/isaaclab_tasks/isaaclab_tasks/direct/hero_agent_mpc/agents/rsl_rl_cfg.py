@@ -46,7 +46,10 @@ class ActorCriticMPCCfg(RslRlPpoActorCriticCfg):
     # MPC cost map parameters
     mpc_horizon: int = 5
     mpc_state_dim: int = 10
-    q_min: float = 0.1
+    q_min: float = 1.0
+    """Minimum Q state cost weight. Raised from 0.1 to prevent Q_joint/Q_rate
+    collapse (observed Q_joint->0.13 causing joint drift and state_err increase).
+    1.0 ensures all state dims retain meaningful MPC penalty."""
     q_max: float = 100.0
     r_min: float = 0.01
     r_max: float = 10.0
