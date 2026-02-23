@@ -107,6 +107,10 @@ class AdaptRunner:
         self.agent_steps = 0
         self.total_time = 0.0
 
+        # EMA accumulators for episode metrics from env.extras["log"]
+        self._ema_extras: dict[str, float] = {}
+        self._ema_alpha = 0.2  # Base EMA alpha (scaled by _num_resets fraction)
+
     def _setup_writer(self) -> None:
         """Initialize TensorBoard writer, with optional WandB dual-write.
 
@@ -190,6 +194,9 @@ class AdaptRunner:
             if hasattr(raw_env, "update_dr_curriculum"):
                 raw_env.update_dr_curriculum(iteration)
 
+            # Collect episode metrics from env resets (EMA smoothing)
+            self._update_ema_extras()
+
             # Accumulate for logging
             loss_acc += loss.item()
             reward_acc += rewards.mean().item()
@@ -266,6 +273,38 @@ class AdaptRunner:
         new_obs_dict, rewards, _, _ = self.env.step(actions)
         return new_obs_dict, loss, rewards, z_hat, z_gt
 
+    def _update_ema_extras(self) -> None:
+        """Update EMA accumulators from environment episode metrics.
+
+        Reads extras["log"] populated by _collect_episode_metrics() during
+        env resets. Uses _num_resets-weighted alpha so high-reset steps
+        carry more weight.
+        """
+        env_extras = getattr(self.env, "extras", {})
+        log = env_extras.get("log", {})
+        if not log:
+            return
+
+        num_resets = log.get("_num_resets", 0.0)
+        if num_resets <= 0:
+            return
+
+        # Scale alpha by fraction of envs that reset (more resets = more signal)
+        alpha = min(1.0, self._ema_alpha * num_resets / max(1, self.env.num_envs))
+
+        for key, value in log.items():
+            if key.startswith("_"):
+                continue
+            # Convert tensor values to float
+            if isinstance(value, torch.Tensor):
+                value = value.mean().item()
+            if not isinstance(value, (int, float)):
+                continue
+            if key in self._ema_extras:
+                self._ema_extras[key] = (1.0 - alpha) * self._ema_extras[key] + alpha * value
+            else:
+                self._ema_extras[key] = value
+
     def _log_metrics(
         self,
         iteration: int,
@@ -294,27 +333,25 @@ class AdaptRunner:
             "Adapt/fps": fps,
         }
 
-        # z_hat per-dimension statistics (mean + std)
-        if z_hat is not None:
-            for i in range(z_hat.shape[-1]):
-                metrics[f"Adapt/z_hat_dim{i}_mean"] = z_hat[:, i].mean().item()
-                metrics[f"Adapt/z_hat_dim{i}_std"] = z_hat[:, i].std().item()
-
-        # z_gt per-dimension statistics for comparison
-        if z_gt is not None:
-            for i in range(z_gt.shape[-1]):
-                metrics[f"Adapt/z_gt_dim{i}_mean"] = z_gt[:, i].mean().item()
-                metrics[f"Adapt/z_gt_dim{i}_std"] = z_gt[:, i].std().item()
-
         # z_hat vs z_gt Pearson correlation (adaptation tracking quality)
         if z_hat is not None and z_gt is not None:
             metrics["Adapt/z_hat_z_gt_corr"] = pearson_r(z_hat.flatten(), z_gt.detach().flatten()).item()
 
-        # Per-dimension L2 loss
+        # Per-dimension L2 loss (identifies hardest latent dims)
         if z_hat is not None and z_gt is not None:
             per_dim_loss = (z_hat - z_gt.detach()).pow(2).mean(dim=0)
             for i in range(per_dim_loss.shape[0]):
                 metrics[f"Adapt/l2_loss_dim{i}"] = per_dim_loss[i].item()
+
+        # Episode metrics from EMA (Episode_Reward/*, Attitude_Error/*, DR/*, etc.)
+        metrics.update(self._ema_extras)
+
+        # DR curriculum progress
+        raw_env = unwrap_env(self.env)
+        if hasattr(raw_env, "_dr_curriculum_cfg") and raw_env._dr_curriculum_cfg is not None:
+            dr_cur = raw_env._dr_curriculum_cfg
+            progress = min(1.0, iteration / max(1, dr_cur.end_iter))
+            metrics["DR_Curriculum/progress"] = progress
 
         # Single flush: all scalars in one wandb.log() or TensorBoard loop
         flush_metrics(self.writer, metrics, iteration, self.logger_type)
@@ -337,6 +374,7 @@ class AdaptRunner:
         """
         torch.save(
             {
+                "checkpoint_version": 2,
                 "model_state_dict": self.policy.state_dict(),
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "hist_normalizer_state_dict": self.hist_normalizer.state_dict(),
@@ -359,8 +397,13 @@ class AdaptRunner:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         state_dict = checkpoint["model_state_dict"]
 
-        # Detect Phase 1 checkpoint by absence of adapt_tconv keys
-        has_adapt = any(k.startswith("adapt_tconv") for k in state_dict)
+        # Detect Phase 1 vs Phase 2: prefer explicit version key, fall back to string matching
+        version = checkpoint.get("checkpoint_version", None)
+        if version is not None:
+            has_adapt = version >= 2
+        else:
+            has_adapt = any(k.startswith("adapt_tconv") for k in state_dict)
+            logger.warning("Checkpoint lacks version key; using string-based detection (has_adapt=%s).", has_adapt)
 
         if has_adapt:
             # Phase 2 checkpoint: load everything strictly

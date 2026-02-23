@@ -6,7 +6,7 @@
 """Consolidated logging and environment utilities for Hero Agent.
 
 Provides all TB/WandB metric functions and environment helpers:
-    - flush_metrics, pearson_r, _collect_tensor_stats: Core logging utilities
+    - flush_metrics, pearson_r: Core logging utilities
     - unwrap_env, connect_encoder_to_env: Environment unwrapping helpers
     - log_tdc_init, log_tdc_control_state, log_tdc_reset_info: TDC console logging
     - log_tdc_diagnostics: TDC health metrics (4 essential metrics)
@@ -27,8 +27,6 @@ import torch
 from ..controllers.tdc import compute_M_bb
 
 if TYPE_CHECKING:
-    from isaaclab.assets import Articulation
-
     from ..base_env import HeroAgentEnv
     from ..controllers.tdc import TDCControllerCfg
 
@@ -86,25 +84,6 @@ def flush_metrics(
         wandb = _get_wandb()
         if wandb is not None:
             wandb.log(wandb_extras, step=step, commit=False)
-
-
-def _collect_tensor_stats(
-    metrics: dict[str, float],
-    prefix: str,
-    tensor: torch.Tensor,
-    dim_names: tuple[str, ...],
-) -> None:
-    """Collect per-dimension mean/std of a (num_envs, D) tensor into metrics dict.
-
-    Args:
-        metrics: Dict to accumulate into.
-        prefix: Tag prefix (e.g., "TDC/m_hat").
-        tensor: Shape (num_envs, D) tensor.
-        dim_names: Names for each dimension (length must equal D).
-    """
-    for i, name in enumerate(dim_names):
-        metrics[f"{prefix}_{name}_mean"] = tensor[:, i].mean().item()
-        metrics[f"{prefix}_{name}_std"] = tensor[:, i].std().item()
 
 
 class _WandbTBWriter:
@@ -337,29 +316,27 @@ def log_tdc_diagnostics(
 def log_dr_metrics(
     extras: dict,
     env: HeroAgentEnv,
-    robot: Articulation,
-    joint_ids: list[int],
 ) -> None:
     """Log essential domain randomization parameter statistics.
 
-    Metrics kept (4):
+    Metrics kept (5):
         - DR/buoyancy_force_mean: critical for TDC lambda
-        - DR/inertia_mean: TDC stability
+        - DR/inertia_roll_mean, DR/inertia_pitch_mean: per-axis TDC stability
         - DR/payload_mass_mean: when payload enabled
         - DR/ocean_current_mag_mean: when ocean current enabled
 
     Args:
         extras: Environment extras dictionary (must have "log" key).
         env: HeroAgentEnv instance with _hydro, _buoy_hydro, etc.
-        robot: Robot articulation (unused, kept for API compatibility).
-        joint_ids: ALBC joint indices (unused, kept for API compatibility).
     """
     log = extras["log"]
 
     with torch.no_grad():
         hydro = env._hydro
         log["DR/buoyancy_force_mean"] = hydro.buoyancy_force.mean().item()
-        log["DR/inertia_mean"] = hydro.rigid_body_inertia.mean().item()
+        inertia = hydro.rigid_body_inertia  # (num_envs, 3) = Ixx, Iyy, Izz
+        log["DR/inertia_roll_mean"] = inertia[:, 0].mean().item()
+        log["DR/inertia_pitch_mean"] = inertia[:, 1].mean().item()
 
         # Payload (if enabled)
         if env._payload_mass is not None:
@@ -414,6 +391,8 @@ def log_encoder_metrics(
 
         metrics["Encoder/z_mean"] = z.mean().item()
         metrics["Encoder/z_std"] = z.std().item()
+        metrics["Encoder/z_min"] = z.min().item()
+        metrics["Encoder/z_max"] = z.max().item()
 
     # Gradient norm (outside no_grad context)
     encoder_params = list(policy.encoder.parameters())
@@ -432,10 +411,8 @@ def log_encoder_metrics(
 
 def log_encoder_tdc_metrics(
     writer: Any,
-    _policy: Any,
     env: Any,
     iteration: int,
-    device: str | torch.device,
     logger_type: str = "tensorboard",
     metrics: dict[str, float] | None = None,
 ) -> None:
@@ -448,10 +425,8 @@ def log_encoder_tdc_metrics(
 
     Args:
         writer: TensorBoard SummaryWriter or equivalent logger.
-        _policy: Unused (kept for API compatibility).
         env: Wrapped environment (will be unwrapped to access TDC state).
         iteration: Current training iteration.
-        device: Computation device.
         logger_type: Logger type ("tensorboard" or "wandb").
         metrics: Optional dict to accumulate into. If None, flushes immediately.
     """

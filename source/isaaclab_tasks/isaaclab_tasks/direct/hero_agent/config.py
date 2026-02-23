@@ -328,6 +328,18 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     payload_mass: float = 0.5  # kg
     payload_attachment_offset: tuple[float, float, float] = (0.0, 0.0, -0.05)  # m, gripper frame
 
+    # ==========================================================================
+    # TDE Observation (optional dynamics mismatch signal)
+    # Computes H_hat = Lambda*p_EE + T_b - M_bar*nu_dot (2D roll/pitch).
+    # Encodes all unmodeled dynamics (inertia error, coupling, damping, etc.)
+    # without requiring a TDC controller or learned dynamics model.
+    # When enabled, observation_space increases by 2 (appended to policy obs).
+    # ==========================================================================
+    enable_tde_obs: bool = False
+    tde_m_hat: tuple[float, float] = (0.15, 0.16)  # nominal design inertia [roll, pitch]
+    tde_nu_dot_ema_alpha: float = 0.05  # EMA filter for angular acceleration
+    tde_h: float = 0.180  # CoG-to-ABPC vertical offset (m), same as TDCControllerCfg
+
 
 @configclass
 class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):

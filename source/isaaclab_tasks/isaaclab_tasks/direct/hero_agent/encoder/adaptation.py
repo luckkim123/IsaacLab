@@ -31,10 +31,13 @@ Reference:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 from .actor_critic_encoder import ActorCriticEncoder
 
@@ -88,6 +91,13 @@ class ProprioAdaptTConv(nn.Module):
             if history_len in self._PRESETS:
                 kernels, strides = self._PRESETS[history_len]
             else:
+                logger.warning(
+                    "No conv preset for history_len=%d. Falling back to H=30 defaults "
+                    "(kernels=%s, strides=%s). This may produce suboptimal temporal aggregation.",
+                    history_len,
+                    self.DEFAULT_KERNELS,
+                    self.DEFAULT_STRIDES,
+                )
                 kernels, strides = self.DEFAULT_KERNELS, self.DEFAULT_STRIDES
         else:
             kernels, strides = conv_kernels, conv_strides
@@ -138,7 +148,7 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
         - adapt_tconv is trainable (L2 loss only)
         - _get_combined_obs() uses z_hat from adapt_tconv (not z from encoder)
         - z_hat is DETACHED before actor/critic: PPO gradient does NOT reach adapt_tconv
-        - _last_z_hat stores the non-detached z_hat for L2 loss gradient
+        - AdaptRunner recomputes z_hat independently for L2 loss gradient
 
     z_hat activation: softplus + z_min (matching Phase 1 encoder output).
 
@@ -163,20 +173,18 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
         )
 
         self._proprio_hist_key = "proprio_hist"
-        self._last_z_hat: torch.Tensor | None = None
 
     def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
         """Use z_hat from adaptation module instead of z from encoder.
 
         z_hat activation: softplus + z_min (matching Phase 1 encoder).
         z_hat is DETACHED before actor/critic input so PPO gradient does
-        not interfere with L2 loss supervision. _last_z_hat stores the
-        non-detached z_hat for L2 gradient to flow through.
+        not interfere with L2 loss supervision. AdaptRunner recomputes z_hat
+        independently for L2 gradient flow.
         """
         policy_obs = obs[self._policy_obs_key]
         z_hat_raw = self.adapt_tconv(obs[self._proprio_hist_key])
         z_hat = self._softplus_z(z_hat_raw)
-        self._last_z_hat = z_hat  # Non-detached: L2 loss gradient flows through here
         return torch.cat([policy_obs, z_hat.detach()], dim=-1)
 
     def compute_z_gt(self, obs: TensorDict) -> torch.Tensor:

@@ -9,13 +9,14 @@ Provides reward configuration, a lightweight reward manager with curriculum
 support, and reward functions for ALBC (joint-based attitude control) training.
 
 Reward design principles:
-    - Gaussian kernel tracking dominates: positive reward exp(-err^2/sigma^2)
-      provides dense gradient in [0,1]. Penalties are small regularizers
-      (~1/15 of tracking) following the AnymalC penalty-ratio pattern.
-    - dt-scaling: state-quality terms (tracking, action_magnitude) are dt-scaled;
-      action rate is NOT dt-scaled (per-step delta scales with frequency).
-    - Environment-specific configs: Base RL and Encoder-TDC have different
-      action semantics, so reward weights are separated.
+    - Gaussian kernel tracking + settling bonus dominate: positive rewards in
+      [0,1] provide dense gradient. Penalties are tiny regularizers (~2.5% of
+      tracking+settling at max actions) to avoid suppressing exploration.
+    - dt-scaling: state-quality terms (tracking, settling, action_magnitude) are
+      dt-scaled; action rate is NOT dt-scaled (per-step delta scales with frequency).
+    - PBRS progress shaping (Ng 1999): preserves optimal policy guarantee.
+    - Sigma curriculum: tracking kernel anneals from wide (0.5) to narrow (0.25)
+      for initial broad basin then progressive precision.
 """
 
 from __future__ import annotations
@@ -46,36 +47,37 @@ class ALBCRewardCfg:
     """ALBC reward configuration with Gaussian tracking + regularization penalties.
 
     Reward = tracking * w_t * dt
+           + settling * w_s * dt
            + action_magnitude * w_am * dt
            + action_rate * w_ar
+           + progress (PBRS)
 
-    Design: tracking dominates (positive, [0,1] Gaussian). Penalties are small
-    regularizers (~1/15 of tracking at max actions) to encourage efficiency,
-    following the AnymalC pattern where penalties << tracking.
+    Design: tracking + settling dominate (positive, [0,1]). Penalties are tiny
+    regularizers (~2.5% of tracking+settling at max actions), following the
+    principle that penalty << primary objective to avoid suppressing exploration.
     """
 
     # Tracking (Gaussian kernel)
     tracking_weight: float = 3.0
     tracking_sigma: float = 0.25
-    tracking_sigma_start: float | None = None  # None = no sigma curriculum
+    tracking_sigma_start: float | None = 0.5  # sigma curriculum 0.5 -> 0.25
 
     # Action magnitude penalty (dt-scaled)
-    action_magnitude_weight: float = -1.0
+    action_magnitude_weight: float = -0.1
 
     # Action rate penalty (NOT dt-scaled, curriculum: starts at 1/10)
-    action_rate_weight: float = -0.05
+    action_rate_weight: float = -0.01
 
-    # Progress (potential-based shaping): tanh(delta / scale)
-    # tanh prevents telescoping (raw delta cancels to ~0 over episode).
-    # NOT dt-scaled. At weight=0.2, episode sum ≈ tracking level.
+    # Progress (potential-based shaping): PBRS (Ng 1999) preserves optimal policy.
+    # NOT dt-scaled. At weight=0.2, episode sum ~ tracking level.
     progress_weight: float = 0.2
     progress_scale: float = 0.01
-    progress_mode: str = "tanh"  # "tanh" (PPO) or "pbrs" (SAC-safe)
-    progress_gamma: float = 0.997  # discount factor for PBRS (match SAC gamma)
+    progress_mode: str = "pbrs"  # "tanh" or "pbrs" (SAC-safe, policy-preserving)
+    progress_gamma: float = 0.99  # discount factor for PBRS (match PPO gamma)
 
     # Settling bonus: sigmoid(sharpness * (threshold - error)), dt-scaled.
     # Dense gradient near target where Gaussian tracking has flat top.
-    settling_weight: float = 0.0  # Default 0: inactive in base RL / TDC envs
+    settling_weight: float = 1.0
     settling_threshold: float = 0.10  # radians (~5.7 deg)
     settling_sharpness: float = 30.0  # 1/radians
 

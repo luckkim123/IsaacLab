@@ -113,9 +113,7 @@ class EncoderRunner(OnPolicyRunner):
             # Log TDC-specific metrics (M_hat, adaptive gains) if env has TDC
             log_encoder_tdc_metrics(
                 writer=self.writer,
-                policy=self.alg.policy,
                 env=self.env,
                 iteration=locs["it"],
-                device=self.device,
                 logger_type=self.logger_type,
             )

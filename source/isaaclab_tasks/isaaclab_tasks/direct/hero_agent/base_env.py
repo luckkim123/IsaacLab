@@ -26,8 +26,12 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.envs.ui import BaseEnvWindow
 from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse
 
-# Import models from common isaaclab_tasks.models
 from isaaclab_tasks.models import HydrodynamicsModel
+
+from isaaclab_assets.robots.uuv import (
+    HERO_AGENT_ALBC_LINK1_LENGTH,
+    HERO_AGENT_ALBC_LINK2_LENGTH,
+)
 
 from .config import HeroAgentEnvCfg
 from .mdp import (
@@ -107,6 +111,11 @@ class HeroAgentEnv(DirectRLEnv):
             render_mode: Render mode for visualization.
             **kwargs: Additional arguments.
         """
+        # Adjust observation_space for optional TDE obs (must be before super().__init__)
+        if cfg.enable_tde_obs:
+            cfg.observation_space += 2
+            self._pad_noise_cfg_for_tde(cfg)
+
         # Convert noise config tuples to tensors before DirectRLEnv creates the noise model.
         # Tuples are used in config for OmegaConf/Hydra serialization compatibility.
         self._convert_noise_cfg_tuples(cfg)
@@ -141,6 +150,27 @@ class HeroAgentEnv(DirectRLEnv):
         # Debug visualization manager
         self._debug_vis = DebugVisualization(self.num_envs, self.device)
         self.set_debug_vis(self.cfg.debug_vis)
+
+    @staticmethod
+    def _pad_noise_cfg_for_tde(cfg: HeroAgentEnvCfg) -> None:
+        """Pad observation noise config by 2 dims (zeros) for TDE obs channels.
+
+        TDE obs (H_hat) has no sensor noise model -- it's a computed signal
+        whose noise comes from nu_dot estimation and is handled by the EMA filter.
+        Must be called before _convert_noise_cfg_tuples() to preserve tuple format.
+        """
+        noise_model = getattr(cfg, "observation_noise_model", None)
+        if noise_model is None:
+            return
+        for sub_cfg_attr in ("noise_cfg", "bias_noise_cfg"):
+            sub_cfg = getattr(noise_model, sub_cfg_attr, None)
+            if sub_cfg is None:
+                continue
+            for param in ("std", "mean", "n_min", "n_max"):
+                val = getattr(sub_cfg, param, None)
+                if isinstance(val, (list, tuple)):
+                    # Append 2 zeros for TDE dims (no artificial noise on computed signal)
+                    setattr(sub_cfg, param, type(val)(list(val) + [0.0, 0.0]))
 
     @staticmethod
     def _convert_noise_cfg_tuples(cfg: HeroAgentEnvCfg) -> None:
@@ -393,6 +423,18 @@ class HeroAgentEnv(DirectRLEnv):
         rand_cfg = self.cfg.randomization
         perturb_cycle = max(1, rand_cfg.perturbation_interval + rand_cfg.perturbation_duration)
         self._perturb_timer = torch.randint(0, perturb_cycle, (self.num_envs,), device=self.device)
+
+        # TDE observation buffers (optional dynamics mismatch signal)
+        if self.cfg.enable_tde_obs:
+            self._tde_m_hat = torch.tensor(self.cfg.tde_m_hat, device=self.device, dtype=torch.float32)
+            self._tde_nu_prev = torch.zeros(self.num_envs, 2, device=self.device)
+            self._tde_nu_dot_filtered = torch.zeros(self.num_envs, 2, device=self.device)
+            self._tde_h_hat = torch.zeros(self.num_envs, 2, device=self.device)
+            self._tde_is_initialized = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            self._tde_h = self.cfg.tde_h
+            self._tde_ema_alpha = self.cfg.tde_nu_dot_ema_alpha
+            self._tde_l1 = HERO_AGENT_ALBC_LINK1_LENGTH
+            self._tde_l2 = HERO_AGENT_ALBC_LINK2_LENGTH
 
         # Action latency buffer (ring buffer for delayed action application)
         # When DR curriculum is active, the config may already be overwritten to
@@ -661,16 +703,81 @@ class HeroAgentEnv(DirectRLEnv):
         payload_torque_b = torch.cross(effective_offset, payload_weight_b, dim=-1)
         return payload_weight_b, payload_torque_b
 
+    def _compute_tde_obs(self) -> torch.Tensor:
+        """Compute TDE-based dynamics mismatch observation H_hat (2D).
+
+        H_hat encodes all unmodeled dynamics using the TDE identity:
+            H = Lambda * p_EE + T_b - M_bar * nu_dot
+
+        Where H = (M_true - M_bar)*nu_dot + B_t captures inertia error,
+        coupling, Coriolis, damping, gravity, and external disturbances.
+
+        Uses EMA-filtered angular acceleration to reduce sensor noise.
+        On the first step after reset, returns zeros (no valid finite diff).
+
+        Returns:
+            H_hat tensor of shape (num_envs, 2).
+        """
+        roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
+        nu = self._robot.data.root_ang_vel_b[:, :2]  # [p, q]
+
+        # Angular acceleration via EMA-filtered finite difference
+        nu_dot_raw = (nu - self._tde_nu_prev) / self.step_dt
+        self._tde_nu_dot_filtered = (
+            self._tde_ema_alpha * nu_dot_raw + (1.0 - self._tde_ema_alpha) * self._tde_nu_dot_filtered
+        )
+
+        # Buoyancy force from buoy hydro model (per-env, DR'd)
+        F_bu = self._buoy_hydro.buoyancy_force
+
+        # Lambda * p_EE (2x2 anti-diagonal @ 2D EE position)
+        lf = torch.cos(pitch) * torch.cos(roll) * F_bu
+        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
+        g1 = joint_pos[:, 0]
+        g12 = joint_pos[:, 0] + joint_pos[:, 1]
+        p_EE_x = self._tde_l1 * torch.cos(g1) + self._tde_l2 * torch.cos(g12)
+        p_EE_y = self._tde_l1 * torch.sin(g1) + self._tde_l2 * torch.sin(g12)
+        # Lambda = [[0, lf], [-lf, 0]] -> Lambda @ [x, y] = [lf*y, -lf*x]
+        Lambda_p_EE_roll = lf * p_EE_y
+        Lambda_p_EE_pitch = -lf * p_EE_x
+
+        # Restoring torque T_b
+        h = self._tde_h
+        T_b_roll = -torch.cos(pitch) * torch.sin(roll) * F_bu * h
+        T_b_pitch = -torch.sin(pitch) * F_bu * h
+
+        # H_hat = Lambda*p_EE + T_b - M_bar*nu_dot
+        H_hat_roll = Lambda_p_EE_roll + T_b_roll - self._tde_m_hat[0] * self._tde_nu_dot_filtered[:, 0]
+        H_hat_pitch = Lambda_p_EE_pitch + T_b_pitch - self._tde_m_hat[1] * self._tde_nu_dot_filtered[:, 1]
+
+        h_hat = torch.stack([H_hat_roll, H_hat_pitch], dim=-1)
+
+        # Zero out for envs without valid history (first step after reset)
+        h_hat = torch.where(self._tde_is_initialized.unsqueeze(-1), h_hat, torch.zeros_like(h_hat))
+
+        # Update history
+        self._tde_nu_prev.copy_(nu)
+        self._tde_is_initialized[:] = True
+        self._tde_h_hat = h_hat
+
+        return h_hat
+
     def _get_observations(self) -> dict:
         """Compute ALBC-specific observations.
 
-        Returns 13-dim policy observation and optional privileged observations.
+        Returns 13-dim (or 15-dim with TDE) policy observation
+        and optional privileged observations.
         See mdp.observations for implementation details.
 
         Returns:
             Observation dictionary with "policy" key and optional "privileged" key.
         """
-        observations = {"policy": compute_policy_obs(self, self._robot)}
+        policy_obs = compute_policy_obs(self, self._robot)
+        if self.cfg.enable_tde_obs:
+            tde_obs = self._compute_tde_obs()
+            policy_obs = torch.cat([policy_obs, tde_obs], dim=-1)
+
+        observations = {"policy": policy_obs}
         if self.cfg.state_space > 0:
             observations["privileged"] = compute_privileged_obs(self)
 
@@ -721,8 +828,12 @@ class HeroAgentEnv(DirectRLEnv):
         log["_num_resets"] = float(n)
 
         # Reward sums (normalized by max episode duration for episode-length-independent metrics)
+        total = 0.0
         for name, value in reward_sums.items():
-            log[f"Episode_Reward/{name}"] = value / self.max_episode_length_s
+            normalized = value / self.max_episode_length_s
+            log[f"Episode_Reward/{name}"] = normalized
+            total += normalized
+        log["Episode_Reward/total"] = total
 
         # Termination rates (0.0~1.0, scale-invariant for weighted averaging)
         n_terminated = torch.count_nonzero(self.reset_terminated[env_ids]).item()
@@ -753,7 +864,7 @@ class HeroAgentEnv(DirectRLEnv):
         if hasattr(self.cfg, "randomization") and self.cfg.randomization.enable:
             # log_dr_metrics expects extras["log"] dict -- pass a wrapper
             extras_wrapper: dict = {"log": log}
-            log_dr_metrics(extras_wrapper, self, self._robot, self._albc_joint_ids)
+            log_dr_metrics(extras_wrapper, self)
 
         return log
 
@@ -859,6 +970,13 @@ class HeroAgentEnv(DirectRLEnv):
         self._perturb_forces[env_ids] = 0.0
         self._perturb_torques[env_ids] = 0.0
         self._perturb_timer[env_ids] = torch.randint(0, perturb_cycle, (len(env_ids),), device=self.device)
+
+        # Reset TDE observation buffers
+        if self.cfg.enable_tde_obs:
+            self._tde_nu_prev[env_ids] = 0.0
+            self._tde_nu_dot_filtered[env_ids] = 0.0
+            self._tde_h_hat[env_ids] = 0.0
+            self._tde_is_initialized[env_ids] = False
 
         # Reset action latency: sample new per-env latency and clear history
         if self._action_history is not None and self._action_latency is not None:
