@@ -31,28 +31,14 @@ import torch
 logger = logging.getLogger(__name__)
 
 from ..encoder.normalization import RunningMeanStd
-from ..utils.logging import connect_encoder_to_env, flush_metrics, log_encoder_tdc_metrics, pearson_r, unwrap_env
-
-
-class _WandbTBWriter:
-    """Thin adapter that forwards ``add_scalar`` to both TensorBoard and WandB.
-
-    ``flush_metrics()`` relies on ``writer.add_scalar()`` for all scalar logging.
-    When WandB is the logger backend, we still need TensorBoard records, so this
-    adapter wraps a real TB SummaryWriter and additionally calls ``wandb.log()``.
-    """
-
-    def __init__(self, tb_writer):
-        self._tb = tb_writer
-
-    def add_scalar(self, tag: str, value, global_step: int | None = None, **kw) -> None:
-        self._tb.add_scalar(tag, value, global_step, **kw)
-        try:
-            import wandb
-
-            wandb.log({tag: value}, step=global_step, commit=False)
-        except ImportError:
-            pass
+from ..utils.logging import (
+    _WandbTBWriter,
+    connect_encoder_to_env,
+    flush_metrics,
+    log_encoder_tdc_metrics,
+    pearson_r,
+    unwrap_env,
+)
 
 
 class AdaptRunner:
@@ -190,6 +176,10 @@ class AdaptRunner:
             # Update reward curriculum
             if has_curriculum:
                 raw_env._reward_manager.update_curriculum(iteration, raw_env.cfg.reward.curriculum_end_iter)
+
+            # Update DR curriculum (perturbation/inertia/mass ramp)
+            if hasattr(raw_env, "update_dr_curriculum"):
+                raw_env.update_dr_curriculum(iteration)
 
             # Accumulate for logging
             loss_acc += loss.item()

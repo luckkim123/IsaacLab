@@ -11,6 +11,8 @@ Neural network architectures for the HORA pipeline:
     - ActorCriticEncoderTDCAdapt: Phase 2 adaptation (proprio history -> z_hat)
     - ProprioAdaptTConv: Temporal conv for proprioception history
     - RunningMeanStd: Welford's online normalization
+
+SAC-MPC encoder networks (ActorCriticMPC, TwinQNetwork) are in hero_agent_mpc.encoder.
 """
 
 from .actor_critic_encoder import ActorCriticEncoder, ActorCriticEncoderTDC

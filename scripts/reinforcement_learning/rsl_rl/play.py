@@ -80,6 +80,57 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 # PLACEHOLDER: Extension template (do not remove this comment)
 
 
+def _load_runner_and_policy(env, agent_cfg, resume_path):
+    """Create runner, load checkpoint, extract inference policy and nn module."""
+    if agent_cfg.class_name == "OnPolicyRunner":
+        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif agent_cfg.class_name == "DistillationRunner":
+        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif agent_cfg.class_name == "SACMPCRunner":
+        from isaaclab_tasks.direct.hero_agent_mpc.runners import SACMPCRunner
+
+        runner = SACMPCRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    else:
+        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    runner.load(resume_path)
+
+    # obtain the trained policy for inference
+    if hasattr(runner, "get_inference_policy"):
+        policy = runner.get_inference_policy(device=env.unwrapped.device)
+    else:
+        # SAC-MPC: actor.act_inference accepts TensorDict directly
+        runner.actor.eval()
+        policy = runner.actor.act_inference
+
+    # extract the neural network module
+    if hasattr(runner, "alg"):
+        # RSL-RL: try 2.3+ first, then 2.2 fallback
+        try:
+            policy_nn = runner.alg.policy
+        except AttributeError:
+            policy_nn = runner.alg.actor_critic
+    else:
+        # SAC-MPC: actor is the policy module
+        policy_nn = runner.actor
+
+    # extract the normalizer
+    if hasattr(policy_nn, "actor_obs_normalizer"):
+        normalizer = policy_nn.actor_obs_normalizer
+    elif hasattr(policy_nn, "student_obs_normalizer"):
+        normalizer = policy_nn.student_obs_normalizer
+    else:
+        normalizer = None
+
+    # export policy to onnx/jit
+    # Skip export for policies that can't be JIT-traced (e.g., MPC with iterative solver)
+    if not hasattr(policy_nn, "reset_mpc"):
+        export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
+        export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
+        export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+
+    return policy, policy_nn
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -138,39 +189,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-    # load previously trained model
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    runner.load(resume_path)
-
-    # obtain the trained policy for inference
-    policy = runner.get_inference_policy(device=env.unwrapped.device)
-
-    # extract the neural network module
-    # we do this in a try-except to maintain backwards compatibility.
-    try:
-        # version 2.3 onwards
-        policy_nn = runner.alg.policy
-    except AttributeError:
-        # version 2.2 and below
-        policy_nn = runner.alg.actor_critic
-
-    # extract the normalizer
-    if hasattr(policy_nn, "actor_obs_normalizer"):
-        normalizer = policy_nn.actor_obs_normalizer
-    elif hasattr(policy_nn, "student_obs_normalizer"):
-        normalizer = policy_nn.student_obs_normalizer
-    else:
-        normalizer = None
-
-    # export policy to onnx/jit
-    export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-    export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
-    export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+    policy, policy_nn = _load_runner_and_policy(env, agent_cfg, resume_path)
 
     dt = env.unwrapped.step_dt
 
@@ -188,6 +207,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     eval_episode_count = 0
     eval_episode_errors: list[float] = []
 
+    # SAC-MPC: initialize prediction error buffer before first inference call
+    if hasattr(policy_nn, "_ensure_pred_error_buf"):
+        policy_nn._ensure_pred_error_buf(env.num_envs, env.unwrapped.device)
+
     # reset environment
     obs = env.get_observations()
     timestep = 0
@@ -198,10 +221,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         with torch.inference_mode():
             # agent stepping
             actions = policy(obs)
+            # SAC-MPC: store dynamics prediction for error feedback (before env.step)
+            if hasattr(policy_nn, "store_prediction"):
+                policy_nn.store_prediction(obs["mpc_state"], actions)
             # env stepping
             obs, _, dones, _ = env.step(actions)
-            # reset recurrent states for episodes that have terminated
-            policy_nn.reset(dones)
+            # SAC-MPC: update prediction error buffer (after env.step)
+            if hasattr(policy_nn, "update_pred_error"):
+                policy_nn.update_pred_error(obs["mpc_state"])
+            # reset policy states for episodes that have terminated
+            if hasattr(policy_nn, "reset_mpc"):
+                env_ids = dones.nonzero(as_tuple=False).squeeze(-1)
+                if env_ids.numel() > 0:
+                    policy_nn.reset_mpc(env_ids)
+            elif hasattr(policy_nn, "reset"):
+                policy_nn.reset(dones)
         timestep += 1
 
         # Hero Agent: collect episode-end errors and print periodic eval

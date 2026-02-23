@@ -229,6 +229,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 runner = EncoderRunner(env, agent_dict, log_dir=log_dir, device=agent_cfg.device)
         else:
             runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    elif agent_cfg.class_name == "SACMPCRunner":
+        from isaaclab_tasks.direct.hero_agent_mpc.runners import SACMPCRunner
+
+        print("[INFO] Using SACMPCRunner for SAC-MPC off-policy training.")
+        runner = SACMPCRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     else:

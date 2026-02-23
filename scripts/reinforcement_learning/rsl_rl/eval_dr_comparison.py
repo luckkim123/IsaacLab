@@ -23,6 +23,10 @@ Usage:
     # Encoder-Base policy
     ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/eval_dr_comparison.py \
         --task Isaac-HeroAgent-Encoder-Base-v0 --num_envs 64 --headless
+
+    # SAC-MPC policy
+    ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/eval_dr_comparison.py \
+        --task Isaac-HeroAgent-SAC-MPC-v0 --num_envs 64 --headless
 """
 
 """Launch Isaac Sim Simulator first."""
@@ -484,7 +488,9 @@ def run_evaluation(
     obs = env.get_observations()
     with torch.inference_mode():
         obs, _, _, _ = env.step(policy(obs))
-        if hasattr(policy_nn, "reset"):
+        if hasattr(policy_nn, "reset_mpc"):
+            policy_nn.reset_mpc(torch.arange(num_envs, device=device))
+        elif hasattr(policy_nn, "reset"):
             policy_nn.reset(torch.ones(num_envs, 1, dtype=torch.bool, device=device))
 
     target_roll_rad = np.deg2rad(target_roll_deg)
@@ -499,8 +505,19 @@ def run_evaluation(
 
         with torch.inference_mode():
             actions = policy(obs)
+            # SAC-MPC: store dynamics prediction before env.step
+            if hasattr(policy_nn, "store_prediction"):
+                policy_nn.store_prediction(obs["mpc_state"], actions)
             obs, _, dones, _ = env.step(actions)
-            if hasattr(policy_nn, "reset"):
+            # SAC-MPC: update prediction error after env.step
+            if hasattr(policy_nn, "update_pred_error"):
+                policy_nn.update_pred_error(obs["mpc_state"])
+            # Reset policy states
+            if hasattr(policy_nn, "reset_mpc"):
+                env_ids = dones.nonzero(as_tuple=False).squeeze(-1)
+                if env_ids.numel() > 0:
+                    policy_nn.reset_mpc(env_ids)
+            elif hasattr(policy_nn, "reset"):
                 policy_nn.reset(dones)
 
         # Collect Euler angles
@@ -621,18 +638,33 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     print(f"[INFO] DR scales: {DR_SCALE}")
 
     # ---- Create runner + load policy ----
+    is_sac_mpc = agent_cfg.class_name == "SACMPCRunner"
+
     if use_checkpoint and resume_path:
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-        runner.load(resume_path, load_optimizer=False)
-        policy = runner.get_inference_policy(device=device)
-        try:
-            policy_nn = runner.alg.policy
-        except AttributeError:
-            policy_nn = runner.alg.actor_critic
+        if is_sac_mpc:
+            from isaaclab_tasks.direct.hero_agent_mpc.runners import SACMPCRunner
+
+            runner = SACMPCRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+            runner.load(resume_path)
+            runner.actor.eval()
+            policy = runner.actor.act_inference
+            policy_nn = runner.actor
+        else:
+            runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+            runner.load(resume_path, load_optimizer=False)
+            policy = runner.get_inference_policy(device=device)
+            try:
+                policy_nn = runner.alg.policy
+            except AttributeError:
+                policy_nn = runner.alg.actor_critic
 
         if hasattr(policy_nn, "get_last_z") and hasattr(raw_env, "set_encoder_policy"):
             raw_env.set_encoder_policy(policy_nn)
             print("[INFO] Encoder policy connected to env.")
+
+        # SAC-MPC: initialize prediction error buffer
+        if hasattr(policy_nn, "_ensure_pred_error_buf"):
+            policy_nn._ensure_pred_error_buf(num_envs, device)
     else:
         action_dim = env_cfg.action_space
         policy = lambda obs: torch.zeros(num_envs, action_dim, device=device)  # noqa: E731

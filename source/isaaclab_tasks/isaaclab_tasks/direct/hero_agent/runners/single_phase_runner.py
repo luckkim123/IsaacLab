@@ -34,12 +34,11 @@ import warnings
 from collections import deque
 
 import torch
-from tensordict import TensorDict
-
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import resolve_rnd_config, resolve_symmetry_config
 from rsl_rl.runners.on_policy_runner import OnPolicyRunner
 from rsl_rl.utils import store_code_state
+from tensordict import TensorDict
 
 from ..encoder.adaptation import ActorCriticEncoderTDCAdapt  # noqa: F401 — needed by eval()
 from ..encoder.normalization import RunningMeanStd

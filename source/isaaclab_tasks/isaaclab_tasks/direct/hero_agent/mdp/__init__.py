@@ -39,6 +39,8 @@ from .rewards import (
     compute_stability_gate,
     mhat_accuracy_reward,
     progress_reward,
+    progress_reward_pbrs,
+    settling_bonus,
     tdc_torque_penalty,
     tracking_reward,
 )
@@ -66,10 +68,12 @@ __all__ = [
     # Rewards (functions)
     "tracking_reward",
     "progress_reward",
+    "progress_reward_pbrs",
     "action_rate_penalty",
     "action_magnitude_penalty",
     "angular_velocity_penalty",
     "mhat_accuracy_reward",
     "tdc_torque_penalty",
+    "settling_bonus",
     "compute_stability_gate",
 ]

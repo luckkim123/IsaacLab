@@ -107,6 +107,24 @@ def _collect_tensor_stats(
         metrics[f"{prefix}_{name}_std"] = tensor[:, i].std().item()
 
 
+class _WandbTBWriter:
+    """Adapter that forwards ``add_scalar`` to both TensorBoard and WandB.
+
+    ``flush_metrics()`` relies on ``writer.add_scalar()`` for all scalar logging.
+    When WandB is the logger backend, we still need TensorBoard records, so this
+    adapter wraps a real TB SummaryWriter and additionally calls ``wandb.log()``.
+    """
+
+    def __init__(self, tb_writer: Any) -> None:
+        self._tb = tb_writer
+
+    def add_scalar(self, tag: str, value: Any, global_step: int | None = None, **kw: Any) -> None:
+        self._tb.add_scalar(tag, value, global_step, **kw)
+        wandb = _get_wandb()
+        if wandb is not None:
+            wandb.log({tag: value}, step=global_step, commit=False)
+
+
 def _get_wandb() -> Any | None:
     """Import wandb or return None if unavailable."""
     try:

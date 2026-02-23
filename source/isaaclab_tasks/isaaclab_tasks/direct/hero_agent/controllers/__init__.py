@@ -9,6 +9,8 @@ This module provides:
     - ALBCKinematics: Forward/Inverse kinematics for 2-link ALBC arm
     - TDCController: Time Delay Controller for roll/pitch attitude stabilization
     - TDCControllerCfg: Configuration for TDC controller
+
+SAC-MPC controllers (DifferentiableMPC, DynamicsMLP) are in hero_agent_mpc.controllers.
 """
 
 from .kinematics import ALBCKinematics

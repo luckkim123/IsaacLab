@@ -18,6 +18,8 @@ This module consolidates all environment configurations:
 - HeroAgentEncoderTDCEnvCfg: Encoder-TDC integration (RL adaptive gains + M_hat)
 - HeroAgentUnifiedTDCEnvCfg: General encoder + RL-output M_hat/Kp/Kd
 - HeroAgentAdaptTDCEnvCfg: Phase 2 adaptation (proprio history -> z_hat)
+
+MPC configurations are in the separate hero_agent_mpc package.
 """
 
 from __future__ import annotations
@@ -536,8 +538,6 @@ class HeroAgentAdaptTDCEnvCfg(HeroAgentEncoderTDCEnvCfg):
     # - tdc_torque REMOVED: u_hat (disturbance compensation) dominates tau, conflicts with tracking
     # - action_rate KEPT: prevents gain chattering
     # - stability_gate ON: forces M_hat within stable region (M_hat > M_true/2)
-    # Disable DR curriculum: let adapt_tconv learn full DR range from the start
-    # instead of racing against curriculum ramp that increases aux_mhat_loss.
     dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=False)
 
     reward: ALBCRewardCfg = ALBCRewardCfg(

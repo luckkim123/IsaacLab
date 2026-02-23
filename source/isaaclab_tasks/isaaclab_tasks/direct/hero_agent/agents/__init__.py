@@ -15,6 +15,8 @@ This module provides:
     - HeroAgentUnifiedTDCPPORunnerCfg: General encoder + RL-output M_hat/Kp/Kd
     - HeroAgentAdaptTDCRunnerCfg: Phase 2 adaptation (supervised, non-PPO)
     - HeroAgentSinglePhaseTDCRunnerCfg: Single-phase joint training (PPO + aux M_hat loss)
+
+MPC agent configurations are in the hero_agent_mpc.agents package.
 """
 
 from ..encoder import ActorCriticEncoder, ActorCriticEncoderTDC, ActorCriticEncoderTDCAdapt

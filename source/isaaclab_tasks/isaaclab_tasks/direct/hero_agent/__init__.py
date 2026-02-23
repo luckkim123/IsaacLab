@@ -18,6 +18,8 @@ Available Tasks:
     - Isaac-HeroAgent-Unified-TDC-v0: General encoder + RL-output M_hat/Kp/Kd
     - Isaac-HeroAgent-Adapt-TDC-v0: Phase 2 adaptation (proprio history -> z_hat)
     - Isaac-HeroAgent-SinglePhase-TDC-v0: Single-phase joint training (PPO + aux M_hat loss)
+
+MPC environments are in the separate hero_agent_mpc package.
 """
 
 import gymnasium as gym

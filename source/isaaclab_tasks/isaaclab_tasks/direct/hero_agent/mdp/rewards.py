@@ -70,6 +70,14 @@ class ALBCRewardCfg:
     # NOT dt-scaled. At weight=0.2, episode sum ≈ tracking level.
     progress_weight: float = 0.2
     progress_scale: float = 0.01
+    progress_mode: str = "tanh"  # "tanh" (PPO) or "pbrs" (SAC-safe)
+    progress_gamma: float = 0.997  # discount factor for PBRS (match SAC gamma)
+
+    # Settling bonus: sigmoid(sharpness * (threshold - error)), dt-scaled.
+    # Dense gradient near target where Gaussian tracking has flat top.
+    settling_weight: float = 0.0  # Default 0: inactive in base RL / TDC envs
+    settling_threshold: float = 0.10  # radians (~5.7 deg)
+    settling_sharpness: float = 30.0  # 1/radians
 
     # Angular velocity penalty (dt-scaled, discourages oscillation under DR)
     # Keep at 0.0 for attitude control: robot needs angular velocity to correct errors.
@@ -378,6 +386,49 @@ def progress_reward(
     """
     delta = env._prev_potentials - env._potentials
     return torch.tanh(delta / scale)
+
+
+def progress_reward_pbrs(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+    gamma: float = 0.997,
+    **_kwargs,
+) -> torch.Tensor:
+    """Proper PBRS: Phi(s) - gamma * Phi(s').
+
+    Preserves optimal policy (Ng et al. 1999).
+    Safe for off-policy (SAC) replay buffer.
+    NOT dt-scaled.
+
+    Args:
+        env: Environment instance (provides _prev_potentials, _potentials).
+        gamma: Discount factor matching the RL algorithm (e.g. SAC gamma).
+    """
+    return env._prev_potentials - gamma * env._potentials
+
+
+def settling_bonus(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+    threshold: float = 0.10,
+    sharpness: float = 30.0,
+    **_kwargs,
+) -> torch.Tensor:
+    """Sigmoid-gated settling bonus: sigmoid(k * (threshold - error)).
+
+    Provides dense gradient in the near-target zone where Gaussian tracking
+    reward has a flat top (gradient -> 0 as error -> 0).
+
+    Output [0, 1]. sigmoid(0)=0.5 at error=threshold.
+    Markov-safe: depends only on current state. Compatible with SAC replay buffer.
+    dt-scaled (instantaneous state quality). Use with positive weight.
+
+    Args:
+        env: Environment instance (provides _potentials = ||[roll_err, pitch_err]||).
+        threshold: Settling zone boundary in radians. Default 0.10 rad (~5.7 deg).
+        sharpness: Sigmoid slope coefficient (1/rad). Higher = sharper transition.
+    """
+    return torch.sigmoid(sharpness * (threshold - env._potentials))
 
 
 def angular_velocity_penalty(

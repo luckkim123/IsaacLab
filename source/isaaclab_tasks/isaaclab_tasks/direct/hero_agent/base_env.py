@@ -39,6 +39,8 @@ from .mdp import (
     compute_policy_obs,
     compute_privileged_obs,
     progress_reward,
+    progress_reward_pbrs,
+    settling_bonus,
     tracking_reward,
 )
 from .mdp.events import (
@@ -274,11 +276,26 @@ class HeroAgentEnv(DirectRLEnv):
             ),
         }
         if rcfg.progress_weight != 0.0:
+            if rcfg.progress_mode == "pbrs":
+                func = progress_reward_pbrs
+                params = {"gamma": rcfg.progress_gamma}
+            else:
+                func = progress_reward
+                params = {"scale": rcfg.progress_scale}
             terms["progress"] = RewardTermCfg(
-                func=progress_reward,
+                func=func,
                 weight=rcfg.progress_weight,
-                params={"scale": rcfg.progress_scale},
+                params=params,
                 scale_by_dt=False,
+            )
+        if rcfg.settling_weight != 0.0:
+            terms["settling"] = RewardTermCfg(
+                func=settling_bonus,
+                weight=rcfg.settling_weight,
+                params={
+                    "threshold": rcfg.settling_threshold,
+                    "sharpness": rcfg.settling_sharpness,
+                },
             )
         if rcfg.angular_velocity_weight != 0.0:
             terms["angular_velocity"] = RewardTermCfg(
@@ -309,8 +326,13 @@ class HeroAgentEnv(DirectRLEnv):
             "cob_offset_z": rand.cob_offset_z,
             "action_latency_range": rand.action_latency_range,
         }
-        # Apply start ranges immediately (iteration 0 uses easy DR)
-        self.update_dr_curriculum(0)
+        # NOTE: Do NOT call update_dr_curriculum(0) here.
+        # Mutating cfg.randomization at init causes env.yaml to save curriculum
+        # start values instead of the actual target values (the YAML is dumped
+        # between env creation and runner.learn()).  The runner's training loop
+        # calls update_dr_curriculum(iteration) at the start of each iteration,
+        # so iteration 0 will apply the start ranges before any data is used
+        # for gradient updates.
 
     def update_dr_curriculum(self, iteration: int) -> None:
         """Linearly ramp DR ranges from start to full over curriculum period."""
@@ -373,7 +395,12 @@ class HeroAgentEnv(DirectRLEnv):
         self._perturb_timer = torch.randint(0, perturb_cycle, (self.num_envs,), device=self.device)
 
         # Action latency buffer (ring buffer for delayed action application)
-        max_latency = rand_cfg.action_latency_range[1]
+        # When DR curriculum is active, the config may already be overwritten to
+        # start values (0,0). Use the full (target) range for buffer allocation.
+        if hasattr(self, "_dr_full_ranges") and "action_latency_range" in self._dr_full_ranges:
+            max_latency = self._dr_full_ranges["action_latency_range"][1]
+        else:
+            max_latency = rand_cfg.action_latency_range[1]
         self._max_action_latency = max_latency
         if max_latency > 0:
             self._action_history = torch.zeros(
@@ -688,22 +715,28 @@ class HeroAgentEnv(DirectRLEnv):
             Dict of metric tag -> value, written to ``self.extras["log"]``.
         """
         log: dict[str, float | torch.Tensor] = {}
+        n = len(env_ids)
+
+        # Weight for downstream weighted averaging (SAC runner uses this)
+        log["_num_resets"] = float(n)
 
         # Reward sums (normalized by max episode duration for episode-length-independent metrics)
         for name, value in reward_sums.items():
             log[f"Episode_Reward/{name}"] = value / self.max_episode_length_s
 
-        # Termination counts
-        log["Episode_Termination/terminated"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
-        log["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+        # Termination rates (0.0~1.0, scale-invariant for weighted averaging)
+        n_terminated = torch.count_nonzero(self.reset_terminated[env_ids]).item()
+        n_timeout = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+        log["Episode_Termination/terminated"] = n_terminated / n if n > 0 else 0.0
+        log["Episode_Termination/time_out"] = n_timeout / n if n > 0 else 0.0
 
-        if len(env_ids) == 0:
+        if n == 0:
             return log
 
-        # Attitude errors (use cached values to avoid side effects)
-        attitude_errors_deg = torch.rad2deg(self._attitude_error[env_ids])
-        log["Attitude_Error/roll_deg"] = attitude_errors_deg[:, 0].abs().mean().item()
-        log["Attitude_Error/pitch_deg"] = attitude_errors_deg[:, 1].abs().mean().item()
+        # Attitude errors (all resetting envs; weighted averaging handles noise)
+        errors_deg = torch.rad2deg(self._attitude_error[env_ids, :2]).abs()
+        log["Attitude_Error/roll_deg"] = errors_deg[:, 0].mean().item()
+        log["Attitude_Error/pitch_deg"] = errors_deg[:, 1].mean().item()
 
         # --- Action diagnostics ---
         log["Action/magnitude_mean"] = torch.linalg.norm(self._actions[env_ids], dim=-1).mean().item()
