@@ -55,23 +55,28 @@ class ActorCriticMPCCfg(RslRlPpoActorCriticCfg):
     pgd_iters: int = 8
     """PGD iterations for rollout (data collection). Full convergence for
     high-quality actions in the replay buffer."""
-    train_pgd_iters: int | None = None
+    train_pgd_iters: int | None = 4
     """PGD iterations for training MPC (differentiable pass). None = use pgd_iters
-    (no separation). Set to 4 after confirming training stability."""
-    diff_gd_lr: float = 0.05
-    """Differentiable refinement step size. Lowered from 0.08 to 0.05 to
-    compensate for increased diff_gd_steps (2). Total displacement per solve:
-    2*0.05=0.10 (vs previous 1*0.08=0.08). Dynamics pred_err stable at 0.019,
-    so gradient amplification risk is low."""
-    diff_gd_steps: int = 2
-    """Number of differentiable GD refinement steps. Restored to 2 (was 1)
-    to strengthen actor gradient signal through MPC Phase 2 chain.
-    With 1 step, actor_grad_norm collapsed to 0.03 (cost_map barely learning).
-    2 steps doubles the gradient path length through the cost landscape."""
+    (no separation). 4 iters leaves incomplete PGD convergence so Phase 2
+    differentiable refinement starts with non-trivial cost gradients,
+    breaking the flat-minimum gradient bottleneck for cost_map learning."""
+    diff_gd_lr: float = 0.08
+    """Differentiable refinement step size. Reduced from 0.15 to 0.08 to
+    prevent gradient amplification through accurate dynamics models.
+    When dynamics prediction improves, Phase 2 gradients become sharper --
+    lower lr dampens the chain rule amplification factor."""
+    diff_gd_steps: int = 1
+    """Number of differentiable GD refinement steps. Reduced from 2 to 1
+    to limit gradient amplification. With improved dynamics (boundary-aware
+    sequence sampling), the MPC gradient chain produces stronger signals --
+    fewer steps prevent actor gradient spikes.
+    1 step at lr=0.08 gives total displacement 0.08 (conservative).
+    NOTE: 2 steps tested (2026-02-23) -- no long-term actor_grad_norm improvement."""
     refine_noise_std: float = 0.0
     """Gaussian noise std added to converged u before differentiable refinement.
-    REVERTED to 0.0: noise caused critic explosion (out-of-distribution actions
-    from perturbed MPC solve triggered extrapolation error in Q-network)."""
+    Non-zero values perturb the starting point away from the flat minimum,
+    providing stronger gradient signal for upstream cost_map parameters.
+    NOTE: 0.2 tested (2026-02-23) -- caused critic explosion."""
 
     # Cost map network
     cost_map_hidden_dims: list[int] = [256, 128, 64]
@@ -139,10 +144,13 @@ class HeroAgentSACMPCRunnerCfg(RslRlOnPolicyRunnerCfg):
     # Required by RslRlOnPolicyRunnerCfg base class, unused by SACMPCRunner.
     num_steps_per_env = 1
 
-    # Symmetric critic: actor and critic see identical observations.
+    # Asymmetric critic: actor sees observations only, critic also sees pred_error.
+    # "pred_error" is NOT an env obs key -- it is injected by SAC from the replay
+    # buffer (8D dynamics prediction error, ECNN-style). This gives the critic
+    # an implicit fingerprint of the current DR configuration.
     obs_groups = {
         "policy": ["policy", "mpc_state", "mpc_target"],
-        "critic": ["policy", "mpc_state", "mpc_target"],
+        "critic": ["policy", "mpc_state", "mpc_target", "pred_error"],
     }
 
     policy = ActorCriticMPCCfg(
