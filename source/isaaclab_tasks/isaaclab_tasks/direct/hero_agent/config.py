@@ -364,9 +364,9 @@ class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
     """Hero Agent encoder training with privileged hydrodynamic info.
 
     state_space=26 returns privileged information for HORA/RMA Phase 1 training.
-    Main hydro (7D) + Buoy hydro (7D) + Main dynamics (4D: Ixx,Iyy,Izz,m_A)
+    Main hydro (7D) + Buoy hydro (7D) + Main dynamics (4D: Ixx,Iyy,Izz,body_mass)
     + Buoy dynamics (4D) + Payload (4D: mass, cog_offset_xyz) = 26D.
-    Includes inertia and added mass for both bodies in privileged obs.
+    Includes inertia and body mass for both bodies in privileged obs.
 
     Network Input Dimensions (ActorCriticEncoder):
         - observation_space (13): Used for gym.spaces.Box definition only

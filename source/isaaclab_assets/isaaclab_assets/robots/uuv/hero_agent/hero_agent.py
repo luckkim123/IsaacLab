@@ -65,12 +65,14 @@ class HeroAgentHydrodynamicsCfg(HydrodynamicsCfg):
     """
 
     # Added mass coefficients [surge, sway, heave, roll, pitch, yaw]
-    # Based on R=0.0825m, L=0.27m geometry
-    # Lateral: M_a = rho * pi * r^2 * L = 998 * pi * 0.0825^2 * 0.27 = 5.76 kg
-    added_mass: tuple[float, ...] = (0.6, 5.76, 5.76, 0.04, 0.05, 0.05)
+    # Cylinder axis along Z (upright), R=0.0825m, L=0.27m
+    # Perpendicular to axis (surge/sway): M_a = rho * pi * r^2 * L = 998 * pi * 0.0825^2 * 0.27 = 5.76 kg
+    # Along axis (heave): much smaller (~0.6 kg, end-cap effect)
+    added_mass: tuple[float, ...] = (5.76, 5.76, 0.6, 0.04, 0.05, 0.05)
 
     # Linear damping coefficients (skin friction, Ns/m and Nms/rad)
-    linear_damping: tuple[float, ...] = (2.0, 4.0, 4.0, 0.1, 0.1, 0.1)
+    # Perpendicular to cylinder axis (surge/sway) > along axis (heave)
+    linear_damping: tuple[float, ...] = (4.0, 4.0, 2.0, 0.1, 0.1, 0.1)
 
     # Quadratic damping coefficients (form drag, Ns^2/m^2 and Nms^2/rad^2)
     # From heroagent2.py: D = 0.5 * rho * Cd * A
@@ -141,7 +143,9 @@ class HeroAgentBuoyHydrodynamicsCfg(HydrodynamicsCfg):
     """
 
     # Added mass coefficients [surge, sway, heave, roll, pitch, yaw]
-    added_mass: tuple[float, ...] = (0.15, 1.5, 1.5, 0.01, 0.01, 0.01)
+    # Cylinder axis along Z (upright), R=0.085m, H=0.118m
+    # Perpendicular to axis (surge/sway): larger; along axis (heave): smaller
+    added_mass: tuple[float, ...] = (1.5, 1.5, 0.15, 0.01, 0.01, 0.01)
 
     # Linear damping coefficients (skin friction, Ns/m)
     linear_damping: tuple[float, ...] = (0.5, 0.5, 0.5, 0.01, 0.01, 0.01)
@@ -182,7 +186,7 @@ class HeroAgentBuoyHydrodynamicsCfg(HydrodynamicsCfg):
 
     # Added mass force (M_A * v_dot) via explicit integration.
     # Stability requires: factor * max(M_A_i / M_rigid_i) < 1
-    # Buoy worst axis: sway/heave M_A=1.5 / m=0.93 = 1.61 → factor < 0.62
+    # Buoy worst axis: surge/sway M_A=1.5 / m=0.93 = 1.61 → factor < 0.62
     apply_added_mass_force: bool = True
     added_mass_stability_factor: float = 0.4
 

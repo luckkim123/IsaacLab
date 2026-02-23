@@ -518,6 +518,11 @@ class HydrodynamicsModel:
         return self._water_density
 
     @property
+    def body_mass(self) -> torch.Tensor | None:
+        """Rigid body mass per environment (num_envs,), or None if not configured."""
+        return self._body_mass
+
+    @property
     def rigid_body_inertia(self) -> torch.Tensor:
         """Rigid body inertia diagonal (num_envs, 3)."""
         return self._rigid_body_inertia

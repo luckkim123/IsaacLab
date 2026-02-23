@@ -90,8 +90,8 @@ def compute_privileged_obs(
     Returns privileged info containing hydrostatic + dynamics parameters:
         - Main body (7D): volume, r_cg (3), r_cb (3)
         - Buoy body (7D): volume, r_cg (3), r_cb (3)
-        - Main body dynamics (4D): inertia Ixx/Iyy/Izz (3), m_A surge (1)
-        - Buoy dynamics (4D): inertia Ixx/Iyy/Izz (3), m_A sway (1)
+        - Main body dynamics (4D): inertia Ixx/Iyy/Izz (3), body_mass (1)
+        - Buoy dynamics (4D): inertia Ixx/Iyy/Izz (3), body_mass (1)
         - Payload (4D, optional): mass, cog_offset (3)
 
     Total: 26D when payload is included, 22D otherwise.
@@ -107,12 +107,16 @@ def compute_privileged_obs(
         _hydro_privileged_info(env._buoy_hydro),  # 7D: volume, CoG, CoB
     ]
 
-    # Dynamics parameters affected by DR (inertia_scale, added_mass_scale)
-    # Each body is independently randomized by _randomize_hydro_model()
+    # Dynamics parameters affected by DR (inertia_scale, body_mass_scale)
+    # Inertia: independently randomized per body by _randomize_hydro_model()
+    # Body mass: single scale for all bodies via randomize_body_mass() -> PhysX
+    main_mass = env._hydro.body_mass
+    buoy_mass = env._buoy_hydro.body_mass
+    assert main_mass is not None and buoy_mass is not None, "body_mass required for privileged obs"
     priv_obs.append(env._hydro.rigid_body_inertia)  # 3D: main Ixx, Iyy, Izz
-    priv_obs.append(env._hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1))  # 1D: main m_A
+    priv_obs.append(main_mass.unsqueeze(-1))  # 1D: main body mass (DR synced)
     priv_obs.append(env._buoy_hydro.rigid_body_inertia)  # 3D: buoy Ixx, Iyy, Izz
-    priv_obs.append(env._buoy_hydro.added_mass_matrix[:, 1, 1].unsqueeze(-1))  # 1D: buoy m_A (sway)
+    priv_obs.append(buoy_mass.unsqueeze(-1))  # 1D: buoy body mass (DR synced)
 
     # Include payload info if enabled and state_space is large enough
     if env._payload_mass is not None and env._payload_cog_offset is not None and env.cfg.state_space >= 26:

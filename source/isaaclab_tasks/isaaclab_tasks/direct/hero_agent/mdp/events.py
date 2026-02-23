@@ -549,6 +549,15 @@ def randomize_body_mass(
 
     env._robot.root_physx_view.set_masses(masses, env_ids_cpu)
 
+    # Sync hydrodynamics model body_mass tensors with PhysX (for privileged obs)
+    body_idx = env._body_id[0]
+    buoy_idx = env._buoy_body_id[0]
+    device = env.device
+    if env._hydro.body_mass is not None:
+        env._hydro.body_mass[env_ids] = masses[env_ids_cpu, body_idx].to(device)
+    if env._buoy_hydro.body_mass is not None:
+        env._buoy_hydro.body_mass[env_ids] = masses[env_ids_cpu, buoy_idx].to(device)
+
 
 # -----------------------------------------------------------------------------
 # Joint Friction Randomization

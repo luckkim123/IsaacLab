@@ -327,7 +327,7 @@ $$x_{bu} = l_1\cos\gamma_1 + l_2\cos(\gamma_1 + \gamma_2), \quad y_{bu} = l_1\si
 | $\gamma_1, \gamma_2$ | `env._robot.data.joint_pos[:, joint_ids]` | 매 step 가용 |
 | $(x_{bu}, y_{bu})$ | `env._kin.forward(joint_pos)` | FK 1회 호출 |
 | $h$ | `env._tdc_cfg.h` (= 0.180 m) | 상수 |
-| $m_A$ | `env._buoy_hydro._added_mass_matrix[:, 0, 0]` | DR 후 per-env 값 |
+| $m_A$ | `env._buoy_hydro._added_mass_matrix[:, 1, 1]` | DR 후 per-env 값 (sway, =surge for upright cylinder) |
 | $I_{ROV}$ | `env._hydro._rigid_body_inertia[:, :2]` | DR 후 per-env 값 |
 | $\hat{M}$ (m_hat) | `env._tdc._m_hat` | per-env (num_envs, 2) |
 | $\hat{M}_{t-L}$ | 별도 히스토리 버퍼 필요 | TDC에 미구현 |
@@ -378,7 +378,7 @@ def stability_violation_penalty(env, **_kwargs):
     p_EE = env._kin.forward(joint_pos)
     x_bu, y_bu = p_EE[:, 0], p_EE[:, 1]
     h = env._tdc_cfg.h
-    m_A = env._buoy_hydro._added_mass_matrix[:, 0, 0]
+    m_A = env._buoy_hydro._added_mass_matrix[:, 1, 1]
     I_ROV = env._hydro._rigid_body_inertia[:, :2]
 
     M_true = torch.stack([
