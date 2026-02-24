@@ -116,6 +116,36 @@ def _apply_xyz_offset(
     target[env_ids, 2] = base[2] + _rand_uniform_range(num_envs, z_range, device)
 
 
+def _sample_or_uniform(
+    key: str,
+    sampled: dict[str, torch.Tensor] | None,
+    shape: tuple | int,
+    range_tuple: tuple[float, float],
+    device: str | torch.device,
+    broadcast_dim: int | None = None,
+) -> torch.Tensor:
+    """Return DORAEMON-sampled value if available, otherwise uniform random.
+
+    Args:
+        key: DORAEMON parameter key to look up.
+        sampled: Optional dict of DORAEMON-sampled values.
+        shape: Output tensor shape (used for uniform fallback).
+        range_tuple: (low, high) for uniform fallback.
+        device: Torch device.
+        broadcast_dim: If set, unsqueeze and expand the sampled scalar
+            along this dimension (e.g. 6 for 6-DOF parameters).
+
+    Returns:
+        Tensor of sampled or random values.
+    """
+    if sampled and key in sampled:
+        val = sampled[key]
+        if broadcast_dim is not None:
+            val = val.unsqueeze(-1).expand(-1, broadcast_dim)
+        return val
+    return _rand_uniform_range(shape, range_tuple, device)
+
+
 # -----------------------------------------------------------------------------
 # Hydrodynamics Randomization
 # -----------------------------------------------------------------------------
@@ -181,38 +211,29 @@ def _randomize_hydro_model(
     base = _get_hydro_base(hydro)
 
     # Added mass (scale each of 6 DOF)
-    if sampled and "added_mass_scale" in sampled:
-        am_scales = sampled["added_mass_scale"].unsqueeze(-1).expand(-1, 6)
-    else:
-        am_scales = _rand_uniform_range((num_envs, 6), rand_cfg.added_mass_scale, device)
+    am_scales = _sample_or_uniform("added_mass_scale", sampled, (num_envs, 6), rand_cfg.added_mass_scale, device, 6)
     hydro.added_mass_matrix[env_ids] = torch.diag_embed(base.added_mass.unsqueeze(0) * am_scales)
 
     # Linear damping
-    if sampled and "linear_damping_scale" in sampled:
-        ld_scales = sampled["linear_damping_scale"].unsqueeze(-1).expand(-1, 6)
-    else:
-        ld_scales = _rand_uniform_range((num_envs, 6), rand_cfg.linear_damping_scale, device)
+    ld_scales = _sample_or_uniform(
+        "linear_damping_scale", sampled, (num_envs, 6), rand_cfg.linear_damping_scale, device, 6
+    )
     hydro.linear_damping[env_ids] = base.linear_damping.unsqueeze(0) * ld_scales
 
     # Quadratic damping
-    if sampled and "quadratic_damping_scale" in sampled:
-        qd_scales = sampled["quadratic_damping_scale"].unsqueeze(-1).expand(-1, 6)
-    else:
-        qd_scales = _rand_uniform_range((num_envs, 6), rand_cfg.quadratic_damping_scale, device)
+    qd_scales = _sample_or_uniform(
+        "quadratic_damping_scale", sampled, (num_envs, 6), rand_cfg.quadratic_damping_scale, device, 6
+    )
     hydro.quadratic_damping[env_ids] = base.quadratic_damping.unsqueeze(0) * qd_scales
 
     # Volume
-    if sampled and "volume_scale" in sampled:
-        vol_scales = sampled["volume_scale"]
-    else:
-        vol_scales = _rand_uniform_range(num_envs, rand_cfg.volume_scale, device)
+    vol_scales = _sample_or_uniform("volume_scale", sampled, num_envs, rand_cfg.volume_scale, device)
     hydro.volume[env_ids] = base.volume * vol_scales
 
     # Water density
-    if sampled and "water_density" in sampled:
-        hydro.water_density[env_ids] = sampled["water_density"]
-    else:
-        hydro.water_density[env_ids] = _rand_uniform_range(num_envs, rand_cfg.water_density_range, device)
+    hydro.water_density[env_ids] = _sample_or_uniform(
+        "water_density", sampled, num_envs, rand_cfg.water_density_range, device
+    )
 
     hydro.update_buoyancy_force(env_ids)
 
@@ -252,10 +273,7 @@ def _randomize_hydro_model(
         )
 
     # Rigid body inertia
-    if sampled and "inertia_scale" in sampled:
-        inertia_scales = sampled["inertia_scale"].unsqueeze(-1).expand(-1, 3)
-    else:
-        inertia_scales = _rand_uniform_range((num_envs, 3), rand_cfg.inertia_scale, device)
+    inertia_scales = _sample_or_uniform("inertia_scale", sampled, (num_envs, 3), rand_cfg.inertia_scale, device, 3)
     hydro.rigid_body_inertia[env_ids] = base.inertia.unsqueeze(0) * inertia_scales
 
 
@@ -475,10 +493,9 @@ def randomize_payload(
     device = env.device
 
     # Randomize mass
-    if sampled and "payload_mass" in sampled:
-        env._payload_mass[env_ids] = sampled["payload_mass"]
-    else:
-        env._payload_mass[env_ids] = _rand_uniform_range(num_reset, rand_cfg.payload_mass_range, device)
+    env._payload_mass[env_ids] = _sample_or_uniform(
+        "payload_mass", sampled, num_reset, rand_cfg.payload_mass_range, device
+    )
 
     # Reset attachment offset to fixed default (no randomization)
     base_offset = torch.tensor(env.cfg.payload_attachment_offset, device=device, dtype=torch.float32)
@@ -554,15 +571,8 @@ def randomize_joint_gains(
     num_reset = len(env_ids)
     device = env.device
 
-    if sampled and "joint_stiffness" in sampled:
-        stiffness = sampled["joint_stiffness"]
-    else:
-        stiffness = _rand_uniform_range(num_reset, rand_cfg.joint_stiffness_range, device)
-
-    if sampled and "joint_damping" in sampled:
-        damping = sampled["joint_damping"]
-    else:
-        damping = _rand_uniform_range(num_reset, rand_cfg.joint_damping_range, device)
+    stiffness = _sample_or_uniform("joint_stiffness", sampled, num_reset, rand_cfg.joint_stiffness_range, device)
+    damping = _sample_or_uniform("joint_damping", sampled, num_reset, rand_cfg.joint_damping_range, device)
 
     # unsqueeze for broadcasting: (num_reset,) -> (num_reset, 1) -> (num_reset, num_joints)
     env._robot.write_joint_stiffness_to_sim(stiffness.unsqueeze(-1), joint_ids=env._albc_joint_ids, env_ids=env_ids)
@@ -599,11 +609,8 @@ def randomize_body_mass(
     masses = env._robot.root_physx_view.get_masses()
     masses[env_ids_cpu] = env._robot.data.default_mass[env_ids_cpu].clone()
 
-    # Single scale per env, broadcast to all bodies
-    if sampled and "body_mass_scale" in sampled:
-        scales = sampled["body_mass_scale"].cpu()
-    else:
-        scales = _rand_uniform_range(num_reset, rand_cfg.body_mass_scale, "cpu")
+    # Single scale per env, broadcast to all bodies (always cpu for PhysX API)
+    scales = _sample_or_uniform("body_mass_scale", sampled, num_reset, rand_cfg.body_mass_scale, "cpu").cpu()
     masses[env_ids_cpu] *= scales.unsqueeze(-1)
     masses = torch.clamp(masses, min=1e-6)
 
@@ -645,15 +652,12 @@ def randomize_joint_friction(
     num_reset = len(env_ids)
     device = env.device
 
-    if sampled and "joint_static_friction" in sampled:
-        static = sampled["joint_static_friction"]
-    else:
-        static = _rand_uniform_range(num_reset, rand_cfg.joint_static_friction_range, device)
-
-    if sampled and "joint_viscous_friction" in sampled:
-        viscous = sampled["joint_viscous_friction"]
-    else:
-        viscous = _rand_uniform_range(num_reset, rand_cfg.joint_viscous_friction_range, device)
+    static = _sample_or_uniform(
+        "joint_static_friction", sampled, num_reset, rand_cfg.joint_static_friction_range, device
+    )
+    viscous = _sample_or_uniform(
+        "joint_viscous_friction", sampled, num_reset, rand_cfg.joint_viscous_friction_range, device
+    )
 
     # unsqueeze for broadcasting: (num_reset,) -> (num_reset, 1) -> (num_reset, num_joints)
     env._robot.write_joint_friction_coefficient_to_sim(

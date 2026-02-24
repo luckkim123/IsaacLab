@@ -63,15 +63,15 @@ class DomainRandomizationCfg:
     position_z_range: tuple[float, float] = (4.0, 5.0)
 
     # -- Initial Orientation (radians) --
-    roll_range: tuple[float, float] = (-0.524, 0.524)   # +-30 deg (was +-45)
-    pitch_range: tuple[float, float] = (-0.524, 0.524)   # +-30 deg (was +-45)
+    roll_range: tuple[float, float] = (-0.524, 0.524)  # +-30 deg
+    pitch_range: tuple[float, float] = (-0.524, 0.524)  # +-30 deg
     yaw_range: tuple[float, float] = (-math.pi, math.pi)
 
     # -- Hydrodynamic Parameter Scales --
-    added_mass_scale: tuple[float, float] = (0.85, 1.15)  # was (0.8, 1.2)
-    linear_damping_scale: tuple[float, float] = (0.8, 1.2)  # was (0.7, 1.3)
-    quadratic_damping_scale: tuple[float, float] = (0.7, 1.3)  # was (0.6, 1.4)
-    volume_scale: tuple[float, float] = (0.9, 1.1)  # was (0.85, 1.15)
+    added_mass_scale: tuple[float, float] = (0.85, 1.15)
+    linear_damping_scale: tuple[float, float] = (0.8, 1.2)
+    quadratic_damping_scale: tuple[float, float] = (0.7, 1.3)
+    volume_scale: tuple[float, float] = (0.9, 1.1)
 
     # -- Center of Buoyancy Offset (meters) --
     cob_offset_x: tuple[float, float] = (-0.01, 0.01)
@@ -87,7 +87,7 @@ class DomainRandomizationCfg:
     inertia_scale: tuple[float, float] = (0.75, 1.3)
 
     # -- Body Mass Scale (applied uniformly to all bodies) --
-    body_mass_scale: tuple[float, float] = (0.9, 1.1)  # was (0.85, 1.15)
+    body_mass_scale: tuple[float, float] = (0.9, 1.1)
 
     # -- Water Density (kg/m^3) --
     water_density_range: tuple[float, float] = (995.0, 1025.0)
@@ -98,8 +98,8 @@ class DomainRandomizationCfg:
     joint_damping_range: tuple[float, float] = (2.4, 3.6)
 
     # -- Joint Friction --
-    joint_static_friction_range: tuple[float, float] = (0.0, 0.03)  # was (0.0, 0.05)
-    joint_viscous_friction_range: tuple[float, float] = (0.0, 0.2)  # was (0.0, 0.3)
+    joint_static_friction_range: tuple[float, float] = (0.0, 0.03)
+    joint_viscous_friction_range: tuple[float, float] = (0.0, 0.2)
 
     def disable_all(
         self,
@@ -159,6 +159,30 @@ class DomainRandomizationCfg:
             payload_cog_offset_xy_radius=0.0,
             payload_cog_offset_z=(0.0, 0.0),
             payload_mass_range=(0.5, 0.5),
+        )
+
+    @classmethod
+    def half_strength(cls) -> DomainRandomizationCfg:
+        """Create DR config at ~50% of full range for diagnostics.
+
+        Narrows all scale/offset ranges to midpoint between 1.0 and full range.
+        No DORAEMON -- constant DR from start. Use to isolate whether encoder/reward
+        design can handle mild DR before enabling full strength.
+        """
+        return cls(
+            enable=True,
+            added_mass_scale=(0.9, 1.1),
+            linear_damping_scale=(0.85, 1.15),
+            quadratic_damping_scale=(0.8, 1.2),
+            volume_scale=(0.92, 1.08),
+            inertia_scale=(0.85, 1.25),
+            body_mass_scale=(0.92, 1.08),
+            cob_offset_z=(-0.01, 0.01),
+            cog_offset_z=(-0.01, 0.01),
+            joint_stiffness_range=(90.0, 110.0),
+            joint_damping_range=(2.7, 3.3),
+            joint_static_friction_range=(0.0, 0.025),
+            joint_viscous_friction_range=(0.0, 0.15),
         )
 
     # ==========================================================================
@@ -379,26 +403,8 @@ class HeroAgentEncoderBaseDebugEnvCfg(HeroAgentEncoderTrainEnvCfg):
     If it converges, full DR or DORAEMON is the issue.
     """
 
-    randomization: DomainRandomizationCfg = DomainRandomizationCfg(
-        enable=True,
-        # Half-strength hydrodynamic scales (midpoint between 1.0 and full range)
-        added_mass_scale=(0.9, 1.1),         # full: (0.8, 1.2)
-        linear_damping_scale=(0.85, 1.15),    # full: (0.7, 1.3)
-        quadratic_damping_scale=(0.8, 1.2),   # full: (0.6, 1.4)
-        volume_scale=(0.92, 1.08),            # full: (0.85, 1.15)
-        inertia_scale=(0.85, 1.25),           # full: (0.7, 1.5)
-        body_mass_scale=(0.92, 1.08),         # full: (0.85, 1.15)
-        # Half-strength offsets
-        cob_offset_z=(-0.01, 0.01),           # full: (-0.02, 0.02)
-        cog_offset_z=(-0.01, 0.01),           # full: (-0.02, 0.02)
-        # Joint gains: narrower range around nominal
-        joint_stiffness_range=(90.0, 110.0),  # full: (80, 120)
-        joint_damping_range=(2.7, 3.3),       # full: (2.4, 3.6)
-        # Joint friction: half
-        joint_static_friction_range=(0.0, 0.025),   # full: (0.0, 0.05)
-        joint_viscous_friction_range=(0.0, 0.15),    # full: (0.0, 0.3)
-    )
-    doraemon: DoraemonCfg = DoraemonCfg(enable=False)  # fixed half-DR
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg.half_strength()
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
 
 
 @configclass
@@ -432,26 +438,8 @@ class HeroAgentTDEBaseDebugEnvCfg(HeroAgentTDEBaseEnvCfg):
     If it converges, full DR or DORAEMON is the issue.
     """
 
-    randomization: DomainRandomizationCfg = DomainRandomizationCfg(
-        enable=True,
-        # Half-strength hydrodynamic scales (midpoint between 1.0 and full range)
-        added_mass_scale=(0.9, 1.1),         # full: (0.8, 1.2)
-        linear_damping_scale=(0.85, 1.15),    # full: (0.7, 1.3)
-        quadratic_damping_scale=(0.8, 1.2),   # full: (0.6, 1.4)
-        volume_scale=(0.92, 1.08),            # full: (0.85, 1.15)
-        inertia_scale=(0.85, 1.25),           # full: (0.7, 1.5)
-        body_mass_scale=(0.92, 1.08),         # full: (0.85, 1.15)
-        # Half-strength offsets
-        cob_offset_z=(-0.01, 0.01),           # full: (-0.02, 0.02)
-        cog_offset_z=(-0.01, 0.01),           # full: (-0.02, 0.02)
-        # Joint gains: narrower range around nominal
-        joint_stiffness_range=(90.0, 110.0),  # full: (80, 120)
-        joint_damping_range=(2.7, 3.3),       # full: (2.4, 3.6)
-        # Joint friction: half
-        joint_static_friction_range=(0.0, 0.025),   # full: (0.0, 0.05)
-        joint_viscous_friction_range=(0.0, 0.15),    # full: (0.0, 0.3)
-    )
-    doraemon: DoraemonCfg = DoraemonCfg(enable=False)  # fixed half-DR
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg.half_strength()
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
 
 
 # =============================================================================
