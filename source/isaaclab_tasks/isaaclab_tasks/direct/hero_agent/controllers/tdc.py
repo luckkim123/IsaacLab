@@ -522,39 +522,3 @@ def compute_M_bb(
         ],
         dim=-1,
     )
-
-
-def compute_M_hat_from_z(
-    z_decomposed: torch.Tensor,
-    p_EE: torch.Tensor,
-    h: float,
-    m_hat_max: float = 1.0,
-) -> torch.Tensor:
-    """Compute M_hat from decomposed encoder z and current FK position.
-
-    Uses the parallel axis theorem with encoder-predicted episode-level constants
-    and step-level FK position:
-        M_hat_roll  = I_roll_hat  + m_A_hat * (y_bu^2 + h^2)
-        M_hat_pitch = I_pitch_hat + m_A_hat * (x_bu^2 + h^2)
-
-    Args:
-        z_decomposed: Decomposed encoder output [m_A_hat, I_roll_hat, I_pitch_hat].
-            Shape: (num_envs, 3).
-        p_EE: EE position [x_bu, y_bu] from FK. Shape: (num_envs, 2).
-        h: CoG-to-ABPC vertical offset in meters.
-        m_hat_max: Upper clamp for M_hat (prevents unbounded growth).
-            With m_A=1.5(sway), M_hat ~ 0.45-0.59; default 1.0 gives safety margin.
-
-    Returns:
-        Design inertia M_hat [roll, pitch]. Shape: (num_envs, 2).
-    """
-    m_A_hat = z_decomposed[:, 0]
-    I_roll_hat = z_decomposed[:, 1]
-    I_pitch_hat = z_decomposed[:, 2]
-    return torch.stack(
-        [
-            I_roll_hat + m_A_hat * (p_EE[:, 1] ** 2 + h**2),
-            I_pitch_hat + m_A_hat * (p_EE[:, 0] ** 2 + h**2),
-        ],
-        dim=-1,
-    ).clamp(max=m_hat_max)
