@@ -133,7 +133,7 @@ tdc.update_controller_params(m_hat=m_hat)
 
 ### 2.4 Training Command
 
-Phase 1 teacher training은 `Isaac-HeroAgent-Encoder-TDC-v0` task 등록이 제거되었으므로,
+Phase 1 teacher training은 `Isaac-HeroAgent-Encoder-Base-v0` task를 사용하거나,
 workflow 스크립트를 통해 실행한다. 자세한 사용법은 `workflows/` 디렉토리 참조.
 
 ---

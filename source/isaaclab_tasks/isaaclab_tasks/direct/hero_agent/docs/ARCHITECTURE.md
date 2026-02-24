@@ -265,7 +265,7 @@ HeroAgentEnvCfg (debug, no DR)
 | Runner | Purpose | Algorithm | Source |
 |:---|:---|:---|:---|
 | `OnPolicyRunner` (RSL-RL) | Base RL / Encoder training | PPO | RSL-RL default |
-| `EncoderRunner` | Phase 1: Encoder-TDC | PPO + z logging | `runners/encoder_runner.py` |
+| `EncoderRunner` | Phase 1: Encoder-Base | PPO + z logging | `runners/encoder_runner.py` |
 | `AdaptRunner` | Phase 2: Adaptation | Supervised L2 | `runners/adapt_runner.py` |
 
 ---

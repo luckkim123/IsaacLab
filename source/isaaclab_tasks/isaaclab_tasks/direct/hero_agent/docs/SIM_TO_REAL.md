@@ -103,8 +103,6 @@ actuators={
 | `Isaac-HeroAgent-v0` (debug) | 100 | 3 | 0 | None |
 | `Isaac-HeroAgent-Base-v0` (train) | 100 | 3 | 0 | +-20% |
 | `Isaac-HeroAgent-TDC-v0` | 200 | 10 | 0 | +-20% |
-| `Isaac-HeroAgent-Encoder-TDC-v0` | 200 | 10 | 0 | +-20% |
-| `Isaac-HeroAgent-Adapt-TDC-v0` | 200 | 10 | 0 | +-20% |
 
 ---
 

@@ -194,8 +194,7 @@ Per-env tensor. 부력 ($F_b = \rho V g$)과 항력 ($F_d = 0.5 \rho C_d A v^2$)
 | HeroAgentTrainEnvCfg | Isaac-HeroAgent-Base-v0 | ON | ON | ON | ON | ON | ON |
 | HeroAgentEncoderTrainEnvCfg | Isaac-HeroAgent-Encoder-Base-v0 | ON | ON | ON | ON | ON | ON |
 | HeroAgentTDCEnvCfg | Isaac-HeroAgent-TDC-v0 | ON | ON | ON | ON | ON | N/A |
-| HeroAgentEncoderTDCEnvCfg | Isaac-HeroAgent-Encoder-TDC-v0 | ON | ON | ON | ON | ON | ON |
-| HeroAgentAdaptTDCEnvCfg | Isaac-HeroAgent-Adapt-TDC-v0 | ON | ON | ON | ON | ON | ON |
+| HeroAgentAdaptBaseEnvCfg | Isaac-HeroAgent-Adapt-Base-v0 | ON | ON | ON | ON | ON | ON |
 
 Note: Latency "N/A" = TDC env overrides `_pre_physics_step()` entirely, so RL action latency does not apply. Perturbation applies to all envs via `_apply_action()`.
 

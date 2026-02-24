@@ -1,5 +1,11 @@
 # RL-TDC vs Hero Agent Encoder-TDC - Comparative Analysis
 
+> **DEPRECATED**: The Encoder-TDC architecture described in this document was removed
+> in 2026-02-23. The current pipeline uses Encoder-Base (Phase 1) + Adapt-Base (Phase 2)
+> without TDC integration. This document is retained as a historical reference for the
+> RL-TDC comparison and stability reward analysis. See TRAINING_PIPELINE.md for
+> the current architecture.
+
 > **Status**: 2026-02-16 | Comparative study + stability reward feasibility analysis
 >
 > RL-based Adaptive TDC (RL-TDC) 논문과 Hero Agent Encoder-TDC 아키텍처의 비교 분석.

@@ -17,14 +17,14 @@ $$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tr
 
 ### Configuration
 
-| Symbol | ALBCRewardCfg (Base RL) | EncoderTDCRewardCfg | Description |
-|:---|:---|:---|:---|
-| $w_1$ | 1.5 | 1.5 | `tracking_weight` |
-| $\sigma$ | 0.25 rad | 0.25 rad | `tracking_sigma` |
-| $w_2$ | -0.1 | **-0.3** | `action_magnitude_weight` |
-| $w_3$ | -0.01 | **-0.005** | `action_rate_weight` (NOT dt-scaled) |
-| end iter | 200 | 300 | `curriculum_end_iter` |
-| $\Delta t$ | 0.005 | 0.005 | `step_dt` (decimation=1, sim dt=0.005) |
+| Symbol | ALBCRewardCfg (Base RL) | Description |
+|:---|:---|:---|
+| $w_1$ | 1.5 | `tracking_weight` |
+| $\sigma$ | 0.25 rad | `tracking_sigma` |
+| $w_2$ | -0.1 | `action_magnitude_weight` |
+| $w_3$ | -0.01 | `action_rate_weight` (NOT dt-scaled) |
+| end iter | 200 | `curriculum_end_iter` |
+| $\Delta t$ | 0.005 | `step_dt` (decimation=1, sim dt=0.005) |
 
 **Source**: `mdp/rewards.py`, `config.py`
 
@@ -33,7 +33,7 @@ $$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tr
 1. **Tracking 지배**: AnymalC/Quadcopter 패턴을 따라, tracking reward가 penalty의 15배 이상을 유지. 미숙한 policy도 양수 reward를 받아 gradient signal이 건전.
 2. **Gaussian kernel 정규화**: $e^{-\phi^2/\sigma^2}$ 형태로 [0, 1] 자연 바운딩. 가중치 해석이 직관적.
 3. **dt-scaling 규칙**: "순간 상태 품질" 측정 항 -> dt-scaled, action rate는 per-step 차분이므로 NOT dt-scaled.
-4. **환경별 분리**: Base RL과 Encoder-TDC는 action semantics가 다르므로 보상 config 분리.
+4. **환경별 분리**: 환경에 따라 action semantics가 다르므로 보상 config을 분리할 수 있다.
 
 ### Previous Design (deprecated, 2026-02-20 이전)
 
@@ -201,7 +201,6 @@ Base RL 환경에서 action space는 2D (관절 2개), 각 action $\in [-1, 1]$:
 2. **L2 (제곱) 페널티**: 작은 행동은 거의 무시, 큰 행동만 약하게 억제.
 3. **환경별 가중치 분리**:
    - Base RL ($w_2 = -0.1$): 관절 속도 제어의 에너지 효율 유도.
-   - Encoder-TDC ($w_2 = -0.3$): 게인 포화(sigmoid 극값) 억제.
 4. **dt-scaled**: 순간 상태 품질 측정.
 
 ---
@@ -221,13 +220,13 @@ def action_rate_penalty(_robot, actions, prev_actions, **_kwargs):
 
 ### Behavior
 
-| $\Delta a_1$ | $\Delta a_2$ | $\sum (\Delta a)^2$ | 페널티 (Base, w=-0.01) | 페널티 (Enc-TDC, w=-0.005) |
-|:---|:---|:---|:---|:---|
-| 0.0 | 0.0 | 0.000 | 0.000 | 0.000 |
-| 0.01 | 0.01 | 0.0002 | -0.000002 | -0.000001 |
-| 0.1 | 0.1 | 0.02 | -0.0002 | -0.0001 |
-| 0.3 | 0.3 | 0.18 | -0.0018 | -0.0009 |
-| 0.5 | 0.5 | 0.50 | -0.005 | -0.0025 |
+| $\Delta a_1$ | $\Delta a_2$ | $\sum (\Delta a)^2$ | 페널티 (Base, w=-0.01) |
+|:---|:---|:---|:---|
+| 0.0 | 0.0 | 0.000 | 0.000 |
+| 0.01 | 0.01 | 0.0002 | -0.000002 |
+| 0.1 | 0.1 | 0.02 | -0.0002 |
+| 0.3 | 0.3 | 0.18 | -0.0018 |
+| 0.5 | 0.5 | 0.50 | -0.005 |
 
 ### Design Rationale
 
@@ -235,7 +234,6 @@ def action_rate_penalty(_robot, actions, prev_actions, **_kwargs):
 2. **NOT dt-scaled**: per-step 차분이므로 dt를 곱하지 않음.
 3. **환경별 가중치 분리**:
    - Base RL ($w_3 = -0.01$): 급격한 관절 이동 억제.
-   - Encoder-TDC ($w_3 = -0.005$): Base의 1/2. 게인은 환경 변화에 따라 적응적으로 변해야 하므로 과도한 smoothness 제약은 적응 속도를 저하시킴.
 4. **Curriculum**: 초기 $w_3 / 10$에서 시작하여 점진적 증가.
 
 ---
@@ -251,7 +249,6 @@ $$w(i) = w_{start} + (w_{full} - w_{start}) \cdot \min\!\big(1, \; i / i_{end}\b
 | Term | $w_{start}$ | $w_{full}$ | $i_{end}$ |
 |:---|:---|:---|:---|
 | action_rate (Base RL) | -0.001 | -0.01 | 200 |
-| action_rate (Enc-TDC) | -0.0005 | -0.005 | 300 |
 
 ### Implementation
 
@@ -291,18 +288,6 @@ raw_env._reward_manager.update_curriculum(iteration, raw_env.cfg.reward.curricul
 | **Net** | | | | **+0.00242** | |
 
 Tracking(93%)이 압도적으로 지배. Net 양수 -> value function baseline 추정이 안정.
-
-#### Encoder-TDC (error ~ 3.5 deg)
-
-| Term | Raw(est) | Weight | dt | Per-step | Share |
-|:---|:---|:---|:---|:---|:---|
-| tracking | 0.833 | 1.5 | 0.005 | **+0.00625** | **82%** |
-| action_magnitude | 0.10 | -0.3 | 0.005 | -0.00015 | 2% |
-| action_rate | 0.0024 | -0.005 | no | -0.00001 | 0% |
-| mhat_accuracy | ~0.7 | 0.5 | 0.005 | +0.00175 | 23% |
-| **Net** | | | | **+0.00784** | |
-
-Net 양수 -> tracking(82%)이 지배적이고, mhat_accuracy가 인코더 학습을 보조.
 
 ### Episode Budget (15s, normalized per second)
 
@@ -352,7 +337,6 @@ _get_rewards() [base_env.py]
 | Environment | Registration | Terms |
 |:---|:---|:---|
 | Base RL (Base-v0 등) | `base_env._build_reward_terms()` | 3개 active (tracking, action_mag, action_rate) |
-| Encoder-TDC (Encoder-TDC-v0) | `encoder_tdc_env._build_reward_terms()` | 3개 + mhat_accuracy |
 | Pure TDC (TDC-v0) | `base_env._build_reward_terms()` (상속) | 3개 active (action은 dummy) |
 
 ### Logging Integration
@@ -433,7 +417,7 @@ total_reward = pose_reward + progress_reward - 2 * actions_cost_scale * actions_
 ## Related Notes
 
 - [TDC_CONTROL_LAW.md](./TDC_CONTROL_LAW.md): TDC 제어기 구조 및 제어 법칙 유도 (보상과 독립)
-- [TRAINING_PIPELINE.md](./TRAINING_PIPELINE.md): Encoder-TDC action space와 게인 범위
+- [TRAINING_PIPELINE.md](./TRAINING_PIPELINE.md): 학습 파이프라인 상세
 - [DOMAIN_RANDOMIZATION.md](./DOMAIN_RANDOMIZATION.md): Domain Randomization 설정 (보상 robustness에 영향)
 
 ---
