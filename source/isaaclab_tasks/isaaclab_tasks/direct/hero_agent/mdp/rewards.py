@@ -478,6 +478,7 @@ def mhat_accuracy_reward(
         x_bu=p_EE[:, 0],
         y_bu=p_EE[:, 1],
         h=env.cfg.tdc.h,
+        m_body=env._buoy_hydro.body_mass,
     )
 
     M_hat = env._tdc._m_hat
@@ -515,6 +516,7 @@ def compute_stability_gate(env: HeroAgentEnv) -> torch.Tensor:
         x_bu=p_EE[:, 0],
         y_bu=p_EE[:, 1],
         h=env.cfg.tdc.h,
+        m_body=env._buoy_hydro.body_mass,
     )
 
     M_hat = env._tdc._m_hat

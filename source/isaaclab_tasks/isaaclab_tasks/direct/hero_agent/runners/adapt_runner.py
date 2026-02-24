@@ -176,17 +176,18 @@ class AdaptRunner:
         total_params = sum(p.numel() for p in self.policy.parameters())
         logger.info("Trainable params: %s / %s total", f"{trainable_params:,}", f"{total_params:,}")
 
-        # Curriculum support: get raw env for reward manager access
+        # Reward sigma annealing + DR curriculum support
         raw_env = unwrap_env(self.env)
-        has_curriculum = hasattr(raw_env, "_reward_manager") and hasattr(raw_env.cfg, "reward")
+        has_reward_manager = hasattr(raw_env, "_reward_manager") and hasattr(raw_env.cfg, "reward")
 
         # Apply curriculum start values and force re-randomize.
         # Initial envs were spawned with full DR ranges (before curriculum existed).
         # Reset all envs so they sample from curriculum start values.
         if hasattr(raw_env, "update_dr_curriculum"):
             raw_env.update_dr_curriculum(0)
-            self.env.reset()
 
+        # Reset all envs for clean start (matching BaseRunner.learn() pattern)
+        self.env.reset()
         obs_dict = self.env.get_observations()
 
         while self.agent_steps < max_agent_steps:
@@ -194,12 +195,9 @@ class AdaptRunner:
             self.agent_steps += num_envs
             iteration += 1
 
-            # Update reward curriculum
-            if has_curriculum:
-                end_iter = raw_env.cfg.reward.curriculum_end_iter
-                if end_iter is None and hasattr(raw_env.cfg, "dr_curriculum"):
-                    end_iter = raw_env.cfg.dr_curriculum.end_iter
-                raw_env._reward_manager.update_curriculum(iteration, end_iter or 500)
+            # Update reward sigma annealing (tracking kernel width)
+            if has_reward_manager:
+                raw_env._reward_manager.update_sigma(iteration, raw_env.cfg.reward)
 
             # Update DR curriculum (perturbation/inertia/mass ramp)
             if hasattr(raw_env, "update_dr_curriculum"):

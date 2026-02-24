@@ -28,7 +28,7 @@ class RunningMeanStd(nn.Module):
         self.epsilon = epsilon
         self.register_buffer("running_mean", torch.zeros(shape, dtype=torch.float64))
         self.register_buffer("running_var", torch.ones(shape, dtype=torch.float64))
-        self.register_buffer("count", torch.ones((), dtype=torch.float64))
+        self.register_buffer("count", torch.zeros((), dtype=torch.float64))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.training:

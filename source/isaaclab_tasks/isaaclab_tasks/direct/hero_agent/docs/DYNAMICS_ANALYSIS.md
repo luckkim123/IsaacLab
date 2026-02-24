@@ -131,6 +131,10 @@ ALBC 실험 결과에서도 200g, 400g 물체는 steady-state error,
 
 부력제의 물리적 질량을 무시하고, Added Mass만 고려한 동역학 모델의 유도 과정이다.
 
+> **Note**: 이 유도에서는 $m_{bu} \approx 0$ (massless buoy)으로 가정하지만,
+> 실제 URDF의 buoy body mass는 약 0.93 kg이다. 코드 구현(`compute_M_bb`)에서는
+> `m_{total} = m_{body} + m_A`를 사용하여 buoy rigid body mass를 포함한다.
+
 ### 3.1 Notation
 
 | 기호 | 정의 | 크기 |

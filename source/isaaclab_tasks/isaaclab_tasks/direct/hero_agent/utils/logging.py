@@ -297,6 +297,7 @@ def log_tdc_diagnostics(
                 x_bu=p_EE[:, 0],
                 y_bu=p_EE[:, 1],
                 h=env.cfg.tdc.h,
+                m_body=env._buoy_hydro.body_mass,
             )
             M_hat = tdc._m_hat
             ratio = M_bb / M_hat.clamp(min=1e-6)
@@ -458,6 +459,7 @@ def log_tdc_controller_metrics(
                 x_bu=p_EE[:, 0],
                 y_bu=p_EE[:, 1],
                 h=raw_env.cfg.tdc.h,
+                m_body=raw_env._buoy_hydro.body_mass,
             )
             M_hat = tdc._m_hat
             for i, axis in enumerate(_ROLL_PITCH):

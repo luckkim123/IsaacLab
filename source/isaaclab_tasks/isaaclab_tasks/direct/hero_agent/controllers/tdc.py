@@ -499,11 +499,14 @@ def compute_M_bb(
     x_bu: torch.Tensor,
     y_bu: torch.Tensor,
     h: float,
+    m_body: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute configuration-dependent true inertia M_bb via parallel axis theorem.
 
-    M_bb_roll  = I_ROV_roll  + m_A * (y_bu^2 + h^2)
-    M_bb_pitch = I_ROV_pitch + m_A * (x_bu^2 + h^2)
+    M_bb_roll  = I_ROV_roll  + m_total * (y_bu^2 + h^2)
+    M_bb_pitch = I_ROV_pitch + m_total * (x_bu^2 + h^2)
+
+    where m_total = m_body + m_A (buoy rigid body mass + hydrodynamic added mass).
 
     Args:
         I_ROV: Rigid body inertia [I_roll, I_pitch]. Shape: (num_envs, 2).
@@ -511,14 +514,17 @@ def compute_M_bb(
         x_bu: Buoy x-position from FK. Shape: (num_envs,).
         y_bu: Buoy y-position from FK. Shape: (num_envs,).
         h: CoG-to-ABPC vertical offset in meters.
+        m_body: Buoy rigid body mass. Shape: (num_envs,). If None, uses m_A only
+            (legacy behavior, underestimates M_true).
 
     Returns:
         True inertia M_bb [roll, pitch]. Shape: (num_envs, 2).
     """
+    m_total = (m_body + m_A) if m_body is not None else m_A
     return torch.stack(
         [
-            I_ROV[:, 0] + m_A * (y_bu**2 + h**2),
-            I_ROV[:, 1] + m_A * (x_bu**2 + h**2),
+            I_ROV[:, 0] + m_total * (y_bu**2 + h**2),
+            I_ROV[:, 1] + m_total * (x_bu**2 + h**2),
         ],
         dim=-1,
     )

@@ -782,7 +782,7 @@ class HeroAgentEnv(DirectRLEnv):
     def _collect_episode_metrics(
         self,
         env_ids: torch.Tensor,
-        reward_sums: dict[str, torch.Tensor],
+        reward_sums: dict[str, float],
     ) -> dict[str, float | torch.Tensor]:
         """Collect episode metrics for TensorBoard/WandB logging.
 
