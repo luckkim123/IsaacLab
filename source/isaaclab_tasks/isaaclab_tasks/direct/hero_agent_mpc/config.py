@@ -62,7 +62,7 @@ class HeroAgentMPCEnvCfg(HeroAgentTrainEnvCfg):
     reward: ALBCRewardCfg = ALBCRewardCfg(
         tracking_weight=3.0,
         tracking_sigma=0.5,
-        action_magnitude_weight=-0.01,
+        action_rate_weight=-0.01,
         action_oscillation_weight=-0.01,
         progress_weight=0.2,
         progress_mode="pbrs",

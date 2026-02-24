@@ -37,11 +37,12 @@ from .config import HeroAgentEnvCfg
 from .mdp import (
     RewardManager,
     RewardTermCfg,
-    action_magnitude_penalty,
     action_oscillation_penalty,
+    action_rate_penalty,
     angular_velocity_penalty,
     compute_policy_obs,
     compute_privileged_obs,
+    linear_error_penalty,
     progress_reward,
     progress_reward_pbrs,
     settling_bonus,
@@ -278,11 +279,12 @@ class HeroAgentEnv(DirectRLEnv):
     def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
         """Build the reward terms dict. Override in subclasses to add/modify terms.
 
-        Base terms (4):
+        Base terms:
             1. tracking: Gaussian kernel exp(-e^2/sigma^2), dt-scaled
-            2. progress: potential-based shaping (prev-curr), NOT dt-scaled
-            3. action_magnitude: ||da||^2 (1st derivative), NOT dt-scaled, curriculum
+            2. linear_error: -min(||err||, max)/max, dt-scaled (strong tail gradient)
+            3. action_rate: ||da||^2 (1st derivative), NOT dt-scaled, curriculum
             4. action_oscillation: ||d^2a||^2 (2nd derivative), NOT dt-scaled, curriculum
+            5. progress: potential-based shaping (optional, default off)
         """
         rcfg = self.cfg.reward
         tracking_params = {"sigma": rcfg.tracking_sigma}
@@ -297,19 +299,27 @@ class HeroAgentEnv(DirectRLEnv):
                 weight=rcfg.tracking_weight,
                 params=tracking_params,
             ),
-            "action_magnitude": RewardTermCfg(
-                func=action_magnitude_penalty,
-                weight=rcfg.action_magnitude_weight,
+        }
+        if rcfg.linear_error_weight != 0.0:
+            terms["linear_error"] = RewardTermCfg(
+                func=linear_error_penalty,
+                weight=rcfg.linear_error_weight,
+                params={"max_err": rcfg.linear_error_max},
+            )
+        if rcfg.action_rate_weight != 0.0:
+            terms["action_rate"] = RewardTermCfg(
+                func=action_rate_penalty,
+                weight=rcfg.action_rate_weight,
                 scale_by_dt=False,
-                curriculum_start_weight=rcfg.action_magnitude_weight / 10.0,
-            ),
-            "action_oscillation": RewardTermCfg(
+                curriculum_start_weight=rcfg.action_rate_weight / 10.0,
+            )
+        if rcfg.action_oscillation_weight != 0.0:
+            terms["action_oscillation"] = RewardTermCfg(
                 func=action_oscillation_penalty,
                 weight=rcfg.action_oscillation_weight,
                 scale_by_dt=False,
                 curriculum_start_weight=rcfg.action_oscillation_weight / 10.0,
-            ),
-        }
+            )
         if rcfg.progress_weight != 0.0:
             if rcfg.progress_mode == "pbrs":
                 func = progress_reward_pbrs
@@ -858,7 +868,9 @@ class HeroAgentEnv(DirectRLEnv):
         log["Attitude_Error/pitch_deg"] = errors_deg[:, 1].mean().item()
 
         # --- Action diagnostics ---
-        log["Action/magnitude_mean"] = torch.linalg.norm(self._actions[env_ids], dim=-1).mean().item()
+        log["Action/size_mean"] = torch.linalg.norm(self._actions[env_ids], dim=-1).mean().item()
+        da = self._actions[env_ids] - self._prev_actions[env_ids]
+        log["Action/rate_mean"] = torch.linalg.norm(da, dim=-1).mean().item()
 
         # --- Dynamics diagnostics ---
         ang_vel_rp = self._robot.data.root_ang_vel_b[env_ids, :2]
@@ -883,7 +895,7 @@ class HeroAgentEnv(DirectRLEnv):
         printing periodic summaries during play without needing episode resets.
 
         Returns:
-            Dict with keys: attitude_error_deg, action_magnitude,
+            Dict with keys: attitude_error_deg, action_rate,
             action_oscillation, angular_velocity_rms.
         """
         err = self._attitude_error[:, :2]
@@ -891,7 +903,7 @@ class HeroAgentEnv(DirectRLEnv):
         d2a = self._actions - 2.0 * self._prev_actions + self._prev_prev_actions
         return {
             "attitude_error_deg": torch.rad2deg(torch.linalg.norm(err, dim=-1)).mean().item(),
-            "action_magnitude": torch.linalg.norm(da, dim=-1).mean().item(),
+            "action_rate": torch.linalg.norm(da, dim=-1).mean().item(),
             "action_oscillation": torch.linalg.norm(d2a, dim=-1).mean().item(),
             "angular_velocity_rms": self._robot.data.root_ang_vel_b[:, :2].pow(2).mean().sqrt().item(),
         }

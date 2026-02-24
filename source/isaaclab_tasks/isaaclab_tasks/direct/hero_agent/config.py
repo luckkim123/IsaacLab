@@ -413,9 +413,23 @@ class HeroAgentTDEBaseEnvCfg(HeroAgentTrainEnvCfg):
     No privileged info (state_space=0): encoder-free pipeline.
     """
 
-    # observation_space stays at 13 (inherited); __init__ auto-increments by 2
-    # when enable_tde_obs=True, and also pads the noise config accordingly.
     enable_tde_obs: bool = True
+
+
+@configclass
+class HeroAgentTDEBaseDebugEnvCfg(HeroAgentTDEBaseEnvCfg):
+    """TDE-Base with DR disabled for diagnostic experiments.
+
+    Identical to TDE-Base except: DR off, no payload, no target randomization,
+    no sensor noise. If error diverges here, the reward design is broken
+    (not a DR interaction issue).
+    """
+
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg()  # enable=False
+    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg()  # enable=False
+    enable_payload: bool = False
+    randomize_target_attitude: bool = False
+    observation_noise_model: None = None
 
 
 # =============================================================================

@@ -12,9 +12,9 @@ Reward design principles:
     - Gaussian kernel tracking + settling bonus dominate: positive rewards in
       [0,1] provide dense gradient. Penalties are tiny regularizers to avoid
       suppressing exploration.
-    - dt-scaling: state-quality terms (tracking, settling) are dt-scaled;
-      action_magnitude and action_oscillation are NOT dt-scaled (per-step
-      deltas naturally scale with frequency).
+    - dt-scaling: state-quality terms (tracking, settling, linear_error) are
+      dt-scaled; action_size, action_rate, and action_oscillation are NOT
+      dt-scaled (per-step values naturally scale with frequency).
     - PBRS progress shaping (Ng 1999): preserves optimal policy guarantee.
     - Sigma curriculum: single-phase linear annealing 0.5 -> 0.25 over curriculum.
       Final sigma 0.25 keeps gradient alive under aggressive DR.
@@ -49,13 +49,13 @@ class ALBCRewardCfg:
 
     Reward = tracking * w_t * dt
            + settling * w_s * dt
-           + action_magnitude * w_am  (NOT dt-scaled)
+           + linear_error * w_le * dt (strong tail gradient)
+           + action_rate * w_ar  (NOT dt-scaled, penalizes action changes)
            + action_oscillation * w_ao  (NOT dt-scaled)
            + progress (PBRS)
 
-    Design: tracking + settling dominate (positive, [0,1]). Penalties are tiny
-    regularizers, following the principle that penalty << primary objective
-    to avoid suppressing exploration.
+    Design: tracking + settling dominate (positive, [0,1]). linear_error
+    ensures gradient at ALL error levels (Gaussian vanishes at large errors).
     """
 
     # Tracking (Gaussian kernel)
@@ -65,18 +65,24 @@ class ALBCRewardCfg:
     tracking_sigma_mid: float | None = None  # single-phase linear annealing (no mid-point)
     sigma_phase1_fraction: float = 0.7  # unused when mid=None
 
-    # Action magnitude penalty: ||a_t - a_{t-1}||^2 (penalizes large changes)
+    # Action rate penalty: ||a_t - a_{t-1}||^2 (penalizes large changes).
     # NOT dt-scaled (per-step delta naturally scales with frequency).
-    action_magnitude_weight: float = -0.01
+    action_rate_weight: float = -0.01
 
     # Action oscillation penalty: ||a_t - 2*a_{t-1} + a_{t-2}||^2 (2nd derivative)
     # Specifically targets direction reversals (high-frequency oscillation).
     # NOT dt-scaled.
     action_oscillation_weight: float = -0.01
 
+    # Linear error penalty: -min(||err||, max_err) / max_err.
+    # Provides constant gradient at ALL error levels (unlike Gaussian which
+    # vanishes at large errors). Clamped to [-1, 0]. dt-scaled.
+    linear_error_weight: float = -1.0
+    linear_error_max: float = 1.0  # clamp at ~57 degrees
+
     # Progress (potential-based shaping): PBRS (Ng 1999) preserves optimal policy.
-    # NOT dt-scaled.
-    progress_weight: float = 0.3
+    # NOT dt-scaled. Set to 0.0 when linear_error provides gradient everywhere.
+    progress_weight: float = 0.0
     progress_scale: float = 0.01
     progress_mode: str = "pbrs"  # "tanh" or "pbrs" (SAC-safe, policy-preserving)
     progress_gamma: float = 0.99  # discount factor for PBRS (match PPO gamma)
@@ -330,7 +336,7 @@ def tracking_reward(
     return torch.exp(-err_sq / (sigma**2))
 
 
-def action_magnitude_penalty(
+def action_rate_penalty(
     _robot: Articulation,
     actions: torch.Tensor,
     prev_actions: torch.Tensor,
@@ -338,7 +344,7 @@ def action_magnitude_penalty(
 ) -> torch.Tensor:
     """Mean of squared action differences: ||a_t - a_{t-1}||^2.
 
-    Penalizes large action changes (magnitude of delta).
+    Penalizes large action changes (rate of change).
     Uses mean (not sum) so the penalty magnitude is independent of action_space dim.
     NOT dt-scaled: per-step delta naturally scales with frequency.
     Use with negative weight.
@@ -362,6 +368,25 @@ def action_oscillation_penalty(
     """
     second_diff = actions - 2.0 * prev_actions + prev_prev_actions
     return torch.mean(second_diff**2, dim=-1)
+
+
+def linear_error_penalty(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+    max_err: float = 1.0,
+    **_kwargs,
+) -> torch.Tensor:
+    """Linear error penalty: min(||err||, max_err) / max_err.
+
+    Provides constant gradient at all error levels (unlike Gaussian which
+    vanishes at large errors). Output in [0, 1], clamped at max_err.
+    dt-scaled. Use with negative weight.
+
+    Args:
+        env: Environment instance (provides _potentials = ||[roll_err, pitch_err]||).
+        max_err: Clamp threshold in radians. Default 1.0 rad (~57 deg).
+    """
+    return torch.clamp(env._potentials / max_err, max=1.0)
 
 
 def progress_reward(
@@ -451,7 +476,7 @@ def tdc_torque_penalty(
 ) -> torch.Tensor:
     """Mean of squared TDC desired torque (tau_desired = U_hat + delta_T_b + M_hat*u_pd).
 
-    Penalizes large control effort from the TDC controller. Unlike action_magnitude
+    Penalizes large control effort from the TDC controller. Unlike action_size
     which penalizes raw gain logits (meaningless for TDC), this penalizes the actual
     physical torque command.
 

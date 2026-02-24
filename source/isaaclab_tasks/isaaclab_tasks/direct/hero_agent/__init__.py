@@ -30,6 +30,7 @@ from .config import (
     HeroAgentEncoderTrainEnvCfg,
     HeroAgentEnvCfg,
     HeroAgentTDCEnvCfg,
+    HeroAgentTDEBaseDebugEnvCfg,
     HeroAgentTDEBaseEnvCfg,
     HeroAgentTrainEnvCfg,
 )
@@ -48,6 +49,17 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentEnvCfg",
         "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentPPORunnerCfg",
+    },
+)
+
+# TDE-Base debug: TDE obs without DR (diagnostic experiment)
+gym.register(
+    id="Isaac-HeroAgent-TDE-Base-Debug-v0",
+    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentTDEBaseDebugEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentTDEBasePPORunnerCfg",
     },
 )
 
@@ -114,6 +126,7 @@ __all__ = [
     # Configurations
     "HeroAgentEnvCfg",
     "HeroAgentTrainEnvCfg",
+    "HeroAgentTDEBaseDebugEnvCfg",
     "HeroAgentTDEBaseEnvCfg",
     "HeroAgentTDCEnvCfg",
     "HeroAgentEncoderTrainEnvCfg",
