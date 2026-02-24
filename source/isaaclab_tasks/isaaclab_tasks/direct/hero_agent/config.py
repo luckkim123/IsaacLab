@@ -413,6 +413,40 @@ class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
 
 
 @configclass
+class HeroAgentEncoderBaseDebugEnvCfg(HeroAgentEncoderTrainEnvCfg):
+    """Encoder-Base with half-strength DR and no curriculum for diagnostics.
+
+    DR enabled at ~50% of full range (narrower scales, smaller offsets).
+    No DR curriculum (constant DR from start). Privileged obs (state_space=26)
+    inherited from HeroAgentEncoderTrainEnvCfg.
+
+    If error diverges here, the encoder/reward design cannot handle even mild DR.
+    If it converges, full DR or curriculum ramp is the issue.
+    """
+
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg(
+        enable=True,
+        # Half-strength hydrodynamic scales (midpoint between 1.0 and full range)
+        added_mass_scale=(0.9, 1.1),         # full: (0.8, 1.2)
+        linear_damping_scale=(0.85, 1.15),    # full: (0.7, 1.3)
+        quadratic_damping_scale=(0.8, 1.2),   # full: (0.6, 1.4)
+        volume_scale=(0.92, 1.08),            # full: (0.85, 1.15)
+        inertia_scale=(0.85, 1.25),           # full: (0.7, 1.5)
+        body_mass_scale=(0.92, 1.08),         # full: (0.85, 1.15)
+        # Half-strength offsets
+        cob_offset_z=(-0.01, 0.01),           # full: (-0.02, 0.02)
+        cog_offset_z=(-0.01, 0.01),           # full: (-0.02, 0.02)
+        # Joint gains: narrower range around nominal
+        joint_stiffness_range=(90.0, 110.0),  # full: (80, 120)
+        joint_damping_range=(2.7, 3.3),       # full: (2.4, 3.6)
+        # Joint friction: half
+        joint_static_friction_range=(0.0, 0.025),   # full: (0.0, 0.05)
+        joint_viscous_friction_range=(0.0, 0.15),    # full: (0.0, 0.3)
+    )
+    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg()  # enable=False (no curriculum)
+
+
+@configclass
 class HeroAgentTDEBaseEnvCfg(HeroAgentTrainEnvCfg):
     """Hero Agent TDE-Base: base RL with TDE dynamics mismatch observation.
 
