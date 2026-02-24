@@ -274,7 +274,7 @@ class HeroAgentEnv(DirectRLEnv):
             num_envs=self.num_envs,
             device=self.device,
         )
-        self._init_dr_curriculum()
+        self._init_doraemon()
 
     def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
         """Build the reward terms dict. Override in subclasses to add/modify terms.
@@ -287,17 +287,11 @@ class HeroAgentEnv(DirectRLEnv):
             5. progress: potential-based shaping (optional, default off)
         """
         rcfg = self.cfg.reward
-        tracking_params = {"sigma": rcfg.tracking_sigma}
-        if rcfg.tracking_sigma_start is not None:
-            tracking_params["_sigma_start"] = rcfg.tracking_sigma_start
-        if rcfg.tracking_sigma_mid is not None:
-            tracking_params["_sigma_mid"] = rcfg.tracking_sigma_mid
-            tracking_params["_sigma_phase1_fraction"] = rcfg.sigma_phase1_fraction
         terms = {
             "tracking": RewardTermCfg(
                 func=tracking_reward,
                 weight=rcfg.tracking_weight,
-                params=tracking_params,
+                params={"sigma": rcfg.tracking_sigma},
             ),
         }
         if rcfg.linear_error_weight != 0.0:
@@ -311,14 +305,12 @@ class HeroAgentEnv(DirectRLEnv):
                 func=action_rate_penalty,
                 weight=rcfg.action_rate_weight,
                 scale_by_dt=False,
-                curriculum_start_weight=rcfg.action_rate_weight / 10.0,
             )
         if rcfg.action_oscillation_weight != 0.0:
             terms["action_oscillation"] = RewardTermCfg(
                 func=action_oscillation_penalty,
                 weight=rcfg.action_oscillation_weight,
                 scale_by_dt=False,
-                curriculum_start_weight=rcfg.action_oscillation_weight / 10.0,
             )
         if rcfg.progress_weight != 0.0:
             if rcfg.progress_mode == "pbrs":
@@ -349,85 +341,28 @@ class HeroAgentEnv(DirectRLEnv):
             )
         return terms
 
-    def _init_dr_curriculum(self) -> None:
-        """Store original DR ranges for curriculum interpolation."""
-        dr_cur = getattr(self.cfg, "dr_curriculum", None)
-        if dr_cur is None or not dr_cur.enable:
-            self._dr_curriculum_cfg = None
-            return
+    def _init_doraemon(self) -> None:
+        """Initialize DORAEMON adaptive DR scheduler if enabled."""
+        doraemon_cfg = getattr(self.cfg, "doraemon", None)
+        if doraemon_cfg is not None and doraemon_cfg.enable:
+            from .doraemon import NDIMS, DoraemonScheduler
 
-        self._dr_curriculum_cfg = dr_cur
-        # Snapshot the full (target) DR ranges from current config
-        rand = self.cfg.randomization
-        self._dr_full_ranges = {
-            "perturbation_force_range": rand.perturbation_force_range,
-            "perturbation_torque_range": rand.perturbation_torque_range,
-            "inertia_scale": rand.inertia_scale,
-            "body_mass_scale": rand.body_mass_scale,
-            "volume_scale": rand.volume_scale,
-            "added_mass_scale": rand.added_mass_scale,
-            "payload_mass_range": rand.payload_mass_range,
-            "linear_damping_scale": rand.linear_damping_scale,
-            "quadratic_damping_scale": rand.quadratic_damping_scale,
-            "water_density_range": rand.water_density_range,
-            "joint_stiffness_range": rand.joint_stiffness_range,
-            "joint_damping_range": rand.joint_damping_range,
-            "joint_static_friction_range": rand.joint_static_friction_range,
-            "joint_viscous_friction_range": rand.joint_viscous_friction_range,
-            "roll_range": rand.roll_range,
-            "pitch_range": rand.pitch_range,
-            "cog_offset_z": rand.cog_offset_z,
-            "cob_offset_z": rand.cob_offset_z,
-            "action_latency_range": rand.action_latency_range,
-        }
-        # NOTE: Do NOT call update_dr_curriculum(0) here.
-        # Mutating cfg.randomization at init causes env.yaml to save curriculum
-        # start values instead of the actual target values (the YAML is dumped
-        # between env creation and runner.learn()).
-        # Instead, runners call update_dr_curriculum(0) + env.reset() before the
-        # first rollout. The reset is critical: without it, all envs keep the
-        # full-DR parameters sampled during the initial reset (in __init__).
+            self._doraemon = DoraemonScheduler(doraemon_cfg, self.device)
+            self._doraemon_ndims = NDIMS
+        else:
+            self._doraemon = None
+            self._doraemon_ndims = 0
 
-    def update_dr_curriculum(self, iteration: int) -> None:
-        """Linearly ramp DR ranges from start to full over curriculum period."""
-        if self._dr_curriculum_cfg is None:
-            return
-
-        dr_cur = self._dr_curriculum_cfg
-        progress = min(1.0, iteration / max(1, dr_cur.end_iter))
-        rand = self.cfg.randomization
-
-        _FIELD_MAP = {
-            "perturbation_force_range": "perturbation_force_range_start",
-            "perturbation_torque_range": "perturbation_torque_range_start",
-            "inertia_scale": "inertia_scale_start",
-            "body_mass_scale": "body_mass_scale_start",
-            "volume_scale": "volume_scale_start",
-            "added_mass_scale": "added_mass_scale_start",
-            "payload_mass_range": "payload_mass_range_start",
-            "linear_damping_scale": "linear_damping_scale_start",
-            "quadratic_damping_scale": "quadratic_damping_scale_start",
-            "water_density_range": "water_density_range_start",
-            "joint_stiffness_range": "joint_stiffness_range_start",
-            "joint_damping_range": "joint_damping_range_start",
-            "joint_static_friction_range": "joint_static_friction_range_start",
-            "joint_viscous_friction_range": "joint_viscous_friction_range_start",
-            "roll_range": "roll_range_start",
-            "pitch_range": "pitch_range_start",
-            "cog_offset_z": "cog_offset_z_start",
-            "cob_offset_z": "cob_offset_z_start",
-            "action_latency_range": "action_latency_range_start",
-        }
-
-        for rand_field, cur_field in _FIELD_MAP.items():
-            start = getattr(dr_cur, cur_field)
-            full = self._dr_full_ranges[rand_field]
-            lo = start[0] + (full[0] - start[0]) * progress
-            hi = start[1] + (full[1] - start[1]) * progress
-            # Integer fields (action_latency_range) need rounding
-            if isinstance(full[0], int):
-                lo, hi = int(round(lo)), int(round(hi))
-            setattr(rand, rand_field, (lo, hi))
+        # Per-env DORAEMON tracking buffers
+        if self._doraemon is not None:
+            ndims = self._doraemon_ndims
+            self._episode_dr_xi = torch.zeros(self.num_envs, ndims, device=self.device)
+            self._episode_dr_log_probs = torch.zeros(self.num_envs, device=self.device)
+            self._episode_return_accum = torch.zeros(self.num_envs, device=self.device)
+            # Settling window: last 1 second (50 steps at 50Hz control)
+            self._settling_window = 50
+            self._settling_errors = torch.zeros(self.num_envs, self._settling_window, device=self.device)
+            self._settling_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
     def _init_state_buffers(self) -> None:
         """Initialize action and force/torque buffers."""
@@ -471,12 +406,7 @@ class HeroAgentEnv(DirectRLEnv):
             self._tde_l2 = HERO_AGENT_ALBC_LINK2_LENGTH
 
         # Action latency buffer (ring buffer for delayed action application)
-        # When DR curriculum is active, the config may already be overwritten to
-        # start values (0,0). Use the full (target) range for buffer allocation.
-        if hasattr(self, "_dr_full_ranges") and "action_latency_range" in self._dr_full_ranges:
-            max_latency = self._dr_full_ranges["action_latency_range"][1]
-        else:
-            max_latency = rand_cfg.action_latency_range[1]
+        max_latency = rand_cfg.action_latency_range[1]
         self._max_action_latency = max_latency
         if max_latency > 0:
             self._action_history = torch.zeros(
@@ -830,7 +760,7 @@ class HeroAgentEnv(DirectRLEnv):
         # Accumulate control effort: sum(||a||^2 * dt) over episode
         self._cumulative_effort += torch.sum(self._actions**2, dim=-1) * self.step_dt
 
-        return self._reward_manager.compute(
+        reward = self._reward_manager.compute(
             robot=self._robot,
             dt=self.step_dt,
             actions=self._actions,
@@ -838,6 +768,16 @@ class HeroAgentEnv(DirectRLEnv):
             prev_prev_actions=self._prev_prev_actions,
             env=self,  # Pass env for accessing potentials
         )
+
+        # DORAEMON: accumulate episode return and settling error
+        if self._doraemon is not None:
+            self._episode_return_accum += reward
+            err = torch.linalg.norm(self._attitude_error[:, :2], dim=-1)
+            idx = self._settling_idx % self._settling_window
+            self._settling_errors.scatter_(1, idx.unsqueeze(1), err.unsqueeze(1))
+            self._settling_idx += 1
+
+        return reward
 
     def _collect_episode_metrics(
         self,
@@ -979,7 +919,26 @@ class HeroAgentEnv(DirectRLEnv):
         self._reset_task_and_state(env_ids_)
 
     def _log_and_reset_rewards(self, env_ids: torch.Tensor) -> None:
-        """Collect episode metrics and reset reward accumulators."""
+        """Collect episode metrics, record DORAEMON episodes, and reset accumulators."""
+        # Record completed episodes to DORAEMON buffer before resetting
+        if self._doraemon is not None and len(env_ids) > 0:
+            # Success = mean settling error < threshold (no timed_out requirement).
+            # Early-terminated episodes that achieved low error before termination
+            # still count as successful for DR distribution optimization.
+            current_threshold = self._doraemon._current_threshold_deg
+            threshold_rad = torch.deg2rad(torch.tensor(current_threshold, device=self.device))
+            # Use the filled portion of settling ring buffer
+            filled = self._settling_idx[env_ids].clamp(max=self._settling_window).float()
+            mean_settling_err = self._settling_errors[env_ids].sum(dim=-1) / filled.clamp(min=1.0)
+            success = mean_settling_err < threshold_rad
+
+            self._doraemon.record_episodes(
+                xi=self._episode_dr_xi[env_ids],
+                returns=self._episode_return_accum[env_ids],
+                success=success.float(),
+                log_probs=self._episode_dr_log_probs[env_ids],
+            )
+
         reward_sums = self._reward_manager.reset(env_ids)
         self.extras["log"] = self._collect_episode_metrics(env_ids, reward_sums)
 
@@ -1025,7 +984,11 @@ class HeroAgentEnv(DirectRLEnv):
             self._action_latency[env_ids] = torch.randint(lo, hi + 1, (len(env_ids),), device=self.device)
 
     def _reset_physics(self, env_ids: torch.Tensor) -> None:
-        """Reset hydrodynamics, payload, and apply domain randomization."""
+        """Reset hydrodynamics, payload, and apply domain randomization.
+
+        When DORAEMON is active, samples DR parameters from the Beta distribution
+        and passes them to randomize functions via the ``sampled`` dict.
+        """
         self._hydro.reset(env_ids)
         self._buoy_hydro.reset(env_ids)
 
@@ -1036,11 +999,32 @@ class HeroAgentEnv(DirectRLEnv):
             self._payload_cog_offset[env_ids] = 0.0
 
         rand_cfg = self.cfg.randomization
-        if rand_cfg.enable:
-            randomize_hydrodynamics(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
-            randomize_body_mass(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
-            if self._payload_enabled:
-                randomize_payload(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
+        if not rand_cfg.enable:
+            return
+
+        # Build sampled dict from DORAEMON Beta distribution
+        sampled: dict[str, torch.Tensor] | None = None
+        if self._doraemon is not None:
+            from .doraemon import PARAM_SPECS
+
+            n = len(env_ids)
+            xi_physical, log_probs = self._doraemon.sample(n)
+            sampled = {spec.name: xi_physical[:, i] for i, spec in enumerate(PARAM_SPECS)}
+
+            # Store for episode tracking
+            self._episode_dr_xi[env_ids] = xi_physical
+            self._episode_dr_log_probs[env_ids] = log_probs
+            self._episode_return_accum[env_ids] = 0.0
+            self._settling_errors[env_ids] = 0.0
+            self._settling_idx[env_ids] = 0
+
+        # Store sampled dict for _reset_task_and_state (joint gains/friction)
+        self._current_sampled = sampled
+
+        randomize_hydrodynamics(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
+        randomize_body_mass(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
+        if self._payload_enabled:
+            randomize_payload(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
 
         has_ocean_current = any(v > 0 for v in self.cfg.ocean_current.max_velocity)
         if has_ocean_current:
@@ -1068,8 +1052,9 @@ class HeroAgentEnv(DirectRLEnv):
 
         # Joint actuator DR: always applied (when DR disabled, ranges collapse to defaults).
         # TDC envs override stiffness/damping in their own _reset_idx().
-        randomize_joint_gains(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
-        randomize_joint_friction(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
+        sampled = getattr(self, "_current_sampled", None)
+        randomize_joint_gains(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
+        randomize_joint_friction(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
 
         # Potential initialization (must be after pose reset).
         # write_root_pose_to_sim() immediately updates internal data cache,

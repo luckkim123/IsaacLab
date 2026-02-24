@@ -5,19 +5,20 @@
 
 """Reward system for Hero Agent ALBC environments.
 
-Provides reward configuration, a lightweight reward manager with curriculum
-support, and reward functions for ALBC (joint-based attitude control) training.
+Provides reward configuration, a lightweight reward manager, and reward
+functions for ALBC (joint-based attitude control) training.
 
 Reward design principles:
     - Gaussian kernel tracking + settling bonus dominate: positive rewards in
       [0,1] provide dense gradient. Penalties are tiny regularizers to avoid
       suppressing exploration.
     - dt-scaling: state-quality terms (tracking, settling, linear_error) are
-      dt-scaled; action_size, action_rate, and action_oscillation are NOT
-      dt-scaled (per-step values naturally scale with frequency).
+      dt-scaled; action_rate and action_oscillation are NOT dt-scaled
+      (per-step values naturally scale with frequency).
     - PBRS progress shaping (Ng 1999): preserves optimal policy guarantee.
-    - Sigma curriculum: single-phase linear annealing 0.5 -> 0.25 over curriculum.
-      Final sigma 0.25 keeps gradient alive under aggressive DR.
+    - Sigma annealing: starts wide (0.5 rad, safe at large errors) and
+      tightens to 0.25 rad for fine-tuning gradient. Prevents reward
+      death spiral during early training while improving precision later.
 """
 
 from __future__ import annotations
@@ -58,12 +59,11 @@ class ALBCRewardCfg:
     ensures gradient at ALL error levels (Gaussian vanishes at large errors).
     """
 
-    # Tracking (Gaussian kernel)
+    # Tracking (Gaussian kernel) with sigma annealing
     tracking_weight: float = 3.0
-    tracking_sigma: float = 0.25  # fixed sigma (14.3deg 1/e point, keeps gradient alive under DR)
-    tracking_sigma_start: float | None = None  # sigma curriculum OFF (root cause of DR death spiral)
-    tracking_sigma_mid: float | None = None  # single-phase linear annealing (no mid-point)
-    sigma_phase1_fraction: float = 0.7  # unused when mid=None
+    tracking_sigma: float = 0.5  # initial sigma (28.6 deg 1/e point, safe for large errors)
+    tracking_sigma_final: float = 0.25  # final sigma (14.3 deg, stronger fine-tuning gradient)
+    sigma_anneal_iters: int = 1000  # anneal sigma linearly over this many runner iterations
 
     # Action rate penalty: ||a_t - a_{t-1}||^2 (penalizes large changes).
     # NOT dt-scaled (per-step delta naturally scales with frequency).
@@ -77,12 +77,12 @@ class ALBCRewardCfg:
     # Linear error penalty: -min(||err||, max_err) / max_err.
     # Provides constant gradient at ALL error levels (unlike Gaussian which
     # vanishes at large errors). Clamped to [-1, 0]. dt-scaled.
-    linear_error_weight: float = -1.0
+    linear_error_weight: float = -0.3
     linear_error_max: float = 1.0  # clamp at ~57 degrees
 
     # Progress (potential-based shaping): PBRS (Ng 1999) preserves optimal policy.
-    # NOT dt-scaled. Set to 0.0 when linear_error provides gradient everywhere.
-    progress_weight: float = 1.0
+    # NOT dt-scaled. Provides immediate reward for error reduction at all levels.
+    progress_weight: float = 0.3
     progress_scale: float = 0.01
     progress_mode: str = "pbrs"  # "tanh" or "pbrs" (SAC-safe, policy-preserving)
     progress_gamma: float = 0.99  # discount factor for PBRS (match PPO gamma)
@@ -111,10 +111,6 @@ class ALBCRewardCfg:
     # TDC torque penalty: ||tau_desired||^2 (actual control effort, dt-scaled)
     tdc_torque_weight: float = 0.0
 
-    # Curriculum end iteration. When None, uses dr_curriculum.end_iter from env config
-    # (single source of truth). Set explicitly only to decouple from DR schedule.
-    curriculum_end_iter: int | None = None
-
 
 # =============================================================================
 # Reward Term Configuration
@@ -137,10 +133,6 @@ class RewardTermCfg:
     scale_by_dt: bool = True
     """Whether to scale reward by dt. Set False for progress-style rewards."""
 
-    curriculum_start_weight: float | None = None
-    """If set, weight starts at this value and linearly ramps to ``weight``
-    over curriculum_end_iter iterations. None means no curriculum (constant weight)."""
-
 
 # =============================================================================
 # Reward Manager
@@ -151,8 +143,8 @@ class RewardManager:
     """Lightweight reward manager for DirectRLEnv UUV environments.
 
     Computes total reward as a weighted sum of individual terms, with automatic
-    dt scaling, episode sum tracking for logging, and curriculum support for
-    gradually increasing penalty weights during training.
+    dt scaling and episode sum tracking for logging. All weights are fixed from
+    construction (DORAEMON manages DR difficulty, not reward weights).
     """
 
     def __init__(
@@ -172,33 +164,6 @@ class RewardManager:
             if term_cfg.weight != 0.0:
                 self._term_names.append(name)
                 self._term_cfgs.append(term_cfg)
-
-        # Active weights (modified by curriculum).
-        # Initialize to curriculum_start_weight when set, so iteration 0
-        # uses the correct starting weight (not full weight).
-        self._active_weights = [
-            cfg.curriculum_start_weight if cfg.curriculum_start_weight is not None else cfg.weight
-            for cfg in self._term_cfgs
-        ]
-
-        # Sigma curriculum: ramp sigma from start to end, optionally via mid-point.
-        # Two-phase: start -> mid (over phase1_fraction), then mid -> end (remaining).
-        # Single-phase: start -> end (linear over full curriculum).
-        self._sigma_curriculum: tuple[float, float] | None = None
-        self._sigma_mid: float | None = None
-        self._sigma_phase1_frac: float = 0.7
-        for name, term_cfg in zip(self._term_names, self._term_cfgs):
-            if name == "tracking" and "sigma" in term_cfg.params:
-                start_sigma = term_cfg.params.pop("_sigma_start", None)
-                mid_sigma = term_cfg.params.pop("_sigma_mid", None)
-                phase1_frac = term_cfg.params.pop("_sigma_phase1_fraction", 0.7)
-                if start_sigma is not None:
-                    end_sigma = term_cfg.params["sigma"]
-                    self._sigma_curriculum = (start_sigma, end_sigma)
-                    self._sigma_mid = mid_sigma
-                    self._sigma_phase1_frac = phase1_frac
-                    term_cfg.params["sigma"] = start_sigma
-                break
 
         # Per-step raw (unweighted, un-dt-scaled) mean values for diagnostics.
         # Updated each compute() call; read by _collect_episode_metrics().
@@ -226,54 +191,33 @@ class RewardManager:
         return self._step_raw_means
 
     @property
-    def active_weights(self) -> dict[str, float]:
-        """Current active weight per term (curriculum-adjusted)."""
-        return {name: self._active_weights[i] for i, name in enumerate(self._term_names)}
-
-    @property
     def current_sigma(self) -> float | None:
-        """Current tracking sigma value (None if no sigma curriculum)."""
+        """Current tracking sigma value."""
         for name, cfg in zip(self._term_names, self._term_cfgs):
             if name == "tracking" and "sigma" in cfg.params:
                 return cfg.params["sigma"]
         return None
 
-    def update_curriculum(self, iteration: int, end_iter: int) -> None:
-        """Update penalty weights based on training progress.
-
-        Linear ramp from curriculum_start_weight to weight over end_iter iterations.
+    def update_sigma(self, iteration: int, reward_cfg: ALBCRewardCfg) -> float | None:
+        """Anneal tracking sigma linearly from start to final over configured iterations.
 
         Args:
-            iteration: Current training iteration (0-based).
-            end_iter: Iteration at which curriculum reaches full weight.
+            iteration: Current runner iteration (0-indexed).
+            reward_cfg: Reward config with sigma_anneal_iters and tracking_sigma_final.
+
+        Returns:
+            New sigma value, or None if no tracking term.
         """
-        if end_iter <= 0:
-            return
-
-        progress = min(1.0, iteration / end_iter)
-        for i, term_cfg in enumerate(self._term_cfgs):
-            if term_cfg.curriculum_start_weight is not None:
-                start = term_cfg.curriculum_start_weight
-                full = term_cfg.weight
-                self._active_weights[i] = start + (full - start) * progress
-
-        # Sigma curriculum: anneal tracking kernel width
-        if self._sigma_curriculum is not None:
-            sigma_start, sigma_end = self._sigma_curriculum
-            if self._sigma_mid is not None:
-                # Two-phase: start -> mid (phase 1), mid -> end (phase 2)
-                f = self._sigma_phase1_frac
-                if progress <= f:
-                    sigma = sigma_start + (self._sigma_mid - sigma_start) * (progress / f)
-                else:
-                    t = (progress - f) / (1.0 - f)
-                    sigma = self._sigma_mid + (sigma_end - self._sigma_mid) * t
-            else:
-                sigma = sigma_start + (sigma_end - sigma_start) * progress
-            for name, term_cfg in zip(self._term_names, self._term_cfgs):
-                if name == "tracking" and "sigma" in term_cfg.params:
-                    term_cfg.params["sigma"] = sigma
-                    break
+        total = reward_cfg.sigma_anneal_iters
+        if total <= 0:
+            return self.current_sigma
+        t = min(1.0, iteration / total)
+        new_sigma = reward_cfg.tracking_sigma + t * (reward_cfg.tracking_sigma_final - reward_cfg.tracking_sigma)
+        for name, cfg in zip(self._term_names, self._term_cfgs):
+            if name == "tracking" and "sigma" in cfg.params:
+                cfg.params["sigma"] = new_sigma
+                return new_sigma
+        return None
 
     def compute(
         self,
@@ -284,10 +228,10 @@ class RewardManager:
         """Compute total reward as weighted sum of terms."""
         self._reward_buf.zero_()
 
-        for i, (name, term_cfg) in enumerate(zip(self._term_names, self._term_cfgs)):
+        for name, term_cfg in zip(self._term_names, self._term_cfgs):
             merged_params = {**term_cfg.params, **context}
             term_value = term_cfg.func(robot, **merged_params)
-            weight = self._active_weights[i]
+            weight = term_cfg.weight
 
             # Store raw (unweighted, un-dt-scaled) mean for diagnostics
             self._step_raw_means[name] = term_value.mean().item()

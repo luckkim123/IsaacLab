@@ -3,13 +3,13 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""OnPolicyRunner with training enhancements shared across all Hero Agent envs.
+"""OnPolicyRunner with DORAEMON DR scheduling and adaptive entropy for Hero Agent.
 
-This module provides BaseRunner, a subclass of OnPolicyRunner that adds:
-    - DR curriculum: apply start values before first rollout, ramp each iteration
-    - Reward curriculum: sigma/weight annealing synced with DR progress
+This module provides BaseRunner, a subclass of OnPolicyRunner that:
+    - Triggers DORAEMON distribution updates each iteration via log()
     - Adaptive entropy: dual EMA reward tracking + noise-std reactive (axPPO-inspired)
     - Noise std floor: safety net preventing exploration collapse
+    - Logs all metrics (DORAEMON, entropy) to TensorBoard/WandB
 
 Usage:
     Registered as runner for TDE-Base and other non-encoder Hero Agent envs.
@@ -30,29 +30,35 @@ logger = logging.getLogger(__name__)
 
 
 class BaseRunner(OnPolicyRunner):
-    """OnPolicyRunner with DR/reward curriculum, adaptive entropy, and noise floor.
+    """OnPolicyRunner with DORAEMON DR scheduling and adaptive entropy.
 
-    Provides all training enhancements that were previously only available in
-    EncoderRunner. Encoder-specific metrics logging is in the EncoderRunner subclass.
+    Provides DORAEMON integration: each iteration, log() calls doraemon.step()
+    which updates the Beta DR distribution based on episode success statistics.
+    Also provides adaptive entropy (dual EMA + noise-std reactive) to prevent
+    exploration collapse under domain randomization.
+
+    EncoderRunner subclass adds encoder-specific metrics logging.
     """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self._setup_adaptive_entropy()
 
-        # Adaptive entropy: dual EMA reward tracking (axPPO-inspired).
+    def _setup_adaptive_entropy(self) -> None:
+        """Initialize adaptive entropy from runner config (cfg dict)."""
         self._adaptive_entropy_cfg = {
-            "enable": self.cfg.get("adaptive_entropy", True),
+            "enable": self.cfg.get("adaptive_entropy", False),
             "base": self.cfg.get("entropy_base", self.alg.entropy_coef),
-            "scale": self.cfg.get("entropy_scale", 5.0),
+            "scale": self.cfg.get("entropy_scale", 15.0),
             "min": self.cfg.get("entropy_min", 0.001),
             "max": self.cfg.get("entropy_max", 0.05),
             "fast_alpha": self.cfg.get("entropy_fast_alpha", 0.1),
             "slow_alpha": self.cfg.get("entropy_slow_alpha", 0.01),
-            "std_target": self.cfg.get("entropy_std_target", 0.7),
+            "std_target": self.cfg.get("entropy_std_target", 0.5),
         }
         self._reward_ema_fast: float | None = None
         self._reward_ema_slow: float | None = None
-        self._entropy_warmup_iters = 10
+        self._entropy_warmup_iters = 50
 
         if self._adaptive_entropy_cfg["enable"]:
             logger.info(
@@ -64,24 +70,12 @@ class BaseRunner(OnPolicyRunner):
             )
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
-        """Apply DR curriculum start values before the first rollout.
-
-        Two problems solved:
-            1. OnPolicyRunner.learn() updates curriculum inside log(), which runs AFTER
-               each iteration's rollout. Without this override, the first iteration
-               runs with full DR ranges.
-            2. The initial env reset (during env.__init__) samples DR from the full
-               config before curriculum exists. We force a reset here so all envs
-               re-sample from the curriculum start values.
-        """
-        raw_env = unwrap_env(self.env)
-        if hasattr(raw_env, "update_dr_curriculum"):
-            raw_env.update_dr_curriculum(0)
-            self.env.reset()
+        """Reset environments before training so initial DR samples come from DORAEMON."""
+        self.env.reset()
         super().learn(num_learning_iterations, init_at_random_ep_len)
 
     def log(self, locs: dict, width: int = 80, pad: int = 35) -> None:
-        """Extended log with curriculum updates and adaptive entropy.
+        """Extended log with DORAEMON update and adaptive entropy.
 
         Args:
             locs: Local variables from the learn() training loop.
@@ -97,32 +91,18 @@ class BaseRunner(OnPolicyRunner):
         iteration = locs["it"]
         raw_env = unwrap_env(self.env)
 
-        # Update reward curriculum
-        if hasattr(raw_env, "_reward_manager") and hasattr(raw_env.cfg, "reward"):
-            end_iter = raw_env.cfg.reward.curriculum_end_iter
-            if end_iter is None and hasattr(raw_env.cfg, "dr_curriculum"):
-                end_iter = raw_env.cfg.dr_curriculum.end_iter
-            raw_env._reward_manager.update_curriculum(iteration, end_iter or 500)
+        # Sigma annealing: tighten tracking sigma over training
+        if hasattr(raw_env, "_reward_manager"):
+            new_sigma = raw_env._reward_manager.update_sigma(iteration, raw_env.cfg.reward)
+            if new_sigma is not None and self.log_dir is not None and not self.disable_logs:
+                self.writer.add_scalar("Reward/tracking_sigma", new_sigma, iteration)
 
-        # Update DR curriculum (ramp perturbation/inertia/mass ranges)
-        if hasattr(raw_env, "update_dr_curriculum"):
-            raw_env.update_dr_curriculum(iteration)
-
-        # Log DR curriculum progress
-        if (
-            hasattr(raw_env, "_dr_curriculum_cfg")
-            and raw_env._dr_curriculum_cfg is not None
-            and self.log_dir is not None
-            and not self.disable_logs
-        ):
-            dr_cur = raw_env._dr_curriculum_cfg
-            progress = min(1.0, iteration / max(1, dr_cur.end_iter))
-            rand = raw_env.cfg.randomization
-            self.writer.add_scalar("DR_Curriculum/progress", progress, iteration)
-            self.writer.add_scalar("DR_Curriculum/perturbation_force_max", rand.perturbation_force_range[1], iteration)
-            self.writer.add_scalar("DR_Curriculum/inertia_scale_hi", rand.inertia_scale[1], iteration)
-            self.writer.add_scalar("DR_Curriculum/payload_mass_max", rand.payload_mass_range[1], iteration)
-            self.writer.add_scalar("DR_Curriculum/cog_offset_z_max", rand.cog_offset_z[1], iteration)
+        # DORAEMON: update DR distribution based on episode statistics
+        if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
+            metrics = raw_env._doraemon.step()
+            if self.log_dir is not None and not self.disable_logs:
+                for key, value in metrics.items():
+                    self.writer.add_scalar(f"DORAEMON/{key}", value, iteration)
 
     def _update_adaptive_entropy(self, locs: dict) -> None:
         """Update entropy_coef using combined noise-std and reward-reactive signals.
@@ -167,7 +147,7 @@ class BaseRunner(OnPolicyRunner):
         new_coef = cfg["base"] * (1.0 + cfg["scale"] * boost)
         self.alg.entropy_coef = max(cfg["min"], min(cfg["max"], new_coef))
 
-        # Direct noise_std floor: prevents exploration collapse under DR.
+        # Noise_std floor: prevents exploration collapse under DR
         min_std = 0.1
         if hasattr(self.alg.policy, "log_std"):
             min_log_std = torch.log(torch.tensor(min_std, device=self.device))

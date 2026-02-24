@@ -165,6 +165,7 @@ def _randomize_hydro_model(
     hydro: HydrodynamicsModel,
     env_ids: torch.Tensor,
     rand_cfg: DomainRandomizationCfg,
+    sampled: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Apply domain randomization to a hydrodynamics model.
 
@@ -172,55 +173,89 @@ def _randomize_hydro_model(
         hydro: The hydrodynamics model to randomize.
         env_ids: Environment indices to randomize.
         rand_cfg: Domain randomization configuration with scale ranges.
+        sampled: Optional DORAEMON-sampled values. When provided, uses these
+            instead of uniform random for the corresponding parameters.
     """
     num_envs = len(env_ids)
     device = hydro.device
     base = _get_hydro_base(hydro)
 
     # Added mass (scale each of 6 DOF)
-    am_scales = _rand_uniform_range((num_envs, 6), rand_cfg.added_mass_scale, device)
+    if sampled and "added_mass_scale" in sampled:
+        am_scales = sampled["added_mass_scale"].unsqueeze(-1).expand(-1, 6)
+    else:
+        am_scales = _rand_uniform_range((num_envs, 6), rand_cfg.added_mass_scale, device)
     hydro.added_mass_matrix[env_ids] = torch.diag_embed(base.added_mass.unsqueeze(0) * am_scales)
 
     # Linear damping
-    ld_scales = _rand_uniform_range((num_envs, 6), rand_cfg.linear_damping_scale, device)
+    if sampled and "linear_damping_scale" in sampled:
+        ld_scales = sampled["linear_damping_scale"].unsqueeze(-1).expand(-1, 6)
+    else:
+        ld_scales = _rand_uniform_range((num_envs, 6), rand_cfg.linear_damping_scale, device)
     hydro.linear_damping[env_ids] = base.linear_damping.unsqueeze(0) * ld_scales
 
     # Quadratic damping
-    qd_scales = _rand_uniform_range((num_envs, 6), rand_cfg.quadratic_damping_scale, device)
+    if sampled and "quadratic_damping_scale" in sampled:
+        qd_scales = sampled["quadratic_damping_scale"].unsqueeze(-1).expand(-1, 6)
+    else:
+        qd_scales = _rand_uniform_range((num_envs, 6), rand_cfg.quadratic_damping_scale, device)
     hydro.quadratic_damping[env_ids] = base.quadratic_damping.unsqueeze(0) * qd_scales
 
     # Volume
-    hydro.volume[env_ids] = base.volume * _rand_uniform_range(num_envs, rand_cfg.volume_scale, device)
+    if sampled and "volume_scale" in sampled:
+        vol_scales = sampled["volume_scale"]
+    else:
+        vol_scales = _rand_uniform_range(num_envs, rand_cfg.volume_scale, device)
+    hydro.volume[env_ids] = base.volume * vol_scales
 
     # Water density
-    hydro.water_density[env_ids] = _rand_uniform_range(num_envs, rand_cfg.water_density_range, device)
+    if sampled and "water_density" in sampled:
+        hydro.water_density[env_ids] = sampled["water_density"]
+    else:
+        hydro.water_density[env_ids] = _rand_uniform_range(num_envs, rand_cfg.water_density_range, device)
 
     hydro.update_buoyancy_force(env_ids)
 
     # Center of Buoyancy (offset from base)
-    _apply_xyz_offset(
-        hydro.center_of_buoyancy,
-        env_ids,
-        base.cob,
-        rand_cfg.cob_offset_x,
-        rand_cfg.cob_offset_y,
-        rand_cfg.cob_offset_z,
-        device,
-    )
+    # CoB XY always uniform (not DORAEMON-managed); Z can be overridden.
+    if sampled and "cob_offset_z" in sampled:
+        num = len(env_ids)
+        hydro.center_of_buoyancy[env_ids, 0] = base.cob[0] + _rand_uniform_range(num, rand_cfg.cob_offset_x, device)
+        hydro.center_of_buoyancy[env_ids, 1] = base.cob[1] + _rand_uniform_range(num, rand_cfg.cob_offset_y, device)
+        hydro.center_of_buoyancy[env_ids, 2] = base.cob[2] + sampled["cob_offset_z"]
+    else:
+        _apply_xyz_offset(
+            hydro.center_of_buoyancy,
+            env_ids,
+            base.cob,
+            rand_cfg.cob_offset_x,
+            rand_cfg.cob_offset_y,
+            rand_cfg.cob_offset_z,
+            device,
+        )
 
     # Center of Gravity (offset from base)
-    _apply_xyz_offset(
-        hydro.center_of_gravity,
-        env_ids,
-        base.cog,
-        rand_cfg.cog_offset_x,
-        rand_cfg.cog_offset_y,
-        rand_cfg.cog_offset_z,
-        device,
-    )
+    if sampled and "cog_offset_z" in sampled:
+        num = len(env_ids)
+        hydro.center_of_gravity[env_ids, 0] = base.cog[0] + _rand_uniform_range(num, rand_cfg.cog_offset_x, device)
+        hydro.center_of_gravity[env_ids, 1] = base.cog[1] + _rand_uniform_range(num, rand_cfg.cog_offset_y, device)
+        hydro.center_of_gravity[env_ids, 2] = base.cog[2] + sampled["cog_offset_z"]
+    else:
+        _apply_xyz_offset(
+            hydro.center_of_gravity,
+            env_ids,
+            base.cog,
+            rand_cfg.cog_offset_x,
+            rand_cfg.cog_offset_y,
+            rand_cfg.cog_offset_z,
+            device,
+        )
 
     # Rigid body inertia
-    inertia_scales = _rand_uniform_range((num_envs, 3), rand_cfg.inertia_scale, device)
+    if sampled and "inertia_scale" in sampled:
+        inertia_scales = sampled["inertia_scale"].unsqueeze(-1).expand(-1, 3)
+    else:
+        inertia_scales = _rand_uniform_range((num_envs, 3), rand_cfg.inertia_scale, device)
     hydro.rigid_body_inertia[env_ids] = base.inertia.unsqueeze(0) * inertia_scales
 
 
@@ -228,6 +263,7 @@ def randomize_hydrodynamics(
     env: HeroAgentEnv,
     env_ids: torch.Tensor | None,
     rand_cfg: DomainRandomizationCfg,
+    sampled: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Randomize hydrodynamic parameters for main body and buoy.
 
@@ -235,16 +271,17 @@ def randomize_hydrodynamics(
         env: The Hero Agent environment instance.
         env_ids: Environment indices to randomize. If None, randomizes all.
         rand_cfg: Domain randomization configuration with scale ranges.
+        sampled: Optional DORAEMON-sampled values.
     """
     env_ids = _ensure_env_ids(env, env_ids)
 
     # Main body hydrodynamics
     if hasattr(env, "_hydro"):
-        _randomize_hydro_model(env._hydro, env_ids, rand_cfg)
+        _randomize_hydro_model(env._hydro, env_ids, rand_cfg, sampled)
 
     # Buoy (link3) hydrodynamics
     if hasattr(env, "_buoy_hydro"):
-        _randomize_hydro_model(env._buoy_hydro, env_ids, rand_cfg)
+        _randomize_hydro_model(env._buoy_hydro, env_ids, rand_cfg, sampled)
 
 
 def randomize_ocean_current(
@@ -417,6 +454,7 @@ def randomize_payload(
     env: HeroAgentEnv,
     env_ids: torch.Tensor | None,
     rand_cfg: DomainRandomizationCfg,
+    sampled: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Randomize payload parameters (mass, attachment offset, CoG offset).
 
@@ -426,6 +464,7 @@ def randomize_payload(
         env: The Hero Agent environment instance.
         env_ids: Environment indices to randomize. If None, randomizes all.
         rand_cfg: Domain randomization configuration.
+        sampled: Optional DORAEMON-sampled values.
     """
     env_ids = _ensure_env_ids(env, env_ids)
 
@@ -436,7 +475,10 @@ def randomize_payload(
     device = env.device
 
     # Randomize mass
-    env._payload_mass[env_ids] = _rand_uniform_range(num_reset, rand_cfg.payload_mass_range, device)
+    if sampled and "payload_mass" in sampled:
+        env._payload_mass[env_ids] = sampled["payload_mass"]
+    else:
+        env._payload_mass[env_ids] = _rand_uniform_range(num_reset, rand_cfg.payload_mass_range, device)
 
     # Reset attachment offset to fixed default (no randomization)
     base_offset = torch.tensor(env.cfg.payload_attachment_offset, device=device, dtype=torch.float32)
@@ -495,6 +537,7 @@ def randomize_joint_gains(
     env: HeroAgentEnv,
     env_ids: torch.Tensor,
     rand_cfg: DomainRandomizationCfg,
+    sampled: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Randomize ALBC joint actuator stiffness and damping with absolute values.
 
@@ -506,12 +549,20 @@ def randomize_joint_gains(
         env: The Hero Agent environment instance.
         env_ids: Environment indices to randomize.
         rand_cfg: Domain randomization configuration with gain ranges.
+        sampled: Optional DORAEMON-sampled values.
     """
     num_reset = len(env_ids)
     device = env.device
 
-    stiffness = _rand_uniform_range(num_reset, rand_cfg.joint_stiffness_range, device)
-    damping = _rand_uniform_range(num_reset, rand_cfg.joint_damping_range, device)
+    if sampled and "joint_stiffness" in sampled:
+        stiffness = sampled["joint_stiffness"]
+    else:
+        stiffness = _rand_uniform_range(num_reset, rand_cfg.joint_stiffness_range, device)
+
+    if sampled and "joint_damping" in sampled:
+        damping = sampled["joint_damping"]
+    else:
+        damping = _rand_uniform_range(num_reset, rand_cfg.joint_damping_range, device)
 
     # unsqueeze for broadcasting: (num_reset,) -> (num_reset, 1) -> (num_reset, num_joints)
     env._robot.write_joint_stiffness_to_sim(stiffness.unsqueeze(-1), joint_ids=env._albc_joint_ids, env_ids=env_ids)
@@ -527,6 +578,7 @@ def randomize_body_mass(
     env: HeroAgentEnv,
     env_ids: torch.Tensor,
     rand_cfg: DomainRandomizationCfg,
+    sampled: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Randomize rigid body masses for specified environments.
 
@@ -538,6 +590,7 @@ def randomize_body_mass(
         env: The Hero Agent environment instance.
         env_ids: Environment indices to randomize.
         rand_cfg: Domain randomization configuration with mass scale range.
+        sampled: Optional DORAEMON-sampled values.
     """
     num_reset = len(env_ids)
     env_ids_cpu = env_ids.cpu()
@@ -547,7 +600,10 @@ def randomize_body_mass(
     masses[env_ids_cpu] = env._robot.data.default_mass[env_ids_cpu].clone()
 
     # Single scale per env, broadcast to all bodies
-    scales = _rand_uniform_range(num_reset, rand_cfg.body_mass_scale, "cpu")
+    if sampled and "body_mass_scale" in sampled:
+        scales = sampled["body_mass_scale"].cpu()
+    else:
+        scales = _rand_uniform_range(num_reset, rand_cfg.body_mass_scale, "cpu")
     masses[env_ids_cpu] *= scales.unsqueeze(-1)
     masses = torch.clamp(masses, min=1e-6)
 
@@ -572,6 +628,7 @@ def randomize_joint_friction(
     env: HeroAgentEnv,
     env_ids: torch.Tensor,
     rand_cfg: DomainRandomizationCfg,
+    sampled: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Randomize ALBC joint friction coefficients.
 
@@ -583,12 +640,20 @@ def randomize_joint_friction(
         env: The Hero Agent environment instance.
         env_ids: Environment indices to randomize.
         rand_cfg: Domain randomization configuration with friction ranges.
+        sampled: Optional DORAEMON-sampled values.
     """
     num_reset = len(env_ids)
     device = env.device
 
-    static = _rand_uniform_range(num_reset, rand_cfg.joint_static_friction_range, device)
-    viscous = _rand_uniform_range(num_reset, rand_cfg.joint_viscous_friction_range, device)
+    if sampled and "joint_static_friction" in sampled:
+        static = sampled["joint_static_friction"]
+    else:
+        static = _rand_uniform_range(num_reset, rand_cfg.joint_static_friction_range, device)
+
+    if sampled and "joint_viscous_friction" in sampled:
+        viscous = sampled["joint_viscous_friction"]
+    else:
+        viscous = _rand_uniform_range(num_reset, rand_cfg.joint_viscous_friction_range, device)
 
     # unsqueeze for broadcasting: (num_reset,) -> (num_reset, 1) -> (num_reset, num_joints)
     env._robot.write_joint_friction_coefficient_to_sim(

@@ -28,11 +28,12 @@ from ..encoder import (
     ActorCriticEncoder,
     ActorCriticEncoderAdapt,
 )
-from ..runners import BaseRunner
+from ..runners import BaseRunner, EncoderRunner
 
 _runner_module.ActorCriticEncoder = ActorCriticEncoder
 _runner_module.ActorCriticEncoderAdapt = ActorCriticEncoderAdapt
 _runner_module.BaseRunner = BaseRunner
+_runner_module.EncoderRunner = EncoderRunner
 
 
 # =============================================================================
@@ -142,9 +143,9 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 class HeroAgentTDEBasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for Hero Agent TDE-Base training.
 
-    Uses BaseRunner which provides adaptive entropy, noise std floor,
-    and DR/reward curriculum. No encoder -- policy learns directly from
-    15D obs (13D policy + 2D TDE dynamics mismatch).
+    Uses BaseRunner which provides DORAEMON DR scheduling and adaptive entropy.
+    No encoder -- policy learns directly from 15D obs
+    (13D policy + 2D TDE dynamics mismatch).
     """
 
     class_name: str = "BaseRunner"
@@ -203,7 +204,7 @@ class HeroAgentTDEBasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     entropy_slow_alpha: float = 0.01
     """EMA alpha for slow reward baseline (~100 iteration response)."""
 
-    entropy_std_target: float = 0.5
+    entropy_std_target: float = 0.4
     """Target mean_noise_std. Below this, entropy boost activates to resist collapse."""
 
 
@@ -215,7 +216,12 @@ class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         - Encoder: privileged (26D) -> tanh -> z (13D) in [-1, 1]
         - Actor: cat([policy_obs, z]) = 26D -> actions
         - Critic: cat([policy_obs, z]) = 26D -> value (symmetric, encoder gets critic gradient)
+
+    Uses EncoderRunner (inherits BaseRunner) for DORAEMON + adaptive entropy
+    + encoder-specific metrics logging.
     """
+
+    class_name: str = "EncoderRunner"
 
     seed = 42
     num_steps_per_env = 128
@@ -276,7 +282,7 @@ class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     entropy_slow_alpha: float = 0.01
     """EMA alpha for slow reward baseline (~100 iteration response)."""
 
-    entropy_std_target: float = 0.5
+    entropy_std_target: float = 0.4
     """Target mean_noise_std. Below this, entropy boost activates to resist collapse."""
 
 

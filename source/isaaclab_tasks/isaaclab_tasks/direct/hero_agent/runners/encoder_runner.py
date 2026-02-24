@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 class EncoderRunner(BaseRunner):
     """BaseRunner with encoder-specific metrics logging.
 
-    Inherits all training enhancements from BaseRunner (adaptive entropy,
-    noise floor, DR/reward curriculum). Adds HORA Phase 1 encoder metrics.
+    Inherits DORAEMON DR scheduling from BaseRunner.
+    Adds HORA Phase 1 encoder metrics.
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -51,7 +51,7 @@ class EncoderRunner(BaseRunner):
     def log(self, locs: dict, width: int = 80, pad: int = 35) -> None:
         """Extended log method that adds encoder-specific metrics.
 
-        Calls BaseRunner.log() first (handles curriculum + adaptive entropy),
+        Calls BaseRunner.log() first (handles DORAEMON DR update),
         then adds encoder metrics if an encoder is present.
 
         Args:

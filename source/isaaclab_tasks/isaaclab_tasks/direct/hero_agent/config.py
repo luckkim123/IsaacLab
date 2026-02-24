@@ -42,6 +42,7 @@ from isaaclab_assets.robots.uuv import (
 )
 
 from .controllers import TDCControllerCfg
+from .doraemon import DoraemonCfg
 from .mdp import ALBCRewardCfg
 
 
@@ -196,49 +197,6 @@ class DomainRandomizationCfg:
 
 
 @configclass
-class DRCurriculumCfg:
-    """Linearly ramp DR ranges from mild (start) to full (DomainRandomizationCfg values).
-
-    The "full" values are whatever DomainRandomizationCfg has. Start values define the
-    initial easy regime. Linear interpolation over end_iter training iterations.
-    """
-
-    enable: bool = False
-    end_iter: int = 2000
-
-    # Per-step perturbation start ranges (baseline-equivalent, ramp to full)
-    perturbation_force_range_start: tuple[float, float] = (0.0, 1.5)
-    perturbation_torque_range_start: tuple[float, float] = (0.0, 0.2)
-
-    # Episode-level DR start ranges (near-nominal, ramp to full)
-    inertia_scale_start: tuple[float, float] = (0.9, 1.1)
-    body_mass_scale_start: tuple[float, float] = (0.95, 1.05)
-    volume_scale_start: tuple[float, float] = (0.95, 1.05)
-    added_mass_scale_start: tuple[float, float] = (0.95, 1.05)
-    payload_mass_range_start: tuple[float, float] = (0.0, 0.2)
-
-    # Hydrodynamic damping (start near nominal, ramp to full range)
-    linear_damping_scale_start: tuple[float, float] = (0.92, 1.08)
-    quadratic_damping_scale_start: tuple[float, float] = (0.88, 1.12)
-    water_density_range_start: tuple[float, float] = (997.0, 1003.0)
-
-    # Joint actuator start ranges (near asset defaults: stiffness=100, damping=3)
-    joint_stiffness_range_start: tuple[float, float] = (96.0, 104.0)
-    joint_damping_range_start: tuple[float, float] = (2.85, 3.15)
-    joint_static_friction_range_start: tuple[float, float] = (0.0, 0.005)
-    joint_viscous_friction_range_start: tuple[float, float] = (0.0, 0.03)
-
-    # Initial orientation start ranges (mild tilt, ramp to full +-30 deg)
-    roll_range_start: tuple[float, float] = (-0.17, 0.17)   # +-10 deg
-    pitch_range_start: tuple[float, float] = (-0.17, 0.17)   # +-10 deg
-
-    # High-impact stability parameters (start near nominal, ramp to full range)
-    cog_offset_z_start: tuple[float, float] = (-0.008, 0.008)
-    cob_offset_z_start: tuple[float, float] = (-0.004, 0.004)
-    action_latency_range_start: tuple[int, int] = (0, 0)
-
-
-@configclass
 class HeroAgentEnvCfg(DirectRLEnvCfg):
     """Configuration for Hero Agent ALBC environment.
 
@@ -332,7 +290,7 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # Domain Randomization
     # ==========================================================================
     randomization: DomainRandomizationCfg = DomainRandomizationCfg()
-    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg()
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
 
     # ==========================================================================
     # Virtual Payload Configuration (simple weight model)
@@ -361,10 +319,8 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
 
     randomization = DomainRandomizationCfg(enable=True)
 
-    # DR curriculum: baseline-equivalent start -> full DR over end_iter.
-    # Single source of truth: reward sigma/weight curricula also follow end_iter.
-    # Shared by all training envs (Base, Encoder, TDC, Adapt).
-    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=True)
+    # DORAEMON: adaptive DR distribution (replaces linear DR curriculum).
+    doraemon: DoraemonCfg = DoraemonCfg()
     ocean_current = OceanCurrentCfg(
         max_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         noise_scale=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
@@ -404,9 +360,8 @@ class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
         - Encoder: privileged(26D) -> latent z(13D)
         - Actual Actor/Critic input: policy_obs(13) + z(13) = 26D
 
-    DR curriculum is inherited from HeroAgentTrainEnvCfg (shared across all
-    training envs). Sigmoid encoder activation prevents z collapse even with
-    mild early DR.
+    DORAEMON adaptive DR is inherited from HeroAgentTrainEnvCfg (shared across
+    all training envs). Sigmoid encoder activation prevents z collapse.
     """
 
     state_space: int = 26
@@ -414,14 +369,14 @@ class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
 
 @configclass
 class HeroAgentEncoderBaseDebugEnvCfg(HeroAgentEncoderTrainEnvCfg):
-    """Encoder-Base with half-strength DR and no curriculum for diagnostics.
+    """Encoder-Base with half-strength DR and no DORAEMON for diagnostics.
 
     DR enabled at ~50% of full range (narrower scales, smaller offsets).
-    No DR curriculum (constant DR from start). Privileged obs (state_space=26)
+    No DORAEMON (constant DR from start). Privileged obs (state_space=26)
     inherited from HeroAgentEncoderTrainEnvCfg.
 
     If error diverges here, the encoder/reward design cannot handle even mild DR.
-    If it converges, full DR or curriculum ramp is the issue.
+    If it converges, full DR or DORAEMON is the issue.
     """
 
     randomization: DomainRandomizationCfg = DomainRandomizationCfg(
@@ -443,7 +398,7 @@ class HeroAgentEncoderBaseDebugEnvCfg(HeroAgentEncoderTrainEnvCfg):
         joint_static_friction_range=(0.0, 0.025),   # full: (0.0, 0.05)
         joint_viscous_friction_range=(0.0, 0.15),    # full: (0.0, 0.3)
     )
-    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg()  # enable=False (no curriculum)
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)  # fixed half-DR
 
 
 @configclass
@@ -467,14 +422,14 @@ class HeroAgentTDEBaseEnvCfg(HeroAgentTrainEnvCfg):
 
 @configclass
 class HeroAgentTDEBaseDebugEnvCfg(HeroAgentTDEBaseEnvCfg):
-    """TDE-Base with half-strength DR and no curriculum for diagnostics.
+    """TDE-Base with half-strength DR and no DORAEMON for diagnostics.
 
     DR enabled at ~50% of full range (narrower scales, smaller offsets).
-    No DR curriculum (constant DR from start). Everything else identical
+    No DORAEMON (constant DR from start). Everything else identical
     to TDE-Base (payload, target randomization, sensor noise all active).
 
     If error diverges here, the reward design cannot handle even mild DR.
-    If it converges, full DR or curriculum ramp is the issue.
+    If it converges, full DR or DORAEMON is the issue.
     """
 
     randomization: DomainRandomizationCfg = DomainRandomizationCfg(
@@ -496,7 +451,7 @@ class HeroAgentTDEBaseDebugEnvCfg(HeroAgentTDEBaseEnvCfg):
         joint_static_friction_range=(0.0, 0.025),   # full: (0.0, 0.05)
         joint_viscous_friction_range=(0.0, 0.15),    # full: (0.0, 0.3)
     )
-    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg()  # enable=False (no curriculum)
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)  # fixed half-DR
 
 
 # =============================================================================

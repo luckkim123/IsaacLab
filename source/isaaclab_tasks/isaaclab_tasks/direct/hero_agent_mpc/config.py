@@ -17,9 +17,9 @@ from isaaclab.utils import configclass
 
 from isaaclab_tasks.direct.hero_agent.config import (
     DomainRandomizationCfg,
-    DRCurriculumCfg,
     HeroAgentTrainEnvCfg,
 )
+from isaaclab_tasks.direct.hero_agent.doraemon import DoraemonCfg
 from isaaclab_tasks.direct.hero_agent.mdp import ALBCRewardCfg
 
 from .controllers.mpc import DifferentiableMPCCfg
@@ -39,9 +39,9 @@ class HeroAgentMPCEnvCfg(HeroAgentTrainEnvCfg):
     Control (2D): [q1_dot_ref, q2_dot_ref] (MPC output from policy)
     """
 
-    # SAC off-policy replay buffer is structurally incompatible with DR curriculum
-    # (stale data from earlier DR stages corrupts training). Full DR from start.
-    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=False)
+    # SAC off-policy replay buffer is structurally incompatible with DORAEMON
+    # (stale data from earlier DR stages corrupts training). DORAEMON disabled.
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
 
     # MPC solver configuration
     mpc: DifferentiableMPCCfg = DifferentiableMPCCfg()
