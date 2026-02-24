@@ -13,6 +13,7 @@ Available Tasks:
     - Isaac-HeroAgent-v0: Debug environment (minimal DR, no ocean current)
     - Isaac-HeroAgent-Base-v0: Base training with DR and ocean current
     - Isaac-HeroAgent-TDE-Base-v0: TDE-Base with dynamics mismatch obs
+    - Isaac-HeroAgent-Priv-Base-v0: Raw privileged info concatenated (ablation)
     - Isaac-HeroAgent-Encoder-Base-Debug-v0: Encoder debug (half DR, no curriculum)
     - Isaac-HeroAgent-Encoder-Base-v0: Encoder training with privileged info
     - Isaac-HeroAgent-TDC-v0: Classical TDC control (no RL)
@@ -87,6 +88,17 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentTDEBaseEnvCfg",
         "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentTDEBasePPORunnerCfg",
+    },
+)
+
+# Priv-Base: raw privileged info concatenated (ablation, no encoder)
+gym.register(
+    id="Isaac-HeroAgent-Priv-Base-v0",
+    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentEncoderTrainEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentPrivBasePPORunnerCfg",
     },
 )
 

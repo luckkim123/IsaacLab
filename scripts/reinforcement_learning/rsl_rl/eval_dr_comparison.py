@@ -15,6 +15,14 @@ DR parameters are linearly scaled from 0% (none) to 100% (hard = training DR):
 All levels start from 0 deg initial pose. Each segment is held for 5 s
 (configurable via --segment_duration).
 
+Supported tasks:
+    Isaac-HeroAgent-v0              (debug, no DR)
+    Isaac-HeroAgent-Base-v0         (base RL training)
+    Isaac-HeroAgent-Encoder-Base-v0 (HORA Phase 1)
+    Isaac-HeroAgent-TDC-v0          (classical TDC)
+    Isaac-HeroAgent-Adapt-Base-v0   (HORA Phase 2)
+    Isaac-HeroAgent-SAC-MPC-v0      (SAC-MPC)
+
 Usage:
     # Pure TDC baseline
     ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/eval_dr_comparison.py \
@@ -71,6 +79,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 import numpy as np
 import torch
+import rsl_rl.runners.on_policy_runner as _runner_module
 from rsl_rl.runners import OnPolicyRunner
 
 from isaaclab.envs import DirectRLEnvCfg
@@ -82,6 +91,18 @@ from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
+
+from isaaclab_tasks.direct.hero_agent.config import DomainRandomizationCfg
+from isaaclab_tasks.direct.hero_agent.utils import unwrap_env, connect_encoder_to_env
+from isaaclab_tasks.direct.hero_agent.encoder import ActorCriticEncoder, ActorCriticEncoderAdapt
+from isaaclab_tasks.direct.hero_agent.runners import BaseRunner, EncoderRunner
+
+# Register custom classes in RSL-RL runner module namespace so the runner
+# can resolve class_name strings (same pattern as rsl_rl_ppo_cfg.py).
+_runner_module.ActorCriticEncoder = ActorCriticEncoder
+_runner_module.ActorCriticEncoderAdapt = ActorCriticEncoderAdapt
+_runner_module.BaseRunner = BaseRunner
+_runner_module.EncoderRunner = EncoderRunner
 
 matplotlib.use("Agg")  # non-interactive backend for headless
 
@@ -95,82 +116,91 @@ DR_SCALE = {"none": 0.0, "soft": 0.3, "medium": 0.6, "hard": 1.0}
 
 
 # ============================================================================
-# DR Presets
+# DR Configuration
 # ============================================================================
 
-def _dr_preset(level: str, is_tdc: bool) -> dict:
-    """Return DR parameter overrides via linear interpolation from nominal to training DR.
+def build_dr_config(scale: float, is_tdc: bool) -> DomainRandomizationCfg:
+    """Build a DomainRandomizationCfg by interpolating between nominal and full DR.
 
-    Scale factors (DR_SCALE): none=0%, soft=30%, medium=60%, hard=100%.
-    "Full" values match DomainRandomizationCfg training defaults.
-    Initial pose is always (0,0) for all levels.
+    Args:
+        scale: 0.0 = nominal physics (fixed_pose), 1.0 = full training DR.
+        is_tdc: If True, use TDC-specific joint gains and disable action latency.
+
+    Returns:
+        A DomainRandomizationCfg with interpolated values.
     """
-    f = DR_SCALE[level]
+    if scale <= 0.0:
+        cfg = DomainRandomizationCfg.fixed_pose()
+        cfg.enable = True
+        if is_tdc:
+            cfg.joint_stiffness_range = (160.0, 240.0)
+            cfg.joint_damping_range = (8.0, 12.0)
+        return cfg
 
-    def lerp_scale(full_lo: float, full_hi: float) -> tuple[float, float]:
-        """Interpolate multiplicative scale range (nominal = 1.0)."""
-        return (1.0 - f * (1.0 - full_lo), 1.0 + f * (full_hi - 1.0))
+    nominal = DomainRandomizationCfg.fixed_pose()
+    full = DomainRandomizationCfg()
+    f = min(scale, 1.0)
 
-    def lerp_range(full_lo: float, full_hi: float, nominal: float = 0.0) -> tuple[float, float]:
-        """Interpolate value range from nominal."""
-        return (nominal + f * (full_lo - nominal), nominal + f * (full_hi - nominal))
+    # Fields to interpolate: (field_name, type)
+    # tuple[float,float] fields lerp element-wise
+    float_tuple_fields = [
+        "position_x_range", "position_y_range", "position_z_range",
+        "yaw_range",
+        "inertia_scale", "body_mass_scale", "volume_scale",
+        "added_mass_scale", "linear_damping_scale", "quadratic_damping_scale",
+        "water_density_range",
+        "perturbation_force_range", "perturbation_torque_range",
+        "payload_mass_range", "payload_cog_offset_z",
+        "cob_offset_x", "cob_offset_y", "cob_offset_z",
+        "cog_offset_x", "cog_offset_y", "cog_offset_z",
+        "joint_stiffness_range", "joint_damping_range",
+        "joint_static_friction_range", "joint_viscous_friction_range",
+    ]
+    # tuple[int,int] fields lerp and round
+    int_tuple_fields = ["action_latency_range"]
+    # float fields lerp directly
+    float_fields = ["payload_cog_offset_xy_radius"]
 
-    def lerp_int(full_lo: int, full_hi: int) -> tuple[int, int]:
-        """Interpolate integer range."""
-        return (int(f * full_lo), int(round(f * full_hi)))
+    cfg = DomainRandomizationCfg()
+    cfg.enable = True
 
-    # Full training DR values (from DomainRandomizationCfg defaults)
-    p = dict(
-        enable=True,
-        inertia_scale=lerp_scale(0.4, 2.5),
-        body_mass_scale=lerp_scale(0.7, 1.3),
-        volume_scale=lerp_scale(0.7, 1.3),
-        added_mass_scale=lerp_scale(0.8, 1.2),
-        linear_damping_scale=lerp_scale(0.7, 1.3),
-        quadratic_damping_scale=lerp_scale(0.6, 1.4),
-        water_density_range=lerp_range(995.0, 1025.0, 998.0),
-        enable_perturbation=f > 0,
-        perturbation_force_range=lerp_range(0.0, 10.0),
-        perturbation_torque_range=lerp_range(0.0, 1.5),
-        payload_mass_range=lerp_range(0.0, 1.5),
-        action_latency_range=lerp_int(0, 4),
-        cob_offset_x=lerp_range(-0.01, 0.01),
-        cob_offset_y=lerp_range(-0.01, 0.01),
-        cob_offset_z=lerp_range(-0.04, 0.04),
-        cog_offset_x=lerp_range(-0.01, 0.01),
-        cog_offset_y=lerp_range(-0.01, 0.01),
-        cog_offset_z=lerp_range(-0.06, 0.06),
-        payload_cog_offset_x=lerp_range(-0.30, 0.30),
-        payload_cog_offset_y=lerp_range(-0.30, 0.30),
-        payload_cog_offset_z=lerp_range(-0.20, 0.0),
-        joint_static_friction_range=lerp_range(0.0, 0.05),
-        joint_viscous_friction_range=lerp_range(0.0, 0.3),
-    )
+    for field in float_tuple_fields:
+        nom_val = getattr(nominal, field)
+        full_val = getattr(full, field)
+        lo = nom_val[0] + f * (full_val[0] - nom_val[0])
+        hi = nom_val[1] + f * (full_val[1] - nom_val[1])
+        setattr(cfg, field, (lo, hi))
 
-    # All levels: initial pose at (0, 0)
-    p["roll_range"] = (0.0, 0.0)
-    p["pitch_range"] = (0.0, 0.0)
+    for field in int_tuple_fields:
+        nom_val = getattr(nominal, field)
+        full_val = getattr(full, field)
+        lo = int(round(nom_val[0] + f * (full_val[0] - nom_val[0])))
+        hi = int(round(nom_val[1] + f * (full_val[1] - nom_val[1])))
+        setattr(cfg, field, (lo, hi))
 
-    # Joint gain centers differ for TDC vs Base RL
+    for field in float_fields:
+        nom_val = getattr(nominal, field)
+        full_val = getattr(full, field)
+        setattr(cfg, field, nom_val + f * (full_val - nom_val))
+
+    cfg.enable_perturbation = f > 0
+
+    # All levels: initial pose at (0, 0), free yaw
+    cfg.roll_range = (0.0, 0.0)
+    cfg.pitch_range = (0.0, 0.0)
+
+    # TDC-specific overrides
     if is_tdc:
-        p["joint_stiffness_range"] = (160.0, 240.0)
-        p["joint_damping_range"] = (8.0, 12.0)
-        p["action_latency_range"] = (0, 0)
-    else:
-        # Training defaults: stiffness=(80, 120), damping=(2.4, 3.6)
-        p["joint_stiffness_range"] = lerp_range(80.0, 120.0, 100.0)
-        p["joint_damping_range"] = lerp_range(2.4, 3.6, 3.0)
+        cfg.joint_stiffness_range = (160.0, 240.0)
+        cfg.joint_damping_range = (8.0, 12.0)
+        cfg.action_latency_range = (0, 0)
 
-    return p
+    return cfg
 
 
-def apply_dr_preset(env_cfg, level: str, is_tdc: bool) -> None:
-    """Apply a DR preset to the environment config's randomization field."""
-    preset = _dr_preset(level, is_tdc)
-    rand_cfg = env_cfg.randomization
-    for key, val in preset.items():
-        if hasattr(rand_cfg, key):
-            setattr(rand_cfg, key, val)
+def apply_dr_config(env_cfg, scale: float, is_tdc: bool) -> None:
+    """Apply interpolated DR config to the environment config."""
+    env_cfg.randomization = build_dr_config(scale, is_tdc)
 
 
 # ============================================================================
@@ -335,6 +365,18 @@ def compute_metrics(data: dict) -> dict:
 # Plots
 # ============================================================================
 
+def _bar_subplot(ax, x, values, colors, xlabels, ylabel, title, ylim=None):
+    """Render a single bar chart subplot with consistent styling."""
+    ax.bar(x, values, color=colors)
+    ax.set_xticks(x)
+    ax.set_xticklabels(xlabels, fontsize=9)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    if ylim:
+        ax.set_ylim(*ylim)
+    ax.grid(True, alpha=0.3, axis="y")
+
+
 def generate_plots(
     all_data: dict[str, dict],
     all_metrics: dict[str, dict],
@@ -417,37 +459,16 @@ def generate_plots(
     xlabels = [f"{lvl}\n(DR {int(DR_SCALE[lvl] * 100)}%)" for lvl in levels]
 
     ss_errors = [np.nanmean(all_metrics[lvl]["steady_state_errors"]) for lvl in levels]
-    axes[0, 0].bar(x, ss_errors, color=bar_colors)
-    axes[0, 0].set_xticks(x)
-    axes[0, 0].set_xticklabels(xlabels, fontsize=9)
-    axes[0, 0].set_ylabel("Error (deg)")
-    axes[0, 0].set_title("Steady-State Error (last 5s avg)")
-    axes[0, 0].grid(True, alpha=0.3, axis="y")
+    _bar_subplot(axes[0, 0], x, ss_errors, bar_colors, xlabels, "Error (deg)", "Steady-State Error (last 5s avg)")
 
     settle_times = [np.nanmean(all_metrics[lvl]["settling_times"]) for lvl in levels]
-    axes[0, 1].bar(x, settle_times, color=bar_colors)
-    axes[0, 1].set_xticks(x)
-    axes[0, 1].set_xticklabels(xlabels, fontsize=9)
-    axes[0, 1].set_ylabel("Time (s)")
-    axes[0, 1].set_title("Settling Time (<5 deg)")
-    axes[0, 1].grid(True, alpha=0.3, axis="y")
+    _bar_subplot(axes[0, 1], x, settle_times, bar_colors, xlabels, "Time (s)", "Settling Time (<5 deg)")
 
     total_errors = [all_metrics[lvl]["total_mean_error"] for lvl in levels]
-    axes[1, 0].bar(x, total_errors, color=bar_colors)
-    axes[1, 0].set_xticks(x)
-    axes[1, 0].set_xticklabels(xlabels, fontsize=9)
-    axes[1, 0].set_ylabel("Error (deg)")
-    axes[1, 0].set_title("Total Mean Error")
-    axes[1, 0].grid(True, alpha=0.3, axis="y")
+    _bar_subplot(axes[1, 0], x, total_errors, bar_colors, xlabels, "Error (deg)", "Total Mean Error")
 
     survivals = [all_metrics[lvl]["survival_rate"] for lvl in levels]
-    axes[1, 1].bar(x, survivals, color=bar_colors)
-    axes[1, 1].set_xticks(x)
-    axes[1, 1].set_xticklabels(xlabels, fontsize=9)
-    axes[1, 1].set_ylabel("Survival (%)")
-    axes[1, 1].set_title("Survival Rate")
-    axes[1, 1].set_ylim(0, 105)
-    axes[1, 1].grid(True, alpha=0.3, axis="y")
+    _bar_subplot(axes[1, 1], x, survivals, bar_colors, xlabels, "Survival (%)", "Survival Rate", ylim=(0, 105))
 
     fig3.tight_layout()
     fig3.savefig(os.path.join(output_dir, "summary.png"), dpi=150)
@@ -590,15 +611,16 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     # ---- Env config overrides (evaluation mode) ----
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.randomize_target_attitude = False
-    env_cfg.observation_noise_model = None
+    if hasattr(env_cfg, "observation_noise_model"):
+        env_cfg.observation_noise_model = None
     env_cfg.enable_payload = True
     # Terminate ONLY on excessive attitude deviation
     env_cfg.max_attitude_angle = 2.5  # ~143 deg absolute limit
     env_cfg.debug_vis = False
     env_cfg.seed = args_cli.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
-    if hasattr(env_cfg, "dr_curriculum"):
-        env_cfg.dr_curriculum.enable = False
+    if hasattr(env_cfg, "doraemon"):
+        env_cfg.doraemon.enable = False
     env_cfg.randomization.enable = True
 
     # Compute episode_length_s from the longest trajectory across all DR levels
@@ -624,11 +646,11 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         print(f"[INFO] Checkpoint: {resume_path}")
 
     # ---- Create env (initial DR = none) ----
-    apply_dr_preset(env_cfg, "none", is_tdc)
+    apply_dr_config(env_cfg, DR_SCALE["none"], is_tdc)
     env = gym.make(args_cli.task, cfg=env_cfg)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    raw_env = env.unwrapped
+    raw_env = unwrap_env(env)
     step_dt = raw_env.step_dt
     num_envs = raw_env.num_envs
     device = raw_env.device
@@ -638,7 +660,8 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     print(f"[INFO] DR scales: {DR_SCALE}")
 
     # ---- Create runner + load policy ----
-    is_sac_mpc = agent_cfg.class_name == "SACMPCRunner"
+    runner_cls_name = getattr(agent_cfg, "class_name", "OnPolicyRunner")
+    is_sac_mpc = runner_cls_name == "SACMPCRunner"
 
     if use_checkpoint and resume_path:
         if is_sac_mpc:
@@ -649,6 +672,16 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             runner.actor.eval()
             policy = runner.actor.act_inference
             policy_nn = runner.actor
+        elif runner_cls_name == "EncoderRunner":
+            runner = EncoderRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+            runner.load(resume_path, load_optimizer=False)
+            policy = runner.get_inference_policy(device=device)
+            policy_nn = runner.alg.actor_critic
+        elif runner_cls_name == "BaseRunner":
+            runner = BaseRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+            runner.load(resume_path, load_optimizer=False)
+            policy = runner.get_inference_policy(device=device)
+            policy_nn = runner.alg.actor_critic
         else:
             runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
             runner.load(resume_path, load_optimizer=False)
@@ -658,9 +691,8 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             except AttributeError:
                 policy_nn = runner.alg.actor_critic
 
-        if hasattr(policy_nn, "get_last_z") and hasattr(raw_env, "set_encoder_policy"):
-            raw_env.set_encoder_policy(policy_nn)
-            print("[INFO] Encoder policy connected to env.")
+        print(f"[INFO] Loaded {runner_cls_name} from {resume_path}")
+        connect_encoder_to_env(env, policy_nn, "EvalDR")
 
         # SAC-MPC: initialize prediction error buffer
         if hasattr(policy_nn, "_ensure_pred_error_buf"):
@@ -698,7 +730,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         print(f"  Trajectory: {len(segment_names)} segs x {args_cli.segment_duration}s = {len(time_s)} steps")
 
         # Apply DR preset
-        apply_dr_preset(raw_env.cfg, level, is_tdc)
+        apply_dr_config(raw_env.cfg, DR_SCALE[level], is_tdc)
 
         # Run evaluation
         data = run_evaluation(

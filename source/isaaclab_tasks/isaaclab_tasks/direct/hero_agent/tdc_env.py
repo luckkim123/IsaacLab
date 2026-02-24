@@ -29,7 +29,7 @@ from .base_env import HeroAgentEnv
 from .config import HeroAgentTDCEnvCfg
 from .controllers import ALBCKinematics, TDCController
 from .mdp import RewardTermCfg, compute_stability_gate, mhat_accuracy_reward, tdc_torque_penalty
-from .utils.logging import log_tdc_control_state, log_tdc_init, log_tdc_reset_info
+from .utils.logging import log_tdc_control_state, log_tdc_init
 
 
 class HeroAgentTDCEnv(HeroAgentEnv):
@@ -275,17 +275,6 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         Args:
             env_ids: Environment indices to reset. None = all.
         """
-        if self._log_interval > 0 and env_ids is not None and len(env_ids) < self.num_envs:
-            log_tdc_reset_info(
-                env_ids=env_ids,
-                terminated=self.reset_terminated,
-                time_outs=self.reset_time_outs,
-                root_pos_w=self._robot.data.root_pos_w,
-                env_origins=self.scene.env_origins,
-                episode_length_buf=self.episode_length_buf,
-                step_dt=self.step_dt,
-            )
-
         super()._reset_idx(env_ids)
 
         # Reset TDC controller history for reset environments

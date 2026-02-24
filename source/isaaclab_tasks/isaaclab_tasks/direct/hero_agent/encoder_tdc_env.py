@@ -79,22 +79,11 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
         self._run_tdc_pipeline()
 
     def _reset_idx(self, env_ids: torch.Tensor | None) -> None:
-        """Reset environments and restore default M_hat / gains.
+        """Reset environments and restore default M_hat.
 
         Args:
             env_ids: Environment indices to reset. None = all.
         """
         super()._reset_idx(env_ids)
-
-        # Reset M_hat to config defaults for clean episode start
         env_ids_ = self._coerce_env_ids(env_ids)
         self._reset_m_hat_defaults(env_ids_)
-
-        # Reset gains to TDC config defaults
-        kp_default = torch.tensor(self.cfg.tdc.kp, device=self.device, dtype=torch.float32)
-        kd_default = torch.tensor(self.cfg.tdc.kd, device=self.device, dtype=torch.float32)
-        self._tdc.update_gains(
-            kp=kp_default.unsqueeze(0).expand(len(env_ids_), -1),
-            kd=kd_default.unsqueeze(0).expand(len(env_ids_), -1),
-            env_ids=env_ids_,
-        )

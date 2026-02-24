@@ -118,8 +118,11 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for Hero Agent ALBC (Active Linear Buoyancy Controller).
 
     Optimized for 2-DOF joint control with potential-based rewards.
-    Uses standard ActorCritic without encoder.
+    Uses BaseRunner for DORAEMON DR scheduling and adaptive entropy.
+    No encoder -- serves as baseline for Encoder-Base comparison.
     """
+
+    class_name: str = "BaseRunner"
 
     seed = 42
     num_steps_per_env = 128
@@ -130,6 +133,7 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
+        noise_std_type="log",
         actor_obs_normalization=False,
         critic_obs_normalization=False,
         actor_hidden_dims=[256, 128, 64],
@@ -150,6 +154,32 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+
+    # -- Adaptive entropy (reward-reactive, matching Encoder-Base) --
+
+    adaptive_entropy: bool = True
+    """Enable reward-reactive entropy coefficient."""
+
+    entropy_base: float = 0.005
+    """Base entropy coefficient (used when reward is stable)."""
+
+    entropy_scale: float = 15.0
+    """Amplification factor: entropy = base * (1 + scale * boost)."""
+
+    entropy_min: float = 0.001
+    """Minimum entropy coefficient (floor)."""
+
+    entropy_max: float = 0.05
+    """Maximum entropy coefficient (ceiling). Allows stronger exploration under DR."""
+
+    entropy_fast_alpha: float = 0.1
+    """EMA alpha for fast reward tracker (~10 iteration response)."""
+
+    entropy_slow_alpha: float = 0.01
+    """EMA alpha for slow reward baseline (~100 iteration response)."""
+
+    entropy_std_target: float = 0.4
+    """Target mean_noise_std. Below this, entropy boost activates to resist collapse."""
 
 
 @configclass
@@ -195,6 +225,83 @@ class HeroAgentTDEBasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     )
 
     # -- Adaptive entropy (reward-reactive, axPPO-inspired) --
+
+    adaptive_entropy: bool = True
+    """Enable reward-reactive entropy coefficient."""
+
+    entropy_base: float = 0.005
+    """Base entropy coefficient (used when reward is stable)."""
+
+    entropy_scale: float = 15.0
+    """Amplification factor: entropy = base * (1 + scale * boost)."""
+
+    entropy_min: float = 0.001
+    """Minimum entropy coefficient (floor)."""
+
+    entropy_max: float = 0.05
+    """Maximum entropy coefficient (ceiling). Allows stronger exploration under DR."""
+
+    entropy_fast_alpha: float = 0.1
+    """EMA alpha for fast reward tracker (~10 iteration response)."""
+
+    entropy_slow_alpha: float = 0.01
+    """EMA alpha for slow reward baseline (~100 iteration response)."""
+
+    entropy_std_target: float = 0.4
+    """Target mean_noise_std. Below this, entropy boost activates to resist collapse."""
+
+
+@configclass
+class HeroAgentPrivBasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO configuration for Hero Agent with raw privileged info (ablation).
+
+    Uses standard ActorCritic with privileged observations concatenated directly
+    to the policy input (13D + 26D = 39D). No encoder compression.
+    Serves as ablation baseline to isolate encoder's contribution:
+        - Base (13D): no privileged info
+        - Priv-Base (39D): privileged concatenated, no encoder
+        - Encoder-Base (26D): privileged compressed via encoder
+    """
+
+    class_name: str = "BaseRunner"
+
+    seed = 42
+    num_steps_per_env = 128
+    max_iterations = 1500
+    save_interval = 50
+    experiment_name = "hero_agent_priv_base"
+    empirical_normalization = False
+
+    obs_groups = {
+        "policy": ["policy", "privileged"],
+        "critic": ["policy", "privileged"],
+    }
+
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        noise_std_type="log",
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.005,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
+
+    # -- Adaptive entropy (identical to Base and Encoder-Base) --
 
     adaptive_entropy: bool = True
     """Enable reward-reactive entropy coefficient."""
