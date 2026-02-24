@@ -203,7 +203,7 @@ class HeroAgentTDEBasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
     entropy_slow_alpha: float = 0.01
     """EMA alpha for slow reward baseline (~100 iteration response)."""
 
-    entropy_std_target: float = 0.4
+    entropy_std_target: float = 0.8
     """Target mean_noise_std. Below this, entropy boost activates to resist collapse."""
 
 
@@ -276,7 +276,7 @@ class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     entropy_slow_alpha: float = 0.01
     """EMA alpha for slow reward baseline (~100 iteration response)."""
 
-    entropy_std_target: float = 0.4
+    entropy_std_target: float = 0.8
     """Target mean_noise_std. Below this, entropy boost activates to resist collapse."""
 
 

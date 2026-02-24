@@ -60,8 +60,8 @@ class ALBCRewardCfg:
 
     # Tracking (Gaussian kernel)
     tracking_weight: float = 3.0
-    tracking_sigma: float = 0.25  # final sigma (14.3deg 1/e point, keeps gradient alive under DR)
-    tracking_sigma_start: float | None = 0.5  # sigma curriculum start
+    tracking_sigma: float = 0.25  # fixed sigma (14.3deg 1/e point, keeps gradient alive under DR)
+    tracking_sigma_start: float | None = None  # sigma curriculum OFF (root cause of DR death spiral)
     tracking_sigma_mid: float | None = None  # single-phase linear annealing (no mid-point)
     sigma_phase1_fraction: float = 0.7  # unused when mid=None
 
@@ -82,7 +82,7 @@ class ALBCRewardCfg:
 
     # Progress (potential-based shaping): PBRS (Ng 1999) preserves optimal policy.
     # NOT dt-scaled. Set to 0.0 when linear_error provides gradient everywhere.
-    progress_weight: float = 0.0
+    progress_weight: float = 1.0
     progress_scale: float = 0.01
     progress_mode: str = "pbrs"  # "tanh" or "pbrs" (SAC-safe, policy-preserving)
     progress_gamma: float = 0.99  # discount factor for PBRS (match PPO gamma)

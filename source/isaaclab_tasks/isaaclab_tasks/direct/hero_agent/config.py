@@ -62,15 +62,15 @@ class DomainRandomizationCfg:
     position_z_range: tuple[float, float] = (4.0, 5.0)
 
     # -- Initial Orientation (radians) --
-    roll_range: tuple[float, float] = (-0.785, 0.785)
-    pitch_range: tuple[float, float] = (-0.785, 0.785)
+    roll_range: tuple[float, float] = (-0.524, 0.524)   # +-30 deg (was +-45)
+    pitch_range: tuple[float, float] = (-0.524, 0.524)   # +-30 deg (was +-45)
     yaw_range: tuple[float, float] = (-math.pi, math.pi)
 
     # -- Hydrodynamic Parameter Scales --
-    added_mass_scale: tuple[float, float] = (0.8, 1.2)
-    linear_damping_scale: tuple[float, float] = (0.7, 1.3)
-    quadratic_damping_scale: tuple[float, float] = (0.6, 1.4)
-    volume_scale: tuple[float, float] = (0.85, 1.15)
+    added_mass_scale: tuple[float, float] = (0.85, 1.15)  # was (0.8, 1.2)
+    linear_damping_scale: tuple[float, float] = (0.8, 1.2)  # was (0.7, 1.3)
+    quadratic_damping_scale: tuple[float, float] = (0.7, 1.3)  # was (0.6, 1.4)
+    volume_scale: tuple[float, float] = (0.9, 1.1)  # was (0.85, 1.15)
 
     # -- Center of Buoyancy Offset (meters) --
     cob_offset_x: tuple[float, float] = (-0.01, 0.01)
@@ -82,11 +82,11 @@ class DomainRandomizationCfg:
     cog_offset_y: tuple[float, float] = (-0.01, 0.01)
     cog_offset_z: tuple[float, float] = (-0.02, 0.02)
 
-    # -- Inertia (moderate: max ratio M_true/M_hat ~2.1, near TDE stability boundary) --
-    inertia_scale: tuple[float, float] = (0.7, 1.5)
+    # -- Inertia (max ratio M_true/M_hat ~1.7, reduced from ~2.1) --
+    inertia_scale: tuple[float, float] = (0.75, 1.3)
 
     # -- Body Mass Scale (applied uniformly to all bodies) --
-    body_mass_scale: tuple[float, float] = (0.85, 1.15)
+    body_mass_scale: tuple[float, float] = (0.9, 1.1)  # was (0.85, 1.15)
 
     # -- Water Density (kg/m^3) --
     water_density_range: tuple[float, float] = (995.0, 1025.0)
@@ -97,8 +97,8 @@ class DomainRandomizationCfg:
     joint_damping_range: tuple[float, float] = (2.4, 3.6)
 
     # -- Joint Friction --
-    joint_static_friction_range: tuple[float, float] = (0.0, 0.05)
-    joint_viscous_friction_range: tuple[float, float] = (0.0, 0.3)
+    joint_static_friction_range: tuple[float, float] = (0.0, 0.03)  # was (0.0, 0.05)
+    joint_viscous_friction_range: tuple[float, float] = (0.0, 0.2)  # was (0.0, 0.3)
 
     def disable_all(
         self,
@@ -210,12 +210,27 @@ class DRCurriculumCfg:
     perturbation_force_range_start: tuple[float, float] = (0.0, 1.5)
     perturbation_torque_range_start: tuple[float, float] = (0.0, 0.2)
 
-    # Episode-level DR start ranges (baseline-equivalent)
-    inertia_scale_start: tuple[float, float] = (0.85, 1.15)
-    body_mass_scale_start: tuple[float, float] = (0.92, 1.08)
-    volume_scale_start: tuple[float, float] = (0.92, 1.08)
-    added_mass_scale_start: tuple[float, float] = (0.92, 1.08)
+    # Episode-level DR start ranges (near-nominal, ramp to full)
+    inertia_scale_start: tuple[float, float] = (0.9, 1.1)
+    body_mass_scale_start: tuple[float, float] = (0.95, 1.05)
+    volume_scale_start: tuple[float, float] = (0.95, 1.05)
+    added_mass_scale_start: tuple[float, float] = (0.95, 1.05)
     payload_mass_range_start: tuple[float, float] = (0.0, 0.2)
+
+    # Hydrodynamic damping (start near nominal, ramp to full range)
+    linear_damping_scale_start: tuple[float, float] = (0.92, 1.08)
+    quadratic_damping_scale_start: tuple[float, float] = (0.88, 1.12)
+    water_density_range_start: tuple[float, float] = (997.0, 1003.0)
+
+    # Joint actuator start ranges (near asset defaults: stiffness=100, damping=3)
+    joint_stiffness_range_start: tuple[float, float] = (96.0, 104.0)
+    joint_damping_range_start: tuple[float, float] = (2.85, 3.15)
+    joint_static_friction_range_start: tuple[float, float] = (0.0, 0.005)
+    joint_viscous_friction_range_start: tuple[float, float] = (0.0, 0.03)
+
+    # Initial orientation start ranges (mild tilt, ramp to full +-30 deg)
+    roll_range_start: tuple[float, float] = (-0.17, 0.17)   # +-10 deg
+    pitch_range_start: tuple[float, float] = (-0.17, 0.17)   # +-10 deg
 
     # High-impact stability parameters (start near nominal, ramp to full range)
     cog_offset_z_start: tuple[float, float] = (-0.008, 0.008)
@@ -418,18 +433,36 @@ class HeroAgentTDEBaseEnvCfg(HeroAgentTrainEnvCfg):
 
 @configclass
 class HeroAgentTDEBaseDebugEnvCfg(HeroAgentTDEBaseEnvCfg):
-    """TDE-Base with DR disabled for diagnostic experiments.
+    """TDE-Base with half-strength DR and no curriculum for diagnostics.
 
-    Identical to TDE-Base except: DR off, no payload, no target randomization,
-    no sensor noise. If error diverges here, the reward design is broken
-    (not a DR interaction issue).
+    DR enabled at ~50% of full range (narrower scales, smaller offsets).
+    No DR curriculum (constant DR from start). Everything else identical
+    to TDE-Base (payload, target randomization, sensor noise all active).
+
+    If error diverges here, the reward design cannot handle even mild DR.
+    If it converges, full DR or curriculum ramp is the issue.
     """
 
-    randomization: DomainRandomizationCfg = DomainRandomizationCfg()  # enable=False
-    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg()  # enable=False
-    enable_payload: bool = False
-    randomize_target_attitude: bool = False
-    observation_noise_model: None = None
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg(
+        enable=True,
+        # Half-strength hydrodynamic scales (midpoint between 1.0 and full range)
+        added_mass_scale=(0.9, 1.1),         # full: (0.8, 1.2)
+        linear_damping_scale=(0.85, 1.15),    # full: (0.7, 1.3)
+        quadratic_damping_scale=(0.8, 1.2),   # full: (0.6, 1.4)
+        volume_scale=(0.92, 1.08),            # full: (0.85, 1.15)
+        inertia_scale=(0.85, 1.25),           # full: (0.7, 1.5)
+        body_mass_scale=(0.92, 1.08),         # full: (0.85, 1.15)
+        # Half-strength offsets
+        cob_offset_z=(-0.01, 0.01),           # full: (-0.02, 0.02)
+        cog_offset_z=(-0.01, 0.01),           # full: (-0.02, 0.02)
+        # Joint gains: narrower range around nominal
+        joint_stiffness_range=(90.0, 110.0),  # full: (80, 120)
+        joint_damping_range=(2.7, 3.3),       # full: (2.4, 3.6)
+        # Joint friction: half
+        joint_static_friction_range=(0.0, 0.025),   # full: (0.0, 0.05)
+        joint_viscous_friction_range=(0.0, 0.15),    # full: (0.0, 0.3)
+    )
+    dr_curriculum: DRCurriculumCfg = DRCurriculumCfg()  # enable=False (no curriculum)
 
 
 # =============================================================================

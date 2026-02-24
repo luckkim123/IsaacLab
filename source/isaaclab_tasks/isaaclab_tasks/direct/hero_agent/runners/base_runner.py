@@ -167,8 +167,8 @@ class BaseRunner(OnPolicyRunner):
         new_coef = cfg["base"] * (1.0 + cfg["scale"] * boost)
         self.alg.entropy_coef = max(cfg["min"], min(cfg["max"], new_coef))
 
-        # Direct noise_std floor: prevent exploration collapse during DR ramp.
-        min_std = 0.25
+        # Direct noise_std floor: prevents exploration collapse under DR.
+        min_std = 0.1
         if hasattr(self.alg.policy, "log_std"):
             min_log_std = torch.log(torch.tensor(min_std, device=self.device))
             self.alg.policy.log_std.data.clamp_(min=min_log_std)
