@@ -38,7 +38,7 @@ from .mdp import (
     RewardManager,
     RewardTermCfg,
     action_magnitude_penalty,
-    action_rate_penalty,
+    action_oscillation_penalty,
     angular_velocity_penalty,
     compute_policy_obs,
     compute_privileged_obs,
@@ -281,8 +281,8 @@ class HeroAgentEnv(DirectRLEnv):
         Base terms (4):
             1. tracking: Gaussian kernel exp(-e^2/sigma^2), dt-scaled
             2. progress: potential-based shaping (prev-curr), NOT dt-scaled
-            3. action_magnitude: squared action penalty, dt-scaled
-            4. action_rate: squared delta-action penalty, NOT dt-scaled, curriculum
+            3. action_magnitude: ||da||^2 (1st derivative), NOT dt-scaled, curriculum
+            4. action_oscillation: ||d^2a||^2 (2nd derivative), NOT dt-scaled, curriculum
         """
         rcfg = self.cfg.reward
         tracking_params = {"sigma": rcfg.tracking_sigma}
@@ -300,12 +300,14 @@ class HeroAgentEnv(DirectRLEnv):
             "action_magnitude": RewardTermCfg(
                 func=action_magnitude_penalty,
                 weight=rcfg.action_magnitude_weight,
+                scale_by_dt=False,
+                curriculum_start_weight=rcfg.action_magnitude_weight / 10.0,
             ),
-            "action_rate": RewardTermCfg(
-                func=action_rate_penalty,
-                weight=rcfg.action_rate_weight,
-                scale_by_dt=False,  # per-step delta naturally scales with frequency
-                curriculum_start_weight=rcfg.action_rate_weight / 10.0,
+            "action_oscillation": RewardTermCfg(
+                func=action_oscillation_penalty,
+                weight=rcfg.action_oscillation_weight,
+                scale_by_dt=False,
+                curriculum_start_weight=rcfg.action_oscillation_weight / 10.0,
             ),
         }
         if rcfg.progress_weight != 0.0:
@@ -404,6 +406,7 @@ class HeroAgentEnv(DirectRLEnv):
         # Action buffers
         self._actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
         self._prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
+        self._prev_prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
         self._prev_actions_obs = torch.zeros(self.num_envs, 2, device=self.device)
         self._joint_pos_targets = torch.zeros(self.num_envs, 2, device=self.device)
         # Global step counter (not per-env). With control_decimation=1 (default),
@@ -523,6 +526,7 @@ class HeroAgentEnv(DirectRLEnv):
             actions: Raw actions from RL. Shape: (num_envs, action_space).
             obs_action_slice: Slice for _prev_actions_obs. None = full clone.
         """
+        self._prev_prev_actions = self._prev_actions.clone()
         self._prev_actions = self._actions.clone()
         self._actions = actions.clone().clamp(-1.0, 1.0)
         if obs_action_slice is not None:
@@ -803,6 +807,7 @@ class HeroAgentEnv(DirectRLEnv):
             dt=self.step_dt,
             actions=self._actions,
             prev_actions=self._prev_actions,
+            prev_prev_actions=self._prev_prev_actions,
             env=self,  # Pass env for accessing potentials
         )
 
@@ -878,14 +883,16 @@ class HeroAgentEnv(DirectRLEnv):
         printing periodic summaries during play without needing episode resets.
 
         Returns:
-            Dict with keys: attitude_error_deg, action_magnitude, action_rate,
-            angular_velocity_rms, joint_pos (mean absolute).
+            Dict with keys: attitude_error_deg, action_magnitude,
+            action_oscillation, angular_velocity_rms.
         """
         err = self._attitude_error[:, :2]
+        da = self._actions - self._prev_actions
+        d2a = self._actions - 2.0 * self._prev_actions + self._prev_prev_actions
         return {
             "attitude_error_deg": torch.rad2deg(torch.linalg.norm(err, dim=-1)).mean().item(),
-            "action_magnitude": torch.linalg.norm(self._actions, dim=-1).mean().item(),
-            "action_rate": torch.linalg.norm(self._actions - self._prev_actions, dim=-1).mean().item(),
+            "action_magnitude": torch.linalg.norm(da, dim=-1).mean().item(),
+            "action_oscillation": torch.linalg.norm(d2a, dim=-1).mean().item(),
             "angular_velocity_rms": self._robot.data.root_ang_vel_b[:, :2].pow(2).mean().sqrt().item(),
         }
 
@@ -963,7 +970,7 @@ class HeroAgentEnv(DirectRLEnv):
             max_jitter = max(1, int(self.max_episode_length * 0.1))
             self.episode_length_buf[env_ids] = torch.randint_like(self.episode_length_buf[env_ids], high=max_jitter)
 
-        for buf in (self._actions, self._prev_actions, self._prev_actions_obs):
+        for buf in (self._actions, self._prev_actions, self._prev_prev_actions, self._prev_actions_obs):
             buf[env_ids] = 0.0
         self._cumulative_effort[env_ids] = 0.0
 

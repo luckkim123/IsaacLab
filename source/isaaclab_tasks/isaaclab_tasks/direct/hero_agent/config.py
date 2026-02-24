@@ -70,23 +70,23 @@ class DomainRandomizationCfg:
     added_mass_scale: tuple[float, float] = (0.8, 1.2)
     linear_damping_scale: tuple[float, float] = (0.7, 1.3)
     quadratic_damping_scale: tuple[float, float] = (0.6, 1.4)
-    volume_scale: tuple[float, float] = (0.7, 1.3)
+    volume_scale: tuple[float, float] = (0.85, 1.15)
 
     # -- Center of Buoyancy Offset (meters) --
     cob_offset_x: tuple[float, float] = (-0.01, 0.01)
     cob_offset_y: tuple[float, float] = (-0.01, 0.01)
-    cob_offset_z: tuple[float, float] = (-0.04, 0.04)
+    cob_offset_z: tuple[float, float] = (-0.02, 0.02)
 
     # -- Center of Gravity Offset (meters) --
     cog_offset_x: tuple[float, float] = (-0.01, 0.01)
     cog_offset_y: tuple[float, float] = (-0.01, 0.01)
-    cog_offset_z: tuple[float, float] = (-0.06, 0.06)
+    cog_offset_z: tuple[float, float] = (-0.02, 0.02)
 
-    # -- Inertia (aggressive: push beyond TDE stability boundary M_true/M_hat > 2) --
-    inertia_scale: tuple[float, float] = (0.4, 2.5)
+    # -- Inertia (moderate: max ratio M_true/M_hat ~2.1, near TDE stability boundary) --
+    inertia_scale: tuple[float, float] = (0.7, 1.5)
 
     # -- Body Mass Scale (applied uniformly to all bodies) --
-    body_mass_scale: tuple[float, float] = (0.7, 1.3)
+    body_mass_scale: tuple[float, float] = (0.85, 1.15)
 
     # -- Water Density (kg/m^3) --
     water_density_range: tuple[float, float] = (995.0, 1025.0)
@@ -155,8 +155,7 @@ class DomainRandomizationCfg:
             cog_offset_z=(0.0, 0.0),
             enable_perturbation=False,
             action_latency_range=(0, 0),
-            payload_cog_offset_x=(0.0, 0.0),
-            payload_cog_offset_y=(0.0, 0.0),
+            payload_cog_offset_xy_radius=0.0,
             payload_cog_offset_z=(0.0, 0.0),
             payload_mass_range=(0.5, 0.5),
         )
@@ -167,8 +166,8 @@ class DomainRandomizationCfg:
     # Models: tether tension variation, sudden current changes, contact forces.
     # ==========================================================================
     enable_perturbation: bool = True
-    perturbation_force_range: tuple[float, float] = (0.0, 10.0)  # N (Hero Agent ~10kg -> 1.0 m/s^2 max)
-    perturbation_torque_range: tuple[float, float] = (0.0, 1.5)  # Nm (10N x 0.15m half-body)
+    perturbation_force_range: tuple[float, float] = (0.0, 5.0)  # N (Hero Agent ~10kg -> 0.5 m/s^2 max)
+    perturbation_torque_range: tuple[float, float] = (0.0, 0.75)  # Nm (5N x 0.15m half-body)
     perturbation_interval: int = 100  # physics steps between events (~0.5s at 200Hz)
     perturbation_duration: int = 20  # physics steps active (~0.1s)
 
@@ -187,9 +186,9 @@ class DomainRandomizationCfg:
     payload_mass_range: tuple[float, float] = (0.0, 1.5)  # kg (up to ~15% body weight)
 
     # -- Payload CoG Offset (meters, relative to attachment point) --
-    payload_cog_offset_x: tuple[float, float] = (-0.30, 0.30)
-    payload_cog_offset_y: tuple[float, float] = (-0.30, 0.30)
-    payload_cog_offset_z: tuple[float, float] = (-0.20, 0.0)
+    # XY sampled uniformly in disk of radius payload_cog_offset_xy_radius.
+    payload_cog_offset_xy_radius: float = 0.10
+    payload_cog_offset_z: tuple[float, float] = (-0.03, 0.0)
 
     # Physical constant: CoG-to-ABPC vertical offset for buoy moment calculation.
     # Used to limit payload CoG offset so max payload moment <= buoy restoring moment.
@@ -205,7 +204,7 @@ class DRCurriculumCfg:
     """
 
     enable: bool = False
-    end_iter: int = 1000
+    end_iter: int = 2000
 
     # Per-step perturbation start ranges (baseline-equivalent, ramp to full)
     perturbation_force_range_start: tuple[float, float] = (0.0, 1.5)
@@ -347,8 +346,8 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
 
     randomization = DomainRandomizationCfg(enable=True)
 
-    # DR curriculum: baseline-equivalent start -> full DR over 1000 iters.
-    # Defaults in DRCurriculumCfg are the new baseline-equivalent values.
+    # DR curriculum: baseline-equivalent start -> full DR over end_iter.
+    # Single source of truth: reward sigma/weight curricula also follow end_iter.
     # Shared by all training envs (Base, Encoder, TDC, Adapt).
     dr_curriculum: DRCurriculumCfg = DRCurriculumCfg(enable=True)
     ocean_current = OceanCurrentCfg(
@@ -396,6 +395,27 @@ class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
     """
 
     state_space: int = 26
+
+
+@configclass
+class HeroAgentTDEBaseEnvCfg(HeroAgentTrainEnvCfg):
+    """Hero Agent TDE-Base: base RL with TDE dynamics mismatch observation.
+
+    Adds 2D H_hat observation (roll/pitch dynamics mismatch) to the standard
+    13D policy obs, giving the policy direct access to unmodeled dynamics
+    without requiring an encoder or adaptation module.
+
+    H_hat = Lambda*p_EE + T_b - M_bar*nu_dot encodes: inertia error, coupling,
+    Coriolis, damping, and external disturbances. Computable from onboard
+    sensors (IMU + joint encoders) in both sim and real.
+
+    observation_space = 15 (13D policy + 2D TDE, auto-adjusted by __init__).
+    No privileged info (state_space=0): encoder-free pipeline.
+    """
+
+    # observation_space stays at 13 (inherited); __init__ auto-increments by 2
+    # when enable_tde_obs=True, and also pads the noise config accordingly.
+    enable_tde_obs: bool = True
 
 
 # =============================================================================

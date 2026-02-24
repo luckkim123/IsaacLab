@@ -9,6 +9,7 @@ This module provides:
     - ActorCriticEncoder: Custom network for HORA Phase 1 teacher training
     - ActorCriticEncoderAdapt: Phase 2 adaptation (proprio history -> z_hat)
     - HeroAgentPPORunnerCfg: Standard PPO for joint-based attitude control
+    - HeroAgentTDEBasePPORunnerCfg: TDE-Base with training enhancements
     - HeroAgentEncoderPPORunnerCfg: HORA Phase 1 with extrinsics encoder
     - HeroAgentAdaptBaseRunnerCfg: Phase 2 adaptation (supervised, base RL)
 
@@ -20,6 +21,7 @@ from .rsl_rl_ppo_cfg import (
     HeroAgentAdaptBaseRunnerCfg,
     HeroAgentEncoderPPORunnerCfg,
     HeroAgentPPORunnerCfg,
+    HeroAgentTDEBasePPORunnerCfg,
     RslRlPpoActorCriticEncoderAdaptCfg,
     RslRlPpoActorCriticEncoderCfg,
 )
@@ -28,6 +30,7 @@ __all__ = [
     "ActorCriticEncoder",
     "ActorCriticEncoderAdapt",
     "HeroAgentPPORunnerCfg",
+    "HeroAgentTDEBasePPORunnerCfg",
     "HeroAgentEncoderPPORunnerCfg",
     "HeroAgentAdaptBaseRunnerCfg",
     "RslRlPpoActorCriticEncoderCfg",

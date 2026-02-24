@@ -443,16 +443,20 @@ def randomize_payload(
     env._payload_attachment_offset[env_ids] = base_offset.unsqueeze(0)
 
     # Randomize CoG offset (relative to attachment point)
+    # XY: uniform in disk of radius payload_cog_offset_xy_radius
+    # Z: uniform in payload_cog_offset_z range
     if env._payload_cog_offset is not None:
-        _apply_xyz_offset(
-            env._payload_cog_offset,
-            env_ids,
-            torch.zeros(3, device=device),
-            rand_cfg.payload_cog_offset_x,
-            rand_cfg.payload_cog_offset_y,
-            rand_cfg.payload_cog_offset_z,
-            device,
-        )
+        r_max = rand_cfg.payload_cog_offset_xy_radius
+        if r_max > 0:
+            angle = torch.rand(num_reset, device=device) * 2.0 * torch.pi
+            radius = r_max * torch.sqrt(torch.rand(num_reset, device=device))
+            env._payload_cog_offset[env_ids, 0] = radius * torch.cos(angle)
+            env._payload_cog_offset[env_ids, 1] = radius * torch.sin(angle)
+        else:
+            env._payload_cog_offset[env_ids, 0] = 0.0
+            env._payload_cog_offset[env_ids, 1] = 0.0
+        z_lo, z_hi = rand_cfg.payload_cog_offset_z
+        env._payload_cog_offset[env_ids, 2] = _rand_uniform_range(num_reset, (z_lo, z_hi), device)
 
         # Clamp effective offset so max payload moment <= buoy restoring moment.
         # Constraint: m * g * |r_eff| <= F_bu * h

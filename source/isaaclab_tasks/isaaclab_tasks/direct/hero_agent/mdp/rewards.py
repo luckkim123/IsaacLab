@@ -10,13 +10,14 @@ support, and reward functions for ALBC (joint-based attitude control) training.
 
 Reward design principles:
     - Gaussian kernel tracking + settling bonus dominate: positive rewards in
-      [0,1] provide dense gradient. Penalties are tiny regularizers (~2.5% of
-      tracking+settling at max actions) to avoid suppressing exploration.
-    - dt-scaling: state-quality terms (tracking, settling, action_magnitude) are
-      dt-scaled; action rate is NOT dt-scaled (per-step delta scales with frequency).
+      [0,1] provide dense gradient. Penalties are tiny regularizers to avoid
+      suppressing exploration.
+    - dt-scaling: state-quality terms (tracking, settling) are dt-scaled;
+      action_magnitude and action_oscillation are NOT dt-scaled (per-step
+      deltas naturally scale with frequency).
     - PBRS progress shaping (Ng 1999): preserves optimal policy guarantee.
-    - Sigma curriculum: two-phase annealing 0.5 -> 0.25 (70%) -> 0.10 (100%)
-      for initial broad basin, then sub-5-degree precision.
+    - Sigma curriculum: single-phase linear annealing 0.5 -> 0.25 over curriculum.
+      Final sigma 0.25 keeps gradient alive under aggressive DR.
 """
 
 from __future__ import annotations
@@ -48,31 +49,34 @@ class ALBCRewardCfg:
 
     Reward = tracking * w_t * dt
            + settling * w_s * dt
-           + action_magnitude * w_am * dt
-           + action_rate * w_ar
+           + action_magnitude * w_am  (NOT dt-scaled)
+           + action_oscillation * w_ao  (NOT dt-scaled)
            + progress (PBRS)
 
     Design: tracking + settling dominate (positive, [0,1]). Penalties are tiny
-    regularizers (~2.5% of tracking+settling at max actions), following the
-    principle that penalty << primary objective to avoid suppressing exploration.
+    regularizers, following the principle that penalty << primary objective
+    to avoid suppressing exploration.
     """
 
     # Tracking (Gaussian kernel)
     tracking_weight: float = 3.0
-    tracking_sigma: float = 0.10  # final sigma (was 0.25, narrowed for sub-5-deg precision)
+    tracking_sigma: float = 0.25  # final sigma (14.3deg 1/e point, keeps gradient alive under DR)
     tracking_sigma_start: float | None = 0.5  # sigma curriculum start
-    tracking_sigma_mid: float | None = 0.25  # two-phase: start->mid->end
-    sigma_phase1_fraction: float = 0.7  # fraction of curriculum for phase 1 (start->mid)
+    tracking_sigma_mid: float | None = None  # single-phase linear annealing (no mid-point)
+    sigma_phase1_fraction: float = 0.7  # unused when mid=None
 
-    # Action magnitude penalty (dt-scaled)
-    action_magnitude_weight: float = -0.2
+    # Action magnitude penalty: ||a_t - a_{t-1}||^2 (penalizes large changes)
+    # NOT dt-scaled (per-step delta naturally scales with frequency).
+    action_magnitude_weight: float = -0.01
 
-    # Action rate penalty (NOT dt-scaled, curriculum: starts at 1/10)
-    action_rate_weight: float = -0.01
+    # Action oscillation penalty: ||a_t - 2*a_{t-1} + a_{t-2}||^2 (2nd derivative)
+    # Specifically targets direction reversals (high-frequency oscillation).
+    # NOT dt-scaled.
+    action_oscillation_weight: float = -0.01
 
     # Progress (potential-based shaping): PBRS (Ng 1999) preserves optimal policy.
     # NOT dt-scaled.
-    progress_weight: float = 1.2
+    progress_weight: float = 0.3
     progress_scale: float = 0.01
     progress_mode: str = "pbrs"  # "tanh" or "pbrs" (SAC-safe, policy-preserving)
     progress_gamma: float = 0.99  # discount factor for PBRS (match PPO gamma)
@@ -326,15 +330,15 @@ def tracking_reward(
     return torch.exp(-err_sq / (sigma**2))
 
 
-def action_rate_penalty(
+def action_magnitude_penalty(
     _robot: Articulation,
     actions: torch.Tensor,
     prev_actions: torch.Tensor,
     **_kwargs,
 ) -> torch.Tensor:
-    """Mean of squared action differences between consecutive steps.
+    """Mean of squared action differences: ||a_t - a_{t-1}||^2.
 
-    Penalizes abrupt action changes to encourage smooth control.
+    Penalizes large action changes (magnitude of delta).
     Uses mean (not sum) so the penalty magnitude is independent of action_space dim.
     NOT dt-scaled: per-step delta naturally scales with frequency.
     Use with negative weight.
@@ -342,17 +346,22 @@ def action_rate_penalty(
     return torch.mean((actions - prev_actions) ** 2, dim=-1)
 
 
-def action_magnitude_penalty(
+def action_oscillation_penalty(
     _robot: Articulation,
     actions: torch.Tensor,
+    prev_actions: torch.Tensor,
+    prev_prev_actions: torch.Tensor,
     **_kwargs,
 ) -> torch.Tensor:
-    """Mean of squared actions. Penalizes large control effort.
+    """Mean of squared second derivative: ||a_t - 2*a_{t-1} + a_{t-2}||^2.
 
+    Specifically targets oscillation (direction reversals). A smooth ramp
+    has zero second derivative; oscillation produces large values.
     Uses mean (not sum) so the penalty magnitude is independent of action_space dim.
-    dt-scaled (instantaneous quality measure). Use with negative weight.
+    NOT dt-scaled. Use with negative weight.
     """
-    return torch.mean(actions**2, dim=-1)
+    second_diff = actions - 2.0 * prev_actions + prev_prev_actions
+    return torch.mean(second_diff**2, dim=-1)
 
 
 def progress_reward(

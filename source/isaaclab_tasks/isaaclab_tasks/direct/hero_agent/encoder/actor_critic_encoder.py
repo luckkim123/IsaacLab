@@ -8,13 +8,14 @@
 This module provides the encoder-based actor-critic network:
     - ActorCriticEncoder: Base encoder network (Phase 1 teacher training)
 
-Architecture:
+Architecture (symmetric critic):
     Encoder: privileged (26D) -> MLP [256, 128, 64] -> z (13D)
     Actor:   cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> actions
     Critic:  cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> value (1D)
 
-Note: Critic does NOT receive privileged info directly (symmetric with actor).
-This forces the encoder to compress useful information into z.
+Both actor and critic see z from the encoder (symmetric design, HORA/RMA standard).
+The encoder receives gradient from both actor loss and critic loss, ensuring
+the encoder learns meaningful representations even early in training.
 
 Reference:
     - HORA: Heuristic-Free Online Robust Adaptation (Qi et al., 2023)
@@ -43,14 +44,18 @@ class ActorCriticEncoder(nn.Module):
 
     The encoder compresses privileged information into a bounded latent vector z.
 
+    Symmetric critic design (HORA/RMA standard):
+        Actor:  cat([policy_obs, z]) -- encoder must compress privileged into z
+        Critic: cat([policy_obs, z]) -- also sees z, encoder gets gradient from both
+
+    The encoder receives gradient from both actor loss and critic value loss.
+    This ensures the encoder learns meaningful z representations, unlike the
+    asymmetric design where the critic bypasses the encoder (causing encoder death).
+
     Activation modes:
         - "tanh": z = tanh(raw) in [-1, 1]. Built into MLP last layer. Default (matches HORA).
         - "sigmoid": z = z_min + sigmoid(raw) * (z_max - z_min). Bounded in [z_min, z_max].
         - "softplus": z = softplus(raw) + z_min. Legacy, can collapse to z_min.
-
-    Gradient flow: During PPO update, stored observations are replayed through
-    the full network (encoder + actor/critic), so encoder gradients flow via
-    both actor and critic loss backpropagation.
     """
 
     is_recurrent: bool = False
@@ -160,30 +165,27 @@ class ActorCriticEncoder(nn.Module):
 
         logger.info("Encoder MLP: %s", self.encoder)
 
-        # Actor/Critic input: policy_obs + z (symmetric design)
-        # Note: Privileged info is NOT passed to critic to force encoder learning.
-        # If critic receives privileged directly, it ignores z and encoder collapses.
-        num_combined_obs = policy_obs_dim + encoder_latent_dim
+        # Actor input: policy_obs + z (encoder compressed)
+        num_actor_obs = policy_obs_dim + encoder_latent_dim
 
         # Actor
         actor_output = [2, num_actions] if self.state_dependent_std else num_actions
-        self.actor = MLP(num_combined_obs, actor_output, list(actor_hidden_dims), activation)
+        self.actor = MLP(num_actor_obs, actor_output, list(actor_hidden_dims), activation)
         logger.info("Actor MLP: %s", self.actor)
 
         # Actor observation normalization (applied to actor input: policy_obs + z)
         self.actor_obs_normalization = actor_obs_normalization
-        self.actor_obs_normalizer = (
-            EmpiricalNormalization(num_combined_obs) if actor_obs_normalization else nn.Identity()
-        )
+        self.actor_obs_normalizer = EmpiricalNormalization(num_actor_obs) if actor_obs_normalization else nn.Identity()
 
-        # Critic
-        self.critic = MLP(num_combined_obs, 1, list(critic_hidden_dims), activation)
-        logger.info("Critic MLP: %s", self.critic)
+        # Critic input: policy_obs + z (symmetric, shares encoder with actor)
+        num_critic_obs = policy_obs_dim + encoder_latent_dim
+        self.critic = MLP(num_critic_obs, 1, list(critic_hidden_dims), activation)
+        logger.info("Critic MLP (symmetric, %dD input): %s", num_critic_obs, self.critic)
 
         # Critic observation normalization (applied to critic input: policy_obs + z)
         self.critic_obs_normalization = critic_obs_normalization
         self.critic_obs_normalizer = (
-            EmpiricalNormalization(num_combined_obs) if critic_obs_normalization else nn.Identity()
+            EmpiricalNormalization(num_critic_obs) if critic_obs_normalization else nn.Identity()
         )
 
         # Action noise
@@ -271,11 +273,22 @@ class ActorCriticEncoder(nn.Module):
             return self.encoder(normalized)
         return self._activate_z(self.encoder(normalized))
 
-    def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
-        """Get combined observation: cat([policy_obs, z]).
+    def _get_actor_obs(self, obs: TensorDict) -> torch.Tensor:
+        """Actor observation: cat([policy_obs, z_from_encoder]).
 
-        Both actor and critic use the same combined observation (symmetric design).
-        Critic does NOT receive privileged info directly to force encoder learning.
+        The actor sees privileged info only through the encoder's compressed
+        latent z, forcing the encoder to learn useful representations.
+        """
+        policy_obs = obs[self._policy_obs_key]
+        z = self._encode(obs[self._privileged_key])
+        return torch.cat([policy_obs, z], dim=-1)
+
+    def _get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
+        """Critic observation: cat([policy_obs, z_from_encoder]).
+
+        Symmetric design: critic sees z (same as actor), so encoder receives
+        gradient from both actor loss and critic loss. This is the standard
+        HORA/RMA architecture.
         """
         policy_obs = obs[self._policy_obs_key]
         z = self._encode(obs[self._privileged_key])
@@ -316,20 +329,20 @@ class ActorCriticEncoder(nn.Module):
 
     def act(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
         """Sample an action from the policy distribution."""
-        actor_obs = self.actor_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
+        actor_obs = self.actor_obs_normalizer(self._get_actor_obs(obs))  # type: ignore[operator]
         self._update_distribution(actor_obs)
         assert self.distribution is not None
         return self.distribution.sample()
 
     def act_inference(self, obs: TensorDict) -> torch.Tensor:
         """Get deterministic action (mean) for inference."""
-        actor_obs = self.actor_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
+        actor_obs = self.actor_obs_normalizer(self._get_actor_obs(obs))  # type: ignore[operator]
         output = self.actor(actor_obs)
         return output[..., 0, :] if self.state_dependent_std else output
 
     def evaluate(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
-        """Evaluate the value function for given observations."""
-        critic_obs = self.critic_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
+        """Evaluate the value function for given observations (symmetric, uses encoder z)."""
+        critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))  # type: ignore[operator]
         return self.critic(critic_obs)
 
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
@@ -341,16 +354,16 @@ class ActorCriticEncoder(nn.Module):
         """Update observation normalization statistics.
 
         Updates encoder, actor, and critic normalizers independently.
-        Encoder normalizer uses raw privileged obs; actor/critic use combined obs.
+        Encoder normalizer uses raw privileged obs.
+        Actor normalizer uses policy_obs + z (encoder output).
+        Critic normalizer uses policy_obs + z (symmetric, same as actor).
         """
         if self.encoder_obs_normalization and hasattr(self.encoder_obs_normalizer, "update"):
             self.encoder_obs_normalizer.update(obs[self._privileged_key])  # type: ignore[union-attr]
-        if self.actor_obs_normalization or self.critic_obs_normalization:
-            combined_obs = self._get_combined_obs(obs)
-            if self.actor_obs_normalization and hasattr(self.actor_obs_normalizer, "update"):
-                self.actor_obs_normalizer.update(combined_obs)  # type: ignore[union-attr]
-            if self.critic_obs_normalization and hasattr(self.critic_obs_normalizer, "update"):
-                self.critic_obs_normalizer.update(combined_obs)  # type: ignore[union-attr]
+        if self.actor_obs_normalization and hasattr(self.actor_obs_normalizer, "update"):
+            self.actor_obs_normalizer.update(self._get_actor_obs(obs))  # type: ignore[union-attr]
+        if self.critic_obs_normalization and hasattr(self.critic_obs_normalizer, "update"):
+            self.critic_obs_normalizer.update(self._get_critic_obs(obs))  # type: ignore[union-attr]
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
         """Load model parameters with backward compatibility.
@@ -359,8 +372,10 @@ class ActorCriticEncoder(nn.Module):
         resumed training. OnPolicyRunner.load() uses this return value to decide
         whether to restore optimizer state and iteration counter.
 
-        Backward compat: injects default encoder_obs_normalizer state when loading
-        checkpoints from before encoder normalization was added.
+        Backward compat:
+            - Injects default encoder_obs_normalizer state for pre-normalization checkpoints.
+            - Rebuilds critic MLP when input dim differs (e.g., symmetric vs asymmetric critic).
+              Critic is unused during inference (act_inference), so this is safe for eval.
         """
         if self.encoder_obs_normalization:
             prefix = "encoder_obs_normalizer."
@@ -368,5 +383,29 @@ class ActorCriticEncoder(nn.Module):
                 logger.info("Old checkpoint: injecting default encoder_obs_normalizer state.")
                 for k, v in self.encoder_obs_normalizer.state_dict().items():
                     state_dict[prefix + k] = v
+
+        # Handle critic dimension mismatch (e.g., old privileged-only critic vs new asymmetric)
+        ckpt_critic_weight = state_dict.get("critic.0.weight")
+        if ckpt_critic_weight is not None:
+            ckpt_critic_in = ckpt_critic_weight.shape[1]
+            current_critic_in = self.critic[0].weight.shape[1]
+            if ckpt_critic_in != current_critic_in:
+                logger.warning(
+                    "Critic input dim mismatch: checkpoint=%d, current=%d. "
+                    "Rebuilding critic to match checkpoint (safe for inference).",
+                    ckpt_critic_in,
+                    current_critic_in,
+                )
+                # Infer hidden dims from checkpoint weight shapes
+                critic_weight_keys = sorted(
+                    k for k in state_dict if k.startswith("critic.") and k.endswith(".weight")
+                )
+                hidden_dims = [state_dict[k].shape[0] for k in critic_weight_keys[:-1]]
+                self.critic = MLP(ckpt_critic_in, 1, hidden_dims, "elu")
+
+                # Rebuild critic_obs_normalizer if enabled
+                if self.critic_obs_normalization:
+                    self.critic_obs_normalizer = EmpiricalNormalization(ckpt_critic_in)
+
         super().load_state_dict(state_dict, strict=strict)
         return True

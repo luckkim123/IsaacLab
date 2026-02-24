@@ -7,6 +7,7 @@
 
 Provides runner configurations:
     - HeroAgentPPORunnerCfg: Standard PPO for joint-based attitude control
+    - HeroAgentTDEBasePPORunnerCfg: TDE-Base with training enhancements
     - HeroAgentEncoderPPORunnerCfg: HORA Phase 1 with extrinsics encoder
     - HeroAgentAdaptBaseRunnerCfg: Phase 2 adaptation (supervised, base RL)
 
@@ -20,16 +21,18 @@ from isaaclab.utils import configclass
 
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
-# Register custom network classes in RSL-RL runner module namespace.
-# The runner resolves policy class_name dynamically (on_policy_runner.py:416).
-# This injection makes custom network classes resolvable in that scope.
+# Register custom classes in RSL-RL runner module namespace.
+# The runner resolves policy class_name and runner class dynamically.
+# This injection makes custom classes resolvable in that scope.
 from ..encoder import (
     ActorCriticEncoder,
     ActorCriticEncoderAdapt,
 )
+from ..runners import BaseRunner
 
 _runner_module.ActorCriticEncoder = ActorCriticEncoder
 _runner_module.ActorCriticEncoderAdapt = ActorCriticEncoderAdapt
+_runner_module.BaseRunner = BaseRunner
 
 
 # =============================================================================
@@ -134,24 +137,65 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
+
+@configclass
+class HeroAgentTDEBasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO configuration for Hero Agent TDE-Base training.
+
+    Uses BaseRunner which provides adaptive entropy, noise std floor,
+    and DR/reward curriculum. No encoder -- policy learns directly from
+    15D obs (13D policy + 2D TDE dynamics mismatch).
+    """
+
+    class_name: str = "BaseRunner"
+
+    seed = 42
+    num_steps_per_env = 128
+    max_iterations = 1500
+    save_interval = 50
+    experiment_name = "hero_agent_tde_base"
+    empirical_normalization = False
+
+    policy = RslRlPpoActorCriticCfg(
+        init_noise_std=1.0,
+        noise_std_type="log",
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.005,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
+
     # -- Adaptive entropy (reward-reactive, axPPO-inspired) --
-    # Fields defined here for future expansion. Base RL uses OnPolicyRunner
-    # directly (not EncoderRunner), so these are not read yet.
 
     adaptive_entropy: bool = True
-    """Enable reward-reactive entropy coefficient. When reward drops, entropy increases."""
+    """Enable reward-reactive entropy coefficient."""
 
     entropy_base: float = 0.005
-    """Base entropy coefficient (used when reward is stable). Matches algorithm.entropy_coef."""
+    """Base entropy coefficient (used when reward is stable)."""
 
-    entropy_scale: float = 5.0
-    """Amplification factor: entropy = base * (1 + scale * drop_ratio)."""
+    entropy_scale: float = 15.0
+    """Amplification factor: entropy = base * (1 + scale * boost)."""
 
     entropy_min: float = 0.001
     """Minimum entropy coefficient (floor)."""
 
-    entropy_max: float = 0.02
-    """Maximum entropy coefficient (ceiling)."""
+    entropy_max: float = 0.05
+    """Maximum entropy coefficient (ceiling). Allows stronger exploration under DR."""
 
     entropy_fast_alpha: float = 0.1
     """EMA alpha for fast reward tracker (~10 iteration response)."""
@@ -167,15 +211,15 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """RSL-RL PPO configuration for Hero Agent encoder training (HORA Phase 1).
 
-    Uses ActorCriticEncoder that compresses privileged info into latent z:
+    Uses ActorCriticEncoder with symmetric critic (HORA/RMA standard):
         - Encoder: privileged (26D) -> tanh -> z (13D) in [-1, 1]
         - Actor: cat([policy_obs, z]) = 26D -> actions
-        - Critic: cat([policy_obs, z]) = 26D -> value (symmetric, forces encoder learning)
+        - Critic: cat([policy_obs, z]) = 26D -> value (symmetric, encoder gets critic gradient)
     """
 
     seed = 42
     num_steps_per_env = 128
-    max_iterations = 1500
+    max_iterations = 2500
     save_interval = 50
     experiment_name = "hero_agent_albc_encoder"
     empirical_normalization = False
@@ -216,14 +260,15 @@ class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     entropy_base: float = 0.005
     """Base entropy coefficient (used when reward is stable). Matches algorithm.entropy_coef."""
 
-    entropy_scale: float = 5.0
-    """Amplification factor: entropy = base * (1 + scale * drop_ratio)."""
+    entropy_scale: float = 15.0
+    """Amplification factor: entropy = base * (1 + scale * boost).
+    At boost=0.2: coef = 0.005 * (1 + 15*0.2) = 0.02 (4x base)."""
 
     entropy_min: float = 0.001
     """Minimum entropy coefficient (floor)."""
 
-    entropy_max: float = 0.02
-    """Maximum entropy coefficient (ceiling)."""
+    entropy_max: float = 0.05
+    """Maximum entropy coefficient (ceiling). Allows stronger exploration under DR."""
 
     entropy_fast_alpha: float = 0.1
     """EMA alpha for fast reward tracker (~10 iteration response)."""

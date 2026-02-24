@@ -12,6 +12,7 @@ joints that position a buoyancy element. No thrusters are used.
 Available Tasks:
     - Isaac-HeroAgent-v0: Debug environment (minimal DR, no ocean current)
     - Isaac-HeroAgent-Base-v0: Base training with DR and ocean current
+    - Isaac-HeroAgent-TDE-Base-v0: TDE-Base with dynamics mismatch obs
     - Isaac-HeroAgent-Encoder-Base-v0: Encoder training with privileged info
     - Isaac-HeroAgent-TDC-v0: Classical TDC control (no RL)
     - Isaac-HeroAgent-Adapt-Base-v0: Phase 2 adaptation (proprio history -> z_hat, base RL)
@@ -29,6 +30,7 @@ from .config import (
     HeroAgentEncoderTrainEnvCfg,
     HeroAgentEnvCfg,
     HeroAgentTDCEnvCfg,
+    HeroAgentTDEBaseEnvCfg,
     HeroAgentTrainEnvCfg,
 )
 from .controllers import TDCControllerCfg
@@ -57,6 +59,17 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentTrainEnvCfg",
         "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentPPORunnerCfg",
+    },
+)
+
+# TDE-Base: base RL with dynamics mismatch observation (15D obs)
+gym.register(
+    id="Isaac-HeroAgent-TDE-Base-v0",
+    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentTDEBaseEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentTDEBasePPORunnerCfg",
     },
 )
 
@@ -101,6 +114,7 @@ __all__ = [
     # Configurations
     "HeroAgentEnvCfg",
     "HeroAgentTrainEnvCfg",
+    "HeroAgentTDEBaseEnvCfg",
     "HeroAgentTDCEnvCfg",
     "HeroAgentEncoderTrainEnvCfg",
     "HeroAgentAdaptBaseEnvCfg",

@@ -19,8 +19,9 @@ Architecture:
 
     ActorCriticEncoderAdapt:
         Inherits ActorCriticEncoder directly (base RL, NOT TDC chain).
-        Overrides _get_combined_obs() to use adapt_tconv(proprio_hist) instead
+        Overrides _get_actor_obs() to use adapt_tconv(proprio_hist) instead
         of _encode(privileged). z_hat uses _activate_z() (tanh, matching Phase 1).
+        _get_critic_obs() is inherited from parent (symmetric, uses encoder z).
 
         The frozen encoder is still available via compute_z_gt() for
         supervised training.
@@ -146,9 +147,10 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
 
     During Phase 2 supervised training:
         - adapt_tconv is trainable (L2 loss only)
-        - _get_combined_obs() uses z_hat from adapt_tconv (not z from encoder)
-        - z_hat is DETACHED before actor/critic: PPO gradient does NOT reach adapt_tconv
+        - _get_actor_obs() uses z_hat from adapt_tconv (not z from encoder)
+        - z_hat is DETACHED before actor input: PPO gradient does NOT reach adapt_tconv
         - AdaptRunner recomputes z_hat independently for L2 loss gradient
+        - _get_critic_obs() inherited: critic sees z (symmetric)
 
     z_hat activation: matches Phase 1 encoder (tanh by default).
 
@@ -174,13 +176,16 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
 
         self._proprio_hist_key = "proprio_hist"
 
-    def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
-        """Use z_hat from adaptation module instead of z from encoder.
+    def _get_actor_obs(self, obs: TensorDict) -> torch.Tensor:
+        """Actor obs: use z_hat from adaptation module instead of z from encoder.
 
         z_hat activation matches Phase 1 encoder (tanh via _activate_z).
-        z_hat is DETACHED before actor/critic input so PPO gradient does
-        not interfere with L2 loss supervision. AdaptRunner recomputes z_hat
+        z_hat is DETACHED before actor input so PPO gradient does not
+        interfere with L2 loss supervision. AdaptRunner recomputes z_hat
         independently for L2 gradient flow.
+
+        _get_critic_obs() is NOT overridden -- inherited from parent,
+        critic sees z via encoder (symmetric design).
         """
         policy_obs = obs[self._policy_obs_key]
         z_hat_raw = self.adapt_tconv(obs[self._proprio_hist_key])
