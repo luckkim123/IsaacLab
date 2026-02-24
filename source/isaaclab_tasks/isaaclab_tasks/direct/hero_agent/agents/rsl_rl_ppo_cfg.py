@@ -9,6 +9,7 @@ Provides runner configurations:
     - HeroAgentPPORunnerCfg: Standard PPO for joint-based attitude control
     - HeroAgentTDEBasePPORunnerCfg: TDE-Base with training enhancements
     - HeroAgentEncoderPPORunnerCfg: HORA Phase 1 with extrinsics encoder
+    - HeroAgentEncoderTDCRunnerCfg: Encoder-TDC (RL M_hat + gains for TDC)
     - HeroAgentAdaptBaseRunnerCfg: Phase 2 adaptation (supervised, base RL)
 
 For evaluation, use CLI overrides instead of separate config classes:
@@ -76,6 +77,18 @@ class RslRlPpoActorCriticEncoderCfg(_RslRlPpoEncoderBaseCfg):
     encoder_latent_dim: int = 13
     encoder_activation: str = "elu"
     encoder_output_activation: str = "tanh"
+
+
+@configclass
+class RslRlPpoActorCriticEncoderTDCCfg(_RslRlPpoEncoderBaseCfg):
+    """PPO actor-critic configuration for Encoder-TDC.
+
+    Same encoder architecture as HORA Phase 1, but the actor outputs 6D
+    actions (m_hat + Kp + Kd) instead of 2D joint positions.
+    num_actions=6 is set automatically from env.action_space.
+    """
+
+    class_name: str = "ActorCriticEncoder"
 
 
 @configclass
@@ -284,6 +297,79 @@ class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     entropy_std_target: float = 0.4
     """Target mean_noise_std. Below this, entropy boost activates to resist collapse."""
+
+
+@configclass
+class HeroAgentEncoderTDCRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """RSL-RL PPO configuration for Encoder-TDC training.
+
+    Uses EncoderRunner (same as HORA Phase 1) with 6D action space.
+    The policy outputs [m_hat(2), Kp(2), Kd(2)] which are linearly
+    scaled and fed to the TDC controller.
+    """
+
+    class_name: str = "EncoderRunner"
+
+    seed = 42
+    num_steps_per_env = 128
+    max_iterations = 2500
+    save_interval = 50
+    experiment_name = "hero_agent_encoder_tdc"
+    empirical_normalization = False
+
+    obs_groups = {
+        "policy": ["policy", "privileged"],
+        "critic": ["policy", "privileged"],
+    }
+
+    policy = RslRlPpoActorCriticEncoderTDCCfg(
+        init_noise_std=1.0,
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
+        activation="elu",
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.005,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )
+
+    # -- Adaptive entropy (same as Encoder-Base) --
+
+    adaptive_entropy: bool = True
+    """Enable reward-reactive entropy coefficient."""
+
+    entropy_base: float = 0.005
+    """Base entropy coefficient."""
+
+    entropy_scale: float = 15.0
+    """Amplification factor: entropy = base * (1 + scale * boost)."""
+
+    entropy_min: float = 0.001
+    """Minimum entropy coefficient (floor)."""
+
+    entropy_max: float = 0.05
+    """Maximum entropy coefficient (ceiling)."""
+
+    entropy_fast_alpha: float = 0.1
+    """EMA alpha for fast reward tracker."""
+
+    entropy_slow_alpha: float = 0.01
+    """EMA alpha for slow reward baseline."""
+
+    entropy_std_target: float = 0.4
+    """Target mean_noise_std for entropy boost."""
 
 
 @configclass

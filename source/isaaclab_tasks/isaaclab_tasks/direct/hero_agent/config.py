@@ -15,6 +15,7 @@ This module consolidates all environment configurations:
 - HeroAgentTrainEnvCfg: Training config (DR + ocean current + payload)
 - HeroAgentEncoderTrainEnvCfg: Encoder training with privileged info
 - HeroAgentTDCEnvCfg: Classical TDC control (no RL)
+- HeroAgentEncoderTDCEnvCfg: Encoder-TDC (RL outputs M_hat + gains for TDC)
 - HeroAgentAdaptBaseEnvCfg: Phase 2 adaptation (proprio history -> z_hat, base RL)
 
 MPC configurations are in the separate hero_agent_mpc package.
@@ -486,6 +487,41 @@ class HeroAgentTDCEnvCfg(HeroAgentTrainEnvCfg):
 
     # TDC-specific DR: higher joint gains (Kp=200, Kd=10), no action latency
     randomization: DomainRandomizationCfg = _tdc_randomization()
+
+
+@configclass
+class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
+    """Encoder-TDC environment: RL policy outputs M_hat + gains for TDC controller.
+
+    The encoder compresses privileged info (26D) into a latent z (13D).
+    The actor takes [policy_obs(13D), z(13D)] = 26D input and outputs 6D actions:
+        [m_hat_roll, m_hat_pitch, Kp_roll, Kp_pitch, Kd_roll, Kd_pitch]
+
+    Actions are linearly scaled from [-1, 1] to physical ranges.
+    A binary stability gate zeros reward when |1 - M_true/M_hat| >= 1.
+
+    Inheritance: HeroAgentEnvCfg -> HeroAgentTrainEnvCfg -> HeroAgentTDCEnvCfg -> this
+    """
+
+    action_space: int = 6  # m_hat(2) + Kp(2) + Kd(2)
+    state_space: int = 26  # privileged obs for encoder
+    enable_payload: bool = True  # 26D privileged requires payload
+
+    # Linear scaling ranges: action in [-1, 1] -> physical range
+    m_hat_min: float = 0.05
+    m_hat_max: float = 0.6
+    kp_min: float = 10.0
+    kp_max: float = 100.0
+    kd_min: float = 2.0
+    kd_max: float = 30.0
+
+    reward: ALBCRewardCfg = ALBCRewardCfg(
+        stability_gate_enable=True,
+        mhat_accuracy_weight=1.0,
+        mhat_accuracy_sigma=0.3,
+        mhat_accuracy_kernel="cauchy",
+        tdc_torque_weight=-0.01,
+    )
 
 
 @configclass
