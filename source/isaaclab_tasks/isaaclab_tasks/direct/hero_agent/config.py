@@ -448,17 +448,22 @@ class HeroAgentTDEBaseDebugEnvCfg(HeroAgentTDEBaseEnvCfg):
 # =============================================================================
 
 
-def _tdc_randomization() -> DomainRandomizationCfg:
+def _tdc_randomization(action_latency: bool = False) -> DomainRandomizationCfg:
     """Create DomainRandomizationCfg with TDC-specific overrides.
 
-    TDC envs need higher joint gains (centered at Kp=200, Kd=10) and no action
-    latency (TDC overrides _pre_physics_step entirely).
+    TDC envs need higher joint gains (centered at Kp=200, Kd=10).
+    Pure TDC (no RL) disables action latency; Encoder-TDC enables it
+    because RL inference latency exists in real deployment.
+
+    Args:
+        action_latency: Enable action latency DR (0-4 steps). True for
+            Encoder-TDC (RL policy present), False for pure TDC.
     """
     return DomainRandomizationCfg(
         enable=True,
         joint_stiffness_range=(160.0, 240.0),
         joint_damping_range=(8.0, 12.0),
-        action_latency_range=(0, 0),
+        action_latency_range=(0, 4) if action_latency else (0, 0),
     )
 
 
@@ -506,6 +511,9 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
     action_space: int = 6  # m_hat(2) + Kp(2) + Kd(2)
     state_space: int = 26  # privileged obs for encoder
     enable_payload: bool = True  # 26D privileged requires payload
+
+    # Override TDC DR: enable action latency (RL inference delay exists in real deployment)
+    randomization: DomainRandomizationCfg = _tdc_randomization(action_latency=True)
 
     # Linear scaling ranges: action in [-1, 1] -> physical range
     m_hat_min: float = 0.05

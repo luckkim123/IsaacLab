@@ -66,10 +66,13 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
         if self._control_step_counter % self.cfg.control_decimation != 0:
             return
 
+        # Apply action latency (delayed actions for control, raw for obs)
+        effective_actions = self._get_delayed_actions(self._actions)
+
         # Linear scale: value = mid + action * half_range
-        m_hat = self._m_hat_mid + self._actions[:, 0:2] * self._m_hat_half
-        kp = self._kp_mid + self._actions[:, 2:4] * self._kp_half
-        kd = self._kd_mid + self._actions[:, 4:6] * self._kd_half
+        m_hat = self._m_hat_mid + effective_actions[:, 0:2] * self._m_hat_half
+        kp = self._kp_mid + effective_actions[:, 2:4] * self._kp_half
+        kd = self._kd_mid + effective_actions[:, 4:6] * self._kd_half
 
         # Update TDC controller parameters
         self._tdc.update_controller_params(m_hat=m_hat)

@@ -174,6 +174,10 @@ class RewardManager:
         self._episode_sums: dict[str, torch.Tensor] = {
             name: torch.zeros(num_envs, dtype=torch.float32, device=device) for name in self._term_names
         }
+        # Last step's per-term per-env scaled values (for post-hoc gate correction)
+        self._last_step_terms: dict[str, torch.Tensor] = {
+            name: torch.zeros(num_envs, dtype=torch.float32, device=device) for name in self._term_names
+        }
 
     @property
     def active_terms(self) -> list[str]:
@@ -241,6 +245,7 @@ class RewardManager:
             else:
                 scaled_value = term_value * weight
 
+            self._last_step_terms[name] = scaled_value
             self._reward_buf += scaled_value
             self._episode_sums[name] += scaled_value
 

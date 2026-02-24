@@ -131,7 +131,13 @@ class HeroAgentTDCEnv(HeroAgentEnv):
             gate = compute_stability_gate(self)
             reward = reward * gate
 
-            # Track gate fraction for instantaneous logging
+            # Correct episode_sums: subtract last step's contribution for gated envs
+            closed = gate == 0.0
+            if closed.any():
+                for name, last_val in self._reward_manager._last_step_terms.items():
+                    self._reward_manager._episode_sums[name][closed] -= last_val[closed]
+
+            # Track gate violation fraction for instantaneous logging
             self._stability_gate_frac = 1.0 - gate.mean().item()
 
             # Accumulate per-episode gate statistics

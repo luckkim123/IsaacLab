@@ -558,6 +558,13 @@ class DoraemonScheduler:
 
         Uses trust-constr with keep_feasible=True for KL constraint.
         """
+        # Guard: if no successful episodes, objective is constant-zero everywhere.
+        # The optimizer would declare trivial convergence and accept arbitrary drift
+        # within the KL trust region, causing unintended distribution expansion.
+        if success.sum().item() < 1.0:
+            logger.debug("[DORAEMON] Backup skipped: no successful episodes in buffer.")
+            return
+
         x0 = self.dist.get_flat_params()
         prev_flat = prev_dist.get_flat_params()
         mins = self.dist._mins

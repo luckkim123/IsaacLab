@@ -155,31 +155,11 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
-    # -- Adaptive entropy (reward-reactive, matching Encoder-Base) --
-
-    adaptive_entropy: bool = True
-    """Enable reward-reactive entropy coefficient."""
-
-    entropy_base: float = 0.005
-    """Base entropy coefficient (used when reward is stable)."""
-
-    entropy_scale: float = 15.0
-    """Amplification factor: entropy = base * (1 + scale * boost)."""
-
-    entropy_min: float = 0.001
-    """Minimum entropy coefficient (floor)."""
-
-    entropy_max: float = 0.05
-    """Maximum entropy coefficient (ceiling). Allows stronger exploration under DR."""
-
-    entropy_fast_alpha: float = 0.1
-    """EMA alpha for fast reward tracker (~10 iteration response)."""
-
-    entropy_slow_alpha: float = 0.01
-    """EMA alpha for slow reward baseline (~100 iteration response)."""
-
-    entropy_std_target: float = 0.4
-    """Target mean_noise_std. Below this, entropy boost activates to resist collapse."""
+    # -- Adaptive entropy disabled for base RL (no encoder) --
+    # Reward-reactive entropy causes entropy_coef spike under DR curriculum:
+    # DR expands -> reward drops -> reward_drop signal fires -> entropy_coef=0.05
+    # -> noise_std explodes -> policy collapses. Noise floor still active via BaseRunner.
+    adaptive_entropy: bool = False
 
 
 @configclass
@@ -224,31 +204,8 @@ class HeroAgentTDEBasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
-    # -- Adaptive entropy (reward-reactive, axPPO-inspired) --
-
-    adaptive_entropy: bool = True
-    """Enable reward-reactive entropy coefficient."""
-
-    entropy_base: float = 0.005
-    """Base entropy coefficient (used when reward is stable)."""
-
-    entropy_scale: float = 15.0
-    """Amplification factor: entropy = base * (1 + scale * boost)."""
-
-    entropy_min: float = 0.001
-    """Minimum entropy coefficient (floor)."""
-
-    entropy_max: float = 0.05
-    """Maximum entropy coefficient (ceiling). Allows stronger exploration under DR."""
-
-    entropy_fast_alpha: float = 0.1
-    """EMA alpha for fast reward tracker (~10 iteration response)."""
-
-    entropy_slow_alpha: float = 0.01
-    """EMA alpha for slow reward baseline (~100 iteration response)."""
-
-    entropy_std_target: float = 0.4
-    """Target mean_noise_std. Below this, entropy boost activates to resist collapse."""
+    # -- Adaptive entropy disabled for TDE-base (same rationale as base) --
+    adaptive_entropy: bool = False
 
 
 @configclass
@@ -301,31 +258,8 @@ class HeroAgentPrivBasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
-    # -- Adaptive entropy (identical to Base and Encoder-Base) --
-
-    adaptive_entropy: bool = True
-    """Enable reward-reactive entropy coefficient."""
-
-    entropy_base: float = 0.005
-    """Base entropy coefficient (used when reward is stable)."""
-
-    entropy_scale: float = 15.0
-    """Amplification factor: entropy = base * (1 + scale * boost)."""
-
-    entropy_min: float = 0.001
-    """Minimum entropy coefficient (floor)."""
-
-    entropy_max: float = 0.05
-    """Maximum entropy coefficient (ceiling). Allows stronger exploration under DR."""
-
-    entropy_fast_alpha: float = 0.1
-    """EMA alpha for fast reward tracker (~10 iteration response)."""
-
-    entropy_slow_alpha: float = 0.01
-    """EMA alpha for slow reward baseline (~100 iteration response)."""
-
-    entropy_std_target: float = 0.4
-    """Target mean_noise_std. Below this, entropy boost activates to resist collapse."""
+    # -- Adaptive entropy disabled for priv-base (same rationale as base) --
+    adaptive_entropy: bool = False
 
 
 @configclass

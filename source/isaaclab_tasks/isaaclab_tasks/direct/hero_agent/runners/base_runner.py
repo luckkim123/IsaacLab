@@ -84,6 +84,9 @@ class BaseRunner(OnPolicyRunner):
         """
         super().log(locs, width, pad)
 
+        # Noise std floor: always active, prevents exploration collapse under DR
+        self._apply_noise_floor(locs)
+
         # Adaptive entropy: adjust entropy_coef based on reward trajectory
         if self._adaptive_entropy_cfg["enable"]:
             self._update_adaptive_entropy(locs)
@@ -103,6 +106,22 @@ class BaseRunner(OnPolicyRunner):
             if self.log_dir is not None and not self.disable_logs:
                 for key, value in metrics.items():
                     self.writer.add_scalar(f"DORAEMON/{key}", value, iteration)
+
+    def _apply_noise_floor(self, locs: dict) -> None:
+        """Clamp action noise std to minimum floor, independent of adaptive entropy.
+
+        Prevents exploration collapse under domain randomization.
+        Always active regardless of adaptive_entropy setting.
+        """
+        min_std = 0.1
+        if hasattr(self.alg.policy, "log_std"):
+            min_log_std = torch.log(torch.tensor(min_std, device=self.device))
+            self.alg.policy.log_std.data.clamp_(min=min_log_std)
+
+        iteration = locs["it"]
+        if self.log_dir is not None and not self.disable_logs:
+            current_std = self.alg.policy.action_std.mean().item()
+            self.writer.add_scalar("Entropy/noise_std_floor_active", float(current_std <= min_std + 1e-4), iteration)
 
     def _update_adaptive_entropy(self, locs: dict) -> None:
         """Update entropy_coef using combined noise-std and reward-reactive signals.
@@ -147,12 +166,6 @@ class BaseRunner(OnPolicyRunner):
         new_coef = cfg["base"] * (1.0 + cfg["scale"] * boost)
         self.alg.entropy_coef = max(cfg["min"], min(cfg["max"], new_coef))
 
-        # Noise_std floor: prevents exploration collapse under DR
-        min_std = 0.1
-        if hasattr(self.alg.policy, "log_std"):
-            min_log_std = torch.log(torch.tensor(min_std, device=self.device))
-            self.alg.policy.log_std.data.clamp_(min=min_log_std)
-
         # Log all signals
         iteration = locs["it"]
         if self.log_dir is not None and not self.disable_logs:
@@ -160,7 +173,6 @@ class BaseRunner(OnPolicyRunner):
             self.writer.add_scalar("Entropy/std_boost", std_boost, iteration)
             self.writer.add_scalar("Entropy/reward_drop", drop, iteration)
             self.writer.add_scalar("Entropy/boost", boost, iteration)
-            self.writer.add_scalar("Entropy/noise_std_floor_active", float(current_std < min_std), iteration)
             if self._reward_ema_fast is not None:
                 self.writer.add_scalar("Entropy/reward_ema_fast", self._reward_ema_fast, iteration)
                 self.writer.add_scalar("Entropy/reward_ema_slow", self._reward_ema_slow, iteration)
