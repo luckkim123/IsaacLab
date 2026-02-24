@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 
-from ..utils.logging import connect_encoder_to_env, log_encoder_metrics, log_encoder_tdc_metrics
+from ..utils.logging import connect_encoder_to_env, log_encoder_metrics, log_tdc_controller_metrics
 from .base_runner import BaseRunner
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ class EncoderRunner(BaseRunner):
         else:
             logger.info("[EncoderRunner] No encoder detected. Using standard logging only.")
 
-        # Wire up encoder policy to env for TDC M_hat extraction
+        # Wire up encoder policy to env for z latent monitoring
         if self._has_encoder:
             connect_encoder_to_env(self.env, self.alg.policy, "EncoderRunner")
 
@@ -71,8 +71,8 @@ class EncoderRunner(BaseRunner):
                 device=self.device,
                 logger_type=self.logger_type,
             )
-            # Log TDC-specific metrics (M_hat, adaptive gains) if env has TDC
-            log_encoder_tdc_metrics(
+            # Log TDC-specific metrics (M_hat, Kp/Kd) if env has TDC
+            log_tdc_controller_metrics(
                 writer=self.writer,
                 env=self.env,
                 iteration=locs["it"],

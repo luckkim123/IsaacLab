@@ -5,7 +5,7 @@
 
 """Training runners for Hero Agent environments.
 
-BaseRunner provides shared training enhancements (curriculum, adaptive entropy).
+BaseRunner provides shared training enhancements (DORAEMON DR scheduling, adaptive entropy).
 EncoderRunner adds HORA Phase 1 encoder metrics on top.
 AdaptRunner handles Phase 2 supervised adaptation.
 SAC-MPC runner (SACMPCRunner) is in hero_agent_mpc.runners.

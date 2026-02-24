@@ -12,7 +12,7 @@ Provides all TB/WandB metric functions and environment helpers:
     - log_tdc_diagnostics: TDC health metrics (4 essential metrics)
     - log_dr_metrics: Domain randomization parameters (4 essential metrics)
     - log_encoder_metrics: Encoder z health (3 essential metrics)
-    - log_encoder_tdc_metrics: Encoder-TDC integration (7 essential metrics)
+    - log_tdc_controller_metrics: TDC controller state (M_hat, Kp/Kd)
 
 Merged from logging.py, env_utils.py, and metrics.py.
 """
@@ -405,11 +405,11 @@ def log_encoder_metrics(
 
 
 # =============================================================================
-# Encoder-TDC Metrics (7 essential metrics)
+# TDC Controller Metrics (M_hat, Kp/Kd)
 # =============================================================================
 
 
-def log_encoder_tdc_metrics(
+def log_tdc_controller_metrics(
     writer: Any,
     env: Any,
     iteration: int,

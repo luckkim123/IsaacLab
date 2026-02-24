@@ -257,7 +257,7 @@ class RewardManager:
 
 
 # =============================================================================
-# Shared Reward Functions (Base RL + Encoder-TDC)
+# Shared Reward Functions
 # =============================================================================
 
 
@@ -435,7 +435,7 @@ def tdc_torque_penalty(
 
 
 # =============================================================================
-# Encoder-TDC Exclusive Reward Functions
+# TDC-Specific Reward Functions
 # =============================================================================
 
 
@@ -465,7 +465,7 @@ def mhat_accuracy_reward(
     Requires: env._tdc, env._kinematics, env._hydro, env._buoy_hydro.
 
     Args:
-        env: Encoder-TDC environment instance.
+        env: TDC environment instance (requires _tdc attribute).
         sigma: Kernel width for relative error.
         kernel: "cauchy" (default) or "gaussian".
     """
