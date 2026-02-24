@@ -527,7 +527,7 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
     reward: ALBCRewardCfg = ALBCRewardCfg(
         stability_gate_enable=True,
         mhat_accuracy_weight=1.0,
-        mhat_accuracy_sigma=0.3,
+        mhat_accuracy_sigma=1.0,
         mhat_accuracy_kernel="cauchy",
         tdc_torque_weight=-0.01,
     )

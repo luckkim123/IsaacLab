@@ -57,15 +57,6 @@ class DoraemonCfg:
     success_threshold_anneal_steps: int = 500
     """Number of DORAEMON steps over which threshold anneals from start to final."""
 
-    min_success_rate: float = 0.05
-    """Minimum success rate for optimization. Below this, no meaningful gradient
-    signal exists (IS estimator has extreme variance). Distribution contracts
-    toward nominal instead of optimizing."""
-
-    contraction_rate: float = 0.05
-    """Per-step contraction rate toward nominal when success < min_success_rate.
-    Concentration increases by factor (1 + contraction_rate) each step."""
-
     buffer_size: int = 2000
     """Maximum episode buffer capacity."""
 
@@ -424,31 +415,19 @@ class DoraemonScheduler:
         metrics["success_rate"] = success_rate
         metrics["entropy_before"] = self.dist.entropy()
 
-        # Guard: insufficient success for meaningful optimization.
-        # With very few successes, IS weights have extreme variance and the
-        # optimizer overfits to noise. Contract toward nominal instead.
-        if success_rate < self.cfg.min_success_rate:
-            self._contract_toward_nominal()
-            metrics["mode"] = -1.0  # contract
-            metrics["entropy_after"] = self.dist.entropy()
-            metrics["kl_step"] = 0.0
-            metrics["backup_count"] = float(self._backup_count)
-            param_stats = self.dist.get_stats()
-            for k, v in param_stats.items():
-                metrics[k] = v
-            self.buffer.clear()
-            self._step_count += 1
-            return metrics
-
         # Save current distribution for trust region
         prev_dist = self.dist.clone()
 
         if success_rate < self.cfg.alpha:
-            # Infeasible: backup toward higher success.
-            # Do NOT attempt expand after backup -- let next iteration collect
-            # fresh episodes from the backed-up distribution first.
+            # Infeasible: backup toward higher success
             self._backup(prev_dist, xi, success)
-            metrics["mode"] = 0.0  # backup only
+            # Retry entropy maximization using backup result as starting point
+            backup_success = self._estimate_success_rate(xi, success, prev_dist)
+            if backup_success >= self.cfg.alpha:
+                self._maximize_entropy(self.dist.clone(), xi, success)
+                metrics["mode"] = 0.5  # backup-then-expand
+            else:
+                metrics["mode"] = 0.0  # backup only
             self._backup_count += 1
         else:
             # Feasible: maximize entropy subject to success >= alpha
@@ -468,30 +447,6 @@ class DoraemonScheduler:
         self._step_count += 1
         return metrics
 
-    def _contract_toward_nominal(self) -> None:
-        """Contract distribution toward nominal by increasing concentration.
-
-        When success rate is too low for meaningful optimization, tighten the
-        distribution around its current mean (which stays at nominal or wherever
-        the distribution currently centers). This makes DR easier.
-
-        Concentration c = a + b increases by factor (1 + contraction_rate).
-        Mean mu = a / (a + b) is preserved. Variance decreases as 1/c.
-        """
-        rate = self.cfg.contraction_rate
-        for i in range(self.dist.ndims):
-            a, b = self.dist._a[i].item(), self.dist._b[i].item()
-            c_new = (a + b) * (1.0 + rate)
-            mu = a / (a + b)
-            self.dist._a[i] = max(_MIN_BETA_PARAM, mu * c_new)
-            self.dist._b[i] = max(_MIN_BETA_PARAM, (1.0 - mu) * c_new)
-
-        logger.debug(
-            "[DORAEMON] Contracted toward nominal (rate=%.3f, new concentration=%.1f avg)",
-            rate,
-            (self.dist._a + self.dist._b).mean().item(),
-        )
-
     def _anneal_threshold(self) -> None:
         """Linearly anneal success threshold from start to final value."""
         cfg = self.cfg
@@ -502,6 +457,20 @@ class DoraemonScheduler:
         self._current_threshold_deg = cfg.success_threshold_deg + t * (
             cfg.success_threshold_deg_final - cfg.success_threshold_deg
         )
+
+    def _estimate_success_rate(
+        self,
+        xi: torch.Tensor,
+        success: torch.Tensor,
+        ref_dist: BetaDistribution,
+    ) -> float:
+        """Estimate success rate under current dist via IS from ref_dist."""
+        new_lp = self.dist.log_prob(xi)
+        old_lp = ref_dist.log_prob(xi)
+        log_ratio = new_lp - old_lp
+        weights = torch.exp(log_ratio - log_ratio.max())
+        weights = weights / weights.sum()
+        return (weights * success).sum().item()
 
     def _maximize_entropy(
         self,
