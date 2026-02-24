@@ -83,7 +83,14 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 def _load_runner_and_policy(env, agent_cfg, resume_path):
     """Create runner, load checkpoint, extract inference policy and nn module."""
     if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        # Check if this is an AdaptRunner task (same pattern as train.py)
+        policy_class_name = getattr(agent_cfg.policy, "class_name", None)
+        if policy_class_name == "ActorCriticEncoderAdapt":
+            from isaaclab_tasks.direct.hero_agent.runners import AdaptRunner
+
+            runner = AdaptRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        else:
+            runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "SACMPCRunner":
@@ -109,6 +116,9 @@ def _load_runner_and_policy(env, agent_cfg, resume_path):
             policy_nn = runner.alg.policy
         except AttributeError:
             policy_nn = runner.alg.actor_critic
+    elif hasattr(runner, "policy"):
+        # AdaptRunner: policy is the nn.Module directly
+        policy_nn = runner.policy
     else:
         # SAC-MPC: actor is the policy module
         policy_nn = runner.actor

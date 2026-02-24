@@ -30,7 +30,6 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-from ..encoder.normalization import RunningMeanStd
 from ..utils.logging import (
     _WandbTBWriter,
     flush_metrics,
@@ -50,7 +49,7 @@ class AdaptRunner:
         - Frozen actor for on-policy action generation
         - Frozen encoder for ground truth z computation
         - Trainable adapt_tconv for z estimation from history
-        - RunningMeanStd for proprioception history normalization
+        - hist_normalizer inside policy (RunningMeanStd, saved in model state_dict)
 
     Constructor follows the OnPolicyRunner interface: (env, train_cfg, log_dir, device).
     The policy is constructed internally from the config dict.
@@ -91,11 +90,6 @@ class AdaptRunner:
         adapt_lr = train_cfg.get("adapt_lr", 3e-4)
         self.policy.freeze_base()
         self.optimizer = torch.optim.Adam(self.policy.get_adapt_parameters(), lr=adapt_lr)
-
-        # History normalization (train mode: online updates)
-        H = policy_cfg.get("proprio_history_len", 30)
-        D = policy_cfg.get("proprio_feature_dim", 8)
-        self.hist_normalizer = RunningMeanStd((H, D)).to(self.device)
 
         # Logging setup
         self.writer = None
@@ -186,6 +180,9 @@ class AdaptRunner:
         if hasattr(raw_env, "update_dr_curriculum"):
             raw_env.update_dr_curriculum(0)
 
+        # Ensure train mode (hist_normalizer updates statistics, adapt_tconv trains)
+        self.policy.train()
+
         # Reset all envs for clean start (matching BaseRunner.learn() pattern)
         self.env.reset()
         obs_dict = self.env.get_observations()
@@ -250,16 +247,10 @@ class AdaptRunner:
         Returns:
             Tuple of (new_obs_dict, loss, rewards, z_hat, z_gt).
         """
-        # Normalize proprioception history
-        obs_dict_normalized = dict(obs_dict)
-        if "proprio_hist" in obs_dict:
-            obs_dict_normalized["proprio_hist"] = self.hist_normalizer(obs_dict["proprio_hist"])
-
-        # Compute z_hat (with gradients) and z_gt (frozen)
-        policy_obs = obs_dict_normalized[self.policy._policy_obs_key]
-        z_hat_raw = self.policy.adapt_tconv(obs_dict_normalized[self.policy._proprio_hist_key])
-        z_hat = self.policy._activate_z(z_hat_raw)
-        z_gt = self.policy.compute_z_gt(obs_dict_normalized)
+        # Compute z_hat (with gradients, includes normalization) and z_gt (frozen)
+        policy_obs = obs_dict[self.policy._policy_obs_key]
+        z_hat = self.policy.compute_z_hat(obs_dict)
+        z_gt = self.policy.compute_z_gt(obs_dict)
 
         # L2 supervised loss
         loss = ((z_hat - z_gt.detach()) ** 2).mean()
@@ -376,17 +367,19 @@ class AdaptRunner:
         )
 
     def save(self, path: str) -> None:
-        """Save checkpoint with adapt_tconv, normalizer, and training state.
+        """Save checkpoint with adapt_tconv, hist_normalizer, and training state.
+
+        v3: hist_normalizer is part of policy.state_dict() (nn.Module submodule).
+        No separate hist_normalizer_state_dict key needed.
 
         Args:
             path: File path for the checkpoint.
         """
         torch.save(
             {
-                "checkpoint_version": 2,
+                "checkpoint_version": 3,
                 "model_state_dict": self.policy.state_dict(),
                 "optimizer_state_dict": self.optimizer.state_dict(),
-                "hist_normalizer_state_dict": self.hist_normalizer.state_dict(),
                 "agent_steps": self.agent_steps,
             },
             path,
@@ -394,11 +387,14 @@ class AdaptRunner:
         logger.info("Checkpoint saved: %s", path)
 
     def load(self, path: str) -> None:
-        """Load checkpoint, auto-detecting Phase 1 vs Phase 2 format.
+        """Load checkpoint, auto-detecting Phase 1 / v2 / v3 format.
 
-        Phase 1 checkpoints (from EncoderRunner) lack adapt_tconv keys and use
-        strict=False to allow missing keys. Phase 2 checkpoints (from this
-        runner) contain all keys and load strictly.
+        Checkpoint versions:
+            v1 (Phase 1, EncoderRunner): No adapt_tconv/hist_normalizer keys.
+                Loaded with strict=False (missing keys get fresh init).
+            v2 (Phase 2, old): hist_normalizer_state_dict as separate top-level key.
+                Migrated by injecting into model_state_dict with 'hist_normalizer.' prefix.
+            v3 (Phase 2, current): hist_normalizer inside policy state_dict.
 
         Args:
             path: Path to checkpoint file.
@@ -406,7 +402,7 @@ class AdaptRunner:
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         state_dict = checkpoint["model_state_dict"]
 
-        # Detect Phase 1 vs Phase 2: prefer explicit version key, fall back to string matching
+        # Detect checkpoint version
         version = checkpoint.get("checkpoint_version", None)
         if version is not None:
             has_adapt = version >= 2
@@ -415,18 +411,40 @@ class AdaptRunner:
             logger.warning("Checkpoint lacks version key; using string-based detection (has_adapt=%s).", has_adapt)
 
         if has_adapt:
+            # v2 -> v3 migration: inject standalone hist_normalizer into model_state_dict
+            if "hist_normalizer_state_dict" in checkpoint:
+                hist_sd = checkpoint["hist_normalizer_state_dict"]
+                for k, v in hist_sd.items():
+                    state_dict[f"hist_normalizer.{k}"] = v
+                logger.info("Migrated v2 hist_normalizer_state_dict into model_state_dict.")
+
             # Phase 2 checkpoint: load everything strictly
             self.policy.load_state_dict(state_dict, strict=True)
             if "optimizer_state_dict" in checkpoint:
                 self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            if "hist_normalizer_state_dict" in checkpoint:
-                self.hist_normalizer.load_state_dict(checkpoint["hist_normalizer_state_dict"])
             if "agent_steps" in checkpoint:
                 self.agent_steps = checkpoint["agent_steps"]
             logger.info("Loaded Phase 2 checkpoint: %s (agent_steps=%s)", path, f"{self.agent_steps:,}")
         else:
-            # Phase 1 checkpoint: missing adapt_tconv keys, use strict=False
+            # Phase 1 checkpoint: missing adapt_tconv + hist_normalizer keys, strict=False
             self.policy.load_state_dict(state_dict, strict=False)
-            logger.info("Loaded Phase 1 checkpoint: %s (adapt_tconv initialized from scratch)", path)
+            logger.info("Loaded Phase 1 checkpoint: %s (adapt_tconv + hist_normalizer initialized fresh)", path)
 
         self.policy.freeze_base()
+
+    def get_inference_policy(self, device=None):
+        """Return inference-ready policy function.
+
+        Sets eval mode (freezes hist_normalizer statistics) and moves to device.
+        Compatible with play.py's runner.get_inference_policy() interface.
+
+        Args:
+            device: Target device. If None, keeps current device.
+
+        Returns:
+            Callable: policy.act_inference bound method.
+        """
+        self.policy.eval()
+        if device is not None:
+            self.policy.to(device)
+        return self.policy.act_inference

@@ -41,6 +41,7 @@ import torch.nn as nn
 logger = logging.getLogger(__name__)
 
 from .actor_critic_encoder import ActorCriticEncoder
+from .normalization import RunningMeanStd
 
 if TYPE_CHECKING:
     from tensordict import TensorDict
@@ -176,10 +177,30 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
 
         self._proprio_hist_key = "proprio_hist"
 
+        # Proprioception history normalizer (train mode: online updates, eval: frozen).
+        # As an nn.Module submodule, its running_mean/var/count are automatically
+        # included in state_dict() for checkpoint save/load.
+        self.hist_normalizer = RunningMeanStd((proprio_history_len, proprio_feature_dim))
+
+    def compute_z_hat(self, obs: TensorDict) -> torch.Tensor:
+        """Canonical z_hat computation: normalize -> adapt_tconv -> activate.
+
+        Both _get_actor_obs() and AdaptRunner's L2 loss use this method,
+        ensuring normalization is always applied (train and inference).
+
+        Args:
+            obs: Observation dict containing proprio_hist key.
+
+        Returns:
+            z_hat: Activated latent estimate. Shape: (N, encoder_latent_dim).
+        """
+        proprio_hist_norm = self.hist_normalizer(obs[self._proprio_hist_key])
+        z_hat_raw = self.adapt_tconv(proprio_hist_norm)
+        return self._activate_z(z_hat_raw)
+
     def _get_actor_obs(self, obs: TensorDict) -> torch.Tensor:
         """Actor obs: use z_hat from adaptation module instead of z from encoder.
 
-        z_hat activation matches Phase 1 encoder (tanh via _activate_z).
         z_hat is DETACHED before actor input so PPO gradient does not
         interfere with L2 loss supervision. AdaptRunner recomputes z_hat
         independently for L2 gradient flow.
@@ -188,8 +209,7 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
         critic sees z via encoder (symmetric design).
         """
         policy_obs = obs[self._policy_obs_key]
-        z_hat_raw = self.adapt_tconv(obs[self._proprio_hist_key])
-        z_hat = self._activate_z(z_hat_raw)
+        z_hat = self.compute_z_hat(obs)
         return torch.cat([policy_obs, z_hat.detach()], dim=-1)
 
     def compute_z_gt(self, obs: TensorDict) -> torch.Tensor:
@@ -211,6 +231,7 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
     def freeze_base(self):
         """Freeze all weights except adapt_tconv.
 
+        hist_normalizer uses buffers (not parameters) so it is unaffected by this.
         After calling this, only adapt_tconv.parameters() have requires_grad=True.
         """
         for name, param in self.named_parameters():

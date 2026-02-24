@@ -516,8 +516,9 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
     randomization: DomainRandomizationCfg = _tdc_randomization(action_latency=True)
 
     # Linear scaling ranges: action in [-1, 1] -> physical range
+    # M_true range ~[0.14, 0.82] (DR + configuration-dependent parallel axis theorem)
     m_hat_min: float = 0.05
-    m_hat_max: float = 0.6
+    m_hat_max: float = 1.5
     kp_min: float = 10.0
     kp_max: float = 100.0
     kd_min: float = 2.0
