@@ -68,11 +68,10 @@ class ALBCRewardCfg:
     joint_oscillation_weight: float = -0.5
     joint_oscillation_alpha: float = 0.2  # EMA smoothing factor (cutoff ~1.6Hz at 50Hz)
 
-    # Joint angle penalty (large joint excursions toward workspace limits).
-    # Quadratic ramp starting at `margin` radians from joint limits.
+    # Joint angle penalty: mean(joint_pos^2). Penalizes deviation from zero,
+    # reducing energy consumption and mechanical stress.
     # dt-scaled. Use with negative weight.
     joint_angle_weight: float = -0.3
-    joint_angle_margin: float = 0.5  # radians (~28.6 deg) from limit before penalty begins
 
     # Linear error penalty: -min(||err||, max_err) / max_err.
     # Provides constant gradient at ALL error levels (unlike Gaussian which
@@ -278,27 +277,18 @@ def joint_oscillation_penalty(
 def joint_angle_penalty(
     _robot: Articulation,
     env: HeroAgentEnv,
-    margin: float = 0.5,
     **_kwargs,
 ) -> torch.Tensor:
-    """Quadratic penalty for joint positions approaching workspace limits.
+    """Quadratic joint angle penalty: mean(joint_pos^2).
 
-    Activates when joint position is within ``margin`` radians of either
-    joint limit. Smooth quadratic ramp: penalty = mean((violation/margin)^2)
-    where violation = max(0, |pos - center| - (half_range - margin)).
+    Penalizes deviation from zero position. Larger joint excursions get
+    disproportionately penalized (quadratic), encouraging the policy to
+    use minimal joint movement for attitude control.
 
-    Output [0, 1]. dt-scaled. Use with negative weight.
-
-    Args:
-        env: Environment instance (provides _albc_joint_ids and joint limits).
-        margin: Distance from limit (radians) at which penalty begins.
+    dt-scaled. Use with negative weight.
     """
     joint_pos = _robot.data.joint_pos[:, env._albc_joint_ids]
-    center = (env._joint_limits_upper + env._joint_limits_lower) * 0.5
-    half_range = env._joint_limits_range * 0.5
-    safe_half = half_range - margin
-    violation = (torch.abs(joint_pos - center) - safe_half).clamp(min=0.0) / margin
-    return torch.mean(violation**2, dim=-1)
+    return torch.mean(joint_pos**2, dim=-1)
 
 
 def linear_error_penalty(

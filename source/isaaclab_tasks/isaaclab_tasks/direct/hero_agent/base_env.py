@@ -315,7 +315,6 @@ class HeroAgentEnv(DirectRLEnv):
             terms["joint_angle"] = RewardTermCfg(
                 func=joint_angle_penalty,
                 weight=rcfg.joint_angle_weight,
-                params={"margin": rcfg.joint_angle_margin},
             )
         if rcfg.progress_weight != 0.0:
             if rcfg.progress_mode == "pbrs":
