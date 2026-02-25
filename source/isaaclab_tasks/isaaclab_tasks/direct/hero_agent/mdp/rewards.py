@@ -71,7 +71,7 @@ class ALBCRewardCfg:
     # Joint angle penalty: mean(joint_pos^2). Penalizes deviation from zero,
     # reducing energy consumption and mechanical stress.
     # dt-scaled. Use with negative weight.
-    joint_angle_weight: float = -0.3
+    joint_angle_weight: float = -1.0
 
     # Linear error penalty: -min(||err||, max_err) / max_err.
     # Provides constant gradient at ALL error levels (unlike Gaussian which
