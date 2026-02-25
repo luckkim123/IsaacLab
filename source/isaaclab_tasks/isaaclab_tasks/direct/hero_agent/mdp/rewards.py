@@ -65,13 +65,13 @@ class ALBCRewardCfg:
     # Joint oscillation penalty (EMA high-pass filtered joint velocity).
     # Penalizes high-frequency oscillation while allowing smooth movement.
     # dt-scaled. Use with negative weight.
-    joint_oscillation_weight: float = -0.5
+    joint_oscillation_weight: float = -1.0
     joint_oscillation_alpha: float = 0.2  # EMA smoothing factor (cutoff ~1.6Hz at 50Hz)
 
     # Joint angle penalty: mean(joint_pos^2). Penalizes deviation from zero,
     # reducing energy consumption and mechanical stress.
     # dt-scaled. Use with negative weight.
-    joint_angle_weight: float = -1.0
+    joint_angle_weight: float = -0.5
 
     # Linear error penalty: -min(||err||, max_err) / max_err.
     # Provides constant gradient at ALL error levels (unlike Gaussian which

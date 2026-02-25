@@ -41,7 +41,7 @@ class DoraemonCfg:
     alpha: float = 0.5
     """Success rate threshold. Distribution expands only when success >= alpha."""
 
-    kl_ub: float = 0.05
+    kl_ub: float = 0.02
     """Trust region KL divergence upper bound per step."""
 
     init_concentration: float = 8.0
@@ -161,8 +161,20 @@ class BetaDistribution:
             # Map nominal to [0, 1]
             mu = (p.nominal - p.min_bound) / (p.max_bound - p.min_bound)
             mu = max(0.01, min(0.99, mu))  # Avoid boundary degeneration
-            self._a[i] = max(_MIN_BETA_PARAM, mu * concentration)
-            self._b[i] = max(_MIN_BETA_PARAM, (1.0 - mu) * concentration)
+            a_raw = mu * concentration
+            b_raw = (1.0 - mu) * concentration
+            if a_raw < _MIN_BETA_PARAM or b_raw < _MIN_BETA_PARAM:
+                # Clamp would distort mean; preserve mean by deriving the other param.
+                # mean = a/(a+b) = mu  →  b = a*(1-mu)/mu  or  a = b*mu/(1-mu)
+                if mu <= 0.5:
+                    self._a[i] = _MIN_BETA_PARAM
+                    self._b[i] = _MIN_BETA_PARAM * (1.0 - mu) / mu
+                else:
+                    self._b[i] = _MIN_BETA_PARAM
+                    self._a[i] = _MIN_BETA_PARAM * mu / (1.0 - mu)
+            else:
+                self._a[i] = a_raw
+                self._b[i] = b_raw
 
     def sample(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Sample n parameter vectors and their log probabilities.
