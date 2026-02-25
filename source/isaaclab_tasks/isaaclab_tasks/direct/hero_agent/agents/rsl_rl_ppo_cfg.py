@@ -124,7 +124,7 @@ class HeroAgentPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     class_name: str = "BaseRunner"
 
-    seed = 42
+    seed = 30
     num_steps_per_env = 128
     max_iterations = 1500
     save_interval = 50
@@ -173,7 +173,7 @@ class HeroAgentTDEBasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     class_name: str = "BaseRunner"
 
-    seed = 42
+    seed = 30
     num_steps_per_env = 128
     max_iterations = 1500
     save_interval = 50
@@ -222,7 +222,7 @@ class HeroAgentPrivBasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     class_name: str = "BaseRunner"
 
-    seed = 42
+    seed = 30
     num_steps_per_env = 128
     max_iterations = 1500
     save_interval = 50
@@ -277,7 +277,7 @@ class HeroAgentEncoderPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     class_name: str = "EncoderRunner"
 
-    seed = 42
+    seed = 30
     num_steps_per_env = 128
     max_iterations = 2500
     save_interval = 50
@@ -351,7 +351,7 @@ class HeroAgentEncoderTDCRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     class_name: str = "EncoderRunner"
 
-    seed = 42
+    seed = 30
     num_steps_per_env = 128
     max_iterations = 2500
     save_interval = 50
@@ -428,7 +428,7 @@ class HeroAgentAdaptBaseRunnerCfg(RslRlOnPolicyRunnerCfg):
         loss  = ||z_hat - z_gt||^2
     """
 
-    seed = 42
+    seed = 30
     num_steps_per_env = 1  # Unused by AdaptRunner (kept for base class compat)
     max_iterations = 1  # Unused by AdaptRunner (kept for base class compat)
     save_interval = 50  # Unused by AdaptRunner (kept for base class compat)

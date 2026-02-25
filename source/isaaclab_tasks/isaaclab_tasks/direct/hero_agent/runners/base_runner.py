@@ -94,12 +94,6 @@ class BaseRunner(OnPolicyRunner):
         iteration = locs["it"]
         raw_env = unwrap_env(self.env)
 
-        # Sigma annealing: tighten tracking sigma over training
-        if hasattr(raw_env, "_reward_manager"):
-            new_sigma = raw_env._reward_manager.update_sigma(iteration, raw_env.cfg.reward)
-            if new_sigma is not None and self.log_dir is not None and not self.disable_logs:
-                self.writer.add_scalar("Reward/tracking_sigma", new_sigma, iteration)
-
         # DORAEMON: update DR distribution based on episode statistics
         if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
             metrics = raw_env._doraemon.step()

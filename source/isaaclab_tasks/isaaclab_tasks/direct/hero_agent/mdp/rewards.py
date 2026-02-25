@@ -59,11 +59,10 @@ class ALBCRewardCfg:
     ensures gradient at ALL error levels (Gaussian vanishes at large errors).
     """
 
-    # Tracking (Gaussian kernel) with sigma annealing
+    # Tracking (Gaussian kernel): exp(-||e||^2 / sigma^2)
+    # Fixed sigma -- fine-tuning gradient provided by settling term instead.
     tracking_weight: float = 3.0
-    tracking_sigma: float = 0.5  # initial sigma (28.6 deg 1/e point, safe for large errors)
-    tracking_sigma_final: float = 0.25  # final sigma (14.3 deg, stronger fine-tuning gradient)
-    sigma_anneal_iters: int = 1000  # anneal sigma linearly over this many runner iterations
+    tracking_sigma: float = 0.5  # 28.6 deg 1/e point
 
     # Action rate penalty: ||a_t - a_{t-1}||^2 (penalizes large changes).
     # NOT dt-scaled (per-step delta naturally scales with frequency).
@@ -193,35 +192,6 @@ class RewardManager:
     def step_raw_means(self) -> dict[str, float]:
         """Last step's unweighted, un-dt-scaled raw mean per term."""
         return self._step_raw_means
-
-    @property
-    def current_sigma(self) -> float | None:
-        """Current tracking sigma value."""
-        for name, cfg in zip(self._term_names, self._term_cfgs):
-            if name == "tracking" and "sigma" in cfg.params:
-                return cfg.params["sigma"]
-        return None
-
-    def update_sigma(self, iteration: int, reward_cfg: ALBCRewardCfg) -> float | None:
-        """Anneal tracking sigma linearly from start to final over configured iterations.
-
-        Args:
-            iteration: Current runner iteration (0-indexed).
-            reward_cfg: Reward config with sigma_anneal_iters and tracking_sigma_final.
-
-        Returns:
-            New sigma value, or None if no tracking term.
-        """
-        total = reward_cfg.sigma_anneal_iters
-        if total <= 0:
-            return self.current_sigma
-        t = min(1.0, iteration / total)
-        new_sigma = reward_cfg.tracking_sigma + t * (reward_cfg.tracking_sigma_final - reward_cfg.tracking_sigma)
-        for name, cfg in zip(self._term_names, self._term_cfgs):
-            if name == "tracking" and "sigma" in cfg.params:
-                cfg.params["sigma"] = new_sigma
-                return new_sigma
-        return None
 
     def compute(
         self,

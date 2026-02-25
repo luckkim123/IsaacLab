@@ -409,7 +409,7 @@ total_reward = pose_reward + progress_reward - 2 * actions_cost_scale * actions_
 
 ### Known Limitations
 
-1. **Sigma 고정**: `tracking_sigma=0.25`가 모든 상황에 최적인지 검증 필요. per-env 또는 curriculum sigma 고려 가능.
+1. **Sigma 고정**: `tracking_sigma=0.5` (고정). Sigma annealing 제거 -- linear_error + settling이 전 구간 gradient를 커버하며, DORAEMON DR 확장과의 상호작용 리스크 회피.
 2. **진동 억제 암묵적 의존**: angular velocity penalty 제거 후, 진동 억제는 Gaussian tracking의 "error 증가 = reward 감소" 신호에 전적으로 의존. DR 극단 조건에서 불충분할 가능성.
 
 ---

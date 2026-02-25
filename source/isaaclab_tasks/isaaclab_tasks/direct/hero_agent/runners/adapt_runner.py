@@ -170,9 +170,8 @@ class AdaptRunner:
         total_params = sum(p.numel() for p in self.policy.parameters())
         logger.info("Trainable params: %s / %s total", f"{trainable_params:,}", f"{total_params:,}")
 
-        # Reward sigma annealing + DR curriculum support
+        # DR curriculum support
         raw_env = unwrap_env(self.env)
-        has_reward_manager = hasattr(raw_env, "_reward_manager") and hasattr(raw_env.cfg, "reward")
 
         # Apply curriculum start values and force re-randomize.
         # Initial envs were spawned with full DR ranges (before curriculum existed).
@@ -191,10 +190,6 @@ class AdaptRunner:
             obs_dict, loss, rewards, z_hat, z_gt = self._train_step(obs_dict, max_grad_norm)
             self.agent_steps += num_envs
             iteration += 1
-
-            # Update reward sigma annealing (tracking kernel width)
-            if has_reward_manager:
-                raw_env._reward_manager.update_sigma(iteration, raw_env.cfg.reward)
 
             # Update DR curriculum (perturbation/inertia/mass ramp)
             if hasattr(raw_env, "update_dr_curriculum"):
