@@ -269,10 +269,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print(
                     f"[Eval @{timestep:5d}] "
                     f"err={snap['attitude_error_deg']:5.1f}deg "
-                    f"act={snap['action_magnitude']:.3f} "
                     f"rate={snap['action_rate']:.4f} "
                     f"angvel_rp={snap['angular_velocity_rp_rms']:.3f} "
-                    f"angvel_yaw={snap['angular_velocity_yaw_rms']:.3f}"
+                    f"angvel_yaw={snap['angular_velocity_yaw_rms']:.3f} "
+                    f"jt_osc={snap['joint_oscillation_hf_rms']:.4f} "
+                    f"jt_pos={snap['joint_pos_mean_abs']:.2f}"
                     f"{ep_info}"
                 )
 
@@ -300,10 +301,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"{statistics.stdev(eval_episode_errors) if len(eval_episode_errors) > 1 else 0:.1f} deg"
         )
         snap = raw_env.get_eval_snapshot()
-        print(f"  Action mag:     {snap['action_magnitude']:.4f}")
         print(f"  Action rate:    {snap['action_rate']:.5f}")
         print(f"  Ang vel RP:     {snap['angular_velocity_rp_rms']:.4f}")
         print(f"  Ang vel Yaw:    {snap['angular_velocity_yaw_rms']:.4f}")
+        print(f"  Joint osc HF:   {snap['joint_oscillation_hf_rms']:.5f}")
+        print(f"  Joint pos abs:  {snap['joint_pos_mean_abs']:.3f}")
         print("=" * 60)
 
     # close the simulator

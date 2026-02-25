@@ -12,13 +12,11 @@ Reward design principles:
     - Gaussian kernel tracking + settling bonus dominate: positive rewards in
       [0,1] provide dense gradient. Penalties are tiny regularizers to avoid
       suppressing exploration.
-    - dt-scaling: state-quality terms (tracking, settling, linear_error) are
-      dt-scaled; action_rate and action_oscillation are NOT dt-scaled
-      (per-step values naturally scale with frequency).
+    - dt-scaling: state-quality terms (tracking, settling, linear_error,
+      joint_oscillation, joint_angle) are dt-scaled.
     - PBRS progress shaping (Ng 1999): preserves optimal policy guarantee.
-    - Sigma annealing: starts wide (0.5 rad, safe at large errors) and
-      tightens to 0.25 rad for fine-tuning gradient. Prevents reward
-      death spiral during early training while improving precision later.
+    - Joint oscillation: EMA high-pass filter isolates high-frequency
+      joint velocity oscillation while allowing smooth movement.
 """
 
 from __future__ import annotations
@@ -51,8 +49,8 @@ class ALBCRewardCfg:
     Reward = tracking * w_t * dt
            + settling * w_s * dt
            + linear_error * w_le * dt (strong tail gradient)
-           + action_rate * w_ar  (NOT dt-scaled, penalizes action changes)
-           + action_oscillation * w_ao  (NOT dt-scaled)
+           + joint_oscillation * w_jo * dt (EMA high-pass filtered)
+           + joint_angle * w_ja * dt (workspace limit)
            + progress (PBRS)
 
     Design: tracking + settling dominate (positive, [0,1]). linear_error
@@ -64,14 +62,17 @@ class ALBCRewardCfg:
     tracking_weight: float = 3.0
     tracking_sigma: float = 0.5  # 28.6 deg 1/e point
 
-    # Action rate penalty: ||a_t - a_{t-1}||^2 (penalizes large changes).
-    # NOT dt-scaled (per-step delta naturally scales with frequency).
-    action_rate_weight: float = -0.01
+    # Joint oscillation penalty (EMA high-pass filtered joint velocity).
+    # Penalizes high-frequency oscillation while allowing smooth movement.
+    # dt-scaled. Use with negative weight.
+    joint_oscillation_weight: float = -0.5
+    joint_oscillation_alpha: float = 0.2  # EMA smoothing factor (cutoff ~1.6Hz at 50Hz)
 
-    # Action oscillation penalty: ||a_t - 2*a_{t-1} + a_{t-2}||^2 (2nd derivative)
-    # Specifically targets direction reversals (high-frequency oscillation).
-    # NOT dt-scaled.
-    action_oscillation_weight: float = -0.01
+    # Joint angle penalty (large joint excursions toward workspace limits).
+    # Quadratic ramp starting at `margin` radians from joint limits.
+    # dt-scaled. Use with negative weight.
+    joint_angle_weight: float = -0.3
+    joint_angle_margin: float = 0.5  # radians (~28.6 deg) from limit before penalty begins
 
     # Linear error penalty: -min(||err||, max_err) / max_err.
     # Provides constant gradient at ALL error levels (unlike Gaussian which
@@ -254,38 +255,50 @@ def tracking_reward(
     return torch.exp(-err_sq / (sigma**2))
 
 
-def action_rate_penalty(
+def joint_oscillation_penalty(
     _robot: Articulation,
-    actions: torch.Tensor,
-    prev_actions: torch.Tensor,
+    env: HeroAgentEnv,
     **_kwargs,
 ) -> torch.Tensor:
-    """Mean of squared action differences: ||a_t - a_{t-1}||^2.
+    """EMA high-pass filtered joint velocity penalty.
 
-    Penalizes large action changes (rate of change).
-    Uses mean (not sum) so the penalty magnitude is independent of action_space dim.
-    NOT dt-scaled: per-step delta naturally scales with frequency.
-    Use with negative weight.
+    Penalizes high-frequency oscillation while allowing smooth movement.
+    The EMA tracks the low-frequency component; the difference is the
+    high-frequency residual that gets penalized.
+
+    dt-scaled. Use with negative weight.
+
+    Requires: env._ema_joint_vel (updated before reward computation each step).
     """
-    return torch.mean((actions - prev_actions) ** 2, dim=-1)
+    joint_vel = _robot.data.joint_vel[:, env._albc_joint_ids]
+    hf = joint_vel - env._ema_joint_vel
+    return torch.mean(hf**2, dim=-1)
 
 
-def action_oscillation_penalty(
+def joint_angle_penalty(
     _robot: Articulation,
-    actions: torch.Tensor,
-    prev_actions: torch.Tensor,
-    prev_prev_actions: torch.Tensor,
+    env: HeroAgentEnv,
+    margin: float = 0.5,
     **_kwargs,
 ) -> torch.Tensor:
-    """Mean of squared second derivative: ||a_t - 2*a_{t-1} + a_{t-2}||^2.
+    """Quadratic penalty for joint positions approaching workspace limits.
 
-    Specifically targets oscillation (direction reversals). A smooth ramp
-    has zero second derivative; oscillation produces large values.
-    Uses mean (not sum) so the penalty magnitude is independent of action_space dim.
-    NOT dt-scaled. Use with negative weight.
+    Activates when joint position is within ``margin`` radians of either
+    joint limit. Smooth quadratic ramp: penalty = mean((violation/margin)^2)
+    where violation = max(0, |pos - center| - (half_range - margin)).
+
+    Output [0, 1]. dt-scaled. Use with negative weight.
+
+    Args:
+        env: Environment instance (provides _albc_joint_ids and joint limits).
+        margin: Distance from limit (radians) at which penalty begins.
     """
-    second_diff = actions - 2.0 * prev_actions + prev_prev_actions
-    return torch.mean(second_diff**2, dim=-1)
+    joint_pos = _robot.data.joint_pos[:, env._albc_joint_ids]
+    center = (env._joint_limits_upper + env._joint_limits_lower) * 0.5
+    half_range = env._joint_limits_range * 0.5
+    safe_half = half_range - margin
+    violation = (torch.abs(joint_pos - center) - safe_half).clamp(min=0.0) / margin
+    return torch.mean(violation**2, dim=-1)
 
 
 def linear_error_penalty(
