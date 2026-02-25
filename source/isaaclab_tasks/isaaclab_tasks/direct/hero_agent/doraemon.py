@@ -41,11 +41,13 @@ class DoraemonCfg:
     alpha: float = 0.5
     """Success rate threshold. Distribution expands only when success >= alpha."""
 
-    kl_ub: float = 0.01
+    kl_ub: float = 0.05
     """Trust region KL divergence upper bound per step."""
 
-    init_concentration: float = 50.0
-    """Initial Beta(a, b) concentration (a + b). Higher = tighter initial distribution."""
+    init_concentration: float = 8.0
+    """Initial Beta(a, b) concentration (a + b). Higher = tighter initial distribution.
+    Low values (5-10) ensure the initial buffer covers enough DR space for IS
+    estimation to work when expanding the distribution."""
 
     success_threshold_deg: float = 15.0
     """Attitude error below this (deg) counts as success. Evaluated over settling window.
