@@ -68,18 +68,18 @@ class HeroAgentHydrodynamicsCfg(HydrodynamicsCfg):
     # Cylinder axis along Z (upright), R=0.0825m, L=0.27m
     # Perpendicular to axis (surge/sway): M_a = rho * pi * r^2 * L = 998 * pi * 0.0825^2 * 0.27 = 5.76 kg
     # Along axis (heave): much smaller (~0.6 kg, end-cap effect)
-    added_mass: tuple[float, ...] = (5.76, 5.76, 0.6, 0.04, 0.05, 0.05)
+    added_mass: tuple[float, ...] = (5.76, 5.76, 0.6, 0.065, 0.065, 0.05)
 
     # Linear damping coefficients (skin friction, Ns/m and Nms/rad)
     # Perpendicular to cylinder axis (surge/sway) > along axis (heave)
-    linear_damping: tuple[float, ...] = (4.0, 4.0, 2.0, 0.1, 0.1, 0.1)
+    linear_damping: tuple[float, ...] = (4.0, 4.0, 2.0, 0.2, 0.2, 0.1)
 
     # Quadratic damping coefficients (form drag, Ns^2/m^2 and Nms^2/rad^2)
     # From heroagent2.py: D = 0.5 * rho * Cd * A
     #   X/Y: 0.5 * 998 * 1.17 * 0.04455 = 26.0
     #   Z:   0.5 * 998 * 1.0 * 0.0214 = 10.7
     # Rotational damping from heroagent2.py empirical values
-    quadratic_damping: tuple[float, ...] = (26.0, 26.0, 10.7, 1.5, 1.5, 0.01)
+    quadratic_damping: tuple[float, ...] = (26.0, 26.0, 10.7, 3.0, 3.0, 1.0)
 
     # Volume for buoyancy calculation (m^3)
     # From URDF: Cylinder R=0.09m, L=0.325m -> V = pi * 0.09^2 * 0.325 = 0.00827 m^3
@@ -263,6 +263,7 @@ HERO_AGENT_CFG = ArticulationCfg(
             joint_names_expr=["joint.*"],
             stiffness=100.0,  # Kp: w_n=57.7 rad/s with J~0.15 kg*m^2
             damping=3.0,  # Kd: damping ratio ~0.7 (near critically damped)
+            effort_limit=10.0,  # Nm, matches real motor max torque
         ),
     },
 )

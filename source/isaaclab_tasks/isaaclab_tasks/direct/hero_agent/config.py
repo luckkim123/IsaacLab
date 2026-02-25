@@ -70,8 +70,8 @@ class DomainRandomizationCfg:
 
     # -- Hydrodynamic Parameter Scales --
     added_mass_scale: tuple[float, float] = (0.85, 1.15)
-    linear_damping_scale: tuple[float, float] = (0.8, 1.2)
-    quadratic_damping_scale: tuple[float, float] = (0.7, 1.3)
+    linear_damping_scale: tuple[float, float] = (0.5, 2.0)
+    quadratic_damping_scale: tuple[float, float] = (0.3, 2.0)
     volume_scale: tuple[float, float] = (0.9, 1.1)
 
     # -- Center of Buoyancy Offset (meters) --
@@ -96,7 +96,13 @@ class DomainRandomizationCfg:
     # -- Joint Actuator Gains (absolute values) --
     # Asset defaults: stiffness=100.0, damping=3.0 (ImplicitActuatorCfg)
     joint_stiffness_range: tuple[float, float] = (80.0, 120.0)
-    joint_damping_range: tuple[float, float] = (2.4, 3.6)
+    joint_damping_range: tuple[float, float] = (1.5, 4.0)
+
+    # -- Yaw-specific quadratic damping scale (independent of general quad_damping) --
+    yaw_damping_scale: tuple[float, float] = (0.3, 2.0)
+
+    # -- Joint Effort Limit (scale applied to asset default effort_limit) --
+    joint_effort_limit_range: tuple[float, float] = (0.5, 2.7)
 
     # -- Joint Friction --
     joint_static_friction_range: tuple[float, float] = (0.0, 0.03)
@@ -145,8 +151,10 @@ class DomainRandomizationCfg:
             inertia_scale=(1.0, 1.0),
             body_mass_scale=(1.0, 1.0),
             water_density_range=(998.0, 998.0),
+            yaw_damping_scale=(1.0, 1.0),
             joint_stiffness_range=(100.0, 100.0),
             joint_damping_range=(3.0, 3.0),
+            joint_effort_limit_range=(1.0, 1.0),
             joint_static_friction_range=(0.0, 0.0),
             joint_viscous_friction_range=(0.0, 0.0),
             cob_offset_x=(0.0, 0.0),
@@ -308,7 +316,7 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # Initialization and Termination
     # ==========================================================================
     initial_height: float = 4.5
-    max_angular_velocity: float = 3.14159  # rad/s (~180 deg/s); terminate if roll/pitch rate exceeds this
+    max_angular_velocity: float = 2.0  # rad/s (~115 deg/s); terminate if roll/pitch rate exceeds this
     max_attitude_angle: float = 1.5708  # rad (~90 deg), prevents Lambda sign reversal
 
     # ==========================================================================

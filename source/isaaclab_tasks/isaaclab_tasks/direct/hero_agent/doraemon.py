@@ -78,7 +78,7 @@ class ParamSpec(NamedTuple):
     nominal: float
 
 
-# 14 DORAEMON-managed DR parameters.
+# 16 DORAEMON-managed DR parameters.
 # Order matches BetaDistribution dimension indices.
 PARAM_SPECS: list[ParamSpec] = [
     ParamSpec("inertia_scale", 0.5, 2.0, 1.0),
@@ -91,10 +91,12 @@ PARAM_SPECS: list[ParamSpec] = [
     ParamSpec("cog_offset_z", -0.04, 0.04, 0.0),
     ParamSpec("cob_offset_z", -0.04, 0.04, 0.0),
     ParamSpec("joint_stiffness", 40.0, 200.0, 100.0),
-    ParamSpec("joint_damping", 1.0, 6.0, 3.0),
+    ParamSpec("joint_damping", 1.0, 4.0, 3.0),
     ParamSpec("joint_static_friction", 0.0, 0.1, 0.0),
     ParamSpec("joint_viscous_friction", 0.0, 0.5, 0.0),
     ParamSpec("payload_mass", 0.0, 3.0, 0.0),
+    ParamSpec("joint_effort_limit", 0.3, 3.0, 1.0),
+    ParamSpec("yaw_damping_scale", 0.3, 2.0, 1.0),
 ]
 
 NDIMS = len(PARAM_SPECS)

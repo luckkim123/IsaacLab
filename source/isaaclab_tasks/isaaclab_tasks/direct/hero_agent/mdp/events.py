@@ -226,6 +226,11 @@ def _randomize_hydro_model(
     )
     hydro.quadratic_damping[env_ids] = base.quadratic_damping.unsqueeze(0) * qd_scales
 
+    # Yaw-specific quadratic damping override (index 5 = yaw)
+    if hasattr(rand_cfg, "yaw_damping_scale"):
+        yaw_scales = _sample_or_uniform("yaw_damping_scale", sampled, num_envs, rand_cfg.yaw_damping_scale, device)
+        hydro.quadratic_damping[env_ids, 5] = base.quadratic_damping[5] * yaw_scales
+
     # Volume
     vol_scales = _sample_or_uniform("volume_scale", sampled, num_envs, rand_cfg.volume_scale, device)
     hydro.volume[env_ids] = base.volume * vol_scales
@@ -577,6 +582,42 @@ def randomize_joint_gains(
     # unsqueeze for broadcasting: (num_reset,) -> (num_reset, 1) -> (num_reset, num_joints)
     env._robot.write_joint_stiffness_to_sim(stiffness.unsqueeze(-1), joint_ids=env._albc_joint_ids, env_ids=env_ids)
     env._robot.write_joint_damping_to_sim(damping.unsqueeze(-1), joint_ids=env._albc_joint_ids, env_ids=env_ids)
+
+
+# -----------------------------------------------------------------------------
+# Joint Effort Limit Randomization
+# -----------------------------------------------------------------------------
+
+
+def randomize_joint_effort_limit(
+    env: HeroAgentEnv,
+    env_ids: torch.Tensor,
+    rand_cfg: DomainRandomizationCfg,
+    sampled: dict[str, torch.Tensor] | None = None,
+) -> None:
+    """Randomize ALBC joint effort limits (max torque).
+
+    Draws a scale factor and applies it to the asset default effort limit.
+    The same scale is applied to both ALBC joints per environment.
+
+    Args:
+        env: The Hero Agent environment instance.
+        env_ids: Environment indices to randomize.
+        rand_cfg: Domain randomization configuration with effort limit range.
+        sampled: Optional DORAEMON-sampled values.
+    """
+    num_reset = len(env_ids)
+    device = env.device
+
+    scale = _sample_or_uniform("joint_effort_limit", sampled, num_reset, rand_cfg.joint_effort_limit_range, device)
+
+    # Cache default effort limit on first call (no default_joint_effort_limit in Isaac Lab API)
+    if not hasattr(env, "_default_effort_limit"):
+        env._default_effort_limit = env._robot.data.joint_effort_limits[0, env._albc_joint_ids[0]].item()
+    num_joints = len(env._albc_joint_ids)
+    effort = (env._default_effort_limit * scale).unsqueeze(-1).expand(-1, num_joints)
+
+    env._robot.write_joint_effort_limit_to_sim(effort, joint_ids=env._albc_joint_ids, env_ids=env_ids)
 
 
 # -----------------------------------------------------------------------------

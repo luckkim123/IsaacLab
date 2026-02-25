@@ -51,6 +51,7 @@ from .mdp import (
 from .mdp.events import (
     randomize_body_mass,
     randomize_hydrodynamics,
+    randomize_joint_effort_limit,
     randomize_joint_friction,
     randomize_joint_gains,
     randomize_joint_positions,
@@ -147,6 +148,11 @@ class HeroAgentEnv(DirectRLEnv):
         self._init_joints()
         self._init_task_and_rewards()
         self._init_state_buffers()
+
+        # Per-condition termination flags (for diagnostics logging)
+        self._term_too_fast = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._term_bad_state = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._term_excessive_tilt = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         # Debug visualization manager
         self._debug_vis = DebugVisualization(self.num_envs, self.device)
@@ -817,6 +823,14 @@ class HeroAgentEnv(DirectRLEnv):
         log["Episode_Termination/terminated"] = n_terminated / n if n > 0 else 0.0
         log["Episode_Termination/time_out"] = n_timeout / n if n > 0 else 0.0
 
+        # Per-condition termination diagnostics
+        n_too_fast = torch.count_nonzero(self._term_too_fast[env_ids]).item()
+        n_bad_state = torch.count_nonzero(self._term_bad_state[env_ids]).item()
+        n_excessive_tilt = torch.count_nonzero(self._term_excessive_tilt[env_ids]).item()
+        log["Episode_Termination/too_fast"] = n_too_fast / n if n > 0 else 0.0
+        log["Episode_Termination/bad_state"] = n_bad_state / n if n > 0 else 0.0
+        log["Episode_Termination/excessive_tilt"] = n_excessive_tilt / n if n > 0 else 0.0
+
         if n == 0:
             return log
 
@@ -873,6 +887,8 @@ class HeroAgentEnv(DirectRLEnv):
             1. Angular velocity exceeds max_angular_velocity (simulation instability)
             2. NaN detected in root state (PhysX failure)
             3. Attitude angle exceeds max_attitude_angle (prevents Lambda sign reversal)
+
+        Per-condition flags are stored for diagnostics logging.
         """
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
@@ -888,9 +904,13 @@ class HeroAgentEnv(DirectRLEnv):
         )
 
         # Attitude angle check: terminate if roll or pitch exceeds limit.
-        # Beyond ~90 deg, cos(angle) flips sign -> Lambda matrix reversal -> unrecoverable.
         roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
         excessive_tilt = (roll.abs() > self.cfg.max_attitude_angle) | (pitch.abs() > self.cfg.max_attitude_angle)
+
+        # Store per-condition flags for diagnostics
+        self._term_too_fast = too_fast
+        self._term_bad_state = bad_state
+        self._term_excessive_tilt = excessive_tilt
 
         return too_fast | bad_state | excessive_tilt, time_out
 
@@ -1054,6 +1074,7 @@ class HeroAgentEnv(DirectRLEnv):
         # TDC envs override stiffness/damping in their own _reset_idx().
         sampled = getattr(self, "_current_sampled", None)
         randomize_joint_gains(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
+        randomize_joint_effort_limit(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
         randomize_joint_friction(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
 
         # Potential initialization (must be after pose reset).

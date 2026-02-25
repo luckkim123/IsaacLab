@@ -93,8 +93,7 @@ class ALBCRewardCfg:
     settling_sharpness: float = 30.0  # 1/radians
 
     # Angular velocity penalty (dt-scaled, discourages oscillation under DR)
-    # Keep at 0.0 for attitude control: robot needs angular velocity to correct errors.
-    angular_velocity_weight: float = 0.0
+    angular_velocity_weight: float = -1.0
 
     # TDC stability gate: multiply total reward by 0 when |1 - M_hat/M_true| >= 1
     # Only effective in TDC envs. Based on Baek et al. (ACC 2022).
