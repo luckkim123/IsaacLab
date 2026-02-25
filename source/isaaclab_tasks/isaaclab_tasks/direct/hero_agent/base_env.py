@@ -845,8 +845,9 @@ class HeroAgentEnv(DirectRLEnv):
         log["Action/rate_mean"] = torch.linalg.norm(da, dim=-1).mean().item()
 
         # --- Dynamics diagnostics ---
-        ang_vel_rp = self._robot.data.root_ang_vel_b[env_ids, :2]
-        log["Dynamics/angular_velocity_rms"] = ang_vel_rp.pow(2).mean().sqrt().item()
+        ang_vel = self._robot.data.root_ang_vel_b[env_ids]
+        log["Dynamics/angular_velocity_rp_rms"] = ang_vel[:, :2].pow(2).mean().sqrt().item()
+        log["Dynamics/angular_velocity_yaw_rms"] = ang_vel[:, 2].pow(2).mean().sqrt().item()
 
         # TDC diagnostics (for any env with TDC controller)
         if hasattr(self, "_tdc"):
@@ -868,7 +869,7 @@ class HeroAgentEnv(DirectRLEnv):
 
         Returns:
             Dict with keys: attitude_error_deg, action_rate,
-            action_oscillation, angular_velocity_rms.
+            action_oscillation, angular_velocity_rp_rms, angular_velocity_yaw_rms.
         """
         err = self._attitude_error[:, :2]
         da = self._actions - self._prev_actions
@@ -877,7 +878,8 @@ class HeroAgentEnv(DirectRLEnv):
             "attitude_error_deg": torch.rad2deg(torch.linalg.norm(err, dim=-1)).mean().item(),
             "action_rate": torch.linalg.norm(da, dim=-1).mean().item(),
             "action_oscillation": torch.linalg.norm(d2a, dim=-1).mean().item(),
-            "angular_velocity_rms": self._robot.data.root_ang_vel_b[:, :2].pow(2).mean().sqrt().item(),
+            "angular_velocity_rp_rms": self._robot.data.root_ang_vel_b[:, :2].pow(2).mean().sqrt().item(),
+            "angular_velocity_yaw_rms": self._robot.data.root_ang_vel_b[:, 2].pow(2).mean().sqrt().item(),
         }
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:

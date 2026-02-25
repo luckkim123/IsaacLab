@@ -271,7 +271,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     f"err={snap['attitude_error_deg']:5.1f}deg "
                     f"act={snap['action_magnitude']:.3f} "
                     f"rate={snap['action_rate']:.4f} "
-                    f"angvel={snap['angular_velocity_rms']:.3f}"
+                    f"angvel_rp={snap['angular_velocity_rp_rms']:.3f} "
+                    f"angvel_yaw={snap['angular_velocity_yaw_rms']:.3f}"
                     f"{ep_info}"
                 )
 
@@ -301,7 +302,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         snap = raw_env.get_eval_snapshot()
         print(f"  Action mag:     {snap['action_magnitude']:.4f}")
         print(f"  Action rate:    {snap['action_rate']:.5f}")
-        print(f"  Ang vel RMS:    {snap['angular_velocity_rms']:.4f}")
+        print(f"  Ang vel RP:     {snap['angular_velocity_rp_rms']:.4f}")
+        print(f"  Ang vel Yaw:    {snap['angular_velocity_yaw_rms']:.4f}")
         print("=" * 60)
 
     # close the simulator
