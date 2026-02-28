@@ -405,6 +405,11 @@ class HeroAgentEnv(DirectRLEnv):
         perturb_cycle = max(1, rand_cfg.perturbation_interval + rand_cfg.perturbation_duration)
         self._perturb_timer = torch.randint(0, perturb_cycle, (self.num_envs,), device=self.device)
 
+        # Buoy perturbation buffers (independent phase from main body)
+        self._buoy_perturb_forces = torch.zeros(self.num_envs, 3, device=self.device)
+        self._buoy_perturb_torques = torch.zeros(self.num_envs, 3, device=self.device)
+        self._buoy_perturb_timer = torch.randint(0, perturb_cycle, (self.num_envs,), device=self.device)
+
         # TDE observation buffers (optional dynamics mismatch signal)
         if self.cfg.enable_tde_obs:
             self._tde_m_hat = torch.tensor(self.cfg.tde_m_hat, device=self.device, dtype=torch.float32)
@@ -545,49 +550,79 @@ class HeroAgentEnv(DirectRLEnv):
         return self._action_history[env_idx, self._action_latency]
 
     def _update_perturbation(self) -> None:
-        """Update per-step random perturbation forces on the base body.
+        """Update per-step random perturbation forces on the base body and buoy.
 
-        Uses a per-env timer that cycles through [0, interval+duration).
+        Uses per-env timers that cycle through [0, interval+duration).
         Phase [0, duration): perturbation active. Phase [duration, cycle): cooldown.
         New random wrench is generated at the start of each active phase.
 
-        Forces are stored in ``_perturb_forces`` / ``_perturb_torques`` and
+        Main body and buoy have independent timers (decorrelated phases) but
+        share the same interval/duration timing parameters.
+
+        Forces are stored in ``_perturb_forces`` / ``_perturb_torques`` (main body)
+        and ``_buoy_perturb_forces`` / ``_buoy_perturb_torques`` (buoy), then
         added to hydro forces in ``_apply_action()``.
         """
         rand_cfg = self.cfg.randomization
-        if not rand_cfg.enable or not rand_cfg.enable_perturbation:
+        if not rand_cfg.enable:
+            return
+
+        main_perturb = rand_cfg.enable_perturbation
+        buoy_perturb = rand_cfg.enable_buoy_perturbation
+        if not main_perturb and not buoy_perturb:
             return
 
         interval = rand_cfg.perturbation_interval
         duration = rand_cfg.perturbation_duration
         cycle = interval + duration
 
-        # Advance per-env timer (wraps around)
-        self._perturb_timer = (self._perturb_timer + 1) % cycle
+        # -- Main body perturbation --
+        if main_perturb:
+            self._perturb_timer = (self._perturb_timer + 1) % cycle
 
-        # Generate new perturbation at the start of active phase (timer == 0)
-        trigger = self._perturb_timer == 0
-        if trigger.any():
-            n = trigger.sum().item()
-            # Random force: uniform magnitude, random direction (unit sphere)
-            f_dir = torch.randn(n, 3, device=self.device)
-            f_dir = f_dir / f_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
-            f_lo, f_hi = rand_cfg.perturbation_force_range
-            f_mag = torch.rand(n, device=self.device) * (f_hi - f_lo) + f_lo
-            self._perturb_forces[trigger] = f_dir * f_mag.unsqueeze(1)
+            trigger = self._perturb_timer == 0
+            if trigger.any():
+                n = trigger.sum().item()
+                f_dir = torch.randn(n, 3, device=self.device)
+                f_dir = f_dir / f_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
+                f_lo, f_hi = rand_cfg.perturbation_force_range
+                f_mag = torch.rand(n, device=self.device) * (f_hi - f_lo) + f_lo
+                self._perturb_forces[trigger] = f_dir * f_mag.unsqueeze(1)
 
-            # Random torque: uniform magnitude, random direction
-            t_dir = torch.randn(n, 3, device=self.device)
-            t_dir = t_dir / t_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
-            t_lo, t_hi = rand_cfg.perturbation_torque_range
-            t_mag = torch.rand(n, device=self.device) * (t_hi - t_lo) + t_lo
-            self._perturb_torques[trigger] = t_dir * t_mag.unsqueeze(1)
+                t_dir = torch.randn(n, 3, device=self.device)
+                t_dir = t_dir / t_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
+                t_lo, t_hi = rand_cfg.perturbation_torque_range
+                t_mag = torch.rand(n, device=self.device) * (t_hi - t_lo) + t_lo
+                self._perturb_torques[trigger] = t_dir * t_mag.unsqueeze(1)
 
-        # Clear forces when active phase ends (timer == duration)
-        deactivate = self._perturb_timer == duration
-        if deactivate.any():
-            self._perturb_forces[deactivate] = 0.0
-            self._perturb_torques[deactivate] = 0.0
+            deactivate = self._perturb_timer == duration
+            if deactivate.any():
+                self._perturb_forces[deactivate] = 0.0
+                self._perturb_torques[deactivate] = 0.0
+
+        # -- Buoy perturbation (independent timer, same interval/duration) --
+        if buoy_perturb:
+            self._buoy_perturb_timer = (self._buoy_perturb_timer + 1) % cycle
+
+            buoy_trigger = self._buoy_perturb_timer == 0
+            if buoy_trigger.any():
+                n = buoy_trigger.sum().item()
+                f_dir = torch.randn(n, 3, device=self.device)
+                f_dir = f_dir / f_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
+                f_lo, f_hi = rand_cfg.buoy_perturbation_force_range
+                f_mag = torch.rand(n, device=self.device) * (f_hi - f_lo) + f_lo
+                self._buoy_perturb_forces[buoy_trigger] = f_dir * f_mag.unsqueeze(1)
+
+                t_dir = torch.randn(n, 3, device=self.device)
+                t_dir = t_dir / t_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
+                t_lo, t_hi = rand_cfg.buoy_perturbation_torque_range
+                t_mag = torch.rand(n, device=self.device) * (t_hi - t_lo) + t_lo
+                self._buoy_perturb_torques[buoy_trigger] = t_dir * t_mag.unsqueeze(1)
+
+            buoy_deactivate = self._buoy_perturb_timer == duration
+            if buoy_deactivate.any():
+                self._buoy_perturb_forces[buoy_deactivate] = 0.0
+                self._buoy_perturb_torques[buoy_deactivate] = 0.0
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Process actions before physics step with control decimation.
@@ -661,10 +696,12 @@ class HeroAgentEnv(DirectRLEnv):
             root_ang_vel_w=self._robot.data.body_ang_vel_w[:, buoy_idx, :],
             root_quat_w=self._robot.data.body_quat_w[:, buoy_idx, :],
         )
+        buoy_total_forces = self._buoy_hydro_forces + self._buoy_perturb_forces
+        buoy_total_torques = self._buoy_hydro_torques + self._buoy_perturb_torques
         self._robot.permanent_wrench_composer.set_forces_and_torques(
             body_ids=self._buoy_body_id,
-            forces=self._buoy_hydro_forces.unsqueeze(1),
-            torques=self._buoy_hydro_torques.unsqueeze(1),
+            forces=buoy_total_forces.unsqueeze(1),
+            torques=buoy_total_torques.unsqueeze(1),
         )
 
         # Gripper payload (weight force applied at attachment point + CoG offset)
@@ -1047,6 +1084,9 @@ class HeroAgentEnv(DirectRLEnv):
         self._perturb_forces[env_ids] = 0.0
         self._perturb_torques[env_ids] = 0.0
         self._perturb_timer[env_ids] = torch.randint(0, perturb_cycle, (len(env_ids),), device=self.device)
+        self._buoy_perturb_forces[env_ids] = 0.0
+        self._buoy_perturb_torques[env_ids] = 0.0
+        self._buoy_perturb_timer[env_ids] = torch.randint(0, perturb_cycle, (len(env_ids),), device=self.device)
 
         # Reset TDE observation buffers
         if self.cfg.enable_tde_obs:

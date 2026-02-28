@@ -63,7 +63,7 @@ class ALBCRewardCfg:
     # Tracking (Gaussian kernel): exp(-||e||^2 / sigma^2)
     # Fixed sigma -- fine-tuning gradient provided by settling term instead.
     tracking_weight: float = 3.0
-    tracking_sigma: float = 1.0  # 57.3 deg 1/e point
+    tracking_sigma: float = 0.5  # 28.6 deg 1/e point
 
     # Joint oscillation penalty (EMA high-pass filtered joint velocity).
     # Penalizes high-frequency oscillation while allowing smooth movement.
@@ -79,7 +79,7 @@ class ALBCRewardCfg:
     # Linear error penalty: -min(||err||, max_err) / max_err.
     # Provides constant gradient at ALL error levels (unlike Gaussian which
     # vanishes at large errors). Clamped to [-1, 0]. dt-scaled.
-    linear_error_weight: float = 0.0
+    linear_error_weight: float = -1.0
     linear_error_max: float = 1.0  # clamp at ~57 degrees
 
     # Progress (potential-based shaping): PBRS (Ng 1999) preserves optimal policy.
@@ -92,8 +92,8 @@ class ALBCRewardCfg:
     # Settling bonus: sigmoid(sharpness * (threshold - error)), dt-scaled.
     # Dense gradient near target where Gaussian tracking has flat top.
     settling_weight: float = 2.0
-    settling_threshold: float = 0.10  # radians (~5.7 deg)
-    settling_sharpness: float = 30.0  # 1/radians
+    settling_threshold: float = 0.035  # radians (~2 deg)
+    settling_sharpness: float = 60.0  # 1/radians
 
     # Angular velocity penalty (dt-scaled, discourages oscillation under DR)
     angular_velocity_weight: float = -1.5

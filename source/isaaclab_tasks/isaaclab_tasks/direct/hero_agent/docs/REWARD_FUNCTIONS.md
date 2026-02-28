@@ -3,15 +3,15 @@
 > **Status**: 2026-02-28 | **Source**: `mdp/rewards.py`, `config.py`
 >
 > Hero Agent ALBC 보상함수의 수학적 분석, 설계 근거, 실측 수치.
-> Gaussian kernel tracking + settling 지배 + 소규모 regularization penalty 구조.
+> Multi-scale gradient 구조: Gaussian tracking + settling + linear error + regularization penalties.
 
 ---
 
 ## Overview
 
-Hero Agent ALBC 환경의 보상은 6개 항의 가중합으로 구성된다:
+Hero Agent ALBC 환경의 보상은 7개 항의 가중합으로 구성된다:
 
-$$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tracking}} + \underbrace{w_2 \cdot \text{settling}(\phi_t) \cdot \Delta t}_{\text{settling}} + \underbrace{w_3 \cdot \text{PBRS}(\phi)}_{\text{progress}} + \underbrace{w_4 \cdot \text{hf}^2 \cdot \Delta t}_{\text{joint osc.}} + \underbrace{w_5 \cdot \|\gamma\|^2 \cdot \Delta t}_{\text{joint angle}} + \underbrace{w_6 \cdot \|\omega\|^2 \cdot \Delta t}_{\text{ang. vel.}}$$
+$$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tracking}} + \underbrace{w_2 \cdot \text{settling}(\phi_t) \cdot \Delta t}_{\text{settling}} + \underbrace{w_3 \cdot \text{PBRS}(\phi)}_{\text{progress}} + \underbrace{w_4 \cdot \text{hf}^2 \cdot \Delta t}_{\text{joint osc.}} + \underbrace{w_5 \cdot \|\dot\gamma\|^2 \cdot \Delta t}_{\text{joint vel.}} + \underbrace{w_6 \cdot \|\omega\|^2 \cdot \Delta t}_{\text{ang. vel.}} + \underbrace{w_7 \cdot \text{lin\_err}(\phi_t) \cdot \Delta t}_{\text{linear err.}}$$
 
 여기서 $\phi_t = \|\mathbf{e}_t^{rp}\|_2$ (roll/pitch error의 L2 norm), $\Delta t$ = step_dt, $\sigma$ = tracking sigma이다.
 
@@ -20,12 +20,16 @@ $$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tr
 | Symbol | ALBCRewardCfg (Base RL) | Description |
 |:---|:---|:---|
 | $w_1$ | 3.0 | `tracking_weight` |
-| $\sigma$ | 1.0 rad | `tracking_sigma` (~57.3 deg 1/e point) |
+| $\sigma$ | 0.5 rad | `tracking_sigma` (~28.6 deg 1/e point) |
 | $w_2$ | 2.0 | `settling_weight` |
+| $\theta_{thr}$ | 0.035 rad | `settling_threshold` (~2 deg) |
+| $k$ | 60.0 | `settling_sharpness` (1/rad) |
 | $w_3$ | 0.3 | `progress_weight` (NOT dt-scaled) |
 | $w_4$ | -1.0 | `joint_oscillation_weight` |
-| $w_5$ | -0.7 | `joint_angle_weight` |
+| $w_5$ | -0.7 | `joint_velocity_weight` |
 | $w_6$ | -1.5 | `angular_velocity_weight` |
+| $w_7$ | -1.0 | `linear_error_weight` |
+| max_err | 1.0 rad | `linear_error_max` (~57 deg) |
 | end iter | 750 | `penalty_curriculum_end_iter` |
 | $\Delta t$ | 0.005 | `step_dt` (decimation=1, sim dt=0.005) |
 
@@ -33,11 +37,15 @@ $$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tr
 
 ### Design Principles
 
-1. **Positive reward 지배**: tracking(3.0) + settling(2.0) + progress(0.3) = 5.3 positive vs joint_osc(-1.0) + joint_angle(-0.7) + ang_vel(-1.5) = -3.2 max penalty. 미숙한 policy도 양수 reward를 받아 gradient signal이 건전.
-2. **Gaussian kernel 정규화**: $e^{-\phi^2/\sigma^2}$ 형태로 [0, 1] 자연 바운딩. 가중치 해석이 직관적.
-3. **dt-scaling 규칙**: "순간 상태 품질" 측정 항 -> dt-scaled, progress (PBRS)는 state transition 기반이므로 NOT dt-scaled.
-4. **Penalty curriculum**: 모든 음수 가중치 항이 0->1로 선형 증가. 초기 탐색 보장 후 점진적 규제.
-5. **PBRS (Ng 1999)**: potential-based reward shaping으로 optimal policy 보존.
+1. **Multi-scale gradient 구조**: 3단계 gradient가 전체 오차 범위를 커버한다.
+   - 0-4도: settling (sharpness=60, 정밀 제어)
+   - 4-40도: tracking sigma=0.5 (주 correction 범위, 기존 대비 2.9배 gradient)
+   - 40도+: linear_error (상수 gradient, tail coverage)
+2. **Passive equilibrium 방지**: sigma=0.5에서 "do nothing" tracking = 1.61 (sigma=1.0의 2.52 대비 36% 감소). 개선 여지 1.39로 2.9배 증가.
+3. **Gaussian kernel 정규화**: $e^{-\phi^2/\sigma^2}$ 형태로 [0, 1] 자연 바운딩. 가중치 해석이 직관적.
+4. **dt-scaling 규칙**: "순간 상태 품질" 측정 항 -> dt-scaled, progress (PBRS)는 state transition 기반이므로 NOT dt-scaled.
+5. **Penalty curriculum**: 모든 음수 가중치 항(linear_error 포함)이 0->1로 선형 증가. 초기 탐색 보장 후 점진적 규제.
+6. **PBRS (Ng 1999)**: potential-based reward shaping으로 optimal policy 보존.
 
 ---
 
@@ -105,37 +113,41 @@ $$\phi_0 = \phi_{-1} = \|\mathbf{e}_0^{rp}\|_2$$
 
 ### Term 1: Tracking Reward (Gaussian Kernel)
 
-$$r_{tracking} = e^{-\phi_t^2 / \sigma^2}, \quad \sigma = 1.0 \text{ rad}, \quad w = 3.0$$
+$$r_{tracking} = e^{-\phi_t^2 / \sigma^2}, \quad \sigma = 0.5 \text{ rad}, \quad w = 3.0$$
 
 **Source**: `mdp/rewards.py` (`tracking_reward`)
 
 | $\phi_t$ (에러) | $e^{-\phi_t^2/\sigma^2}$ | dt-scaled | weighted |
 |:---|:---|:---|:---|
 | 0.0 (완벽) | 1.0000 | 0.00500 | 0.01500 |
-| 0.087 (~5도) | 0.9925 | 0.00496 | 0.01489 |
-| 0.175 (~10도) | 0.9698 | 0.00485 | 0.01455 |
-| 0.349 (~20도) | 0.8853 | 0.00443 | 0.01328 |
-| 0.524 (~30도) | 0.7602 | 0.00380 | 0.01141 |
-| 0.785 (~45도) | 0.5394 | 0.00270 | 0.00809 |
-| 1.0 (= sigma) | 0.3679 | 0.00184 | 0.00552 |
+| 0.035 (~2도) | 0.9951 | 0.00498 | 0.01493 |
+| 0.087 (~5도) | 0.9703 | 0.00485 | 0.01455 |
+| 0.175 (~10도) | 0.8848 | 0.00442 | 0.01327 |
+| 0.349 (~20도) | 0.6137 | 0.00307 | 0.00921 |
+| 0.524 (~30도) | 0.3364 | 0.00168 | 0.00505 |
+| 0.785 (~45도) | 0.0848 | 0.00042 | 0.00127 |
+| 1.0 (= 2sigma) | 0.0183 | 0.00009 | 0.00027 |
 
-$\sigma = 1.0$ rad은 넓은 kernel width로, 45도 error에서도 의미 있는 gradient(0.54)를 제공한다. 미세 조정은 settling bonus가 담당.
+$\sigma = 0.5$ rad은 10-30도 범위에서 강한 gradient를 제공한다. 45도 이상에서는 linear_error가 보완.
+
+**"Do nothing" 분석**: 초기화 ±30도 범위에서 평균 tracking = $3.0 \times 0.537 = 1.61$ (sigma=1.0의 2.52 대비 36% 감소). 개선 여지 1.39로 2.9배 증가하여 passive equilibrium 수렴을 방지.
 
 ### Term 2: Settling Bonus (Sigmoid)
 
-$$r_{settling} = \sigma(k \cdot (\theta_{thr} - \phi_t)), \quad k = 30, \; \theta_{thr} = 0.10 \text{ rad}, \quad w = 2.0$$
+$$r_{settling} = \sigma(k \cdot (\theta_{thr} - \phi_t)), \quad k = 60, \; \theta_{thr} = 0.035 \text{ rad}, \quad w = 2.0$$
 
 **Source**: `mdp/rewards.py` (`settling_bonus`)
 
 | $\phi_t$ (에러) | settling | dt-scaled | weighted |
 |:---|:---|:---|:---|
-| 0.0 (완벽) | 0.9526 | 0.00476 | 0.00953 |
-| 0.05 (~2.9도) | 0.8176 | 0.00409 | 0.00818 |
-| 0.10 (threshold) | 0.5000 | 0.00250 | 0.00500 |
-| 0.15 (~8.6도) | 0.1824 | 0.00091 | 0.00182 |
-| 0.20 (~11.5도) | 0.0474 | 0.00024 | 0.00047 |
+| 0.0 (완벽) | 0.8909 | 0.00445 | 0.00891 |
+| 0.017 (~1도) | 0.7311 | 0.00366 | 0.00731 |
+| 0.035 (threshold) | 0.5000 | 0.00250 | 0.00500 |
+| 0.052 (~3도) | 0.2689 | 0.00134 | 0.00269 |
+| 0.070 (~4도) | 0.1091 | 0.00055 | 0.00109 |
+| 0.10 (~5.7도) | 0.0180 | 0.00009 | 0.00018 |
 
-Gaussian tracking이 flat top (gradient -> 0 near zero error)인 영역에서 dense gradient를 제공하여 미세 수렴을 유도한다.
+Sigma=0.5 tracking이 5-30도를 커버하므로, settling은 0-4도 정밀 제어에 집중한다. sharpness=60에서 2도 근처 max gradient = 60/4 = 15.0 (이전 30/4 = 7.5의 2배).
 
 ### Term 3: Progress Reward (PBRS)
 
@@ -161,13 +173,13 @@ EMA가 저주파 성분을 추적하고, 차이(고주파 잔차)를 제곱 페�
 
 $\alpha = 0.2$는 50Hz 제어 주파수에서 약 1.6Hz cutoff에 해당한다.
 
-### Term 5: Joint Angle Penalty
+### Term 5: Joint Velocity Penalty
 
-$$r_{angle} = \text{mean}(\gamma^2), \quad w = -0.7$$
+$$r_{vel} = \text{mean}(\dot\gamma^2), \quad w = -0.7$$
 
-**Source**: `mdp/rewards.py` (`joint_angle_penalty`)
+**Source**: `mdp/rewards.py` (`joint_velocity_penalty`)
 
-관절 각도가 0으로부터 벗어날수록 quadratic하게 증가하는 페널티. 에너지 효율적인 attitude control을 유도하고, workspace 경계 근처의 비선형 동역학 영역을 회피한다.
+관절 속도의 제곱 평균 페널티. 빠른 관절 운동을 억제하여 제어 안정성과 에너지 효율을 향상시킨다. Joint oscillation (고주파만)과 달리 모든 관절 속도를 페널티 대상으로 한다.
 
 ### Term 6: Angular Velocity Penalty
 
@@ -178,6 +190,43 @@ $$r_{angvel} = \sum_{i \in \{p, q\}} \omega_i^2, \quad w = -1.5$$
 Roll/pitch 각속도(body frame)의 제곱합. Yaw는 제어 불가능하므로 제외. `sum` (not `mean`) 사용: 축 수가 2로 고정이므로 결과 동일하나, 총 각속도 크기에 비례하는 penalty를 명시적으로 표현.
 
 DR 환경에서 강한 외란 하에 과도한 각속도 진동을 억제한다. 가중치 -1.5는 tracking(3.0)의 절반으로, ang_vel > 0.7 rad/s에서도 tracking gradient를 완전히 억압하지 않도록 조정되었다 (이전 -3.0에서 하향 조정).
+
+### Term 7: Linear Error Penalty
+
+$$r_{lin} = \min(\phi_t / \phi_{max}, \; 1.0), \quad \phi_{max} = 1.0 \text{ rad}, \quad w = -1.0$$
+
+**Source**: `mdp/rewards.py` (`linear_error_penalty`)
+
+큰 오차(>30도)에서 Gaussian tracking의 gradient가 소멸할 때 **상수 gradient**를 제공한다. 출력 [0, 1], max_err에서 clamped.
+
+| $\phi_t$ (에러) | raw | dt-scaled | weighted (full curriculum) |
+|:---|:---|:---|:---|
+| 0.087 (~5도) | 0.087 | 0.00044 | -0.00044 |
+| 0.175 (~10도) | 0.175 | 0.00088 | -0.00088 |
+| 0.349 (~20도) | 0.349 | 0.00175 | -0.00175 |
+| 0.524 (~30도) | 0.524 | 0.00262 | -0.00262 |
+| 0.785 (~45도) | 0.785 | 0.00393 | -0.00393 |
+| 1.0 (= max_err) | 1.000 | 0.00500 | -0.00500 |
+
+Gradient = $1/\phi_{max}$ = 1.0/rad으로 **모든 오차 수준에서 일정**. Penalty curriculum에 따라 0->1 ramp되므로 초기에는 비활성, 점진적으로 강화된다. Tracking과 같은 방향으로 작용 (둘 다 오차 감소 유인).
+
+---
+
+## Multi-Scale Gradient Design
+
+3단계 gradient 구조로 전체 오차 범위를 커버한다:
+
+```
+오차 0도 ----[settling]---- 4도 ----[tracking sigma=0.5]---- 40도+ ----[linear_error]----
+          precision band         main correction range         tail coverage
+          (sharpness=60)         (2.9x stronger gradient)      (constant gradient)
+```
+
+| 범위 | 주 gradient 원천 | 특성 |
+|:---|:---|:---|
+| 0-4도 | settling (k=60) | max gradient 15.0/rad, 정밀 수렴 |
+| 4-40도 | tracking (sigma=0.5) | Gaussian gradient, 주 correction |
+| 40도+ | linear_error | 상수 1.0/rad, tail coverage |
 
 ---
 
@@ -190,7 +239,7 @@ $$w_{eff}(i) = w_{full} \cdot \min(1, \; i / i_{end})$$
 | Parameter | Value |
 |:---|:---|
 | `penalty_curriculum_end_iter` | 750 |
-| Applies to | `joint_oscillation`, `joint_angle`, `angular_velocity` (all negative-weight terms) |
+| Applies to | `joint_oscillation`, `joint_velocity`, `angular_velocity`, `linear_error` (all negative-weight terms) |
 | Scale at iter 0 | 0.0 (penalties disabled) |
 | Scale at iter 375 | 0.5 |
 | Scale at iter 750 | 1.0 (full penalties) |
@@ -221,33 +270,37 @@ raw_env._reward_manager.update_curriculum(iteration)
 
 | Term | Raw | Weight | dt | Per-step | Share |
 |:---|:---|:---|:---|:---|:---|
-| tracking | 0.934 | 3.0 | 0.005 | **+0.01401** | **55%** |
-| settling | 0.012 | 2.0 | 0.005 | +0.00012 | 0.5% |
+| tracking | 0.746 | 3.0 | 0.005 | **+0.01119** | **44%** |
+| settling | ~0 | 2.0 | 0.005 | ~0 | ~0% |
 | progress | ~0.01 | 0.3 | no | +0.00300 | 12% |
 | joint_oscillation | ~0.1 | -1.0 | 0.005 | -0.00050 | 2% |
-| joint_angle | ~0.05 | -0.7 | 0.005 | -0.00018 | 0.7% |
+| joint_velocity | ~0.05 | -0.7 | 0.005 | -0.00018 | 0.7% |
 | angular_velocity | ~0.5 | -1.5 | 0.005 | -0.00375 | 15% |
-| **Net** | | | | **+0.01270** | |
+| linear_error | 0.262 | -1.0 | 0.005 | -0.00131 | 5% |
+| **Net** | | | | **+0.00845** | |
 
-Positive 항(tracking+settling+progress=67%)이 지배. Net 양수 -> value function baseline 안정.
+Positive 항(tracking+progress=56%)이 지배. Net 양수 -> value function baseline 안정. Sigma=0.5에서 tracking은 sigma=1.0 대비 낮지만 (0.934->0.746), 오차 감소 시 보상 증가폭이 2.9배 커져 학습 gradient가 강화됨.
 
-### Episode Budget (15s, normalized per second)
+### Episode Budget (15s, normalized per second, full curriculum)
 
-| Error | Positive rewards/s | Penalties/s (full curriculum) | Total/s |
-|:---|:---|:---|:---|
-| 5 deg | +3.97 | -0.50 | **+3.47** |
-| 10 deg | +3.76 | -0.50 | **+3.26** |
-| 20 deg | +3.06 | -0.50 | **+2.56** |
-| 30 deg | +2.39 | -0.50 | **+1.89** |
-| 45 deg | +1.60 | -0.50 | **+1.10** |
+| Error | Tracking/s | Settling/s | Linear err/s | Penalties/s | Total/s |
+|:---|:---|:---|:---|:---|:---|
+| 2 deg | +2.99 | +1.00 | -0.09 | -0.50 | **+3.40** |
+| 5 deg | +2.91 | +0.04 | -0.17 | -0.50 | **+2.28** |
+| 10 deg | +2.65 | ~0 | -0.35 | -0.50 | **+1.80** |
+| 20 deg | +1.84 | ~0 | -0.70 | -0.50 | **+0.64** |
+| 30 deg | +1.01 | ~0 | -1.05 | -0.50 | **-0.54** |
+| 45 deg | +0.25 | ~0 | -1.57 | -0.50 | **-1.82** |
 
-45도까지도 양수 reward 유지. 학습 초기에도 강건한 양수 gradient signal을 제공한다.
+Sigma=0.5 + linear_error에 의해 20도 이상에서 보상이 급격히 감소한다. 30도 이상에서 음수 영역 진입으로 "안 움직이는 전략"이 더 이상 유리하지 않다.
 
 ### Key Observations
 
-1. **Positive reward 지배 구조**: tracking(3.0) + settling(2.0) + progress(0.3) = 5.3 총 positive vs max penalty -3.2. 45도 error에서도 양수 유지.
-2. **Angular velocity penalty 균형**: -1.5 가중치는 ang_vel=1.0 rad/s에서 -0.0075/step. tracking 0.0055/step과 비교해 억압이 가능하지만, 더 작은 ang_vel에서는 tracking gradient가 우세.
-3. **Episode reward 정규화**: `_collect_episode_metrics()`에서 `/ max_episode_length_s`로 나누어 episode 길이에 무관한 per-second 평균을 로깅.
+1. **Multi-scale gradient**: tracking(0.5 sigma)이 10-30도를 커버, settling이 0-4도를 커버, linear_error가 40도+ tail을 커버. 전 범위에서 gradient dead zone 없음.
+2. **Passive equilibrium 해소**: "do nothing" 기대 보상이 sigma=1.0의 2.52에서 sigma=0.5의 1.61로 감소. 개선 여지 2.9배 증가.
+3. **30도+ 음수 진입**: linear_error의 상수 gradient가 큰 오차에서 탈출 유인을 제공. 초기화 범위(±30도) 끝에서도 학습 가능한 gradient 존재.
+4. **Angular velocity penalty 균형**: -1.5 가중치는 ang_vel=1.0 rad/s에서 -0.0075/step. tracking 0.0055/step과 비교해 억압이 가능하지만, 더 작은 ang_vel에서는 tracking gradient가 우세.
+5. **Episode reward 정규화**: `_collect_episode_metrics()`에서 `/ max_episode_length_s`로 나누어 episode 길이에 무관한 per-second 평균을 로깅.
 
 ---
 
@@ -266,8 +319,9 @@ _get_rewards() [base_env.py]
             +-- settling_bonus()             --> * weight * dt
             +-- progress_reward_pbrs()       --> * weight (no dt)
             +-- joint_oscillation_penalty()  --> * weight * dt * penalty_scale
-            +-- joint_angle_penalty()        --> * weight * dt * penalty_scale
+            +-- joint_velocity_penalty()     --> * weight * dt * penalty_scale
             +-- angular_velocity_penalty()   --> * weight * dt * penalty_scale
+            +-- linear_error_penalty()       --> * weight * dt * penalty_scale
             |
             +-- accumulate to _episode_sums
             |
@@ -284,9 +338,9 @@ _get_rewards() [base_env.py]
 
 | Environment | Active Terms |
 |:---|:---|
-| Base RL (Base-v0 등) | 6개 (tracking, settling, progress, joint_osc, joint_angle, ang_vel) |
+| Base RL (Base-v0 등) | 7개 (tracking, settling, progress, joint_osc, joint_vel, ang_vel, linear_error) |
 | Debug (HeroAgent-v0) | 동일 (동일 config) |
-| TDC (TDC-v0) | 6개 base + mhat_accuracy, tdc_torque (if weight != 0) |
+| TDC (TDC-v0) | 7개 base + mhat_accuracy, tdc_torque (if weight != 0) |
 
 TDC 환경에서 `tdc_env._build_reward_terms()`가 base를 상속 + 확장한다.
 
@@ -303,8 +357,9 @@ log[f"Episode_Reward/{name}"] = value / self.max_episode_length_s
 - `Episode_Reward/settling`
 - `Episode_Reward/progress`
 - `Episode_Reward/joint_oscillation`
-- `Episode_Reward/joint_angle`
+- `Episode_Reward/joint_velocity`
 - `Episode_Reward/angular_velocity`
+- `Episode_Reward/linear_error`
 
 ---
 
@@ -325,16 +380,19 @@ total_reward = pose_reward + progress_reward - 2 * actions_cost_scale * actions_
 
 | 항목 | Isaac Gym | Isaac Lab (현재) |
 |:---|:---|:---|
-| Tracking | $8 \cdot e^{-\phi}$ | $3.0 \cdot e^{-\phi^2 / \sigma^2}$ (Gaussian, $\sigma=1.0$) |
+| Tracking | $8 \cdot e^{-\phi}$ (Laplacian) | $3.0 \cdot e^{-\phi^2 / \sigma^2}$ (Gaussian, $\sigma=0.5$) |
 | Progress | $\phi_{t-1} - \phi_t$ (raw delta) | $\phi_{t-1} - \gamma \phi_t$ (PBRS, $\gamma=0.99$) |
-| Settling | 없음 | $2.0 \cdot \sigma(30 \cdot (0.1 - \phi))$ |
+| Settling | 없음 | $2.0 \cdot \sigma(60 \cdot (0.035 - \phi))$ |
+| Linear error | 없음 | $-1.0 \cdot \min(\phi/1.0, 1.0)$ |
 | Action cost | $-2 \cdot \|a\|^2$ | 없음 (제거됨) |
 | Alive reward | 0.5/step | 없음 |
 | Joint oscillation | 없음 | $-1.0 \cdot \text{EMA-HP}(\dot\gamma)^2$ |
-| Joint angle | 없음 | $-0.7 \cdot \|\gamma\|^2$ |
+| Joint velocity | 없음 | $-0.7 \cdot \|\dot\gamma\|^2$ |
 | Angular velocity | 없음 | $-1.5 \cdot \|\omega_{rp}\|^2$ |
 | dt scaling | 없음 | 상태 품질 항에 적용 |
 | Curriculum | 없음 | 모든 penalty, 750 iter ramp |
+
+**Kernel 비교**: Isaac Gym의 Laplacian $e^{-|\phi|}$는 모든 오차에서 일정한 gradient (-1)를 제공하여 학습이 안정적이었다. Isaac Lab의 Gaussian $e^{-\phi^2/\sigma^2}$은 원점 근처 gradient가 0에 수렴하나 (settling으로 보완), sigma=0.5로 중간 범위 gradient를 강화하고 linear_error로 tail을 보완하여 전 범위 coverage를 달성.
 
 ### Cross-Environment Comparison
 
@@ -342,7 +400,7 @@ total_reward = pose_reward + progress_reward - 2 * actions_cost_scale * actions_
 |:---|:---|:---|:---|
 | AnymalC | +1.0 | -0.05, -0.01, -2.5e-5, -2.5e-7 | ~100:1 |
 | Quadcopter | +15.0 | -0.05, -0.01 | ~300:1 |
-| Hero Agent | **+3.0, +2.0, +0.3** | **-1.0, -0.7, -1.5** | **~1.7:1** |
+| Hero Agent | **+3.0, +2.0, +0.3** | **-1.0, -0.7, -1.5, -1.0** | **~1.3:1** |
 
 Hero Agent의 pos:neg 비율이 상대적으로 낮지만, 이는 의도적 설계이다. UUV의 강한 DR(added mass +-50% 등) 환경에서 penalty가 과도한 진동을 적극 억제해야 하며, curriculum으로 초기 탐색을 보장한다.
 
@@ -352,15 +410,16 @@ Hero Agent의 pos:neg 비율이 상대적으로 낮지만, 이는 의도적 설�
 
 ### Strengths
 
-1. **Positive reward 지배**: 45도 error에서도 양수 reward를 유지하여 학습 gradient가 건전.
-2. **dt-invariant**: 적절한 dt 스케일링으로 `decimation` 변경 시 재튜닝 불필요.
-3. **Episode-length-independent logging**: `/ max_episode_length_s` 정규화로 생존 시간에 무관한 quality 비교 가능.
-4. **PBRS 이론적 보장**: optimal policy 보존, off-policy safe.
-5. **Penalty curriculum**: 초기 탐색 보장 -> 점진적 규제 -> 최종 smooth control.
+1. **Multi-scale gradient**: 전 오차 범위에서 gradient dead zone 없음. Settling(정밀), tracking(중간), linear_error(tail) 3단계 coverage.
+2. **Passive equilibrium 방지**: sigma=0.5에서 "do nothing" tracking 36% 감소, 개선 여지 2.9배 증가.
+3. **dt-invariant**: 적절한 dt 스케일링으로 `decimation` 변경 시 재튜닝 불필요.
+4. **Episode-length-independent logging**: `/ max_episode_length_s` 정규화로 생존 시간에 무관한 quality 비교 가능.
+5. **PBRS 이론적 보장**: optimal policy 보존, off-policy safe.
+6. **Penalty curriculum**: 초기 탐색 보장 -> 점진적 규제 -> 최종 smooth control.
 
 ### Known Limitations
 
-1. **Sigma 고정**: `tracking_sigma=1.0` (고정). 넓은 kernel width로 먼 error에서도 gradient를 유지하나, near-target precision은 settling bonus에 의존.
+1. **45도+ tracking 소멸**: sigma=0.5에서 45도 tracking = 0.085 (거의 0). Linear_error가 보완하지만, Gaussian의 smooth gradient는 손실.
 2. **Angular velocity penalty 조정 필요성**: DR 극단 조건에서 -1.5가 충분한지 미검증. 과도하면 tracking gradient를 억압하고, 부족하면 진동을 방치.
 3. **Progress weight 상대적 약함**: 0.3 weight는 tracking(3.0)의 1/10. PBRS의 이론적 장점에도 불구하고 실제 gradient 기여가 작을 수 있음.
 
@@ -374,4 +433,4 @@ Hero Agent의 pos:neg 비율이 상대적으로 낮지만, 이는 의도적 설�
 
 ---
 **Created**: 2026-02-11
-**Updated**: 2026-02-28 (Full rewrite: 3-term system -> 6-term system. Updated all weights, formulas, tables, and comparisons to match current code. Added settling, progress PBRS, joint oscillation, joint angle, angular velocity terms. Removed deprecated action_magnitude and action_rate. angular_velocity_weight -3.0 -> -1.5.)
+**Updated**: 2026-02-28 (Reward tuning: tracking_sigma 1.0->0.5, settling_threshold 0.10->0.035, settling_sharpness 30->60, linear_error_weight 0.0->-1.0. Multi-scale gradient design. Fixed joint_angle->joint_velocity typo.)
