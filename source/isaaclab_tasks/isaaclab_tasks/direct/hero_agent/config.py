@@ -200,8 +200,6 @@ class DomainRandomizationCfg:
             payload_cog_offset_z=(-0.015, 0.0),
             perturbation_force_range=(0.0, 2.5),
             perturbation_torque_range=(0.0, 0.4),
-            buoy_perturbation_force_range=(0.0, 0.25),
-            buoy_perturbation_torque_range=(0.0, 0.025),
             action_latency_range=(0, 2),
         )
 
@@ -221,7 +219,7 @@ class DomainRandomizationCfg:
     # Mass-proportional scaling: same acceleration (0.54 m/s^2) -> force = 0.93/9.18 * 5.0 ~ 0.5N.
     # Torque: 0.5N * 0.085m (buoy radius) ~ 0.05 Nm.
     # Shares perturbation_interval/duration timing parameters but uses independent phase timer.
-    enable_buoy_perturbation: bool = True
+    enable_buoy_perturbation: bool = False
     buoy_perturbation_force_range: tuple[float, float] = (0.0, 0.5)  # N
     buoy_perturbation_torque_range: tuple[float, float] = (0.0, 0.05)  # Nm
 

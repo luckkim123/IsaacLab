@@ -9,9 +9,9 @@
 
 ## Overview
 
-Hero Agent ALBC 환경의 보상은 7개 항의 가중합으로 구성된다:
+Hero Agent ALBC 환경의 보상은 6개 항의 가중합으로 구성된다:
 
-$$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tracking}} + \underbrace{w_2 \cdot \text{settling}(\phi_t) \cdot \Delta t}_{\text{settling}} + \underbrace{w_3 \cdot \text{PBRS}(\phi)}_{\text{progress}} + \underbrace{w_4 \cdot \text{hf}^2 \cdot \Delta t}_{\text{joint osc.}} + \underbrace{w_5 \cdot \|\dot\gamma\|^2 \cdot \Delta t}_{\text{joint vel.}} + \underbrace{w_6 \cdot \|\omega\|^2 \cdot \Delta t}_{\text{ang. vel.}} + \underbrace{w_7 \cdot \text{lin\_err}(\phi_t) \cdot \Delta t}_{\text{linear err.}}$$
+$$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tracking}} + \underbrace{w_2 \cdot \text{settling}(\phi_t) \cdot \Delta t}_{\text{settling}} + \underbrace{w_3 \cdot \text{PBRS}(\phi)}_{\text{progress}} + \underbrace{w_4 \cdot \text{hf}^2 \cdot \Delta t}_{\text{joint osc.}} + \underbrace{w_5 \cdot \|\dot\gamma\|^2 \cdot \Delta t}_{\text{joint vel.}} + \underbrace{w_7 \cdot \text{lin\_err}(\phi_t) \cdot \Delta t}_{\text{linear err.}}$$
 
 여기서 $\phi_t = \|\mathbf{e}_t^{rp}\|_2$ (roll/pitch error의 L2 norm), $\Delta t$ = step_dt, $\sigma$ = tracking sigma이다.
 
@@ -21,13 +21,13 @@ $$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tr
 |:---|:---|:---|
 | $w_1$ | 3.0 | `tracking_weight` |
 | $\sigma$ | 0.5 rad | `tracking_sigma` (~28.6 deg 1/e point) |
-| $w_2$ | 2.0 | `settling_weight` |
-| $\theta_{thr}$ | 0.035 rad | `settling_threshold` (~2 deg) |
-| $k$ | 60.0 | `settling_sharpness` (1/rad) |
+| $w_2$ | 4.0 | `settling_weight` |
+| $\theta_{thr}$ | 0.175 rad | `settling_threshold` (~10 deg) |
+| $k$ | 20.0 | `settling_sharpness` (1/rad) |
 | $w_3$ | 0.3 | `progress_weight` (NOT dt-scaled) |
-| $w_4$ | -1.0 | `joint_oscillation_weight` |
-| $w_5$ | -0.7 | `joint_velocity_weight` |
-| $w_6$ | -1.5 | `angular_velocity_weight` |
+| $w_4$ | -5.0 | `joint_oscillation_weight` |
+| $w_5$ | -1.0 | `joint_velocity_weight` |
+| $w_6$ | 0.0 | `angular_velocity_weight` (disabled) |
 | $w_7$ | -1.0 | `linear_error_weight` |
 | max_err | 1.0 rad | `linear_error_max` (~57 deg) |
 | end iter | 750 | `penalty_curriculum_end_iter` |
@@ -38,8 +38,8 @@ $$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tr
 ### Design Principles
 
 1. **Multi-scale gradient 구조**: 3단계 gradient가 전체 오차 범위를 커버한다.
-   - 0-4도: settling (sharpness=60, 정밀 제어)
-   - 4-40도: tracking sigma=0.5 (주 correction 범위, 기존 대비 2.9배 gradient)
+   - 0-10도: settling (sharpness=20, weight=4.0, 근접 유도)
+   - 5-40도: tracking sigma=0.5 (주 correction 범위)
    - 40도+: linear_error (상수 gradient, tail coverage)
 2. **Passive equilibrium 방지**: sigma=0.5에서 "do nothing" tracking = 1.61 (sigma=1.0의 2.52 대비 36% 감소). 개선 여지 1.39로 2.9배 증가.
 3. **Gaussian kernel 정규화**: $e^{-\phi^2/\sigma^2}$ 형태로 [0, 1] 자연 바운딩. 가중치 해석이 직관적.
@@ -420,7 +420,7 @@ Hero Agent의 pos:neg 비율이 상대적으로 낮지만, 이는 의도적 설�
 ### Known Limitations
 
 1. **45도+ tracking 소멸**: sigma=0.5에서 45도 tracking = 0.085 (거의 0). Linear_error가 보완하지만, Gaussian의 smooth gradient는 손실.
-2. **Angular velocity penalty 조정 필요성**: DR 극단 조건에서 -1.5가 충분한지 미검증. 과도하면 tracking gradient를 억압하고, 부족하면 진동을 방치.
+2. **Angular velocity penalty 비활성화**: joint_velocity + joint_oscillation으로 충분히 커버 가능하여 제거됨 (0.0).
 3. **Progress weight 상대적 약함**: 0.3 weight는 tracking(3.0)의 1/10. PBRS의 이론적 장점에도 불구하고 실제 gradient 기여가 작을 수 있음.
 
 ---
@@ -433,4 +433,4 @@ Hero Agent의 pos:neg 비율이 상대적으로 낮지만, 이는 의도적 설�
 
 ---
 **Created**: 2026-02-11
-**Updated**: 2026-02-28 (Reward tuning: tracking_sigma 1.0->0.5, settling_threshold 0.10->0.035, settling_sharpness 30->60, linear_error_weight 0.0->-1.0. Multi-scale gradient design. Fixed joint_angle->joint_velocity typo.)
+**Updated**: 2026-02-28 (Reward rebalance: settling 2.0->4.0/0.035->0.175(~10deg)/60->20, joint_oscillation -1.0->-5.0, joint_velocity -0.7->-1.0, angular_velocity -1.5->0.0 disabled.)

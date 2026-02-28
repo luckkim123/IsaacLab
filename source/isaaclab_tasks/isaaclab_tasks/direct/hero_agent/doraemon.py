@@ -41,7 +41,7 @@ class DoraemonCfg:
     alpha: float = 0.5
     """Success rate threshold. Distribution expands only when success >= alpha."""
 
-    kl_ub: float = 0.005
+    kl_ub: float = 0.0015
     """Trust region KL divergence upper bound per step."""
 
     init_concentration: float = 30.0
@@ -87,7 +87,7 @@ class ParamSpec(NamedTuple):
     nominal: float
 
 
-# 16 DORAEMON-managed DR parameters.
+# 15 DORAEMON-managed DR parameters.
 # Order matches BetaDistribution dimension indices.
 PARAM_SPECS: list[ParamSpec] = [
     ParamSpec("inertia_scale", 0.6, 1.5, 1.0),
@@ -104,7 +104,6 @@ PARAM_SPECS: list[ParamSpec] = [
     ParamSpec("joint_static_friction", 0.0, 0.05, 0.015),
     ParamSpec("joint_viscous_friction", 0.0, 0.3, 0.1),
     ParamSpec("payload_mass", 0.0, 1.5, 0.5),
-    ParamSpec("joint_effort_limit", 0.4, 2.7, 1.0),
     ParamSpec("yaw_damping_scale", 0.5, 1.5, 1.0),
 ]
 

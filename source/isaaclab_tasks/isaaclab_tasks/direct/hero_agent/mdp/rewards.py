@@ -10,9 +10,8 @@ functions for ALBC (joint-based attitude control) training.
 
 Reward design principles:
     - Gaussian kernel tracking + settling bonus dominate the positive signal
-      ([0,1] dense gradient). Penalties (joint_oscillation, joint_velocity,
-      angular_velocity) provide directional regularization with a combined
-      max of ~-3.2 per step, ramped via penalty curriculum.
+      ([0,1] dense gradient). Penalties (joint_oscillation, joint_velocity)
+      provide directional regularization, ramped via penalty curriculum.
     - dt-scaling: state-quality terms (tracking, settling, joint_oscillation,
       joint_velocity, angular_velocity) are dt-scaled.
     - PBRS progress shaping (Ng 1999): preserves optimal policy guarantee.
@@ -47,17 +46,16 @@ if TYPE_CHECKING:
 class ALBCRewardCfg:
     """ALBC reward configuration with Gaussian tracking + regularization penalties.
 
-    Active terms (6):
+    Active terms (5):
         tracking          * w_t  * dt   (Gaussian kernel, positive)
         settling          * w_s  * dt   (sigmoid near-target bonus, positive)
-        angular_velocity  * w_av * dt   (body-rate penalty, negative)
         joint_oscillation * w_jo * dt   (EMA high-pass filtered, negative)
         joint_velocity    * w_jv * dt   (joint speed penalty, negative)
         progress          * w_p        (PBRS, NOT dt-scaled)
 
-    Design: tracking + settling dominate the positive signal. Three
-    penalties (angular_velocity, joint_oscillation, joint_velocity) provide
-    directional regularization, ramped via penalty curriculum.
+    Design: tracking + settling dominate the positive signal. Two
+    penalties (joint_oscillation, joint_velocity) provide directional
+    regularization, ramped via penalty curriculum.
     """
 
     # Tracking (Gaussian kernel): exp(-||e||^2 / sigma^2)
@@ -68,13 +66,13 @@ class ALBCRewardCfg:
     # Joint oscillation penalty (EMA high-pass filtered joint velocity).
     # Penalizes high-frequency oscillation while allowing smooth movement.
     # dt-scaled. Use with negative weight.
-    joint_oscillation_weight: float = -1.0
+    joint_oscillation_weight: float = -5.0
     joint_oscillation_alpha: float = 0.2  # EMA smoothing factor (cutoff ~1.6Hz at 50Hz)
 
     # Joint velocity penalty: mean(joint_vel^2). Penalizes fast joint movement,
     # improving control stability and energy efficiency.
     # dt-scaled. Use with negative weight.
-    joint_velocity_weight: float = -0.7
+    joint_velocity_weight: float = -1.0
 
     # Linear error penalty: -min(||err||, max_err) / max_err.
     # Provides constant gradient at ALL error levels (unlike Gaussian which
@@ -91,12 +89,12 @@ class ALBCRewardCfg:
 
     # Settling bonus: sigmoid(sharpness * (threshold - error)), dt-scaled.
     # Dense gradient near target where Gaussian tracking has flat top.
-    settling_weight: float = 2.0
-    settling_threshold: float = 0.035  # radians (~2 deg)
-    settling_sharpness: float = 60.0  # 1/radians
+    settling_weight: float = 4.0
+    settling_threshold: float = 0.175  # radians (~10 deg)
+    settling_sharpness: float = 20.0  # 1/radians
 
     # Angular velocity penalty (dt-scaled, discourages oscillation under DR)
-    angular_velocity_weight: float = -1.5
+    angular_velocity_weight: float = 0.0
 
     # Penalty curriculum: linearly ramp penalty scale from 0 to 1 over this
     # ratio of max_iterations. 0 = disabled (penalties always at full weight).
