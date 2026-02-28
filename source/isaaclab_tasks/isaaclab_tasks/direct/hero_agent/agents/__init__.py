@@ -11,7 +11,6 @@ This module provides:
     - HeroAgentPPORunnerCfg: Standard PPO for joint-based attitude control
     - HeroAgentTDEBasePPORunnerCfg: TDE-Base with training enhancements
     - HeroAgentEncoderPPORunnerCfg: HORA Phase 1 with extrinsics encoder
-    - HeroAgentEncoderTDCRunnerCfg: Encoder-TDC (RL M_hat + gains for TDC)
     - HeroAgentAdaptBaseRunnerCfg: Phase 2 adaptation (supervised, base RL)
 
 MPC agent configurations are in the hero_agent_mpc.agents package.
@@ -21,13 +20,11 @@ from ..encoder import ActorCriticEncoder, ActorCriticEncoderAdapt
 from .rsl_rl_ppo_cfg import (
     HeroAgentAdaptBaseRunnerCfg,
     HeroAgentEncoderPPORunnerCfg,
-    HeroAgentEncoderTDCRunnerCfg,
     HeroAgentPPORunnerCfg,
     HeroAgentPrivBasePPORunnerCfg,
     HeroAgentTDEBasePPORunnerCfg,
     RslRlPpoActorCriticEncoderAdaptCfg,
     RslRlPpoActorCriticEncoderCfg,
-    RslRlPpoActorCriticEncoderTDCCfg,
 )
 
 __all__ = [
@@ -37,9 +34,7 @@ __all__ = [
     "HeroAgentPrivBasePPORunnerCfg",
     "HeroAgentTDEBasePPORunnerCfg",
     "HeroAgentEncoderPPORunnerCfg",
-    "HeroAgentEncoderTDCRunnerCfg",
     "HeroAgentAdaptBaseRunnerCfg",
     "RslRlPpoActorCriticEncoderCfg",
-    "RslRlPpoActorCriticEncoderTDCCfg",
     "RslRlPpoActorCriticEncoderAdaptCfg",
 ]

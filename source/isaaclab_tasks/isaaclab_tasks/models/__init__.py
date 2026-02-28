@@ -9,11 +9,13 @@ This module provides physics models that can be shared across multiple environme
     - HydrodynamicsModel: Fossen model for 6-DOF hydrodynamic forces (UUV)
     - ThrusterModel: First-order thruster dynamics with allocation matrix (UUV)
 
-Configuration classes are imported from isaaclab_assets.robots.uuv and
-re-exported here for convenient access.
+Configuration classes (HydrodynamicsCfg, OceanCurrentCfg, ThrusterCfg) are
+defined in isaaclab_assets.robots.uuv and re-exported here for convenient access.
 """
 
-from .hydrodynamics import HydrodynamicsCfg, HydrodynamicsModel, OceanCurrentCfg
+from isaaclab_assets.robots.uuv import HydrodynamicsCfg, OceanCurrentCfg
+
+from .hydrodynamics import HydrodynamicsModel
 from .thruster import ThrusterCfg, ThrusterModel
 
 __all__ = [

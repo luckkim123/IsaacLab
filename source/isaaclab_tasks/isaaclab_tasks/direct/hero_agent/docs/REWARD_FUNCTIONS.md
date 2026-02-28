@@ -1,54 +1,43 @@
 # Reward Functions
 
-> **Status**: 2026-02-20 | **Source**: `mdp/rewards.py`, `config.py`
+> **Status**: 2026-02-28 | **Source**: `mdp/rewards.py`, `config.py`
 >
 > Hero Agent ALBC 보상함수의 수학적 분석, 설계 근거, 실측 수치.
-> Gaussian kernel tracking 지배 + 소규모 regularization penalty 구조.
+> Gaussian kernel tracking + settling 지배 + 소규모 regularization penalty 구조.
 
 ---
 
 ## Overview
 
-Hero Agent ALBC 환경의 보상은 3개 항의 가중합으로 구성된다:
+Hero Agent ALBC 환경의 보상은 6개 항의 가중합으로 구성된다:
 
-$$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tracking}} + \underbrace{w_2 \cdot \|\mathbf{a}_t\|^2 \cdot \Delta t}_{\text{action mag.}} + \underbrace{w_3 \cdot \|\Delta\mathbf{a}_t\|^2}_{\text{action rate}}$$
+$$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tracking}} + \underbrace{w_2 \cdot \text{settling}(\phi_t) \cdot \Delta t}_{\text{settling}} + \underbrace{w_3 \cdot \text{PBRS}(\phi)}_{\text{progress}} + \underbrace{w_4 \cdot \text{hf}^2 \cdot \Delta t}_{\text{joint osc.}} + \underbrace{w_5 \cdot \|\gamma\|^2 \cdot \Delta t}_{\text{joint angle}} + \underbrace{w_6 \cdot \|\omega\|^2 \cdot \Delta t}_{\text{ang. vel.}}$$
 
-여기서 $\phi_t = \|\mathbf{e}_t^{rp}\|_2$ (roll/pitch 에러의 L2 norm), $\Delta t$ = step_dt, $\sigma$ = tracking sigma이다.
+여기서 $\phi_t = \|\mathbf{e}_t^{rp}\|_2$ (roll/pitch error의 L2 norm), $\Delta t$ = step_dt, $\sigma$ = tracking sigma이다.
 
 ### Configuration
 
 | Symbol | ALBCRewardCfg (Base RL) | Description |
 |:---|:---|:---|
-| $w_1$ | 1.5 | `tracking_weight` |
-| $\sigma$ | 0.25 rad | `tracking_sigma` |
-| $w_2$ | -0.1 | `action_magnitude_weight` |
-| $w_3$ | -0.01 | `action_rate_weight` (NOT dt-scaled) |
-| end iter | 200 | `curriculum_end_iter` |
+| $w_1$ | 3.0 | `tracking_weight` |
+| $\sigma$ | 1.0 rad | `tracking_sigma` (~57.3 deg 1/e point) |
+| $w_2$ | 2.0 | `settling_weight` |
+| $w_3$ | 0.3 | `progress_weight` (NOT dt-scaled) |
+| $w_4$ | -1.0 | `joint_oscillation_weight` |
+| $w_5$ | -0.7 | `joint_angle_weight` |
+| $w_6$ | -1.5 | `angular_velocity_weight` |
+| end iter | 750 | `penalty_curriculum_end_iter` |
 | $\Delta t$ | 0.005 | `step_dt` (decimation=1, sim dt=0.005) |
 
-**Source**: `mdp/rewards.py`, `config.py`
+**Source**: `mdp/rewards.py` (`ALBCRewardCfg`), `config.py`
 
 ### Design Principles
 
-1. **Tracking 지배**: AnymalC/Quadcopter 패턴을 따라, tracking reward가 penalty의 15배 이상을 유지. 미숙한 policy도 양수 reward를 받아 gradient signal이 건전.
+1. **Positive reward 지배**: tracking(3.0) + settling(2.0) + progress(0.3) = 5.3 positive vs joint_osc(-1.0) + joint_angle(-0.7) + ang_vel(-1.5) = -3.2 max penalty. 미숙한 policy도 양수 reward를 받아 gradient signal이 건전.
 2. **Gaussian kernel 정규화**: $e^{-\phi^2/\sigma^2}$ 형태로 [0, 1] 자연 바운딩. 가중치 해석이 직관적.
-3. **dt-scaling 규칙**: "순간 상태 품질" 측정 항 -> dt-scaled, action rate는 per-step 차분이므로 NOT dt-scaled.
-4. **환경별 분리**: 환경에 따라 action semantics가 다르므로 보상 config을 분리할 수 있다.
-
-### Previous Design (deprecated, 2026-02-20 이전)
-
-기존 5항 구조:
-- `tracking_weight=1.5`: $e^{-\phi^2/\sigma^2}$ (Gaussian)
-- `linear_error_weight=-1.0`: $-\|\mathbf{e}\|_2$ (Gaussian 보완)
-- `angular_velocity_weight=-1.0`: $-\|\omega\|^2$ (진동 억제)
-- `action_magnitude_weight=-1.0`: $-\|a\|^2$
-- `action_rate_weight=-0.01`: $-\|\Delta a\|^2$
-
-문제점:
-- **Penalty 지배**: 3개의 -1.0 penalty가 +1.5 tracking을 구조적으로 압도. error > 17.9도이면 tracking + linear_error만으로 순음수 (angular_velocity, action_magnitude penalty 추가 전에 이미 음수).
-- **Episode 길이 비례 penalty 누적**: 정규화 없이 raw sum 로깅 -> 생존이 길어지면 mean_reward가 오히려 하락.
-- **noise_std 조기 붕괴**: penalty 지배 구조가 "아무것도 하지 마라"로 해석 -> 탐색 포기.
-- AnymalC (penalty/tracking 비율 1:100) 대비 Hero Agent는 1:1.5로 penalty 비중이 ~60배 과다.
+3. **dt-scaling 규칙**: "순간 상태 품질" 측정 항 -> dt-scaled, progress (PBRS)는 state transition 기반이므로 NOT dt-scaled.
+4. **Penalty curriculum**: 모든 음수 가중치 항이 0->1로 선형 증가. 초기 탐색 보장 후 점진적 규제.
+5. **PBRS (Ng 1999)**: potential-based reward shaping으로 optimal policy 보존.
 
 ---
 
@@ -62,7 +51,7 @@ $$\mathbf{e}_t = \text{atan2}\!\big(\sin(\boldsymbol{\phi}^* - \boldsymbol{\phi}
 
 `atan2(sin, cos)` wrapping으로 각도 차이가 항상 $[-\pi, \pi]$ 범위에 있도록 보장한다.
 
-**Source**: `attitude_task.py` (`compute_error`)
+**Source**: `base_env.py` (`compute_error`)
 
 ### Target Attitude Randomization
 
@@ -77,9 +66,9 @@ $$\mathbf{e}_t = \text{atan2}\!\big(\sin(\boldsymbol{\phi}^* - \boldsymbol{\phi}
 
 $$\phi_r^* \in [-0.5, +0.5] \text{ rad} \;(\approx \pm28\degree), \quad \phi_p^* \in [-0.5, +0.5] \text{ rad}, \quad \phi_y^* = 0$$
 
-Yaw 목표는 항상 0으로 고정 (range=0.0). 목표가 per-env이므로 `_target_euler`은 `(num_envs, 3)` 텐서이며, attitude error 계산 시 각 환경의 개별 목표를 참조한다.
+Yaw 목표는 항상 0으로 고정 (range=0.0).
 
-**Source**: `attitude_task.py` (`reset_targets`), `config.py`
+**Source**: `base_env.py` (`reset_targets`), `config.py`
 
 ### Potential Value
 
@@ -89,7 +78,7 @@ $$\phi_t = \|\mathbf{e}_t^{rp}\|_2 = \sqrt{e_{roll}^2 + e_{pitch}^2}$$
 
 **Yaw를 제외하는 이유**: ALBC는 부력체(buoy)의 위치를 조절하여 roll/pitch 토크를 생성한다. 구조적으로 Z축(yaw) 토크를 만들 수 없으므로, yaw를 보상에 포함하면 해결 불가능한 과제를 부여하는 것이 된다.
 
-**Source**: `attitude_task.py` (`update_potentials`)
+**Source**: `base_env.py` (`update_potentials`)
 
 ### Update Timing
 
@@ -102,175 +91,125 @@ def update_potentials(self, quat: torch.Tensor) -> None:
     self._potentials = torch.linalg.norm(self._attitude_error[:, :2], dim=-1)
 ```
 
-1. 현재 potential을 `_prev_potentials`에 복사 (상태 추적용)
-2. 새로운 attitude error 계산 (로깅에서도 참조)
-3. roll/pitch norm으로 새 potential 갱신
-
 ### Initialization on Reset
 
 에피소드 리셋 직후 `initialize_potentials()`가 호출된다:
 
 $$\phi_0 = \phi_{-1} = \|\mathbf{e}_0^{rp}\|_2$$
 
-두 값을 동일하게 설정하여 리셋 직후 상태를 일관성 있게 초기화한다.
-
-**Source**: `attitude_task.py` (`initialize_potentials`)
+두 값을 동일하게 설정하여 리셋 직후 PBRS progress가 0을 반환한다.
 
 ---
 
-## Term 1: Tracking Reward (Gaussian Kernel)
+## Individual Reward Terms
 
-### Formula
+### Term 1: Tracking Reward (Gaussian Kernel)
 
-$$r_{tracking} = e^{-\phi_t^2 / \sigma^2}, \quad \sigma = 0.25 \text{ rad}$$
+$$r_{tracking} = e^{-\phi_t^2 / \sigma^2}, \quad \sigma = 1.0 \text{ rad}, \quad w = 3.0$$
 
 **Source**: `mdp/rewards.py` (`tracking_reward`)
 
-```python
-def tracking_reward(_robot, env, sigma=0.25, **_kwargs):
-    err_sq = env._potentials ** 2
-    return torch.exp(-err_sq / (sigma ** 2))
-```
-
-### Behavior
-
-| $\phi_t$ (에러) | $e^{-\phi_t^2/\sigma^2}$ | 보상 (dt-scaled) |
-|:---|:---|:---|
-| 0.0 (완벽) | 1.0000 | 0.0050 |
-| 0.1 (~5.7도) | 0.8521 | 0.0043 |
-| 0.25 (~14.3도) | 0.3679 (= 1/e) | 0.0018 |
-| 0.5 (~28.6도) | 0.0183 | 0.0001 |
-| 0.785 (~45도) | 0.0001 | ~0 |
-
-### Design Rationale
-
-1. **Natural [0, 1] bound**: 정규화 없이 자연스럽게 [0, 1] 범위. 가중치의 의미가 직관적.
-2. **Sigma 파라미터**: 민감도 조절 가능. $\sigma=0.25$ rad에서 error=0.1 rad이면 보상 0.85 (좋음), error=0.5 rad이면 보상 0.02 (나쁨).
-3. **L2 squared norm**: 기존 L1 norm ($e^{-\phi}$) 대비 작은 오차 근처에서 더 큰 gradient 제공 (미세 조정에 유리).
-4. **dt-scaled** (`scale_by_dt=True`): 시뮬레이션 주파수 변경 시 에피소드 리턴 일정.
-
-### Comparison: $e^{-\phi^2/\sigma^2}$ vs $e^{-\phi}$
-
-기존 방식 $e^{-\phi}$의 gradient:
-$$\frac{d}{d\phi} e^{-\phi} = -e^{-\phi}$$
-
-Gaussian kernel의 gradient:
-$$\frac{d}{d\phi} e^{-\phi^2/\sigma^2} = -\frac{2\phi}{\sigma^2} \cdot e^{-\phi^2/\sigma^2}$$
-
-$\phi \to 0$에서:
-- $e^{-\phi}$: gradient $\to -1$ (일정)
-- $e^{-\phi^2/\sigma^2}$: gradient $\to 0$ (자연 감쇄)
-
-$\phi \approx \sigma$에서:
-- $e^{-\phi}$: gradient $\approx -0.78$
-- $e^{-\phi^2/\sigma^2}$: gradient $\approx -\frac{2}{\sigma} \cdot e^{-1} \approx -2.94$ (더 강함)
-
-Gaussian은 "목표에 거의 도달한 상태"에서는 gradient가 작아져 불필요한 진동을 줄이고, "중간 오차 영역"에서는 더 강한 gradient로 적극적 교정을 유도한다.
-
----
-
-## Term 2: Action Magnitude Penalty
-
-### Formula
-
-$$r_{action\_mag} = \sum_{i=1}^{n} a_i^2, \quad n = \text{action\_space}$$
-
-**Source**: `mdp/rewards.py` (`action_magnitude_penalty`)
-
-```python
-def action_magnitude_penalty(_robot, actions, **_kwargs):
-    return torch.sum(actions ** 2, dim=-1)
-```
-
-### Behavior
-
-Base RL 환경에서 action space는 2D (관절 2개), 각 action $\in [-1, 1]$:
-
-| $a_1$ | $a_2$ | $\sum a^2$ | 페널티 (Base, w=-0.1, dt) | Tracking 대비 |
-|:---|:---|:---|:---|:---|
-| 0.0 | 0.0 | 0.00 | 0.0000 | 0% |
-| 0.3 | 0.3 | 0.18 | -0.00009 | 1.2% |
-| 0.5 | 0.5 | 0.50 | -0.00025 | 3.3% |
-| 1.0 | 1.0 | 2.00 | -0.00100 | 13.3% |
-
-(Tracking 대비 = 완벽 tracking 0.0075/step 기준)
-
-### Design Rationale
-
-1. **Small regularizer**: tracking의 ~1/7 ~ 1/75 수준으로, AnymalC의 penalty/tracking 비율 패턴을 따름.
-2. **L2 (제곱) 페널티**: 작은 행동은 거의 무시, 큰 행동만 약하게 억제.
-3. **환경별 가중치 분리**:
-   - Base RL ($w_2 = -0.1$): 관절 속도 제어의 에너지 효율 유도.
-4. **dt-scaled**: 순간 상태 품질 측정.
-
----
-
-## Term 3: Action Rate Penalty
-
-### Formula
-
-$$r_{action\_rate} = \sum_{i=1}^{n} (a_{t,i} - a_{t-1,i})^2$$
-
-**Source**: `mdp/rewards.py` (`action_rate_penalty`)
-
-```python
-def action_rate_penalty(_robot, actions, prev_actions, **_kwargs):
-    return torch.sum((actions - prev_actions) ** 2, dim=-1)
-```
-
-### Behavior
-
-| $\Delta a_1$ | $\Delta a_2$ | $\sum (\Delta a)^2$ | 페널티 (Base, w=-0.01) |
+| $\phi_t$ (에러) | $e^{-\phi_t^2/\sigma^2}$ | dt-scaled | weighted |
 |:---|:---|:---|:---|
-| 0.0 | 0.0 | 0.000 | 0.000 |
-| 0.01 | 0.01 | 0.0002 | -0.000002 |
-| 0.1 | 0.1 | 0.02 | -0.0002 |
-| 0.3 | 0.3 | 0.18 | -0.0018 |
-| 0.5 | 0.5 | 0.50 | -0.005 |
+| 0.0 (완벽) | 1.0000 | 0.00500 | 0.01500 |
+| 0.087 (~5도) | 0.9925 | 0.00496 | 0.01489 |
+| 0.175 (~10도) | 0.9698 | 0.00485 | 0.01455 |
+| 0.349 (~20도) | 0.8853 | 0.00443 | 0.01328 |
+| 0.524 (~30도) | 0.7602 | 0.00380 | 0.01141 |
+| 0.785 (~45도) | 0.5394 | 0.00270 | 0.00809 |
+| 1.0 (= sigma) | 0.3679 | 0.00184 | 0.00552 |
 
-### Design Rationale
+$\sigma = 1.0$ rad은 넓은 kernel width로, 45도 error에서도 의미 있는 gradient(0.54)를 제공한다. 미세 조정은 settling bonus가 담당.
 
-1. **Smooth control**: 연속 스텝 간 행동 변화를 최소화하여 부드러운 제어 유도. 특히 TDC에서 게인 급변 방지.
-2. **NOT dt-scaled**: per-step 차분이므로 dt를 곱하지 않음.
-3. **환경별 가중치 분리**:
-   - Base RL ($w_3 = -0.01$): 급격한 관절 이동 억제.
-4. **Curriculum**: 초기 $w_3 / 10$에서 시작하여 점진적 증가.
+### Term 2: Settling Bonus (Sigmoid)
+
+$$r_{settling} = \sigma(k \cdot (\theta_{thr} - \phi_t)), \quad k = 30, \; \theta_{thr} = 0.10 \text{ rad}, \quad w = 2.0$$
+
+**Source**: `mdp/rewards.py` (`settling_bonus`)
+
+| $\phi_t$ (에러) | settling | dt-scaled | weighted |
+|:---|:---|:---|:---|
+| 0.0 (완벽) | 0.9526 | 0.00476 | 0.00953 |
+| 0.05 (~2.9도) | 0.8176 | 0.00409 | 0.00818 |
+| 0.10 (threshold) | 0.5000 | 0.00250 | 0.00500 |
+| 0.15 (~8.6도) | 0.1824 | 0.00091 | 0.00182 |
+| 0.20 (~11.5도) | 0.0474 | 0.00024 | 0.00047 |
+
+Gaussian tracking이 flat top (gradient -> 0 near zero error)인 영역에서 dense gradient를 제공하여 미세 수렴을 유도한다.
+
+### Term 3: Progress Reward (PBRS)
+
+$$r_{progress} = \phi_{t-1} - \gamma \cdot \phi_t, \quad \gamma = 0.99, \quad w = 0.3$$
+
+**Source**: `mdp/rewards.py` (`progress_reward_pbrs`)
+
+Ng et al. (1999) potential-based reward shaping으로 optimal policy를 보존한다. NOT dt-scaled. $\gamma$는 PPO discount factor와 일치시켜야 한다 (`ALBCRewardCfg.progress_gamma`).
+
+Error 감소 시 양수 보상 제공:
+- $\phi_{t-1} = 0.30, \; \phi_t = 0.28$: $r = 0.30 - 0.99 \cdot 0.28 = 0.0228 \to w \cdot r = 0.0068$
+- Error 증가 시 음수로 전환, 자연스러운 gradient 제공
+
+Off-policy (SAC) replay buffer에서도 안전하게 사용 가능. 대안으로 `progress_reward` (tanh 기반)가 있으나, PBRS가 이론적 보장이 강하다.
+
+### Term 4: Joint Oscillation Penalty (EMA High-Pass)
+
+$$r_{osc} = \text{mean}((\dot{\gamma} - \text{EMA}(\dot{\gamma}))^2), \quad \alpha_{EMA} = 0.2, \quad w = -1.0$$
+
+**Source**: `mdp/rewards.py` (`joint_oscillation_penalty`)
+
+EMA가 저주파 성분을 추적하고, 차이(고주파 잔차)를 제곱 페널티로 부과한다. 부드러운 움직임은 허용하면서 고주파 진동만 선택적으로 억제한다.
+
+$\alpha = 0.2$는 50Hz 제어 주파수에서 약 1.6Hz cutoff에 해당한다.
+
+### Term 5: Joint Angle Penalty
+
+$$r_{angle} = \text{mean}(\gamma^2), \quad w = -0.7$$
+
+**Source**: `mdp/rewards.py` (`joint_angle_penalty`)
+
+관절 각도가 0으로부터 벗어날수록 quadratic하게 증가하는 페널티. 에너지 효율적인 attitude control을 유도하고, workspace 경계 근처의 비선형 동역학 영역을 회피한다.
+
+### Term 6: Angular Velocity Penalty
+
+$$r_{angvel} = \sum_{i \in \{p, q\}} \omega_i^2, \quad w = -1.5$$
+
+**Source**: `mdp/rewards.py` (`angular_velocity_penalty`)
+
+Roll/pitch 각속도(body frame)의 제곱합. Yaw는 제어 불가능하므로 제외. `sum` (not `mean`) 사용: 축 수가 2로 고정이므로 결과 동일하나, 총 각속도 크기에 비례하는 penalty를 명시적으로 표현.
+
+DR 환경에서 강한 외란 하에 과도한 각속도 진동을 억제한다. 가중치 -1.5는 tracking(3.0)의 절반으로, ang_vel > 0.7 rad/s에서도 tracking gradient를 완전히 억압하지 않도록 조정되었다 (이전 -3.0에서 하향 조정).
 
 ---
 
-## Curriculum Strategy
+## Penalty Curriculum
 
-Action rate의 가중치를 학습 초기에는 작게 유지하여 exploration을 보장하고, 점진적으로 증가시켜 smooth한 행동을 유도한다.
+모든 음수 가중치 항에 선형 ramp curriculum이 적용된다:
 
-### Schedule
+$$w_{eff}(i) = w_{full} \cdot \min(1, \; i / i_{end})$$
 
-$$w(i) = w_{start} + (w_{full} - w_{start}) \cdot \min\!\big(1, \; i / i_{end}\big)$$
-
-| Term | $w_{start}$ | $w_{full}$ | $i_{end}$ |
-|:---|:---|:---|:---|
-| action_rate (Base RL) | -0.001 | -0.01 | 200 |
+| Parameter | Value |
+|:---|:---|
+| `penalty_curriculum_end_iter` | 750 |
+| Applies to | `joint_oscillation`, `joint_angle`, `angular_velocity` (all negative-weight terms) |
+| Scale at iter 0 | 0.0 (penalties disabled) |
+| Scale at iter 375 | 0.5 |
+| Scale at iter 750 | 1.0 (full penalties) |
 
 ### Implementation
 
-`RewardTermCfg`에 `curriculum_start_weight` 필드가 설정된 항만 curriculum이 적용된다.
+`RewardManager.update_curriculum(iteration)` 메서드에서 `penalty_scale`을 갱신한다. `compute()` 내부에서 `weight < 0`인 항에만 scale을 곱한다:
 
 ```python
-@configclass
-class RewardTermCfg:
-    func: Callable
-    weight: float           # full weight (curriculum 도달 목표)
-    curriculum_start_weight: float | None = None  # 시작 가중치 (None = 상수)
+if weight < 0:
+    scaled_value = scaled_value * self._penalty_scale
 ```
-
-`RewardManager._active_weights`는 **초기화 시 `curriculum_start_weight`로 설정**되어, 첫 iteration부터 올바른 시작값을 사용한다.
 
 Runner의 `log()` 메서드에서 매 iteration 호출:
-
 ```python
-raw_env._reward_manager.update_curriculum(iteration, raw_env.cfg.reward.curriculum_end_iter)
+raw_env._reward_manager.update_curriculum(iteration)
 ```
 
-**Source**: `mdp/rewards.py` (`update_curriculum`), `runners/encoder_runner.py`
+초기 학습에서 penalty 없이 자유롭게 탐색하고, 점진적으로 규제를 강화하여 smooth하고 에너지 효율적인 행동으로 수렴한다.
 
 ---
 
@@ -278,33 +217,37 @@ raw_env._reward_manager.update_curriculum(iteration, raw_env.cfg.reward.curricul
 
 ### Expected Per-step Balance (15s episode)
 
-#### Base RL (error ~ 15 deg, moderate actions)
+#### Base RL (error ~ 15 deg = 0.262 rad, moderate angular velocity ~ 0.5 rad/s)
 
 | Term | Raw | Weight | dt | Per-step | Share |
 |:---|:---|:---|:---|:---|:---|
-| tracking | 0.334 | 1.5 | 0.005 | **+0.00251** | **93%** |
-| action_magnitude | 0.08 | -0.1 | 0.005 | -0.00004 | 1.5% |
-| action_rate | 0.005 | -0.01 | no | -0.00005 | 1.9% |
-| **Net** | | | | **+0.00242** | |
+| tracking | 0.934 | 3.0 | 0.005 | **+0.01401** | **55%** |
+| settling | 0.012 | 2.0 | 0.005 | +0.00012 | 0.5% |
+| progress | ~0.01 | 0.3 | no | +0.00300 | 12% |
+| joint_oscillation | ~0.1 | -1.0 | 0.005 | -0.00050 | 2% |
+| joint_angle | ~0.05 | -0.7 | 0.005 | -0.00018 | 0.7% |
+| angular_velocity | ~0.5 | -1.5 | 0.005 | -0.00375 | 15% |
+| **Net** | | | | **+0.01270** | |
 
-Tracking(93%)이 압도적으로 지배. Net 양수 -> value function baseline 추정이 안정.
+Positive 항(tracking+settling+progress=67%)이 지배. Net 양수 -> value function baseline 안정.
 
 ### Episode Budget (15s, normalized per second)
 
-| Error | Tracking/s | Action penalties/s | Total/s |
+| Error | Positive rewards/s | Penalties/s (full curriculum) | Total/s |
 |:---|:---|:---|:---|
-| 5 deg | +1.33 | -0.018 | **+1.31** |
-| 10 deg | +0.92 | -0.018 | **+0.90** |
-| 15 deg | +0.50 | -0.018 | **+0.48** |
-| 20 deg | +0.21 | -0.018 | **+0.20** |
-| 30 deg | +0.02 | -0.018 | **+0.00** |
+| 5 deg | +3.97 | -0.50 | **+3.47** |
+| 10 deg | +3.76 | -0.50 | **+3.26** |
+| 20 deg | +3.06 | -0.50 | **+2.56** |
+| 30 deg | +2.39 | -0.50 | **+1.89** |
+| 45 deg | +1.60 | -0.50 | **+1.10** |
 
-30도까지 양수 reward 유지. 학습 초기(~30도 error)에도 양수 신호를 받을 수 있다.
+45도까지도 양수 reward 유지. 학습 초기에도 강건한 양수 gradient signal을 제공한다.
 
 ### Key Observations
 
-1. **Tracking 지배 구조**: tracking weight(1.5) 대비 action_magnitude(-0.1)는 1/15, action_rate(-0.01)는 1/150. AnymalC의 penalty/tracking 비율(~1:100)과 유사.
-2. **Episode reward 정규화**: `_collect_episode_metrics()`에서 `/ max_episode_length_s`로 나누어 episode 길이에 무관한 per-second 평균을 로깅. AnymalC/Quadcopter와 동일한 패턴.
+1. **Positive reward 지배 구조**: tracking(3.0) + settling(2.0) + progress(0.3) = 5.3 총 positive vs max penalty -3.2. 45도 error에서도 양수 유지.
+2. **Angular velocity penalty 균형**: -1.5 가중치는 ang_vel=1.0 rad/s에서 -0.0075/step. tracking 0.0055/step과 비교해 억압이 가능하지만, 더 작은 ang_vel에서는 tracking gradient가 우세.
+3. **Episode reward 정규화**: `_collect_episode_metrics()`에서 `/ max_episode_length_s`로 나누어 episode 길이에 무관한 per-second 평균을 로깅.
 
 ---
 
@@ -319,9 +262,12 @@ _get_rewards() [base_env.py]
     |
     +-- RewardManager.compute()           # iterate active terms
             |
-            +-- tracking_reward()            --> * active_weight * dt
-            +-- action_magnitude_penalty()   --> * active_weight * dt
-            +-- action_rate_penalty()        --> * active_weight (no dt)  [curriculum]
+            +-- tracking_reward()            --> * weight * dt
+            +-- settling_bonus()             --> * weight * dt
+            +-- progress_reward_pbrs()       --> * weight (no dt)
+            +-- joint_oscillation_penalty()  --> * weight * dt * penalty_scale
+            +-- joint_angle_penalty()        --> * weight * dt * penalty_scale
+            +-- angular_velocity_penalty()   --> * weight * dt * penalty_scale
             |
             +-- accumulate to _episode_sums
             |
@@ -334,14 +280,19 @@ _get_rewards() [base_env.py]
 
 ### Environment-Specific Registration
 
-| Environment | Registration | Terms |
-|:---|:---|:---|
-| Base RL (Base-v0 등) | `base_env._build_reward_terms()` | 3개 active (tracking, action_mag, action_rate) |
-| Pure TDC (TDC-v0) | `base_env._build_reward_terms()` (상속) | 3개 active (action은 dummy) |
+`_build_reward_terms()`에서 config의 각 가중치를 확인하고 0이 아닌 항만 등록한다:
+
+| Environment | Active Terms |
+|:---|:---|
+| Base RL (Base-v0 등) | 6개 (tracking, settling, progress, joint_osc, joint_angle, ang_vel) |
+| Debug (HeroAgent-v0) | 동일 (동일 config) |
+| TDC (TDC-v0) | 6개 base + mhat_accuracy, tdc_torque (if weight != 0) |
+
+TDC 환경에서 `tdc_env._build_reward_terms()`가 base를 상속 + 확장한다.
 
 ### Logging Integration
 
-`RewardManager.reset(env_ids)` 호출 시 리셋되는 환경들의 에피소드 합 평균을 반환한다. 이 값은 `base_env._collect_episode_metrics()`를 통해 WandB/TensorBoard에 **per-second 평균으로 정규화**되어 기록된다:
+`RewardManager.reset(env_ids)` 호출 시 리셋되는 환경들의 에피소드 합 평균을 반환한다. `base_env._collect_episode_metrics()`를 통해 WandB/TensorBoard에 **per-second 평균으로 정규화**되어 기록된다:
 
 ```python
 log[f"Episode_Reward/{name}"] = value / self.max_episode_length_s
@@ -349,8 +300,11 @@ log[f"Episode_Reward/{name}"] = value / self.max_episode_length_s
 
 로깅 항목:
 - `Episode_Reward/tracking`
-- `Episode_Reward/action_magnitude`
-- `Episode_Reward/action_rate`
+- `Episode_Reward/settling`
+- `Episode_Reward/progress`
+- `Episode_Reward/joint_oscillation`
+- `Episode_Reward/joint_angle`
+- `Episode_Reward/angular_velocity`
 
 ---
 
@@ -363,7 +317,7 @@ log[f"Episode_Reward/{name}"] = value / self.max_episode_length_s
 pose_reward = 8 * torch.exp(-potentials)
 
 # line 766
-progress_reward = potentials - prev_potentials    # 부호 주의!
+progress_reward = potentials - prev_potentials
 
 # line 776
 total_reward = pose_reward + progress_reward - 2 * actions_cost_scale * actions_cost
@@ -371,30 +325,26 @@ total_reward = pose_reward + progress_reward - 2 * actions_cost_scale * actions_
 
 | 항목 | Isaac Gym | Isaac Lab (현재) |
 |:---|:---|:---|
-| Tracking | $8 \cdot e^{-\phi}$ | $e^{-\phi^2 / \sigma^2}$ (Gaussian) |
-| Action cost | $-2 \cdot \|a\|^2$ | $-0.1 \cdot \|a\|^2 \cdot \Delta t$ (Base) |
+| Tracking | $8 \cdot e^{-\phi}$ | $3.0 \cdot e^{-\phi^2 / \sigma^2}$ (Gaussian, $\sigma=1.0$) |
+| Progress | $\phi_{t-1} - \phi_t$ (raw delta) | $\phi_{t-1} - \gamma \phi_t$ (PBRS, $\gamma=0.99$) |
+| Settling | 없음 | $2.0 \cdot \sigma(30 \cdot (0.1 - \phi))$ |
+| Action cost | $-2 \cdot \|a\|^2$ | 없음 (제거됨) |
 | Alive reward | 0.5/step | 없음 |
-| Action rate | 없음 | $-0.01 \cdot \|\Delta a\|^2$ (curriculum) |
-| dt scaling | 없음 | tracking, action_mag에 적용 |
-| Penalty/Tracking ratio | ~1:4 | ~1:15 |
+| Joint oscillation | 없음 | $-1.0 \cdot \text{EMA-HP}(\dot\gamma)^2$ |
+| Joint angle | 없음 | $-0.7 \cdot \|\gamma\|^2$ |
+| Angular velocity | 없음 | $-1.5 \cdot \|\omega_{rp}\|^2$ |
+| dt scaling | 없음 | 상태 품질 항에 적용 |
+| Curriculum | 없음 | 모든 penalty, 750 iter ramp |
 
 ### Cross-Environment Comparison
 
-| Environment | Tracking Weight | Penalty Weights | Ratio |
+| Environment | Positive Weights | Penalty Weights | Pos:Neg Ratio |
 |:---|:---|:---|:---|
-| AnymalC | +1.0 | -0.05, -0.01, -2.5e-5, -2.5e-7 | 100:1 ~ 10000:1 |
-| Quadcopter | +15.0 | -0.05, -0.01 | 300:1 |
-| Hero Agent | +1.5 | **-0.1, -0.01** | **15:1** |
+| AnymalC | +1.0 | -0.05, -0.01, -2.5e-5, -2.5e-7 | ~100:1 |
+| Quadcopter | +15.0 | -0.05, -0.01 | ~300:1 |
+| Hero Agent | **+3.0, +2.0, +0.3** | **-1.0, -0.7, -1.5** | **~1.7:1** |
 
-### Literature Comparison
-
-| Method | Tracking | Penalty Terms | Curriculum |
-|:---|:---|:---|:---|
-| **RMA** (Kumar 2021, 4족보행) | $e^{-err/\sigma}$ | 10개 (torque, contact, stumble...) | No |
-| **HORA** (Qi 2023, 손 조작) | clipped rotation | 5개 (energy, torque, pose) | No |
-| **Legged Gym** (ETH) | $e^{-err/\sigma}$ | squared penalties | No |
-| **"Learning to Swim"** (Cai 2024) | $e^{-err^2}$ (Gaussian) | energy, drag | No |
-| **Hero Agent (현재)** | $e^{-err^2/\sigma^2}$ (Gaussian) | 2개 (action_mag, rate) | **Yes** |
+Hero Agent의 pos:neg 비율이 상대적으로 낮지만, 이는 의도적 설계이다. UUV의 강한 DR(added mass +-50% 등) 환경에서 penalty가 과도한 진동을 적극 억제해야 하며, curriculum으로 초기 탐색을 보장한다.
 
 ---
 
@@ -402,15 +352,17 @@ total_reward = pose_reward + progress_reward - 2 * actions_cost_scale * actions_
 
 ### Strengths
 
-1. **Tracking 지배 구조**: tracking이 penalty의 15배 이상이므로, 미숙한 policy(~30도 error)도 양수 reward를 받아 건전한 학습 gradient 유지.
+1. **Positive reward 지배**: 45도 error에서도 양수 reward를 유지하여 학습 gradient가 건전.
 2. **dt-invariant**: 적절한 dt 스케일링으로 `decimation` 변경 시 재튜닝 불필요.
 3. **Episode-length-independent logging**: `/ max_episode_length_s` 정규화로 생존 시간에 무관한 quality 비교 가능.
-4. **간결한 구조**: 3개 항으로 해석 가능성이 높고, reward hacking 위험 감소.
+4. **PBRS 이론적 보장**: optimal policy 보존, off-policy safe.
+5. **Penalty curriculum**: 초기 탐색 보장 -> 점진적 규제 -> 최종 smooth control.
 
 ### Known Limitations
 
-1. **Sigma 고정**: `tracking_sigma=0.5` (고정). Sigma annealing 제거 -- linear_error + settling이 전 구간 gradient를 커버하며, DORAEMON DR 확장과의 상호작용 리스크 회피.
-2. **진동 억제 암묵적 의존**: angular velocity penalty 제거 후, 진동 억제는 Gaussian tracking의 "error 증가 = reward 감소" 신호에 전적으로 의존. DR 극단 조건에서 불충분할 가능성.
+1. **Sigma 고정**: `tracking_sigma=1.0` (고정). 넓은 kernel width로 먼 error에서도 gradient를 유지하나, near-target precision은 settling bonus에 의존.
+2. **Angular velocity penalty 조정 필요성**: DR 극단 조건에서 -1.5가 충분한지 미검증. 과도하면 tracking gradient를 억압하고, 부족하면 진동을 방치.
+3. **Progress weight 상대적 약함**: 0.3 weight는 tracking(3.0)의 1/10. PBRS의 이론적 장점에도 불구하고 실제 gradient 기여가 작을 수 있음.
 
 ---
 
@@ -422,4 +374,4 @@ total_reward = pose_reward + progress_reward - 2 * actions_cost_scale * actions_
 
 ---
 **Created**: 2026-02-11
-**Updated**: 2026-02-20 (Reward redesign: removed linear_error and angular_velocity penalties due to structural penalty domination. Reduced action_magnitude from -1.0 to -0.1. Added episode reward normalization by max_episode_length_s. Active terms: 5 -> 3.)
+**Updated**: 2026-02-28 (Full rewrite: 3-term system -> 6-term system. Updated all weights, formulas, tables, and comparisons to match current code. Added settling, progress PBRS, joint oscillation, joint angle, angular velocity terms. Removed deprecated action_magnitude and action_rate. angular_velocity_weight -3.0 -> -1.5.)

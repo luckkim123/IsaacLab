@@ -48,12 +48,15 @@ SAC-MPC 고유 메트릭은 `SAC/`, `Dynamics/`, `MPC/` prefix를 사용한다.
 
 | Metric | Meaning | Healthy Range |
 |:-------|:--------|:--------------|
-| `Episode_Reward/tracking` | Gaussian tracking reward (weight=3.0) | 상승 중, dominant positive |
-| `Episode_Reward/action_magnitude` | Control effort penalty (weight=-0.1) | 작은 음수, -0.01 ~ -0.05 |
-| `Episode_Reward/action_rate` | Action smoothness penalty (weight=-0.01) | 0에 근접, -0.001 ~ -0.01 |
+| `Episode_Reward/tracking` | Gaussian tracking reward (weight=+3.0) | 상승 중, dominant positive |
+| `Episode_Reward/settling` | Sigmoid near-target bonus (weight=+2.0) | error < 5 deg에서 상승 |
+| `Episode_Reward/progress` | PBRS error reduction (weight=+0.3) | 양수, 수렴 시 감소 |
+| `Episode_Reward/angular_velocity` | Body-rate penalty (weight=-1.5) | 작은 음수, -0.05 ~ -0.2 |
+| `Episode_Reward/joint_oscillation` | High-freq oscillation penalty (weight=-1.0) | 작은 음수, -0.01 ~ -0.1 |
+| `Episode_Reward/joint_angle` | Workspace limit penalty (weight=-0.7) | 작은 음수, -0.01 ~ -0.05 |
 
-**진단 요점**: tracking이 상승하지 않으면서 penalty만 누적되면 reward shaping 문제.
-penalty가 tracking의 2배 이상이면 penalty domination (가중치 조정 필요).
+**진단 요점**: tracking + settling이 상승하지 않으면서 penalty만 누적되면 reward shaping 문제.
+penalty 합산이 positive signal의 2배 이상이면 penalty domination (가중치 조정 필요).
 
 ### Panel 3: "Actor-Critic Health"
 

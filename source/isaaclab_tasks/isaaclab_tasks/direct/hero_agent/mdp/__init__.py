@@ -45,6 +45,7 @@ from .rewards import (
     tracking_reward,
 )
 
+
 __all__ = [
     # Events
     "randomize_body_mass",
@@ -65,15 +66,15 @@ __all__ = [
     "RewardManager",
     "RewardTermCfg",
     # Rewards (functions)
-    "tracking_reward",
+    "angular_velocity_penalty",
+    "compute_stability_gate",
+    "joint_angle_penalty",
+    "joint_oscillation_penalty",
+    "linear_error_penalty",
+    "mhat_accuracy_reward",
     "progress_reward",
     "progress_reward_pbrs",
-    "joint_oscillation_penalty",
-    "joint_angle_penalty",
-    "linear_error_penalty",
-    "angular_velocity_penalty",
-    "mhat_accuracy_reward",
-    "tdc_torque_penalty",
     "settling_bonus",
-    "compute_stability_gate",
+    "tdc_torque_penalty",
+    "tracking_reward",
 ]

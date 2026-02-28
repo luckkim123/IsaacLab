@@ -243,7 +243,6 @@ class AdaptRunner:
             Tuple of (new_obs_dict, loss, rewards, z_hat, z_gt).
         """
         # Compute z_hat (with gradients, includes normalization) and z_gt (frozen)
-        policy_obs = obs_dict[self.policy._policy_obs_key]
         z_hat = self.policy.compute_z_hat(obs_dict)
         z_gt = self.policy.compute_z_gt(obs_dict)
 
@@ -256,13 +255,7 @@ class AdaptRunner:
         self.optimizer.step()
 
         # Generate action from frozen actor using same z_hat (detached)
-        with torch.no_grad():
-            z_hat_detached = z_hat.detach()
-            combined_obs = torch.cat([policy_obs, z_hat_detached], dim=-1)
-            actor_obs = self.policy.actor_obs_normalizer(combined_obs)
-            output = self.policy.actor(actor_obs)
-            actions = output[..., 0, :] if self.policy.state_dependent_std else output
-            actions = actions.clamp(-1.0, 1.0)
+        actions = self.policy.act_with_z_hat(obs_dict, z_hat)
 
         # Step environment
         new_obs_dict, rewards, _, _ = self.env.step(actions)
@@ -328,15 +321,15 @@ class AdaptRunner:
             "Adapt/fps": fps,
         }
 
-        # z_hat vs z_gt Pearson correlation (adaptation tracking quality)
+        # z_hat vs z_gt Pearson correlation (last step snapshot, not interval average)
         if z_hat is not None and z_gt is not None:
-            metrics["Adapt/z_hat_z_gt_corr"] = pearson_r(z_hat.flatten(), z_gt.detach().flatten()).item()
+            metrics["Adapt/z_hat_z_gt_corr_snapshot"] = pearson_r(z_hat.flatten(), z_gt.detach().flatten()).item()
 
-        # Per-dimension L2 loss (identifies hardest latent dims)
+        # Per-dimension L2 loss (last step snapshot, identifies hardest latent dims)
         if z_hat is not None and z_gt is not None:
             per_dim_loss = (z_hat - z_gt.detach()).pow(2).mean(dim=0)
             for i in range(per_dim_loss.shape[0]):
-                metrics[f"Adapt/l2_loss_dim{i}"] = per_dim_loss[i].item()
+                metrics[f"Adapt/l2_loss_dim{i}_snapshot"] = per_dim_loss[i].item()
 
         # Episode metrics from EMA (Episode_Reward/*, Attitude_Error/*, DR/*, etc.)
         metrics.update(self._ema_extras)

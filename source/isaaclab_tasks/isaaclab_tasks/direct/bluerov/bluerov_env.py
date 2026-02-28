@@ -279,7 +279,7 @@ class BlueROVEnv(DirectRLEnv):
         """Compute observations."""
         # Update hydrodynamics PhysX state for added mass force calculation
         # This must be called after robot.update() which happens at the start of each step
-        if self._hydro._apply_added_mass:
+        if self._hydro.apply_added_mass:
             self._hydro.update_physx_state(
                 body_com_acc_w=self._robot.data.body_com_acc_w,
                 root_quat_w=self._robot.data.root_quat_w,

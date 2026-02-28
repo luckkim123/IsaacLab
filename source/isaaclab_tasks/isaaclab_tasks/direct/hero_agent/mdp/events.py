@@ -281,6 +281,21 @@ def _randomize_hydro_model(
     inertia_scales = _sample_or_uniform("inertia_scale", sampled, (num_envs, 3), rand_cfg.inertia_scale, device, 3)
     hydro.rigid_body_inertia[env_ids] = base.inertia.unsqueeze(0) * inertia_scales
 
+    # Enforce added mass stability constraint after DR.
+    # Per-axis clamp: M_a[i] < threshold * I_rigid[i] to prevent exponential instability
+    # in explicit integration (forward Euler). MarineGym equivalent: _enforce_stability_constraint().
+    if hydro.cfg.apply_added_mass_force and hydro.body_mass is not None:
+        threshold = 0.95
+        am_diag = torch.diagonal(hydro.added_mass_matrix[env_ids], dim1=-2, dim2=-1)  # (N, 6)
+        body_mass = hydro.body_mass[env_ids]  # (N,)
+        rot_inertia = hydro.rigid_body_inertia[env_ids]  # (N, 3)
+        gen_inertia = torch.cat([body_mass.unsqueeze(-1).expand(-1, 3), rot_inertia], dim=-1)  # (N, 6)
+        max_am = threshold * gen_inertia
+        exceeded = am_diag > max_am
+        if exceeded.any():
+            clamped = torch.where(exceeded, max_am, am_diag)
+            hydro.added_mass_matrix[env_ids] = torch.diag_embed(clamped)
+
 
 def randomize_hydrodynamics(
     env: HeroAgentEnv,

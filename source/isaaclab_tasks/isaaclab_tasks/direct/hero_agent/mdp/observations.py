@@ -82,19 +82,29 @@ def compute_policy_obs(
     )
 
 
+def _added_mass_surge(hydro: HydrodynamicsModel) -> torch.Tensor:
+    """Extract surge added mass from diagonal matrix.
+
+    Returns: (num_envs, 1) = [M_a_surge].
+    """
+    return hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1)
+
+
 def compute_privileged_obs(
     env: HeroAgentEnv,
 ) -> torch.Tensor:
     """Compute privileged observations for asymmetric training.
 
-    Returns privileged info containing hydrostatic + dynamics parameters:
-        - Main body (7D): volume, r_cg (3), r_cb (3)
-        - Buoy body (7D): volume, r_cg (3), r_cb (3)
+    Returns privileged info containing hydrostatic + dynamics + added mass parameters:
+        - Main body hydro (7D): volume, r_cg (3), r_cb (3)
+        - Buoy body hydro (7D): volume, r_cg (3), r_cb (3)
         - Main body dynamics (4D): inertia Ixx/Iyy/Izz (3), body_mass (1)
         - Buoy dynamics (4D): inertia Ixx/Iyy/Izz (3), body_mass (1)
-        - Payload (4D, optional): mass, cog_offset (3)
+        - Payload (4D): mass, cog_offset (3)
+        - Main body added mass surge (1D)
+        - Buoy added mass surge (1D)
 
-    Total: 26D when payload is included, 22D otherwise.
+    Total: 28D (26D base + 2D added mass). Requires state_space >= 28.
 
     Args:
         env: The Hero Agent environment instance.
@@ -125,5 +135,13 @@ def compute_privileged_obs(
             dim=-1,
         )
         priv_obs.append(payload_priv)  # 4D: mass, cog_offset_xyz
+
+    # Surge added mass: effective inertia = I_rigid + M_added.
+    # UUV added mass is comparable to rigid body inertia (e.g., main body M_a_surge=5.76kg)
+    # and is DR'd via added_mass_scale. Without this, the encoder cannot observe
+    # a major component of the effective dynamics (M_true via parallel axis theorem).
+    if env.cfg.state_space >= 28:
+        priv_obs.append(_added_mass_surge(env._hydro))  # 1D: main M_a surge
+        priv_obs.append(_added_mass_surge(env._buoy_hydro))  # 1D: buoy M_a surge
 
     return torch.cat(priv_obs, dim=-1)

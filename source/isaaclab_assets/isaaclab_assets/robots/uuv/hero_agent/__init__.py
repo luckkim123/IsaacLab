@@ -13,5 +13,4 @@ from .hero_agent import (
     HERO_AGENT_CFG,
     HeroAgentBuoyHydrodynamicsCfg,
     HeroAgentHydrodynamicsCfg,
-    HeroAgentThrusterCfg,
 )

@@ -41,12 +41,9 @@ class EncoderRunner(BaseRunner):
 
         if self._has_encoder:
             logger.info("[EncoderRunner] Encoder detected. Encoder metrics logging enabled.")
+            connect_encoder_to_env(self.env, self.alg.policy, "EncoderRunner")
         else:
             logger.info("[EncoderRunner] No encoder detected. Using standard logging only.")
-
-        # Wire up encoder policy to env for z latent monitoring
-        if self._has_encoder:
-            connect_encoder_to_env(self.env, self.alg.policy, "EncoderRunner")
 
     def log(self, locs: dict, width: int = 80, pad: int = 35) -> None:
         """Extended log method that adds encoder-specific metrics.

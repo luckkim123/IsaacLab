@@ -30,8 +30,6 @@ from __future__ import annotations
 
 import torch
 
-from isaaclab.utils.math import euler_xyz_from_quat
-
 from .base_env import HeroAgentEnv
 from .config import HeroAgentAdaptBaseEnvCfg
 
@@ -72,22 +70,15 @@ class HeroAgentAdaptBaseEnv(HeroAgentEnv):
             - joint_pos_norm: normalized joint positions [-1, 1]
             - prev_actions: previous RL velocity actions [-1, 1]
         """
-        roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
-        ang_vel_b = self._robot.data.root_ang_vel_b
-        p = ang_vel_b[:, 0:1]
-        q = ang_vel_b[:, 1:2]
-
-        # Normalized joint positions (same as in policy obs)
-        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
-        joint_pos_norm = 2.0 * (joint_pos - self._joint_limits_lower) / self._joint_limits_range - 1.0
+        roll, pitch, p, q, joint_pos_norm = self._get_proprio_features()
 
         new_entry = torch.cat(
             [roll.unsqueeze(-1), pitch.unsqueeze(-1), p, q, joint_pos_norm, self._prev_actions_obs],
             dim=-1,
         )
 
-        # Roll buffer left (oldest entry dropped) and insert new entry at end
-        self._proprio_hist = torch.roll(self._proprio_hist, -1, dims=1)
+        # Shift buffer left (oldest entry dropped) and insert new entry at end
+        self._proprio_hist[:, :-1] = self._proprio_hist[:, 1:].clone()
         self._proprio_hist[:, -1] = new_entry
 
     def _reset_idx(self, env_ids: torch.Tensor | None) -> None:

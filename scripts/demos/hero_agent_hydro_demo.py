@@ -218,12 +218,12 @@ def main():
         robot.update(sim.cfg.dt)
 
         # Update PhysX acceleration cache for added mass force calculation
-        if hydro_model._apply_added_mass:
+        if hydro_model.apply_added_mass:
             hydro_model.update_physx_state(
                 body_com_acc_w=robot.data.body_com_acc_w,
                 root_quat_w=robot.data.root_quat_w,
             )
-        if buoy_hydro_model._apply_added_mass:
+        if buoy_hydro_model.apply_added_mass:
             buoy_hydro_model.update_physx_state(
                 body_com_acc_w=robot.data.body_com_acc_w[:, buoy_idx:buoy_idx+1, :],
                 root_quat_w=robot.data.body_quat_w[:, buoy_idx, :],

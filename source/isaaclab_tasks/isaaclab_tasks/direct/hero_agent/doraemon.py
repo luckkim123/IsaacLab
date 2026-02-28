@@ -57,13 +57,20 @@ class DoraemonCfg:
     """Final success threshold (deg) after annealing completes."""
 
     success_threshold_anneal_steps: int = 500
-    """Number of DORAEMON steps over which threshold anneals from start to final."""
+    """Number of *successful* DORAEMON steps over which threshold anneals from start to final.
+    Only steps where success_rate >= alpha count toward annealing progress."""
 
     buffer_size: int = 2000
     """Maximum episode buffer capacity."""
 
     min_episodes: int = 200
     """Minimum episodes before first DORAEMON update."""
+
+    param_overrides: dict[str, tuple[float, float]] = {}
+    """Per-parameter bound overrides as {name: (min_bound, max_bound)}.
+    Use to tighten or shift DORAEMON bounds for specific environments.
+    E.g., TDC envs need higher joint_stiffness bounds: {"joint_stiffness": (120.0, 300.0)}.
+    Only min/max bounds are changed; nominal is recomputed as the midpoint."""
 
 
 # =============================================================================
@@ -94,9 +101,9 @@ PARAM_SPECS: list[ParamSpec] = [
     ParamSpec("cob_offset_z", -0.04, 0.04, 0.0),
     ParamSpec("joint_stiffness", 40.0, 200.0, 100.0),
     ParamSpec("joint_damping", 1.0, 4.0, 3.0),
-    ParamSpec("joint_static_friction", 0.0, 0.1, 0.0),
-    ParamSpec("joint_viscous_friction", 0.0, 0.5, 0.0),
-    ParamSpec("payload_mass", 0.0, 3.0, 0.0),
+    ParamSpec("joint_static_friction", 0.0, 0.1, 0.015),
+    ParamSpec("joint_viscous_friction", 0.0, 0.5, 0.1),
+    ParamSpec("payload_mass", 0.0, 3.0, 1.0),
     ParamSpec("joint_effort_limit", 0.3, 3.0, 1.0),
     ParamSpec("yaw_damping_scale", 0.3, 2.0, 1.0),
 ]
@@ -361,7 +368,28 @@ class DoraemonScheduler:
         self.cfg = cfg
         self.device = device
 
-        self.dist = BetaDistribution(PARAM_SPECS, device, cfg.init_concentration)
+        # Apply per-parameter bound overrides (e.g., TDC joint_stiffness)
+        specs = list(PARAM_SPECS)
+        if cfg.param_overrides:
+            name_to_idx = {s.name: i for i, s in enumerate(specs)}
+            for name, (lo, hi) in cfg.param_overrides.items():
+                if name not in name_to_idx:
+                    logger.warning("[DORAEMON] param_overrides: unknown parameter '%s', skipping.", name)
+                    continue
+                idx = name_to_idx[name]
+                old = specs[idx]
+                nominal = (lo + hi) / 2.0  # midpoint as new nominal
+                specs[idx] = ParamSpec(old.name, lo, hi, nominal)
+                logger.info(
+                    "[DORAEMON] Override %s bounds: (%.2f, %.2f) -> (%.2f, %.2f)",
+                    name,
+                    old.min_bound,
+                    old.max_bound,
+                    lo,
+                    hi,
+                )
+
+        self.dist = BetaDistribution(specs, device, cfg.init_concentration)
 
         self.buffer = EpisodeBuffer(cfg.buffer_size, NDIMS, device)
 
@@ -371,6 +399,7 @@ class DoraemonScheduler:
 
         # Success threshold annealing state
         self._current_threshold_deg = cfg.success_threshold_deg
+        self._threshold_anneal_count = 0
 
         logger.info(
             "[DORAEMON] Initialized: alpha=%.2f, kl_ub=%.4f, %d parameters, "
@@ -423,12 +452,14 @@ class DoraemonScheduler:
             metrics["success_rate"] = success.mean().item() if n > 0 else 0.0
             return metrics
 
-        # Anneal success threshold
-        self._anneal_threshold()
-        metrics["success_threshold_deg"] = self._current_threshold_deg
-
         success_rate = success.mean().item()
         metrics["success_rate"] = success_rate
+
+        # Anneal success threshold only when agent is performing well
+        if success_rate >= self.cfg.alpha:
+            self._anneal_threshold()
+        metrics["success_threshold_deg"] = self._current_threshold_deg
+
         metrics["entropy_before"] = self.dist.entropy()
 
         # Save current distribution for trust region
@@ -464,12 +495,13 @@ class DoraemonScheduler:
         return metrics
 
     def _anneal_threshold(self) -> None:
-        """Linearly anneal success threshold from start to final value."""
+        """Anneal success threshold by one step. Only called when success_rate >= alpha."""
         cfg = self.cfg
+        self._threshold_anneal_count += 1
         if cfg.success_threshold_anneal_steps <= 0:
             self._current_threshold_deg = cfg.success_threshold_deg_final
             return
-        t = min(1.0, self._step_count / cfg.success_threshold_anneal_steps)
+        t = min(1.0, self._threshold_anneal_count / cfg.success_threshold_anneal_steps)
         self._current_threshold_deg = cfg.success_threshold_deg + t * (
             cfg.success_threshold_deg_final - cfg.success_threshold_deg
         )

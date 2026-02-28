@@ -57,6 +57,9 @@ class BaseRunner(OnPolicyRunner):
         iteration = locs["it"]
         raw_env = unwrap_env(self.env)
 
+        # Penalty curriculum: linearly ramp penalty scale
+        raw_env._reward_manager.update_curriculum(iteration)
+
         # DORAEMON: update DR distribution based on episode statistics
         if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
             metrics = raw_env._doraemon.step()
@@ -72,8 +75,9 @@ class BaseRunner(OnPolicyRunner):
         """
         min_std = 0.1
         if hasattr(self.alg.policy, "log_std"):
-            min_log_std = torch.log(torch.tensor(min_std, device=self.device))
-            self.alg.policy.log_std.data.clamp_(min=min_log_std)
+            if not hasattr(self, "_cached_min_log_std"):
+                self._cached_min_log_std = torch.log(torch.tensor(min_std, device=self.device))
+            self.alg.policy.log_std.data.clamp_(min=self._cached_min_log_std)
 
         iteration = locs["it"]
         if self.log_dir is not None and not self.disable_logs:

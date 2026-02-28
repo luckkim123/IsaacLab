@@ -35,6 +35,26 @@ logger = logging.getLogger(__name__)
 _ROLL_PITCH = ("roll", "pitch")
 
 
+def _compute_m_bb_from_env(env: object) -> torch.Tensor | None:
+    """Compute M_bb from env's kinematics and hydrodynamics.
+
+    Returns:
+        M_bb tensor of shape (num_envs, 2) or None if env lacks required attributes.
+    """
+    if not (hasattr(env, "_kinematics") and hasattr(env, "_buoy_hydro")):
+        return None
+    joint_pos = env._robot.data.joint_pos[:, env._albc_joint_ids]
+    p_EE = env._kinematics.forward(joint_pos)
+    return compute_M_bb(
+        I_ROV=env._hydro.rigid_body_inertia[:, :2],
+        m_A=env._buoy_hydro.added_mass_matrix[:, 1, 1],
+        x_bu=p_EE[:, 0],
+        y_bu=p_EE[:, 1],
+        h=env.cfg.tdc.h,
+        m_body=env._buoy_hydro.body_mass,
+    )
+
+
 # =============================================================================
 # Core Logging Utilities
 # =============================================================================
@@ -288,17 +308,8 @@ def log_tdc_diagnostics(
         log["TDC/tde_to_pd_ratio"] = u_hat_rms / max(pd_rms, 1e-8)
 
         # Stability violated fraction (requires env with kinematics + TDC cfg)
-        if env is not None and hasattr(env, "_kinematics") and hasattr(env.cfg, "tdc"):
-            joint_pos = env._robot.data.joint_pos[:, env._albc_joint_ids]
-            p_EE = env._kinematics.forward(joint_pos)
-            M_bb = compute_M_bb(
-                I_ROV=env._hydro.rigid_body_inertia[:, :2],
-                m_A=env._buoy_hydro.added_mass_matrix[:, 1, 1],
-                x_bu=p_EE[:, 0],
-                y_bu=p_EE[:, 1],
-                h=env.cfg.tdc.h,
-                m_body=env._buoy_hydro.body_mass,
-            )
+        M_bb = _compute_m_bb_from_env(env) if env is not None else None
+        if M_bb is not None:
             M_hat = tdc._m_hat
             ratio = M_bb / M_hat.clamp(min=1e-6)
             stability_norm = (1.0 - ratio).abs().max(dim=-1).values
@@ -450,17 +461,8 @@ def log_tdc_controller_metrics(
             metrics[f"TDC/kd_{axis}_mean"] = tdc._kd[:, i].mean().item()
 
         # M_hat vs true M_bb: relative MAE only (no correlation, no absolute MAE)
-        if hasattr(raw_env, "_kinematics") and hasattr(raw_env, "_buoy_hydro"):
-            joint_pos = raw_env._robot.data.joint_pos[:, raw_env._albc_joint_ids]
-            p_EE = raw_env._kinematics.forward(joint_pos)
-            M_true = compute_M_bb(
-                I_ROV=raw_env._hydro.rigid_body_inertia[:, :2],
-                m_A=raw_env._buoy_hydro.added_mass_matrix[:, 1, 1],
-                x_bu=p_EE[:, 0],
-                y_bu=p_EE[:, 1],
-                h=raw_env.cfg.tdc.h,
-                m_body=raw_env._buoy_hydro.body_mass,
-            )
+        M_true = _compute_m_bb_from_env(raw_env)
+        if M_true is not None:
             M_hat = tdc._m_hat
             for i, axis in enumerate(_ROLL_PITCH):
                 metrics[f"TDC/m_hat_{axis}_rel_mae"] = (

@@ -15,7 +15,6 @@ This module consolidates all environment configurations:
 - HeroAgentTrainEnvCfg: Training config (DR + ocean current + payload)
 - HeroAgentEncoderTrainEnvCfg: Encoder training with privileged info
 - HeroAgentTDCEnvCfg: Classical TDC control (no RL)
-- HeroAgentEncoderTDCEnvCfg: Encoder-TDC (RL outputs M_hat + gains for TDC)
 - HeroAgentAdaptBaseEnvCfg: Phase 2 adaptation (proprio history -> z_hat, base RL)
 
 MPC configurations are in the separate hero_agent_mpc package.
@@ -382,22 +381,22 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
 class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
     """Hero Agent encoder training with privileged hydrodynamic info.
 
-    state_space=26 returns privileged information for HORA/RMA Phase 1 training.
+    state_space=28 returns privileged information for HORA/RMA Phase 1 training.
     Main hydro (7D) + Buoy hydro (7D) + Main dynamics (4D: Ixx,Iyy,Izz,body_mass)
-    + Buoy dynamics (4D) + Payload (4D: mass, cog_offset_xyz) = 26D.
-    Includes inertia and body mass for both bodies in privileged obs.
+    + Buoy dynamics (4D) + Payload (4D: mass, cog_offset_xyz)
+    + Main added mass surge (1D) + Buoy added mass surge (1D) = 28D.
 
     Network Input Dimensions (ActorCriticEncoder):
         - observation_space (13): Used for gym.spaces.Box definition only
-        - state_space (26): Privileged info, returned as observations["privileged"]
-        - Encoder: privileged(26D) -> latent z(13D)
+        - state_space (28): Privileged info, returned as observations["privileged"]
+        - Encoder: privileged(28D) -> latent z(13D)
         - Actual Actor/Critic input: policy_obs(13) + z(13) = 26D
 
     DORAEMON adaptive DR is inherited from HeroAgentTrainEnvCfg (shared across
     all training envs). Sigmoid encoder activation prevents z collapse.
     """
 
-    state_space: int = 26
+    state_space: int = 28
 
 
 @configclass
@@ -405,7 +404,7 @@ class HeroAgentEncoderBaseDebugEnvCfg(HeroAgentEncoderTrainEnvCfg):
     """Encoder-Base with half-strength DR and no DORAEMON for diagnostics.
 
     DR enabled at ~50% of full range (narrower scales, smaller offsets).
-    No DORAEMON (constant DR from start). Privileged obs (state_space=26)
+    No DORAEMON (constant DR from start). Privileged obs (state_space=28)
     inherited from HeroAgentEncoderTrainEnvCfg.
 
     If error diverges here, the encoder/reward design cannot handle even mild DR.
@@ -501,12 +500,18 @@ class HeroAgentTDCEnvCfg(HeroAgentTrainEnvCfg):
     # TDC-specific DR: higher joint gains (Kp=200, Kd=10), no action latency
     randomization: DomainRandomizationCfg = _tdc_randomization()
 
+    # TDC needs higher stiffness for stability. Override DORAEMON bounds
+    # to prevent sampling low stiffness values that cause TDC instability.
+    doraemon: DoraemonCfg = DoraemonCfg(
+        param_overrides={"joint_stiffness": (120.0, 300.0)},
+    )
+
 
 @configclass
 class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
     """Encoder-TDC environment: RL policy outputs M_hat + gains for TDC controller.
 
-    The encoder compresses privileged info (26D) into a latent z (13D).
+    The encoder compresses privileged info (28D) into a latent z (13D).
     The actor takes [policy_obs(13D), z(13D)] = 26D input and outputs 6D actions:
         [m_hat_roll, m_hat_pitch, Kp_roll, Kp_pitch, Kd_roll, Kd_pitch]
 
@@ -517,8 +522,8 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
     """
 
     action_space: int = 6  # m_hat(2) + Kp(2) + Kd(2)
-    state_space: int = 26  # privileged obs for encoder
-    enable_payload: bool = True  # 26D privileged requires payload
+    state_space: int = 28  # privileged obs for encoder
+    enable_payload: bool = True  # 28D privileged requires payload
 
     # Override TDC DR: enable action latency (RL inference delay exists in real deployment)
     randomization: DomainRandomizationCfg = _tdc_randomization(action_latency=True)
@@ -545,7 +550,7 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
 class HeroAgentAdaptBaseEnvCfg(HeroAgentEncoderTrainEnvCfg):
     """Phase 2 adaptation training config (base RL pipeline).
 
-    Inherits from HeroAgentEncoderTrainEnvCfg (state_space=26 for privileged z_gt).
+    Inherits from HeroAgentEncoderTrainEnvCfg (state_space=32 for privileged z_gt).
     Adds proprioception history buffer for the adaptation module.
 
     Per-timestep feature (8D):

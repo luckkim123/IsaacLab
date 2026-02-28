@@ -75,6 +75,7 @@ if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
 
 """Rest everything follows."""
 
+import importlib
 import logging
 import os
 import time
@@ -99,7 +100,6 @@ from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
-# EncoderRunner is imported lazily when needed (for encoder training only)
 
 # import logger
 logger = logging.getLogger(__name__)
@@ -195,56 +195,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    # create runner from rsl-rl
-    if agent_cfg.class_name == "OnPolicyRunner":
-        # Hero Agent tasks use EncoderRunner for curriculum + encoder logging
-        is_hero_agent = args_cli.task.startswith("Isaac-HeroAgent") if args_cli.task else False
-        policy_class_name = getattr(agent_cfg.policy, "class_name", None)
-        use_constrained_runner = policy_class_name == "ActorCriticConstrained"
-        use_encoder_runner = is_hero_agent or (
-            policy_class_name and policy_class_name.startswith("ActorCriticEncoder")
-        )
-        use_adapt_runner = policy_class_name == "ActorCriticEncoderAdapt"
-        if use_constrained_runner:
-            from isaaclab_tasks.direct.hero_agent.runners import ConstrainedEncoderRunner
+    # Runner dispatch: custom runners are resolved by class_name via lazy import.
+    _RUNNER_MAP = {
+        "BaseRunner": ("isaaclab_tasks.direct.hero_agent.runners", "BaseRunner"),
+        "EncoderRunner": ("isaaclab_tasks.direct.hero_agent.runners", "EncoderRunner"),
+        "AdaptRunner": ("isaaclab_tasks.direct.hero_agent.runners", "AdaptRunner"),
+        "SACMPCRunner": ("isaaclab_tasks.direct.hero_agent_mpc.runners", "SACMPCRunner"),
+    }
 
-            print("[INFO] Using ConstrainedEncoderRunner for constrained TDC training.")
-            runner = ConstrainedEncoderRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-        elif use_adapt_runner:
-            from isaaclab_tasks.direct.hero_agent.runners import AdaptRunner
-
-            print("[INFO] Using AdaptRunner for Phase 2 adaptation training.")
-            runner = AdaptRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-        elif use_encoder_runner:
-            agent_dict = agent_cfg.to_dict()
-            diagnostic_mode = agent_dict.get("diagnostic_mode", "none")
-            if diagnostic_mode != "none":
-                from isaaclab_tasks.direct.hero_agent.runners import DiagnosticEncoderRunner
-
-                print(f"[INFO] Using DiagnosticEncoderRunner (mode={diagnostic_mode}).")
-                runner = DiagnosticEncoderRunner(env, agent_dict, log_dir=log_dir, device=agent_cfg.device)
-            else:
-                from isaaclab_tasks.direct.hero_agent.runners import EncoderRunner
-
-                print("[INFO] Using EncoderRunner for Hero Agent (curriculum + encoder metrics).")
-                runner = EncoderRunner(env, agent_dict, log_dir=log_dir, device=agent_cfg.device)
-        else:
-            runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    elif agent_cfg.class_name == "EncoderRunner":
-        from isaaclab_tasks.direct.hero_agent.runners import EncoderRunner
-
-        print("[INFO] Using EncoderRunner for Hero Agent (DORAEMON + adaptive entropy + encoder metrics).")
-        runner = EncoderRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    elif agent_cfg.class_name == "BaseRunner":
-        from isaaclab_tasks.direct.hero_agent.runners import BaseRunner
-
-        print("[INFO] Using BaseRunner for Hero Agent (DORAEMON + adaptive entropy).")
-        runner = BaseRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    elif agent_cfg.class_name == "SACMPCRunner":
-        from isaaclab_tasks.direct.hero_agent_mpc.runners import SACMPCRunner
-
-        print("[INFO] Using SACMPCRunner for SAC-MPC off-policy training.")
-        runner = SACMPCRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    if agent_cfg.class_name in _RUNNER_MAP:
+        module_path, cls_name = _RUNNER_MAP[agent_cfg.class_name]
+        module = importlib.import_module(module_path)
+        runner_cls = getattr(module, cls_name)
+        print(f"[INFO] Using {cls_name} for training.")
+        runner = runner_cls(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
+    elif agent_cfg.class_name == "OnPolicyRunner":
+        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     else:

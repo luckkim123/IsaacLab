@@ -5,19 +5,11 @@
 
 """Hero Agent underwater vehicle configuration for Isaac Lab.
 
-The Hero Agent is a custom deep-sea intervention ROV with:
-    - Main body with integrated sensors
-    - 2-DOF manipulator arm
-    - Gripper system
+The following configuration parameters are available:
 
-Design Notes:
-    Unlike BlueROV which has explicit rotor joints, Hero Agent uses virtual thrusters.
-    Thruster forces are computed via ThrusterModel and applied directly to the base_link
-    through the allocation matrix. This approach is valid for RL training since
-    the policy learns thruster commands, not individual rotor velocities.
-
-    Hydrodynamic parameters are estimated and should be updated
-    with experimentally identified values for accurate simulation.
+* :obj:`HERO_AGENT_CFG`: Hero Agent articulation configuration
+* :obj:`HeroAgentHydrodynamicsCfg`: Main body hydrodynamic parameters
+* :obj:`HeroAgentBuoyHydrodynamicsCfg`: Buoy (link3) hydrodynamic parameters
 """
 
 from __future__ import annotations
@@ -29,200 +21,134 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 from isaaclab.utils import configclass
 
-from ..uuv_cfg import HydrodynamicsCfg, ThrusterCfg
+from ..uuv_cfg import HydrodynamicsCfg
 
 # Path to Hero Agent USD file
 _HERO_AGENT_MESHES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "meshes")
 HERO_AGENT_USD_PATH = os.path.join(_HERO_AGENT_MESHES_DIR, "Agent.usd")
 
 
+##
+# Hydrodynamics Configuration
+##
+
+
 @configclass
 class HeroAgentHydrodynamicsCfg(HydrodynamicsCfg):
     """Hydrodynamic parameters for Hero Agent main body.
 
-    Based on heroagent2.py (IsaacGym) parameters:
-        Main body: cylinder R=0.0825m, L=0.27m, m=9.18kg
-        rho = 998 kg/m^3
+    Cylinder formulas (Fossen, 2021) with URDF dimensions:
+        Main body: a=0.18m (diameter), b=0.325m (length), m=9.18kg, rho=998 kg/m^3
 
     Physics Model:
-        - PhysX gravity is ENABLED (disable_gravity=False)
-        - Weight is handled by PhysX naturally for all bodies
-        - This model applies ONLY buoyancy as external force
+        - PhysX gravity ENABLED; this model applies ONLY buoyancy as external force
         - Buoyancy-weight difference determines net vertical force
-
-    Buoyancy calculation (from heroagent2.py):
-        Volume ~0.00789 m^3 -> Buoyancy = 998 * 9.81 * 0.00789 = 77.3 N
-
-    Drag coefficients from heroagent2.py:
-        D_x = D_y = 1.17, D_z = 1.0
-        A_x = A_y = 0.0825 * 2 * 0.27 = 0.04455 m^2
-        A_z = pi * 0.0825^2 = 0.0214 m^2
-        Quad drag X/Y: 0.5 * 998 * 1.17 * 0.04455 = 26.0 Ns^2/m^2
-        Quad drag Z:   0.5 * 998 * 1.0 * 0.0214 = 10.7 Ns^2/m^2
-
-    Reference:
-        heroagent2.py (IsaacGym implementation)
+        - Appendage corrections (+15% translational drag) for gripper asymmetry
     """
 
-    # Added mass coefficients [surge, sway, heave, roll, pitch, yaw]
-    # Cylinder axis along Z (upright), R=0.0825m, L=0.27m
-    # Perpendicular to axis (surge/sway): M_a = rho * pi * r^2 * L = 998 * pi * 0.0825^2 * 0.27 = 5.76 kg
-    # Along axis (heave): much smaller (~0.6 kg, end-cap effect)
-    added_mass: tuple[float, ...] = (5.76, 5.76, 0.6, 0.065, 0.065, 0.05)
+    # Added mass [surge, sway, heave, roll, pitch, yaw]
+    # Capped for explicit integration stability: M_a[i] < I_rigid[i]
+    # surge/sway=8.0 (theory 8.25, capped), heave=1.0, roll/pitch=0.09, yaw=0.035
+    added_mass: tuple[float, ...] = (8.0, 8.0, 1.0, 0.09, 0.09, 0.035)
 
-    # Linear damping coefficients (skin friction, Ns/m and Nms/rad)
-    # Perpendicular to cylinder axis (surge/sway) > along axis (heave)
-    linear_damping: tuple[float, ...] = (4.0, 4.0, 2.0, 0.2, 0.2, 0.1)
+    # Linear damping [surge, sway, heave, roll, pitch, yaw] (skin friction + appendage)
+    # ITTC-1957 with x2.2 roughness+appendage correction
+    linear_damping: tuple[float, ...] = (2.0, 2.0, 1.5, 0.3, 0.3, 0.15)
 
-    # Quadratic damping coefficients (form drag, Ns^2/m^2 and Nms^2/rad^2)
-    # From heroagent2.py: D = 0.5 * rho * Cd * A
-    #   X/Y: 0.5 * 998 * 1.17 * 0.04455 = 26.0
-    #   Z:   0.5 * 998 * 1.0 * 0.0214 = 10.7
-    # Rotational damping from heroagent2.py empirical values
-    quadratic_damping: tuple[float, ...] = (26.0, 26.0, 10.7, 3.0, 3.0, 1.0)
+    # Quadratic damping [surge, sway, heave, roll, pitch, yaw] (form drag + appendage)
+    # Cd_cross=1.17, Cd_axial=1.0, with appendage correction
+    quadratic_damping: tuple[float, ...] = (39.0, 39.0, 15.0, 1.0, 1.0, 0.5)
 
-    # Volume for buoyancy calculation (m^3)
-    # From URDF: Cylinder R=0.09m, L=0.325m -> V = pi * 0.09^2 * 0.325 = 0.00827 m^3
-    # Buoyancy = 998 * 0.00827 * 9.81 = 80.9 N
-    volume: float = 0.00827
+    # Volume (m^3): pure cylinder 0.00827 + 8.8% appendage = 0.009
+    # Buoyancy = 998 * 0.009 * 9.81 = 88.1 N
+    volume: float = 0.009
 
-    # Body name (for reference, not used when volume is explicitly set)
     body_name: str = "base"
 
     # Center of buoyancy at geometric center of cylinder (body frame)
     center_of_buoyancy: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
-    # Center of gravity below CoB for passive stability
-    # Note: This is for restoring moment calculation. Actual CoG is from PhysX.
+    # Center of gravity below CoB for passive stability (restoring moment only)
     center_of_gravity: tuple[float, float, float] = (0.0, 0.0, -0.05)
 
-    # Freshwater density from heroagent2.py (kg/m^3)
-    water_density: float = 998.0
+    water_density: float = 998.0  # Freshwater (kg/m^3)
 
-    # Rigid body inertia [I_xx, I_yy, I_zz] (kg*m^2)
-    # From URDF collision geometry: R=0.09m, L=0.325m, m=9.18kg
-    #   I_xx = I_yy = m*(3*R^2 + L^2)/12 = 9.18*(0.0243 + 0.1056)/12 = 0.0994
-    #   I_zz = m*R^2/2 = 9.18*0.0081/2 = 0.0372
+    # Rigid body inertia [Ixx, Iyy, Izz] from URDF: R=0.09m, L=0.325m, m=9.18kg
     rigid_body_inertia: tuple[float, float, float] | None = (0.0994, 0.0994, 0.0372)
 
     # Body mass from URDF (kg) - for CoG correction torque during domain randomization
     body_mass: float = 9.18
 
-    # C_A only (not C_RB) — PhysX handles rigid body Coriolis/gyroscopic effects
-    # via enable_gyroscopic_forces=True. Applying C_RB here would double-count.
+    # C_A only (not C_RB) -- PhysX handles rigid body Coriolis via enable_gyroscopic_forces
     use_full_coriolis: bool = False
 
-    # Added mass force (M_A * v_dot) via explicit integration.
-    # Stability requires: factor * max(M_A_i / M_rigid_i) < 1
-    # Main body worst axis: yaw M_A=0.05 / I_zz=0.0372 = 1.34 → factor < 0.75
+    # Added mass force (M_A * v_dot) via explicit integration
+    # Worst axis: yaw M_A=0.035 / I_zz=0.0372 = 0.94
     apply_added_mass_force: bool = True
     added_mass_stability_factor: float = 0.5
+
+    # Semi-implicit damping clamp: max D_eff per axis = factor * I / dt
+    damping_stability_factor: float = 0.8
 
 
 @configclass
 class HeroAgentBuoyHydrodynamicsCfg(HydrodynamicsCfg):
     """Hydrodynamic parameters for Hero Agent buoy (link3 / ABPC).
 
-    Based on heroagent2.py (IsaacGym) parameters:
-        ABPC buoyancy: 1.55 * 9.81 = 15.2 N (slightly increased for positive buoyancy)
-        ABPC mass: 0.18 kg (adjusted for slight positive buoyancy)
-        rho = 998 kg/m^3
+    Cylinder formulas (Fossen, 2021) with URDF dimensions:
+        Buoy: a=0.17m (diameter), b=0.118m (length), m=0.93kg, rho=998 kg/m^3
+        Short cylinder (b/a=0.69): added mass C_a reduced to ~0.75
 
     Physics Model:
-        - PhysX gravity is ENABLED (disable_gravity=False)
-        - Weight is handled by PhysX naturally
-        - This model applies ONLY buoyancy as external force
-
-    Buoyancy calculation:
-        Volume ~0.00155 m^3 -> Buoyancy = 998 * 9.81 * 0.00155 = 15.2 N
-
-    Drag from heroagent2.py:
-        A_x_abpc = 0.1 * 2 * 0.065 = 0.013 m^2
-        Uses 0.3 coefficient factor (reduced drag for ABPC)
-        Quad drag: 0.3 * 998 * 1.17 * 0.013 = 4.6 Ns^2/m^2
+        - PhysX gravity ENABLED; this model applies ONLY buoyancy as external force
+        - Buoyancy = 26.2 N, Weight = 9.1 N -> Net = +17.1 N
     """
 
-    # Added mass coefficients [surge, sway, heave, roll, pitch, yaw]
-    # Cylinder axis along Z (upright), R=0.085m, H=0.118m
-    # Perpendicular to axis (surge/sway): larger; along axis (heave): smaller
-    added_mass: tuple[float, ...] = (1.5, 1.5, 0.15, 0.01, 0.01, 0.01)
+    # Added mass [surge, sway, heave, roll, pitch, yaw]
+    # Capped for stability: M_a[i] < I_rigid[i] (m=0.93, Ixx=Iyy=0.00278, Izz=0.00336)
+    # surge/sway=0.7 (theory 2.67, capped), heave=0.2, roll/pitch=0.002, yaw=0.002
+    added_mass: tuple[float, ...] = (0.7, 0.7, 0.2, 0.002, 0.002, 0.002)
 
-    # Linear damping coefficients (skin friction, Ns/m)
-    linear_damping: tuple[float, ...] = (0.5, 0.5, 0.5, 0.01, 0.01, 0.01)
+    # Linear damping (skin friction + roughness)
+    linear_damping: tuple[float, ...] = (0.8, 0.8, 0.6, 0.02, 0.02, 0.01)
 
-    # Quadratic damping coefficients (form drag, Ns^2/m^2)
-    # From heroagent2.py: 0.3 * rho * Cd * A = 0.3 * 998 * 1.17 * 0.013 = 4.6
-    quadratic_damping: tuple[float, ...] = (4.6, 4.6, 4.6, 0.1, 0.1, 0.1)
+    # Quadratic damping (form drag, short-cylinder correction)
+    quadratic_damping: tuple[float, ...] = (10.0, 10.0, 8.0, 0.05, 0.05, 0.02)
 
-    # Volume for buoyancy calculation (m^3)
-    # From URDF: Cylinder R=0.085m, H=0.118m -> V = pi * 0.085^2 * 0.118 = 0.00268 m^3
-    # Buoyancy = 998 * 0.00268 * 9.81 = 26.2 N (link3 mass=0.93kg -> weight=9.1N -> net=+17.1N)
-    # System net force: +3.0 N (slight positive buoyancy)
+    # Volume (m^3): pi * 0.085^2 * 0.118 = 0.00268
+    # Buoyancy = 26.2 N; system net: ~+10 N (main 88.1 + buoy 26.2 - weight 104.1)
     volume: float = 0.00268
 
-    # Body name (for reference, not used when volume is explicitly set)
     body_name: str = "link3"
 
-    # Center of buoyancy at geometric center
-    center_of_buoyancy: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # Center of buoyancy in link3 frame (URDF collision origin z-offset)
+    center_of_buoyancy: tuple[float, float, float] = (0.0, 0.0, 0.059)
 
-    # Center of gravity at body frame origin
-    center_of_gravity: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # Center of gravity matching URDF inertial origin (symmetric cylinder, CoG=CoB)
+    center_of_gravity: tuple[float, float, float] = (0.0, 0.0, 0.059)
 
-    # Freshwater density from heroagent2.py (kg/m^3)
-    water_density: float = 998.0
+    water_density: float = 998.0  # Freshwater (kg/m^3)
 
-    # Rigid body inertia [I_xx, I_yy, I_zz] (kg*m^2)
-    # From URDF: R=0.085m, H=0.118m, m=0.93kg
-    #   I_xx = I_yy = m*(3*R^2 + H^2)/12 = 0.93*(0.02168 + 0.01392)/12 = 0.00278
-    #   I_zz = m*R^2/2 = 0.93*0.007225/2 = 0.00336
+    # Rigid body inertia [Ixx, Iyy, Izz] from URDF: R=0.085m, H=0.118m, m=0.93kg
     rigid_body_inertia: tuple[float, float, float] | None = (0.00278, 0.00278, 0.00336)
 
     # Body mass from URDF (kg) - for CoG correction torque during domain randomization
     body_mass: float = 0.93
 
-    # C_A only — PhysX handles rigid body Coriolis/gyroscopic effects
+    # C_A only -- PhysX handles rigid body Coriolis via enable_gyroscopic_forces
     use_full_coriolis: bool = False
 
-    # Added mass force (M_A * v_dot) via explicit integration.
-    # Stability requires: factor * max(M_A_i / M_rigid_i) < 1
-    # Buoy worst axis: surge/sway M_A=1.5 / m=0.93 = 1.61 → factor < 0.62
+    # Added mass force: worst axis surge/sway 0.7/0.93 = 0.75
     apply_added_mass_force: bool = True
     added_mass_stability_factor: float = 0.4
 
+    # Semi-implicit damping clamp
+    damping_stability_factor: float = 0.8
 
-@configclass
-class HeroAgentThrusterCfg(ThrusterCfg):
-    """Thruster configuration for Hero Agent.
 
-    Note:
-        Thruster layout and allocation matrix should be updated
-        based on actual vehicle design.
-    """
-
-    num_thrusters: int = 6
-    max_thrust: float = 60.0  # Larger thrusters for bigger vehicle
-    thrust_coefficient: float = 50.0
-    time_constant_up: float = 0.1
-    time_constant_down: float = 0.05
-
-    # Estimated allocation matrix (similar to BlueROV layout)
-    # Should be updated based on actual thruster positions
-    allocation_matrix: tuple[tuple[float, ...], ...] = (
-        # Fx: forward surge force
-        (0.707, 0.707, -0.707, -0.707, 0.0, 0.0),
-        # Fy: lateral sway force
-        (-0.707, 0.707, 0.707, -0.707, 0.0, 0.0),
-        # Fz: vertical heave force
-        (0.0, 0.0, 0.0, 0.0, 1.0, 1.0),
-        # Mx: roll torque
-        (0.0, 0.0, 0.0, 0.0, 0.12, -0.12),
-        # My: pitch torque
-        (0.0, 0.0, 0.0, 0.0, 0.15, 0.15),
-        # Mz: yaw torque
-        (0.22, -0.22, 0.22, -0.22, 0.0, 0.0),
-    )
-
+##
+# ALBC Constants
+##
 
 # ALBC (Active Linear Buoyancy Controller) joint names
 HERO_AGENT_ALBC_JOINT_NAMES: list[str] = ["joint1", "joint2"]
@@ -237,14 +163,22 @@ HERO_AGENT_ALBC_LINK2_LENGTH: float = 0.233  # meters (buoy_fixer x-offset from 
 HERO_AGENT_ALBC_HEIGHT_OFFSET: float = 0.1625  # meters (joint1 z-offset from base)
 
 
+##
+# Articulation Configuration
+##
+
 HERO_AGENT_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UsdFileCfg(
         usd_path=HERO_AGENT_USD_PATH,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,  # PhysX handles gravity; HydrodynamicsModel applies buoyancy only
-            max_depenetration_velocity=10.0,  # Limits separation speed when bodies overlap
-            enable_gyroscopic_forces=True,  # Enables gyroscopic torque from rotational inertia
+            max_depenetration_velocity=10.0,
+            enable_gyroscopic_forces=True,
+            # PhysX numerical damping (not hydrodynamic); 0.2 matches MarineGym
+            linear_damping=0.2,
+            angular_damping=0.2,
+            max_angular_velocity=180.0,  # deg/s (= pi rad/s), matching MarineGym
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
@@ -253,17 +187,18 @@ HERO_AGENT_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 2.0),  # Start 2m above ground (underwater)
+        pos=(0.0, 0.0, 2.0),  # 2m above ground plane (scene is underwater)
         rot=(1.0, 0.0, 0.0, 0.0),  # Upright orientation
-        joint_pos={},
-        joint_vel={},
+        joint_pos={"joint.*": 0.0},
+        joint_vel={"joint.*": 0.0},
     ),
     actuators={
         "arm": ImplicitActuatorCfg(
             joint_names_expr=["joint.*"],
             stiffness=100.0,  # Kp: w_n=57.7 rad/s with J~0.15 kg*m^2
             damping=3.0,  # Kd: damping ratio ~0.7 (near critically damped)
-            effort_limit=10.0,  # Nm, matches real motor max torque
+            effort_limit_sim=9.5,  # Nm, Dynamixel XW540 stall torque @ 12V
+            velocity_limit_sim=6.28,  # rad/s (~2*pi), Dynamixel XW540 limit
         ),
     },
 )

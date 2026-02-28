@@ -63,11 +63,9 @@ class HydrodynamicsCfg:
     # Water density (kg/m^3, default: freshwater, seawater: 1025.0)
     water_density: float = 997.0
 
-    # Acceleration filter alpha for numerical stability (0 < alpha < 1)
-    # Higher values (closer to 1) provide stronger low-pass filtering, reducing noise-induced instability
-    acceleration_filter_alpha: float = 0.8
-
-    # Use full Coriolis matrix C(v) = C_RB(v) + C_A(v) per Fossen model
+    # Use full Coriolis matrix C(v) = C_RB(v) + C_A(v) per Fossen model.
+    # When PhysX enable_gyroscopic_forces=True, set False to use C_A only and avoid
+    # double-counting the rigid body Coriolis/gyroscopic terms already handled by PhysX.
     use_full_coriolis: bool = True
 
     # Rigid body inertia for full Coriolis (kg*m^2, [I_xx, I_yy, I_zz])
@@ -95,12 +93,20 @@ class HydrodynamicsCfg:
     # None disables cross-coupling (standard diagonal damping only).
     damping_cross_coupling: tuple[tuple[int, int], ...] | None = None
 
+    # Semi-implicit stability clamp for damping force.
+    # Limits per-axis damping so that dt * D_eff / mass < factor, preventing
+    # forward Euler instability where high damping reverses velocity.
+    # Requires body_mass and rigid_body_inertia to be set.
+    # None disables clamping (backward compatible default).
+    damping_stability_factor: float | None = None
+
 
 @configclass
 class OceanCurrentCfg:
     """Configuration for ocean current disturbances."""
 
     # Maximum current velocity [linear_x, linear_y, linear_z, angular_x, angular_y, angular_z]
+    # All-zero values effectively disable ocean current disturbances.
     max_velocity: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
     # Gaussian noise scale for current velocity
@@ -130,7 +136,7 @@ class ThrusterCfg:
 
     # Thruster allocation matrix: wrench = allocation_matrix @ thrusts
     # Shape: (6, num_thrusters) where 6 = [Fx, Fy, Fz, Mx, My, Mz]
-    # Default is BlueROV2 Heavy configuration with 6 thrusters
+    # Default derived from BlueROV2 Heavy 6-thruster layout
     allocation_matrix: tuple[tuple[float, ...], ...] = (
         # Fx: forward surge force
         (0.707, 0.707, -0.707, -0.707, 0.0, 0.0),

@@ -14,7 +14,7 @@
   Physical Properties:
     - Total mass: ~10.61 kg (base: 9.18, gripper: 0.3, links: 0.2, buoy: 0.93)
     - Water density: 998 kg/m3 (freshwater)
-    - Net buoyancy: +3.0 N (slight positive buoyancy)
+    - Net buoyancy: ~+10 N (positive buoyancy, main 88.1 + buoy 26.2 - weight 104.1)
 -->
 <robot name="agent">
 
@@ -161,7 +161,7 @@
   <!-- Buoyancy force: 998 * 9.81 * 0.00268 = 26.24 N -->
   <!-- Weight: 0.93 * 9.81 = 9.12 N -->
   <!-- Net buoyancy: +17.12 N (floats) -->
-  <!-- System net force: +3.0 N (slight positive buoyancy) -->
+  <!-- System net force: ~+10 N (positive buoyancy) -->
   <link name="link3">
     <visual>
       <origin xyz="0 0 0.059" rpy="0 0 0"/>

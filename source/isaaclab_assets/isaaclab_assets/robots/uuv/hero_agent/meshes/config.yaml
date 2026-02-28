@@ -13,7 +13,7 @@ joint_drive:
   target_type: position
   gains:
     stiffness: 100.0
-    damping: 40.0
+    damping: 3.0
 collider_type: convex_hull
 self_collision: false
 replace_cylinders_with_capsules: false

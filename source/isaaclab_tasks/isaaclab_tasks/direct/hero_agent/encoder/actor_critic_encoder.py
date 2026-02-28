@@ -9,7 +9,7 @@ This module provides the encoder-based actor-critic network:
     - ActorCriticEncoder: Base encoder network (Phase 1 teacher training)
 
 Architecture (symmetric critic):
-    Encoder: privileged (26D) -> MLP [256, 128, 64] -> z (13D)
+    Encoder: privileged (28D) -> MLP [256, 128, 64] -> z (13D)
     Actor:   cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> actions
     Critic:  cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> value (1D)
 
@@ -50,8 +50,8 @@ class ActorCriticEncoder(nn.Module):
     The encoder receives gradient from both actor loss and critic value loss.
 
     Activation modes:
-        - "tanh": z = tanh(raw) in [-1, 1]. Built into MLP last layer. Default (matches HORA).
-        - "sigmoid": z = z_min + sigmoid(raw) * (z_max - z_min). Bounded in [z_min, z_max].
+        - "tanh": z = tanh(raw) in [-1, 1]. Built into MLP last layer (matches HORA original).
+        - "sigmoid": z = z_min + sigmoid(raw) * (z_max - z_min). Bounded in [z_min, z_max]. Default.
     """
 
     is_recurrent: bool = False
@@ -63,9 +63,9 @@ class ActorCriticEncoder(nn.Module):
         num_actions: int,
         # Encoder parameters
         policy_obs_dim: int = 13,
-        privileged_dim: int = 18,
+        privileged_dim: int = 32,
         encoder_hidden_dims: list[int] | tuple[int, ...] = (256, 128, 64),
-        encoder_latent_dim: int = 6,
+        encoder_latent_dim: int = 13,
         encoder_activation: str = "relu",
         encoder_output_activation: str = "sigmoid",
         encoder_obs_normalization: bool = False,
@@ -135,7 +135,10 @@ class ActorCriticEncoder(nn.Module):
         else:
             self.encoder = MLP(privileged_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
 
-        # Initialize last encoder layer bias for sigmoid activation
+        # Initialize last encoder layer for sigmoid activation.
+        # bias=0 -> sigmoid(0)=0.5 -> z starts at midpoint of [z_min, z_max].
+        # Small weight std ensures initial z is tightly clustered near midpoint,
+        # allowing the encoder to gradually learn the appropriate z mapping.
         if encoder_output_activation == "sigmoid":
             last_linear = self.encoder[-1]
             assert isinstance(last_linear, nn.Linear), (
@@ -259,6 +262,25 @@ class ActorCriticEncoder(nn.Module):
         actor_obs = self.actor_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
         return self.actor(actor_obs)
 
+    @torch.no_grad()
+    def act_with_z_hat(self, obs: TensorDict, z_hat: torch.Tensor) -> torch.Tensor:
+        """Get deterministic action using a pre-computed z_hat (detached).
+
+        Avoids duplicating actor internals in the AdaptRunner by routing
+        through the same normalizer and actor MLP used by act_inference().
+
+        Args:
+            obs: Observation dict containing policy obs.
+            z_hat: Pre-computed latent estimate (will be detached internally).
+
+        Returns:
+            Clamped deterministic actions. Shape: (N, num_actions).
+        """
+        policy_obs = obs[self._policy_obs_key]
+        combined_obs = torch.cat([policy_obs, z_hat.detach()], dim=-1)
+        actor_obs = self.actor_obs_normalizer(combined_obs)  # type: ignore[operator]
+        return self.actor(actor_obs).clamp(-1.0, 1.0)
+
     def evaluate(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
         """Evaluate the value function for given observations (symmetric, uses encoder z)."""
         critic_obs = self.critic_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
@@ -297,6 +319,13 @@ class ActorCriticEncoder(nn.Module):
         if len(filtered) < len(state_dict):
             dropped = set(state_dict.keys()) - current_keys
             logger.info("Dropped %d unknown checkpoint keys: %s", len(dropped), dropped)
+
+        # Warn if essential keys are missing (model would silently use random weights)
+        missing = current_keys - set(filtered.keys())
+        essential_prefixes = ("encoder.", "actor.", "critic.", "log_std")
+        missing_essential = {k for k in missing if any(k.startswith(p) for p in essential_prefixes)}
+        if missing_essential:
+            logger.warning("Missing %d essential keys in checkpoint: %s", len(missing_essential), missing_essential)
 
         super().load_state_dict(filtered, strict=False)
         return True

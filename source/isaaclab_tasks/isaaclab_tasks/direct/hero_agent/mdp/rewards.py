@@ -9,11 +9,12 @@ Provides reward configuration, a lightweight reward manager, and reward
 functions for ALBC (joint-based attitude control) training.
 
 Reward design principles:
-    - Gaussian kernel tracking + settling bonus dominate: positive rewards in
-      [0,1] provide dense gradient. Penalties are tiny regularizers to avoid
-      suppressing exploration.
+    - Gaussian kernel tracking + settling bonus dominate the positive signal
+      ([0,1] dense gradient). Penalties (joint_oscillation, joint_angle,
+      angular_velocity) provide directional regularization with a combined
+      max of ~-3.2 per step, ramped via penalty curriculum.
     - dt-scaling: state-quality terms (tracking, settling, linear_error,
-      joint_oscillation, joint_angle) are dt-scaled.
+      joint_oscillation, joint_angle, angular_velocity) are dt-scaled.
     - PBRS progress shaping (Ng 1999): preserves optimal policy guarantee.
     - Joint oscillation: EMA high-pass filter isolates high-frequency
       joint velocity oscillation while allowing smooth movement.
@@ -46,21 +47,23 @@ if TYPE_CHECKING:
 class ALBCRewardCfg:
     """ALBC reward configuration with Gaussian tracking + regularization penalties.
 
-    Reward = tracking * w_t * dt
-           + settling * w_s * dt
-           + linear_error * w_le * dt (strong tail gradient)
-           + joint_oscillation * w_jo * dt (EMA high-pass filtered)
-           + joint_angle * w_ja * dt (workspace limit)
-           + progress (PBRS)
+    Active terms (6):
+        tracking          * w_t  * dt   (Gaussian kernel, positive)
+        settling          * w_s  * dt   (sigmoid near-target bonus, positive)
+        angular_velocity  * w_av * dt   (body-rate penalty, negative)
+        joint_oscillation * w_jo * dt   (EMA high-pass filtered, negative)
+        joint_angle       * w_ja * dt   (workspace limit, negative)
+        progress          * w_p        (PBRS, NOT dt-scaled)
 
-    Design: tracking + settling dominate (positive, [0,1]). linear_error
-    ensures gradient at ALL error levels (Gaussian vanishes at large errors).
+    Design: tracking + settling dominate the positive signal. Three
+    penalties (angular_velocity, joint_oscillation, joint_angle) provide
+    directional regularization, ramped via penalty curriculum.
     """
 
     # Tracking (Gaussian kernel): exp(-||e||^2 / sigma^2)
     # Fixed sigma -- fine-tuning gradient provided by settling term instead.
     tracking_weight: float = 3.0
-    tracking_sigma: float = 0.5  # 28.6 deg 1/e point
+    tracking_sigma: float = 1.0  # 57.3 deg 1/e point
 
     # Joint oscillation penalty (EMA high-pass filtered joint velocity).
     # Penalizes high-frequency oscillation while allowing smooth movement.
@@ -71,12 +74,12 @@ class ALBCRewardCfg:
     # Joint angle penalty: mean(joint_pos^2). Penalizes deviation from zero,
     # reducing energy consumption and mechanical stress.
     # dt-scaled. Use with negative weight.
-    joint_angle_weight: float = -0.5
+    joint_angle_weight: float = -0.7
 
     # Linear error penalty: -min(||err||, max_err) / max_err.
     # Provides constant gradient at ALL error levels (unlike Gaussian which
     # vanishes at large errors). Clamped to [-1, 0]. dt-scaled.
-    linear_error_weight: float = -0.3
+    linear_error_weight: float = 0.0
     linear_error_max: float = 1.0  # clamp at ~57 degrees
 
     # Progress (potential-based shaping): PBRS (Ng 1999) preserves optimal policy.
@@ -93,7 +96,12 @@ class ALBCRewardCfg:
     settling_sharpness: float = 30.0  # 1/radians
 
     # Angular velocity penalty (dt-scaled, discourages oscillation under DR)
-    angular_velocity_weight: float = -1.0
+    angular_velocity_weight: float = -1.5
+
+    # Penalty curriculum: linearly ramp penalty scale from 0 to 1 over this many
+    # training iterations. 0 = disabled (penalties always at full weight).
+    # Applies to all terms with negative weight.
+    penalty_curriculum_end_iter: int = 750
 
     # TDC stability gate: multiply total reward by 0 when |1 - M_hat/M_true| >= 1
     # Only effective in TDC envs. Based on Baek et al. (ACC 2022).
@@ -150,9 +158,12 @@ class RewardManager:
         cfg: dict[str, RewardTermCfg],
         num_envs: int,
         device: str,
+        penalty_curriculum_end_iter: int = 0,
     ) -> None:
         self.num_envs = num_envs
         self.device = device
+        self._penalty_curriculum_end_iter = penalty_curriculum_end_iter
+        self._penalty_scale = 1.0 if penalty_curriculum_end_iter <= 0 else 0.0
 
         # Parse configurations (skip terms with zero weight)
         self._term_names: list[str] = []
@@ -162,10 +173,6 @@ class RewardManager:
             if term_cfg.weight != 0.0:
                 self._term_names.append(name)
                 self._term_cfgs.append(term_cfg)
-
-        # Per-step raw (unweighted, un-dt-scaled) mean values for diagnostics.
-        # Updated each compute() call; read by _collect_episode_metrics().
-        self._step_raw_means: dict[str, float] = {name: 0.0 for name in self._term_names}
 
         # Initialize buffers
         self._reward_buf = torch.zeros(num_envs, dtype=torch.float32, device=device)
@@ -188,9 +195,15 @@ class RewardManager:
         return self._episode_sums
 
     @property
-    def step_raw_means(self) -> dict[str, float]:
-        """Last step's unweighted, un-dt-scaled raw mean per term."""
-        return self._step_raw_means
+    def penalty_scale(self) -> float:
+        """Current penalty curriculum scale [0, 1]."""
+        return self._penalty_scale
+
+    def update_curriculum(self, iteration: int) -> None:
+        """Update penalty scale based on training iteration (linear ramp)."""
+        if self._penalty_curriculum_end_iter <= 0:
+            return
+        self._penalty_scale = min(1.0, iteration / self._penalty_curriculum_end_iter)
 
     def compute(
         self,
@@ -206,13 +219,14 @@ class RewardManager:
             term_value = term_cfg.func(robot, **merged_params)
             weight = term_cfg.weight
 
-            # Store raw (unweighted, un-dt-scaled) mean for diagnostics
-            self._step_raw_means[name] = term_value.mean().item()
-
             if term_cfg.scale_by_dt:
                 scaled_value = term_value * weight * dt
             else:
                 scaled_value = term_value * weight
+
+            # Penalty curriculum: scale negative-weight terms
+            if weight < 0:
+                scaled_value = scaled_value * self._penalty_scale
 
             self._last_step_terms[name] = scaled_value
             self._reward_buf += scaled_value
@@ -238,7 +252,7 @@ class RewardManager:
 def tracking_reward(
     _robot: Articulation,
     env: HeroAgentEnv,
-    sigma: float = 0.25,
+    sigma: float = 1.0,
     **_kwargs,
 ) -> torch.Tensor:
     """Gaussian kernel tracking reward: exp(-||e||^2 / sigma^2).
@@ -248,7 +262,7 @@ def tracking_reward(
 
     Args:
         env: Environment instance (provides _potentials = ||[roll_err, pitch_err]||).
-        sigma: Gaussian kernel width in radians. Default 0.25 rad (~14.3 deg).
+        sigma: Gaussian kernel width in radians. Default 1.0 rad (~57.3 deg).
     """
     err_sq = env._potentials**2
     return torch.exp(-err_sq / (sigma**2))
@@ -335,7 +349,7 @@ def progress_reward(
 def progress_reward_pbrs(
     _robot: Articulation,
     env: HeroAgentEnv,
-    gamma: float = 0.997,
+    gamma: float = 0.99,
     **_kwargs,
 ) -> torch.Tensor:
     """Proper PBRS: Phi(s) - gamma * Phi(s').
@@ -379,15 +393,19 @@ def angular_velocity_penalty(
     robot: Articulation,
     **_kwargs,
 ) -> torch.Tensor:
-    """Sum of squared body-frame angular velocities.
+    """Sum of squared roll/pitch angular velocities (body frame).
 
-    Penalizes oscillatory motion to encourage smooth settling.
+    Only penalizes controllable axes (roll, pitch). Yaw is excluded because
+    buoyancy-based control cannot generate Z-axis torque.
     dt-scaled (instantaneous quality measure). Use with negative weight.
+
+    Note: Uses ``sum`` (not ``mean``) over the 2 axes so the penalty scales
+    with total angular velocity magnitude. The axis count is fixed at 2.
 
     Returns:
         (num_envs,) penalty value (positive; apply negative weight).
     """
-    return torch.sum(robot.data.root_ang_vel_b**2, dim=-1)
+    return torch.sum(robot.data.root_ang_vel_b[:, :2] ** 2, dim=-1)
 
 
 def tdc_torque_penalty(

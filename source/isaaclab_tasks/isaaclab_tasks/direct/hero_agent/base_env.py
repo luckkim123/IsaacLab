@@ -135,6 +135,10 @@ class HeroAgentEnv(DirectRLEnv):
                 nm._num_components = self.cfg.observation_space
                 nm._bias = nm._bias.repeat(1, nm._num_components)
 
+        # Validate state_space value
+        if self.cfg.state_space < 0:
+            raise ValueError(f"state_space={self.cfg.state_space} must be non-negative")
+
         # Validate state_space vs enable_payload consistency
         if self.cfg.state_space >= 18 and not self.cfg.enable_payload:
             raise ValueError(
@@ -279,6 +283,7 @@ class HeroAgentEnv(DirectRLEnv):
             cfg=self._build_reward_terms(),
             num_envs=self.num_envs,
             device=self.device,
+            penalty_curriculum_end_iter=self.cfg.reward.penalty_curriculum_end_iter,
         )
         self._init_doraemon()
 
@@ -452,6 +457,20 @@ class HeroAgentEnv(DirectRLEnv):
         self._attitude_error = self.compute_attitude_error(self._robot.data.root_quat_w)
         return self._attitude_error
 
+    def _get_proprio_features(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Extract proprioception features shared by policy obs and adaptation history.
+
+        Returns:
+            roll, pitch, p (ang_vel_x), q (ang_vel_y), joint_pos_normalized
+        """
+        roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
+        ang_vel_b = self._robot.data.root_ang_vel_b
+        p = ang_vel_b[:, 0:1]
+        q = ang_vel_b[:, 1:2]
+        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
+        joint_pos_norm = 2.0 * (joint_pos - self._joint_limits_lower) / self._joint_limits_range - 1.0
+        return roll, pitch, p, q, joint_pos_norm
+
     def _update_potentials(self, quat: torch.Tensor) -> None:
         """Update potential values for reward computation.
 
@@ -587,8 +606,8 @@ class HeroAgentEnv(DirectRLEnv):
             effective_actions = self._get_delayed_actions(self._actions)
 
             # Integrate velocity to position: delta_pos = dt * max_vel * action
-            # step_dt = physics_dt * decimation (time per RL step)
-            control_dt = self.step_dt * self.cfg.control_decimation
+            # control_dt = physics_dt * control_decimation (50Hz = 0.005 * 4 = 0.02s)
+            control_dt = self.physics_dt * self.cfg.control_decimation
             position_delta = control_dt * self.cfg.max_joint_velocity * effective_actions
             self._joint_pos_targets += position_delta
 
@@ -606,12 +625,12 @@ class HeroAgentEnv(DirectRLEnv):
         # Update PhysX acceleration cache for added mass force (M_A * v_dot).
         # Uses previous step's acceleration to avoid circular dependency.
         # Stability factor must satisfy: factor * max(M_A_i / M_rigid_i) < 1
-        if self._hydro._apply_added_mass:
+        if self._hydro.apply_added_mass:
             self._hydro.update_physx_state(
                 body_com_acc_w=self._robot.data.body_com_acc_w,
                 root_quat_w=self._robot.data.root_quat_w,
             )
-        if self._buoy_hydro._apply_added_mass:
+        if self._buoy_hydro.apply_added_mass:
             buoy_body_idx = self._buoy_body_id[0]
             self._buoy_hydro.update_physx_state(
                 body_com_acc_w=self._robot.data.body_com_acc_w[:, buoy_body_idx, :],
@@ -812,6 +831,9 @@ class HeroAgentEnv(DirectRLEnv):
 
         # Weight for downstream weighted averaging (SAC runner uses this)
         log["_num_resets"] = float(n)
+
+        # Penalty curriculum scale (0.0 ~ 1.0)
+        log["Reward/penalty_scale"] = self._reward_manager.penalty_scale
 
         # Reward sums (normalized by max episode duration for episode-length-independent metrics)
         total = 0.0
