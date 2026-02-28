@@ -26,7 +26,7 @@ Domain randomization spans 15+ physical parameters (hydrodynamics, ocean current
 - **Thruster-Free Control**: Attitude stabilization using only buoyancy manipulation through a 2-DOF revolute arm, eliminating thruster noise and energy consumption
 - **Multi-Phase Training Pipeline**: Pure RL (PPO), classical TDC, HORA encoder (Phase 1), and supervised adaptation (Phase 2) -- each registered as a Gymnasium environment
 - **Sim-to-Real Transfer**: Domain randomization across 15+ physical parameters with HORA encoder for online adaptation via proprioception history
-- **Deployment Export**: JIT-scriptable module exports TorchScript/ONNX models with baked-in gain scaling for direct C++ TDC controller integration
+- **Deployment Ready**: Frozen actor + adaptation module can be exported for real robot deployment without privileged information
 - **GPU-Accelerated Simulation**: Runs 4096+ parallel environments on a single GPU via Isaac Lab and PhysX, with Fossen-model 6-DOF hydrodynamics
 
 ## Getting Started
@@ -70,7 +70,11 @@ Train a base RL policy for attitude stabilization:
 | Task ID | Obs / Priv / Act | Description |
 |:---|:---:|:---|
 | `Isaac-HeroAgent-v0` | 13 / -- / 2 | Debug (no DR, no ocean current) |
-| `Isaac-HeroAgent-Base-v0` | 13 / -- / 2 | Base training (DR + ocean current + payload) |
+| `Isaac-HeroAgent-TDE-Base-Debug-v0` | 15 / -- / 2 | TDE debug (no DR) |
+| `Isaac-HeroAgent-Base-v0` | 13 / -- / 2 | Base training (DR + payload) |
+| `Isaac-HeroAgent-TDE-Base-v0` | 15 / -- / 2 | TDE-Base with dynamics mismatch obs |
+| `Isaac-HeroAgent-Priv-Base-v0` | 13 / 28 / 2 | Raw privileged info ablation |
+| `Isaac-HeroAgent-Encoder-Base-Debug-v0` | 13 / 28 / 2 | Encoder debug (half DR) |
 | `Isaac-HeroAgent-Encoder-Base-v0` | 13 / 28 / 2 | HORA Phase 1 encoder training |
 | `Isaac-HeroAgent-TDC-v0` | 13 / -- / 2 | Classical TDC control (no RL actions) |
 | `Isaac-HeroAgent-Adapt-Base-v0` | 13 / 28 / 2 | Phase 2 adaptation (proprio history, base RL) |
@@ -132,21 +136,20 @@ Train the encoder to compress privileged hydrodynamic information (28D) into a 1
 Train a temporal convolution network to estimate the encoder latent from proprioception history only (no privileged info):
 
 ```bash
-./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/hero_agent/workflows/train_adaptation.py \
+./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
     --task Isaac-HeroAgent-Adapt-Base-v0 \
-    --phase1_checkpoint logs/rsl_rl/<encoder_base_run>/model_1500.pt \
-    --num_envs 4096
+    --num_envs 4096 --headless
 ```
 
-#### Phase 3: Deploy Export
+Phase 1 checkpoint path는 `AdaptRunner`가 `resume_path` 또는 config에서 자동 로드한다.
 
-Evaluate the complete pipeline and export models:
+#### Phase 3: Evaluation
+
+Evaluate the complete pipeline:
 
 ```bash
-./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/hero_agent/workflows/play_phase3.py \
-    --task Isaac-HeroAgent-Adapt-Base-v0 \
-    --checkpoint logs/rsl_rl/<adapt_run>/model_final.pt \
-    --export-jit --export-onnx --headless
+./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py \
+    --task Isaac-HeroAgent-Adapt-Base-v0
 ```
 
 </details>
@@ -154,25 +157,17 @@ Evaluate the complete pipeline and export models:
 <details>
 <summary><strong>Benchmarking</strong></summary>
 
-Compare controllers across standardized scenarios (nominal / easy / hard / extreme) with controlled DR intensity, ocean current, and payload:
+Compare controllers by running `play.py` with different task IDs and checkpoints:
 
 ```bash
-./isaaclab.sh -p source/isaaclab_tasks/isaaclab_tasks/direct/hero_agent/workflows/benchmark.py \
-    --entries "Isaac-HeroAgent-TDC-v0:" \
-              "Isaac-HeroAgent-Base-v0:logs/rsl_rl/<base_run>/model_600.pt" \
-    --scenarios nominal hard \
-    --num_episodes 50 --num_envs 256 \
-    --output_dir benchmarks/run1 --headless
+# Evaluate base RL
+./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py \
+    --task Isaac-HeroAgent-Base-v0
+
+# Evaluate classical TDC (no checkpoint needed)
+./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/play.py \
+    --task Isaac-HeroAgent-TDC-v0
 ```
-
-Entry format: `TASK_ID:CHECKPOINT_PATH` (empty path for TDC-v0 which needs no checkpoint). Results are saved as CSVs with per-episode and aggregated metrics. Optional `--logger wandb` for WandB logging.
-
-| Scenario | DR Intensity | Ocean Current | Payload | Purpose |
-|:---|:---:|:---:|:---:|:---|
-| nominal | None | None | 0.5 kg fixed | Baseline stability |
-| easy | +/-10% hydro | 0.1 m/s | 0-0.5 kg | Mild perturbation |
-| hard | +/-30-50% hydro | 0.3 m/s | 0-1.0 kg | Training distribution |
-| extreme | +/-60-80% hydro | 0.5 m/s | 0-2.0 kg | Out-of-distribution |
 
 </details>
 
@@ -211,9 +206,8 @@ See `tdc_env.py` for a complete example.
 
 ```
 hero_agent/
-├── __init__.py           # Gymnasium environment registration (5 tasks)
+├── __init__.py           # Gymnasium environment registration (9 tasks)
 ├── config.py             # All environment configuration classes
-├── config_benchmark.py   # Benchmark scenario presets (nominal/easy/hard/extreme)
 ├── base_env.py           # Base RL environment (HeroAgentEnv)
 ├── tdc_env.py            # Classical TDC controller environment
 ├── adapt_base_env.py     # Phase 2 adaptation environment (base RL)
@@ -221,8 +215,6 @@ hero_agent/
 ├── encoder/              # HORA encoder networks + adaptation module
 ├── agents/               # RSL-RL PPO runner configurations
 ├── runners/              # Custom training runners (encoder, adaptation)
-├── workflows/            # Multi-phase training, benchmarking + deploy export
-├── deploy/               # JIT/ONNX export for C++ integration
 ├── mdp/                  # Observations, rewards, domain randomization events
 ├── utils/                # Debug visualization + episode logging
 └── docs/                 # Architecture, TDC theory, dynamics, training, DR, sim-to-real

@@ -105,19 +105,19 @@ Base RL pipeline은 직접 관절 속도를 명령한다.
 
 | Parameter | Value | Source |
 |:---|:---|:---|
-| Algorithm | PPO (On-Policy) | `rsl_rl_ppo_cfg.py:184-227` |
+| Algorithm | PPO (On-Policy) | `rsl_rl_ppo_cfg.py` |
 | Parallel Envs | 4096 (CLI default) | CLI `--num_envs` |
-| Learning Rate | 3e-4 (adaptive schedule) | `rsl_rl_ppo_cfg.py:220` |
-| Gamma | 0.99 | `rsl_rl_ppo_cfg.py:222` |
-| GAE Lambda | 0.95 | `rsl_rl_ppo_cfg.py:223` |
-| Clip Param | 0.2 | `rsl_rl_ppo_cfg.py:216` |
-| Epochs per Update | 8 | `rsl_rl_ppo_cfg.py:218` |
-| Mini-batches | 4 | `rsl_rl_ppo_cfg.py:219` |
-| Steps per Env | 32 | `rsl_rl_ppo_cfg.py:196` |
-| Max Iterations | 600 | `rsl_rl_ppo_cfg.py:197` |
-| Entropy Coef | 0.0 | Disabled (dynamic systems에서 std 폭발 방지) |
-| Max Grad Norm | 1.0 | `rsl_rl_ppo_cfg.py:225` |
-| Init Noise Std | 1.0 | `rsl_rl_ppo_cfg.py:207` |
+| Learning Rate | 3e-4 (adaptive schedule) | `_HeroAgentBaseRunnerCfg.algorithm` |
+| Gamma | 0.99 | `RslRlPpoAlgorithmCfg` |
+| GAE Lambda | 0.95 | `RslRlPpoAlgorithmCfg` |
+| Clip Param | 0.2 | `RslRlPpoAlgorithmCfg` |
+| Epochs per Update | 5 | `num_learning_epochs` |
+| Mini-batches | 4 | `num_mini_batches` |
+| Steps per Env | 128 | `_HeroAgentBaseRunnerCfg.num_steps_per_env` |
+| Max Iterations | 2500 | `HeroAgentEncoderPPORunnerCfg.max_iterations` |
+| Entropy Coef | 0.005 | `RslRlPpoAlgorithmCfg` |
+| Max Grad Norm | 1.0 | `RslRlPpoAlgorithmCfg` |
+| Init Noise Std | 1.0 | `_HeroAgentPolicyCfg` |
 
 ### 2.4 Training Command
 
@@ -131,11 +131,11 @@ Phase 1 teacher training은 `Isaac-HeroAgent-Encoder-Base-v0` task를 사용한�
 
 ```
 Per-timestep MLP:  8D features --> MLP [32, 32] --> 32D embedding
-Temporal Conv:     (N, 30, 32) -->
-                   Conv1d(32->32, kernel=9, stride=2, padding=4) --> (N, 15, 32)
-                   Conv1d(32->32, kernel=5, stride=1, padding=2) --> (N, 15, 32)
-                   Conv1d(32->32, kernel=5, stride=1, padding=2) --> (N, 15, 32)
-Flatten + Linear:  (N, 480) --> Linear --> z_hat (13D)
+Temporal Conv:     (N, 32, 30) -->
+                   Conv1d(32->32, kernel=9, stride=2) --> (N, 32, 11)
+                   Conv1d(32->32, kernel=5, stride=1) --> (N, 32, 7)
+                   Conv1d(32->32, kernel=5, stride=1) --> (N, 32, 3)
+Flatten + Linear:  (N, 96) --> Linear --> z_hat (13D)
 Activation:        sigmoid, z in [0.01, 2.0] (same as encoder)
 ```
 
@@ -193,7 +193,7 @@ adapt_tconv가 출력한 z_hat으로 실제 policy를 구동하면서 동시에 
 | Log Interval | 10 iterations | `rsl_rl_ppo_cfg.py:278` |
 | Max Grad Norm | 10.0 | `rsl_rl_ppo_cfg.py:281` |
 | History Length | 30 timesteps | `rsl_rl_ppo_cfg.py:90` |
-| Feature Dim | 12 per timestep | `rsl_rl_ppo_cfg.py:91` |
+| Feature Dim | 8 per timestep | `RslRlPpoActorCriticEncoderAdaptCfg.proprio_feature_dim` |
 | Loss | L2 ($\|z_{hat} - z_{gt}\|^2$) | `AdaptRunner` |
 
 Phase 2의 grad norm (10.0)이 Phase 1 (1.0)보다 완화된 이유:

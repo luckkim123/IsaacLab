@@ -264,7 +264,7 @@ real에서는 Dynamixel이 내부적으로 trajectory를 생성하므로 positio
   - Joint normalization: `(pos - lower) / range * 2 - 1`
   - Attitude: Euler from quaternion (same convention)
   - Angular velocity: body frame
-- [ ] Action postprocessing: `[-1, 1]` -> sigmoid scaling -> TDC gains
+- [ ] Action postprocessing: `[-1, 1]` joint velocity -> integrate to position target
 - [ ] Adaptation module z: history ring buffer at 50Hz, adapt_tconv inference
 - [ ] Online monitoring: z statistics, M_hat values, TDE residual ratio
 
