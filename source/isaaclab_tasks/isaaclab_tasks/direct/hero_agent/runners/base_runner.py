@@ -38,6 +38,8 @@ class BaseRunner(OnPolicyRunner):
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         """Reset environments before training so initial DR samples come from DORAEMON."""
+        raw_env = unwrap_env(self.env)
+        raw_env._reward_manager.set_max_iterations(num_learning_iterations)
         self.env.reset()
         super().learn(num_learning_iterations, init_at_random_ep_len)
 

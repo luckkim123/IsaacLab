@@ -40,8 +40,8 @@ from .mdp import (
     angular_velocity_penalty,
     compute_policy_obs,
     compute_privileged_obs,
-    joint_angle_penalty,
     joint_oscillation_penalty,
+    joint_velocity_penalty,
     linear_error_penalty,
     progress_reward,
     progress_reward_pbrs,
@@ -283,7 +283,7 @@ class HeroAgentEnv(DirectRLEnv):
             cfg=self._build_reward_terms(),
             num_envs=self.num_envs,
             device=self.device,
-            penalty_curriculum_end_iter=self.cfg.reward.penalty_curriculum_end_iter,
+            penalty_curriculum_ratio=self.cfg.reward.penalty_curriculum_ratio,
         )
         self._init_doraemon()
 
@@ -294,7 +294,7 @@ class HeroAgentEnv(DirectRLEnv):
             1. tracking: Gaussian kernel exp(-e^2/sigma^2), dt-scaled
             2. linear_error: -min(||err||, max)/max, dt-scaled (strong tail gradient)
             3. joint_oscillation: EMA high-pass joint vel^2, dt-scaled
-            4. joint_angle: quadratic penalty near joint limits, dt-scaled
+            4. joint_velocity: quadratic joint velocity penalty, dt-scaled
             5. progress: potential-based shaping (optional, default off)
         """
         rcfg = self.cfg.reward
@@ -316,10 +316,10 @@ class HeroAgentEnv(DirectRLEnv):
                 func=joint_oscillation_penalty,
                 weight=rcfg.joint_oscillation_weight,
             )
-        if rcfg.joint_angle_weight != 0.0:
-            terms["joint_angle"] = RewardTermCfg(
-                func=joint_angle_penalty,
-                weight=rcfg.joint_angle_weight,
+        if rcfg.joint_velocity_weight != 0.0:
+            terms["joint_velocity"] = RewardTermCfg(
+                func=joint_velocity_penalty,
+                weight=rcfg.joint_velocity_weight,
             )
         if rcfg.progress_weight != 0.0:
             if rcfg.progress_mode == "pbrs":

@@ -34,8 +34,8 @@ from .rewards import (
     RewardTermCfg,
     angular_velocity_penalty,
     compute_stability_gate,
-    joint_angle_penalty,
     joint_oscillation_penalty,
+    joint_velocity_penalty,
     linear_error_penalty,
     mhat_accuracy_reward,
     progress_reward,
@@ -44,7 +44,6 @@ from .rewards import (
     tdc_torque_penalty,
     tracking_reward,
 )
-
 
 __all__ = [
     # Events
@@ -68,7 +67,7 @@ __all__ = [
     # Rewards (functions)
     "angular_velocity_penalty",
     "compute_stability_gate",
-    "joint_angle_penalty",
+    "joint_velocity_penalty",
     "joint_oscillation_penalty",
     "linear_error_penalty",
     "mhat_accuracy_reward",

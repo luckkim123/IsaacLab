@@ -235,6 +235,8 @@ class SACMPCRunner:
         """Main training loop."""
         if num_learning_iterations is not None:
             self.max_iterations = num_learning_iterations
+        if hasattr(self._raw_env, "_reward_manager"):
+            self._raw_env._reward_manager.set_max_iterations(self.max_iterations)
         obs = self.env.get_observations()
         total_steps = 0
         start_time = time.time()
@@ -260,8 +262,8 @@ class SACMPCRunner:
             # ---- DR / reward curriculum (before data collection) ----
             if hasattr(self._raw_env, "update_dr_curriculum"):
                 self._raw_env.update_dr_curriculum(iteration)
-            if hasattr(self._raw_env, "_reward_manager") and hasattr(self._raw_env.cfg, "reward"):
-                self._raw_env._reward_manager.update_curriculum(iteration, self._raw_env.cfg.reward.curriculum_end_iter)
+            if hasattr(self._raw_env, "_reward_manager"):
+                self._raw_env._reward_manager.update_curriculum(iteration)
 
             # ---- Collect one env step ----
             # Disable EF dropout during rollout: dynamics predictions must be

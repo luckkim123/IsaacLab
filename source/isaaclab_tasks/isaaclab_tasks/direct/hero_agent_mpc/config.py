@@ -63,7 +63,7 @@ class HeroAgentMPCEnvCfg(HeroAgentTrainEnvCfg):
         tracking_weight=3.0,
         tracking_sigma=0.5,
         joint_oscillation_weight=-0.5,
-        joint_angle_weight=-0.3,
+        joint_velocity_weight=-0.3,
         progress_weight=0.2,
         progress_mode="pbrs",
         progress_gamma=0.99,  # match SAC gamma

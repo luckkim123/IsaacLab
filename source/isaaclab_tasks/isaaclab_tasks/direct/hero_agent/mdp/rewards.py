@@ -10,11 +10,11 @@ functions for ALBC (joint-based attitude control) training.
 
 Reward design principles:
     - Gaussian kernel tracking + settling bonus dominate the positive signal
-      ([0,1] dense gradient). Penalties (joint_oscillation, joint_angle,
+      ([0,1] dense gradient). Penalties (joint_oscillation, joint_velocity,
       angular_velocity) provide directional regularization with a combined
       max of ~-3.2 per step, ramped via penalty curriculum.
     - dt-scaling: state-quality terms (tracking, settling, joint_oscillation,
-      joint_angle, angular_velocity) are dt-scaled.
+      joint_velocity, angular_velocity) are dt-scaled.
     - PBRS progress shaping (Ng 1999): preserves optimal policy guarantee.
     - Joint oscillation: EMA high-pass filter isolates high-frequency
       joint velocity oscillation while allowing smooth movement.
@@ -52,11 +52,11 @@ class ALBCRewardCfg:
         settling          * w_s  * dt   (sigmoid near-target bonus, positive)
         angular_velocity  * w_av * dt   (body-rate penalty, negative)
         joint_oscillation * w_jo * dt   (EMA high-pass filtered, negative)
-        joint_angle       * w_ja * dt   (workspace limit, negative)
+        joint_velocity    * w_jv * dt   (joint speed penalty, negative)
         progress          * w_p        (PBRS, NOT dt-scaled)
 
     Design: tracking + settling dominate the positive signal. Three
-    penalties (angular_velocity, joint_oscillation, joint_angle) provide
+    penalties (angular_velocity, joint_oscillation, joint_velocity) provide
     directional regularization, ramped via penalty curriculum.
     """
 
@@ -71,10 +71,10 @@ class ALBCRewardCfg:
     joint_oscillation_weight: float = -1.0
     joint_oscillation_alpha: float = 0.2  # EMA smoothing factor (cutoff ~1.6Hz at 50Hz)
 
-    # Joint angle penalty: mean(joint_pos^2). Penalizes deviation from zero,
-    # reducing energy consumption and mechanical stress.
+    # Joint velocity penalty: mean(joint_vel^2). Penalizes fast joint movement,
+    # improving control stability and energy efficiency.
     # dt-scaled. Use with negative weight.
-    joint_angle_weight: float = -0.7
+    joint_velocity_weight: float = -0.7
 
     # Linear error penalty: -min(||err||, max_err) / max_err.
     # Provides constant gradient at ALL error levels (unlike Gaussian which
@@ -98,10 +98,10 @@ class ALBCRewardCfg:
     # Angular velocity penalty (dt-scaled, discourages oscillation under DR)
     angular_velocity_weight: float = -1.5
 
-    # Penalty curriculum: linearly ramp penalty scale from 0 to 1 over this many
-    # training iterations. 0 = disabled (penalties always at full weight).
+    # Penalty curriculum: linearly ramp penalty scale from 0 to 1 over this
+    # ratio of max_iterations. 0 = disabled (penalties always at full weight).
     # Applies to all terms with negative weight.
-    penalty_curriculum_end_iter: int = 750
+    penalty_curriculum_ratio: float = 0.75
 
     # TDC stability gate: multiply total reward by 0 when |1 - M_hat/M_true| >= 1
     # Only effective in TDC envs. Based on Baek et al. (ACC 2022).
@@ -158,12 +158,13 @@ class RewardManager:
         cfg: dict[str, RewardTermCfg],
         num_envs: int,
         device: str,
-        penalty_curriculum_end_iter: int = 0,
+        penalty_curriculum_ratio: float = 0.0,
     ) -> None:
         self.num_envs = num_envs
         self.device = device
-        self._penalty_curriculum_end_iter = penalty_curriculum_end_iter
-        self._penalty_scale = 1.0 if penalty_curriculum_end_iter <= 0 else 0.0
+        self._penalty_curriculum_ratio = penalty_curriculum_ratio
+        self._penalty_curriculum_end_iter = 0
+        self._penalty_scale = 1.0 if penalty_curriculum_ratio <= 0 else 0.0
 
         # Parse configurations (skip terms with zero weight)
         self._term_names: list[str] = []
@@ -198,6 +199,12 @@ class RewardManager:
     def penalty_scale(self) -> float:
         """Current penalty curriculum scale [0, 1]."""
         return self._penalty_scale
+
+    def set_max_iterations(self, max_iterations: int) -> None:
+        """Compute penalty curriculum end iteration from ratio and max_iterations."""
+        if self._penalty_curriculum_ratio <= 0:
+            return
+        self._penalty_curriculum_end_iter = int(self._penalty_curriculum_ratio * max_iterations)
 
     def update_curriculum(self, iteration: int) -> None:
         """Update penalty scale based on training iteration (linear ramp)."""
@@ -288,21 +295,21 @@ def joint_oscillation_penalty(
     return torch.mean(hf**2, dim=-1)
 
 
-def joint_angle_penalty(
+def joint_velocity_penalty(
     _robot: Articulation,
     env: HeroAgentEnv,
     **_kwargs,
 ) -> torch.Tensor:
-    """Quadratic joint angle penalty: mean(joint_pos^2).
+    """Quadratic joint velocity penalty: mean(joint_vel^2).
 
-    Penalizes deviation from zero position. Larger joint excursions get
-    disproportionately penalized (quadratic), encouraging the policy to
-    use minimal joint movement for attitude control.
+    Penalizes fast joint movement, improving control stability and energy
+    efficiency. Unlike joint_oscillation (EMA high-pass, high-freq only),
+    this penalizes all joint velocity magnitudes.
 
     dt-scaled. Use with negative weight.
     """
-    joint_pos = _robot.data.joint_pos[:, env._albc_joint_ids]
-    return torch.mean(joint_pos**2, dim=-1)
+    joint_vel = _robot.data.joint_vel[:, env._albc_joint_ids]
+    return torch.mean(joint_vel**2, dim=-1)
 
 
 def linear_error_penalty(
