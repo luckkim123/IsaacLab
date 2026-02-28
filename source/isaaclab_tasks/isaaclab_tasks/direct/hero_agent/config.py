@@ -459,12 +459,12 @@ def _tdc_randomization(action_latency: bool = False) -> DomainRandomizationCfg:
     """Create DomainRandomizationCfg with TDC-specific overrides.
 
     TDC envs need higher joint gains (centered at Kp=200, Kd=10).
-    Pure TDC (no RL) disables action latency; Encoder-TDC enables it
+    Pure TDC (no RL) disables action latency; encoder-based TDC envs enable it
     because RL inference latency exists in real deployment.
 
     Args:
         action_latency: Enable action latency DR (0-4 steps). True for
-            Encoder-TDC (RL policy present), False for pure TDC.
+            encoder-based TDC envs (RL policy present), False for pure TDC.
     """
     return DomainRandomizationCfg(
         enable=True,

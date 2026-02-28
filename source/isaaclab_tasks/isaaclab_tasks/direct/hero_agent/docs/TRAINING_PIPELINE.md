@@ -72,18 +72,17 @@ Hydrostatic + dynamics + surge added mass를 포함. Damping은 제외.
 
 Source: `mdp/observations.py` (`_hydro_privileged_info`, `_added_mass_surge`)
 
-#### Encoder Latent z (6D)
+#### Encoder Latent z (13D)
 
 ```
-z = softplus(MLP(privileged)) + z_min    (z_min = 0.1)
+z = z_min + sigmoid(MLP(privileged)) * (z_max - z_min)    (z_min=0.01, z_max=2.0)
 ```
 
-- 6D: 6-DOF 관례 [surge, sway, heave, roll, pitch, yaw]에 대응
-- softplus: z > z_min 보장 (양수 latent), upper bound 없음
-- z[3:5] (roll, pitch) -> M_hat으로 직접 사용 (별도 MLP 없음)
+- 13D: general compressed latent (물리적 파라미터에 직접 대응하지 않음)
+- sigmoid: z in [0.01, 2.0] bounded (softplus의 dead zone collapse 방지)
+- Encoder-Base에서는 z에서 M_hat을 추출하지 않음 (base RL은 velocity 명령만 출력)
 
-Softplus를 tanh 대신 사용하는 이유: M_hat이 물리적으로 양수여야 하므로, positive latent가 자연스럽다.
-HORA는 tanh([-1,1])을 사용하지만, M_hat 추출에는 양수 보장이 더 중요하다.
+Source: `encoder/actor_critic_encoder.py` (`_activate_z`, `_encode`)
 
 #### Policy Observations (13D)
 
@@ -91,31 +90,16 @@ HORA는 tanh([-1,1])을 사용하지만, M_hat 추출에는 양수 보장이 더
 euler_angles(3) + angular_velocity(3) + attitude_error(3) + joint_pos(2) + prev_actions(2)
 ```
 
-`prev_actions`는 Kp 2D만 포함 (Kd 제외). 13D obs 호환성을 위한 설계.
+Source: `mdp/observations.py` (`compute_policy_obs`)
 
-#### Actor Output (4D)
+#### Actor Output (2D)
 
 ```
-Raw actions --> Sigmoid scaling:
-  Kp = kp_min + sigmoid(raw) * (kp_max - kp_min)    [kp_min=10, kp_max=100]
-  Kd = kd_min + sigmoid(raw) * (kd_max - kd_min)    [kd_min=2, kd_max=30]
+actions: 2D joint velocity commands in [-1, 1]
+target += dt * max_joint_velocity * action
 ```
 
-sigmoid(0) = 0.5 → 초기 Kp=55, Kd=16 (합리적 midpoint).
-
-#### M_hat Extraction
-
-```python
-z = policy.get_last_z()       # (num_envs, 6), computed during act()
-m_hat = z[:, 3:5]             # (num_envs, 2), guaranteed >= z_min=0.1
-tdc.update_controller_params(m_hat=m_hat)
-```
-
-별도 M_hat network를 두지 않고, encoder latent에서 직접 슬라이싱한다.
-이 방식의 trade-off:
-
-- 장점: 추가 파라미터 없음, 단순
-- 단점: z[3:5]가 물리적 inertia 값 범위에 직접 묶임 (latent space 유연성 감소)
+Base RL pipeline은 직접 관절 속도를 명령한다.
 
 ### 2.3 Training Configuration
 
@@ -137,8 +121,7 @@ tdc.update_controller_params(m_hat=m_hat)
 
 ### 2.4 Training Command
 
-Phase 1 teacher training은 `Isaac-HeroAgent-Encoder-Base-v0` task를 사용하거나,
-workflow 스크립트를 통해 실행한다. 자세한 사용법은 `workflows/` 디렉토리 참조.
+Phase 1 teacher training은 `Isaac-HeroAgent-Encoder-Base-v0` task를 사용한다.
 
 ---
 
@@ -147,24 +130,24 @@ workflow 스크립트를 통해 실행한다. 자세한 사용법은 `workflows/
 ### 3.1 Architecture: ProprioAdaptTConv
 
 ```
-Per-timestep MLP:  12D features --> MLP [32, 32] --> 32D embedding
+Per-timestep MLP:  8D features --> MLP [32, 32] --> 32D embedding
 Temporal Conv:     (N, 30, 32) -->
                    Conv1d(32->32, kernel=9, stride=2, padding=4) --> (N, 15, 32)
                    Conv1d(32->32, kernel=5, stride=1, padding=2) --> (N, 15, 32)
                    Conv1d(32->32, kernel=5, stride=1, padding=2) --> (N, 15, 32)
-Flatten + Linear:  (N, 480) --> Linear --> z_hat (6D)
-Activation:        softplus + z_min (same as encoder)
+Flatten + Linear:  (N, 480) --> Linear --> z_hat (13D)
+Activation:        sigmoid, z in [0.01, 2.0] (same as encoder)
 ```
 
 구현 클래스: `ActorCriticEncoderAdapt` (`encoder/adaptation.py`)
 
-### 3.2 Proprioception History (12D per timestep)
+### 3.2 Proprioception History (8D per timestep)
 
 ```
-[roll(1), pitch(1), p(1), q(1), joint_pos_norm(2), joint_vel(2), actions(4)]
+[roll(1), pitch(1), p(1), q(1), joint_pos_norm(2), prev_actions(2)]
 ```
 
-Ring buffer: `(num_envs, 30, 12)`, 리셋 시 0으로 초기화.
+Ring buffer: `(num_envs, 30, 8)`, 리셋 시 0으로 초기화.
 
 각 feature의 역할:
 
@@ -172,9 +155,8 @@ Ring buffer: `(num_envs, 30, 12)`, 리셋 시 0으로 초기화.
 |:---|:---|:---|
 | roll, pitch | 2 | Restoring torque의 직접적 결과. $T_b = f(\text{roll, pitch, CoG, CoB, V})$ |
 | p, q | 2 | Angular acceleration = $\tau / M_{eff}$의 적분. $M_{eff}$ 추론 가능 |
-| joint_pos_norm | 2 | Arm 구성 정보 (TDC 작동점, IK 상태) |
-| joint_vel | 2 | Arm dynamics 상태 |
-| actions | 4 | System identification의 입력 신호 역할 |
+| joint_pos_norm | 2 | Arm 구성 정보 (작동점, IK 상태) |
+| prev_actions | 2 | System identification의 입력 신호 역할 |
 
 HORA와의 차이: HORA (Allegro hand)에서는 joint state = dynamics state이므로 joint 정보만으로 충분하다.
 ALBC에서는 arm state $\neq$ body dynamics state이므로, body orientation + angular rates를 포함해야 한다.
@@ -231,10 +213,9 @@ PPO 대신 supervised L2 loss를 사용하며, Phase 1 체크포인트에서 enc
 ### 4.1 Data Flow
 
 ```
-Proprioception History --> AdaptTConv --> z_hat (6D)
-    z_hat[3:5] --> M_hat --> TDC Controller
-    policy_obs + z_hat --> Frozen Actor --> 4D gains --> TDC Controller
-    TDC.compute() --> p_EE --> IK --> joint position targets
+Proprioception History --> AdaptTConv --> z_hat (13D)
+    policy_obs + z_hat --> Frozen Actor --> 2D velocity commands
+    velocity --> joint position targets
 ```
 
 Privileged information, encoder 모두 불필요. Proprioception history만으로 동작.
@@ -243,8 +224,7 @@ Privileged information, encoder 모두 불필요. Proprioception history만으�
 
 | Component | Frequency | Rationale |
 |:---|:---|:---|
-| TDC Controller | 50 Hz (control_decimation=4) | Fast state feedback |
-| Actor | 50 Hz (same as TDC) | Gain adjustment per control step |
+| Actor | 50 Hz (control_decimation=4) | Joint velocity command per control step |
 | AdaptTConv | 50 Hz (current) / 10 Hz (optional) | 환경 변화는 느리므로 저주파 가능 |
 
 RMA 원논문에서 adaptation module을 actor보다 낮은 주파수로 실행하는 이유:
@@ -270,12 +250,12 @@ Encoder는 배포 시 불필요 (adapt module이 대체).
 | Aspect | Design Notes (07) | Current Implementation | Status |
 |:---|:---|:---|:---|
 | Encoder input | Privileged (CoM, CoB, mass, inertia) | 28D hydro + dynamics + added_mass + payload | OK |
-| Latent dim | TBD (HORA: 8) | 6D | OK |
-| Latent activation | softplus | softplus + z_min=0.1 | OK |
-| M_hat extraction | Separate MLP f_theta | Direct z[3:5] slice | Acceptable |
-| Actor input | 4D (error, error_rate) + z | 13D policy_obs + z = 19D | OK (richer) |
-| Actor output | 4D gains (softplus) | 4D gains (sigmoid scaling) | OK |
-| Adapt input/step | 8D (roll, pitch, p, q, act) | 12D (+ joint_pos_norm, joint_vel) | Updated |
+| Latent dim | TBD (HORA: 8) | 13D | OK |
+| Latent activation | softplus | sigmoid, z in [0.01, 2.0] | OK |
+| M_hat extraction | Separate MLP f_theta | N/A (Encoder-Base has no M_hat) | N/A |
+| Actor input | 4D (error, error_rate) + z | 13D policy_obs + z(13D) = 26D | OK (richer) |
+| Actor output | 4D gains (softplus) | 2D velocity commands | OK |
+| Adapt input/step | 8D (roll, pitch, p, q, act) | 8D (roll, pitch, p, q, joint_pos_norm, prev_actions) | OK |
 | History length | TBD (HORA: 30) | 30 | OK |
 | Adapt architecture | MLP + 1D CNN | MLP [32,32] + 3x Conv1d | OK |
 | Phase 2 loss | L2 | L2 | OK |
@@ -285,11 +265,10 @@ Encoder는 배포 시 불필요 (adapt module이 대체).
 1. **Privileged 22D -> 28D**: Payload 항목 확장 (2D->4D), dynamics (inertia+body_mass, 8D 추가),
    surge added mass (2D 추가). 최종 28D = hydro(14) + dynamics(8) + payload(4) + added_mass(2).
 
-2. **Proprio 8D -> 12D**: 초기 설계(arm joint only)에서 body orientation + angular rates를 추가.
-   Arm state만으로는 body dynamics 정보가 부족하다는 분석 결과(Issue A) 반영.
+2. **Sigmoid activation**: 초기 설계의 softplus에서 sigmoid로 변경. Softplus의 dead zone
+   collapse 문제를 방지하고, bounded output으로 안정적 학습.
 
-3. **M_hat sigmoid 미적용**: 설계에서 제안된 `sigmoid(z) * (max - min)` 대신, softplus로 하한만 보장.
-   상한 clamp의 dead gradient 문제는 현재 softplus 방식에서 발생하지 않음.
+3. **Base RL pipeline**: Encoder-Base (velocity output)를 Phase 1 기본 파이프라인으로 채택.
 
 ---
 
@@ -298,29 +277,28 @@ Encoder는 배포 시 불필요 (adapt module이 대체).
 ### Issue A: Proprio History Content -- Resolved
 
 초기 구현이 arm joint state만 포함하던 문제.
-body euler + angular rates 추가로 12D 확장 완료.
+body euler + angular rates 추가로 8D 확장 완료.
 Conv1d temporal reduction은 history_len에만 의존하므로 변경 없음.
 
-### Issue B: No Separate M_hat Network -- Accepted
+### Issue B: General Latent vs M_hat Extraction -- Accepted
 
-별도 MLP 대신 z[3:5] 직접 슬라이싱. 2D output에 대해 별도 MLP는 과도한 설계.
-Phase 1 학습에서 M_hat 수렴이 불량할 경우, clamp -> sigmoid 전환을 고려.
+Encoder-Base는 general 13D latent을 사용하며, M_hat을 직접 슬라이싱하지 않는다.
+z는 encoder가 자유롭게 구조화한 compressed representation이다.
 
-### Issue C: Missing Damping/Added Mass in Privileged Info -- Accepted
+### Issue C: Missing Damping in Privileged Info -- Accepted
 
-TDE 메커니즘이 이전 step의 실제 dynamics를 암묵적으로 포착하므로,
-encoder가 정확한 added mass를 알 필요는 없다.
-M_hat만 합리적이면 TDE가 나머지를 보상.
+Surge added mass는 28D에 포함 (2D). Damping은 제외.
+자세 안정화(steady state)에서 damping 효과는 미미하다.
 
-### Issue D: Softplus vs Tanh for Latent -- Accepted
+### Issue D: Sigmoid Activation -- Accepted
 
-softplus의 양수 보장이 M_hat 추출에 자연스럽다.
-z 값의 scale drift 가능성은 WandB에 z statistics를 로깅하여 모니터링.
+sigmoid로 z in [0.01, 2.0] bounded. Softplus의 dead zone collapse 문제를 해결.
+z 값의 분포는 WandB에 z statistics를 로깅하여 모니터링.
 
-### Issue E: Latent Dim 6 vs HORA 8 -- Accepted
+### Issue E: Latent Dim 13 -- Accepted
 
-22D privileged info의 상당 부분이 redundant (main/buoy body 상관).
-실질적 독립 자유도 6-8개. 6D latent은 적절한 압축 비율.
+28D privileged info를 13D로 압축. 약 2:1 압축 비율.
+실질적 독립 자유도보다 여유 있는 latent space가 encoder 학습을 안정화한다.
 
 ### Issue F: Yaw in Policy Obs -- Accepted
 
@@ -340,4 +318,4 @@ context 정보로서 포함. Reward에서는 yaw error를 제외.
 ---
 
 **Created**: 2026-02-11
-**Updated**: 2026-02-11
+**Updated**: 2026-02-28

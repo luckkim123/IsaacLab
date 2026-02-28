@@ -27,39 +27,30 @@ System net buoyancy: ~+3N (약한 양의 부력 -> 수동 안정성).
 
 ```
 hero_agent/
-├── __init__.py                 # Gym environment registration (5 environments)
+├── __init__.py                 # Gym environment registration (9 tasks)
 ├── base_env.py                 # Base RL environment (HeroAgentEnv)
 ├── tdc_env.py                  # TDC controller environment (HeroAgentTDCEnv)
+├── encoder_tdc_env.py          # Encoder-TDC env (reference, not registered)
 ├── adapt_base_env.py           # Phase 2 adaptation env (HeroAgentAdaptBaseEnv)
 ├── config.py                   # All configuration classes
 ├── agents/                     # RL agent configs
-│   └── rsl_rl_ppo_cfg.py       # PPO runner + network config (3 variants)
+│   └── rsl_rl_ppo_cfg.py       # PPO runner + network config
 ├── controllers/
 │   ├── tdc.py                  # TDC controller + TDCControllerCfg
 │   └── kinematics.py           # ALBCKinematics: 2-link DLS IK/FK/Jacobian
 ├── encoder/                    # HORA encoder networks
 │   ├── actor_critic_encoder.py # ActorCriticEncoder
-│   ├── adaptation.py           # ActorCriticEncoderAdapt, ProprioAdaptTConv
-│   └── normalization.py        # EmpiricalNormalization
+│   └── adaptation.py           # ActorCriticEncoderAdapt, ProprioAdaptTConv
 ├── runners/                    # Training runners
 │   ├── encoder_runner.py       # Phase 1 PPO (EncoderRunner)
 │   └── adapt_runner.py         # Phase 2 supervised (AdaptRunner)
-├── workflows/                  # Phase 2/3 entry-points
-│   ├── _config_resolver.py     # Shared config resolution
-│   ├── _policy_factory.py      # Shared policy build + checkpoint loading
-│   ├── train_adaptation.py     # Phase 2 training entry-point
-│   └── play_phase3.py          # Phase 3 evaluation + deploy
-├── deploy/                     # Phase 3 deployment export
-│   ├── deploy_module.py        # JIT-scriptable deploy module
-│   └── deploy_exporter.py      # JIT/ONNX/JSON export
 ├── mdp/
 │   ├── observations.py         # Policy obs (13D) + privileged obs (28D)
 │   ├── rewards.py              # RewardManager + reward terms
 │   └── events.py               # Domain randomization + reset functions
 ├── utils/
 │   ├── debug_vis.py            # Debug visualization (CoM, CoB, frames)
-│   ├── logging.py              # Episode metric + DR logging
-│   └── env_utils.py            # unwrap_env, connect_encoder_to_env
+│   └── logging.py              # Episode metric + DR logging + env_utils
 └── docs/                       # Documentation (this directory)
 ```
 
@@ -239,16 +230,20 @@ Buoy added mass surge (1D)
 | Task ID | Config | Env Class | DR | Current | Payload | Obs |
 |:---|:---|:---|:---:|:---:|:---:|:---|
 | `Isaac-HeroAgent-v0` | `HeroAgentEnvCfg` | `HeroAgentEnv` | OFF | OFF | OFF | 13D |
-| `Isaac-HeroAgent-Base-v0` | `HeroAgentTrainEnvCfg` | `HeroAgentEnv` | ON | ON | ON | 13D |
-| `Isaac-HeroAgent-Encoder-Base-v0` | `HeroAgentEncoderTrainEnvCfg` | `HeroAgentEnv` | ON | ON | ON | 13D+28D |
-| `Isaac-HeroAgent-TDC-v0` | `HeroAgentTDCEnvCfg` | `HeroAgentTDCEnv` | ON | ON | ON | 13D |
-| `Isaac-HeroAgent-Adapt-Base-v0` | `HeroAgentAdaptBaseEnvCfg` | `HeroAgentAdaptBaseEnv` | ON | ON | ON | 13D+28D+hist |
+| `Isaac-HeroAgent-TDE-Base-Debug-v0` | `HeroAgentTDEBaseDebugEnvCfg` | `HeroAgentEnv` | Half | OFF | ON | 15D |
+| `Isaac-HeroAgent-Base-v0` | `HeroAgentTrainEnvCfg` | `HeroAgentEnv` | ON | OFF | ON | 13D |
+| `Isaac-HeroAgent-TDE-Base-v0` | `HeroAgentTDEBaseEnvCfg` | `HeroAgentEnv` | ON | OFF | ON | 15D |
+| `Isaac-HeroAgent-Priv-Base-v0` | `HeroAgentEncoderTrainEnvCfg` | `HeroAgentEnv` | ON | OFF | ON | 13D+28D |
+| `Isaac-HeroAgent-Encoder-Base-Debug-v0` | `HeroAgentEncoderBaseDebugEnvCfg` | `HeroAgentEnv` | Half | OFF | ON | 13D+28D |
+| `Isaac-HeroAgent-Encoder-Base-v0` | `HeroAgentEncoderTrainEnvCfg` | `HeroAgentEnv` | ON | OFF | ON | 13D+28D |
+| `Isaac-HeroAgent-TDC-v0` | `HeroAgentTDCEnvCfg` | `HeroAgentTDCEnv` | ON | OFF | ON | 13D |
+| `Isaac-HeroAgent-Adapt-Base-v0` | `HeroAgentAdaptBaseEnvCfg` | `HeroAgentAdaptBaseEnv` | ON | OFF | ON | 13D+28D+hist |
 
 ### Environment Inheritance
 
 ```
-HeroAgentEnv (base_env.py)                    # Base RL: 2D joint velocity actions
-  ├── HeroAgentTDCEnv (tdc_env.py)            # TDC: classical controller replaces RL actions
+HeroAgentEnv (base_env.py)                       # Base RL: 2D joint velocity actions
+  ├── HeroAgentTDCEnv (tdc_env.py)               # TDC: classical controller replaces RL actions
   └── HeroAgentAdaptBaseEnv (adapt_base_env.py)  # Phase 2: proprio history buffer (base RL)
 ```
 
@@ -260,6 +255,7 @@ HeroAgentEnvCfg (debug, no DR)
        ├── HeroAgentEncoderTrainEnvCfg (+ 28D privileged obs)
        │    └── HeroAgentAdaptBaseEnvCfg (+ proprio history)
        └── HeroAgentTDCEnvCfg (+ TDC config, TDC joint gains)
+            └── HeroAgentEncoderTDCEnvCfg (+ 28D privileged, 6D actions)
 ```
 
 ---
@@ -407,4 +403,4 @@ Critical ordering:
 ---
 
 **Created**: 2026-02-09
-**Updated**: 2026-02-11 (sim.dt, episode_length, control_decimation, env variants, IK, DR, payload, privileged obs updated to current code)
+**Updated**: 2026-02-28 (phantom files removed, env table updated to 9 tasks, Encoder-TDC unregistered)

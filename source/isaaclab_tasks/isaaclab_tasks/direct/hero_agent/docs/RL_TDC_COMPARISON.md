@@ -102,14 +102,11 @@ RL은 PD 게인을 출력하고, encoder는 privileged info로부터 M_hat을 �
 
 ```
 Privileged Info (28D) --> Encoder --> z (13D latent)
-    |-- z[3:5] --> M_hat (roll, pitch inertia) --> TDC Controller
-    |-- z (full 6D) + policy_obs (13D) --> Actor (19D) --> 4D gains
-                                                            |
-                                           [Kp_roll, Kp_pitch, Kd_roll, Kd_pitch]
-                                                            |
-                                                     TDC Controller
-                                                            |
-                                                   p_EE --> DLS IK --> Joint Targets
+    |-- policy_obs (13D) + z (13D) --> Actor (26D) --> 6D actions
+    |-- actions[0:2] --> M_hat (roll, pitch) --> TDC Controller
+    |-- actions[2:4] --> Kp, actions[4:6] --> Kd --> TDC Controller
+                                                       |
+                                              TDC.compute() --> p_EE --> DLS IK --> Joint Targets
 ```
 
 ### 3.2 Control Law
@@ -134,7 +131,7 @@ $$\tau = \hat{M} \cdot u_{pd} + \hat{U} + \Delta T_b$$
 | 9:11 | joint positions (normalized) | 2 |
 | 11:13 | previous actions (Kp only) | 2 |
 
-+ Encoder z (6D) = 총 19D 입력
++ Encoder z (13D) = 총 26D 입력
 
 **Privileged Observations (28D)**:
 - Main body hydro (7D): volume, CoG(3), CoB(3)
@@ -144,7 +141,7 @@ $$\tau = \hat{M} \cdot u_{pd} + \hat{U} + \Delta T_b$$
 - Payload (4D): mass, cog_offset_xyz(3)
 - Added mass surge (2D): main(1), buoy(1)
 
-**Action (4D)**: sigmoid scaling으로 범위 보장
+**Action (6D)**: linear scaling으로 범위 보장
 
 $$K_p = K_{p,\min} + \sigma(\text{raw}) \cdot (K_{p,\max} - K_{p,\min}), \quad K_p \in [10, 100]$$
 $$K_d = K_{d,\min} + \sigma(\text{raw}) \cdot (K_{d,\max} - K_{d,\min}), \quad K_d \in [2, 30]$$
@@ -154,10 +151,10 @@ $$K_d = K_{d,\min} + \sigma(\text{raw}) \cdot (K_{d,\max} - K_{d,\min}), \quad K
 **Phase 1**: Encoder + Actor + Critic (PPO)
 - Encoder가 privileged info를 z로 압축
 - Actor가 z + policy_obs로 TDC 게인 출력
-- Critic은 actor와 동일한 19D 입력 (symmetric) -- encoder 학습 강제
+- Critic은 actor와 동일한 26D 입력 (symmetric) -- encoder 학습 강제
 
 **Phase 2**: Adaptation Module (Supervised L2)
-- ProprioAdaptTConv: proprioception history (30 step x 12D) --> z_hat (6D)
+- ProprioAdaptTConv: proprioception history (30 step x 8D) --> z_hat (13D)
 - Phase 1 encoder/actor를 freeze하고, adapt module만 학습
 - On-policy data collection (adapt z_hat이 actor를 구동)
 
@@ -188,7 +185,7 @@ RL-TDC는 **제어 법칙에 나타나는 모든 변수**를 상태에 포함시
 이를 통해 정책이 현재 TDE 오차의 크기를 간접적으로 파악 가능.
 
 Hero Agent는 이 대신 **encoder z를 통해 동역학 정보를 전달**한다.
-encoder가 privileged info를 6D latent로 압축하므로,
+encoder가 privileged info를 13D latent로 압축하므로,
 정책은 시스템의 현재 동역학 상태를 파악할 수 있다.
 단, TDE 오차 자체에 대한 직접적 관측은 없다.
 
@@ -459,7 +456,7 @@ $$\tau_{\text{feedback}} = \hat{M}_t K_p \cdot e + \hat{M}_t K_d \cdot \dot{e} =
 
 우리 시스템이 자유도 면에서 더 유연하지만, 그만큼 학습 난이도가 높다.
 RL-TDC는 단일 변수로 제어하므로 SAC가 빠르게 수렴하는 반면,
-우리 시스템은 4D action + 6D encoder latent 조합을 PPO로 학습해야 한다.
+우리 시스템은 6D action + 13D encoder latent 조합을 PPO로 학습해야 한다.
 
 ### 7.6 권장 접근
 

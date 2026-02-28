@@ -140,7 +140,7 @@ class HeroAgentEnv(DirectRLEnv):
             raise ValueError(f"state_space={self.cfg.state_space} must be non-negative")
 
         # Validate state_space vs enable_payload consistency
-        if self.cfg.state_space >= 18 and not self.cfg.enable_payload:
+        if self.cfg.state_space >= 26 and not self.cfg.enable_payload:
             raise ValueError(
                 f"state_space={self.cfg.state_space} requires enable_payload=True "
                 f"(payload provides 4D of the {self.cfg.state_space}D privileged obs)"

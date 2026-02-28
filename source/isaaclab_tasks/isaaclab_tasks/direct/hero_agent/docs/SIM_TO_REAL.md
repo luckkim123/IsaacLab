@@ -59,7 +59,7 @@ PhysX 내부에서 연속 PD를 계산한다. 명령이 즉시 반영되며 dela
 | Environment | Kp Center | Kd Center | DR Range |
 |:---|:---|:---|:---|
 | Base RL (v0, Base-v0) | 100.0 | 3.0 | +-20% ([80,120], [2.4,3.6]) |
-| TDC (TDC-v0, Encoder-TDC-v0) | 200.0 | 10.0 | +-20% ([160,240], [8,12]) |
+| TDC (TDC-v0) | 200.0 | 10.0 | +-20% ([160,240], [8,12]) |
 
 TDC 환경에서 Kp/Kd가 높은 이유: TDC controller가 빠른 position tracking을 요구한다.
 DLS IK의 small delta position commands를 정확히 추종하려면 높은 강성이 필요.
