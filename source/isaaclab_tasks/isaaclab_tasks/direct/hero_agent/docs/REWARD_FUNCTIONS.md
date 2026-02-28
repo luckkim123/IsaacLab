@@ -21,7 +21,7 @@ $$r_t = \underbrace{w_1 \cdot e^{-\phi_t^2 / \sigma^2} \cdot \Delta t}_{\text{tr
 |:---|:---|:---|
 | $w_1$ | 3.0 | `tracking_weight` |
 | $\sigma$ | 0.5 rad | `tracking_sigma` (~28.6 deg 1/e point) |
-| $w_2$ | 4.0 | `settling_weight` |
+| $w_2$ | 3.0 | `settling_weight` |
 | $\theta_{thr}$ | 0.175 rad | `settling_threshold` (~10 deg) |
 | $k$ | 20.0 | `settling_sharpness` (1/rad) |
 | $w_3$ | 0.3 | `progress_weight` (NOT dt-scaled) |

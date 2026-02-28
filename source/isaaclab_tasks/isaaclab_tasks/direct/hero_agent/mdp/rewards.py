@@ -89,7 +89,7 @@ class ALBCRewardCfg:
 
     # Settling bonus: sigmoid(sharpness * (threshold - error)), dt-scaled.
     # Dense gradient near target where Gaussian tracking has flat top.
-    settling_weight: float = 4.0
+    settling_weight: float = 3.0
     settling_threshold: float = 0.175  # radians (~10 deg)
     settling_sharpness: float = 20.0  # 1/radians
 
