@@ -38,10 +38,16 @@ _ROLL_PITCH = ("roll", "pitch")
 def _compute_m_bb_from_env(env: object) -> torch.Tensor | None:
     """Compute M_bb from env's kinematics and hydrodynamics.
 
+    Requires TDC env attributes: _kinematics, _buoy_hydro, _hydro, _robot,
+    _albc_joint_ids, and cfg.tdc. Returns None if any are missing.
+
     Returns:
         M_bb tensor of shape (num_envs, 2) or None if env lacks required attributes.
     """
-    if not (hasattr(env, "_kinematics") and hasattr(env, "_buoy_hydro")):
+    required = ("_kinematics", "_buoy_hydro", "_hydro", "_robot", "_albc_joint_ids")
+    if not all(hasattr(env, attr) for attr in required):
+        return None
+    if not (hasattr(env, "cfg") and hasattr(env.cfg, "tdc")):
         return None
     joint_pos = env._robot.data.joint_pos[:, env._albc_joint_ids]
     p_EE = env._kinematics.forward(joint_pos)
