@@ -9,7 +9,7 @@ The RL policy outputs 6D actions that parameterize the TDC controller:
     [m_hat_roll, m_hat_pitch, Kp_roll, Kp_pitch, Kd_roll, Kd_pitch]
 
 Actions are linearly scaled from [-1, 1] to physical ranges defined in config.
-The encoder compresses privileged observations (26D) into a latent z (13D),
+The encoder compresses privileged observations (28D) into a latent z (13D),
 which augments the policy observation space.
 
 Control Flow (50 Hz):
@@ -25,6 +25,11 @@ import torch
 
 from .config import HeroAgentEncoderTDCEnvCfg
 from .tdc_env import HeroAgentTDCEnv
+
+
+def _scale_range(lo: float, hi: float) -> tuple[float, float]:
+    """Return (midpoint, half_range) for linear [-1, 1] -> [lo, hi] scaling."""
+    return (lo + hi) / 2.0, (hi - lo) / 2.0
 
 
 class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
@@ -45,12 +50,9 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Pre-compute scaling constants: value = mid + action * half_range
-        self._m_hat_mid = (cfg.m_hat_min + cfg.m_hat_max) / 2.0
-        self._m_hat_half = (cfg.m_hat_max - cfg.m_hat_min) / 2.0
-        self._kp_mid = (cfg.kp_min + cfg.kp_max) / 2.0
-        self._kp_half = (cfg.kp_max - cfg.kp_min) / 2.0
-        self._kd_mid = (cfg.kd_min + cfg.kd_max) / 2.0
-        self._kd_half = (cfg.kd_max - cfg.kd_min) / 2.0
+        self._m_hat_mid, self._m_hat_half = _scale_range(cfg.m_hat_min, cfg.m_hat_max)
+        self._kp_mid, self._kp_half = _scale_range(cfg.kp_min, cfg.kp_max)
+        self._kd_mid, self._kd_half = _scale_range(cfg.kd_min, cfg.kd_max)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Parse 6D actions, scale to physical ranges, update TDC, then run pipeline.

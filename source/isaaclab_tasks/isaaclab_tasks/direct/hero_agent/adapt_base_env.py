@@ -84,6 +84,5 @@ class HeroAgentAdaptBaseEnv(HeroAgentEnv):
     def _reset_idx(self, env_ids: torch.Tensor | None) -> None:
         """Reset history buffer for terminated environments."""
         super()._reset_idx(env_ids)
-        if env_ids is None:
-            env_ids = torch.arange(self.num_envs, device=self.device)
-        self._proprio_hist[env_ids] = 0.0
+        env_ids_ = self._coerce_env_ids(env_ids)
+        self._proprio_hist[env_ids_] = 0.0

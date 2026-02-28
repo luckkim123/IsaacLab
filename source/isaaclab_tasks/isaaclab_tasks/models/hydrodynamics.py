@@ -192,7 +192,7 @@ class HydrodynamicsModel:
             warnings.warn(
                 f"HydrodynamicsModel({cfg.body_name}): apply_added_mass_force=True but body_mass is None. "
                 "Added mass stability validation skipped. Set body_mass for safety checks.",
-                stacklevel=3,
+                stacklevel=4,
             )
         if cfg.apply_added_mass_force and cfg.body_mass is not None:
             am = torch.tensor(cfg.added_mass, **self._tensor_kwargs)
@@ -220,7 +220,7 @@ class HydrodynamicsModel:
                             f"HydrodynamicsModel({cfg.body_name}): Marginal added mass stability on axis "
                             f"'{axis_names[i]}': M_a/I_rigid = {ratio:.2f} (threshold=0.8). "
                             f"Consider reducing added_mass[{i}] or using a lower stability_factor.",
-                            stacklevel=3,
+                            stacklevel=4,
                         )
 
     def _to_env_ids(self, env_ids: torch.Tensor | Sequence[int]) -> torch.Tensor:
@@ -277,7 +277,15 @@ class HydrodynamicsModel:
         self._physx_acc_b = torch.cat([lin_acc_b, ang_acc_b], dim=-1)
 
     def _resolve_volume(self, cfg: HydrodynamicsCfg, articulation_prim_path: str | None) -> float:
-        """Resolve volume with fallback: config > auto-calc from collision geometry > default 0.01 m^3."""
+        """Resolve volume with fallback: config > auto-calc from collision geometry > default 0.01 m^3.
+
+        Args:
+            cfg: Hydrodynamics configuration.
+            articulation_prim_path: USD path to articulation root for auto volume calculation.
+
+        Returns:
+            Resolved volume in cubic metres.
+        """
         if cfg.volume is not None:
             return cfg.volume
 
@@ -290,10 +298,14 @@ class HydrodynamicsModel:
                 return volume
             warnings.warn(
                 f"Auto-calculated volume is {volume} m^3 for {body_path}. "
-                "Using default 0.01 m^3. Consider setting volume explicitly in config."
+                "Using default 0.01 m^3. Consider setting volume explicitly in config.",
+                stacklevel=3,
             )
         else:
-            warnings.warn("Volume not specified and no articulation_prim_path provided. Using default 0.01 m^3.")
+            warnings.warn(
+                "Volume not specified and no articulation_prim_path provided. Using default 0.01 m^3.",
+                stacklevel=3,
+            )
         return 0.01
 
     def compute_forces(

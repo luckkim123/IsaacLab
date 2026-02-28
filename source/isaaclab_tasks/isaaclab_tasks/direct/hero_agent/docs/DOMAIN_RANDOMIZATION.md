@@ -250,18 +250,22 @@ _pre_physics_step() per-step events:
 
 ## Privileged Observations (Encoder)
 
-HORA encoder 훈련을 위한 24D privileged information:
+HORA encoder 훈련을 위한 28D privileged information:
 
 ```
-Main body (10D): [volume(1), CoG(3), CoB(3), inertia(3)]
-Buoy body (10D): [volume(1), CoG(3), CoB(3), inertia(3)]
-Payload    (4D): [mass(1), cog_offset(3)]
+Main body hydro (7D):     [volume(1), CoG(3), CoB(3)]
+Buoy body hydro (7D):     [volume(1), CoG(3), CoB(3)]
+Main body dynamics (4D):  [inertia Ixx/Iyy/Izz(3), body_mass(1)]
+Buoy dynamics (4D):       [inertia Ixx/Iyy/Izz(3), body_mass(1)]
+Payload (4D):             [mass(1), cog_offset_xyz(3)]
+Main added mass surge (1D)
+Buoy added mass surge (1D)
 ```
 
 | Category | Included | Excluded | Rationale |
 |:---|:---|:---|:---|
-| Hydrostatic | Volume, CoB, CoG, inertia | - | 자세 제어의 핵심 파라미터 |
-| Hydrodynamic | - | Added mass, damping | 동적 응답 속도에 영향, 정상상태 자세에는 미미 |
+| Hydrostatic | Volume, CoB, CoG, inertia, body_mass | - | 자세 제어의 핵심 파라미터 |
+| Hydrodynamic | Surge added mass | Sway/heave added mass, damping | Surge M_a가 effective inertia에 지배적 |
 | External | Payload (mass + CoG) | Ocean current | 페이로드는 복원 토크 직접 변경 |
 | Sensor | - | Noise/bias | 관측 노이즈는 policy robustness로 처리 |
 | Perturbation | - | Force/torque | 비예측적 외란으로 robust policy에 기여 |

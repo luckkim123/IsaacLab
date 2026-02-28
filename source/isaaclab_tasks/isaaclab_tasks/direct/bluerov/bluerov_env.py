@@ -159,8 +159,10 @@ class BlueROVEnv(DirectRLEnv):
         task_cfg = self.cfg.task
 
         # Backward compatibility: create HoverTaskCfg from legacy parameters
-        if task_cfg is None or isinstance(task_cfg, TaskBaseCfg) and not isinstance(
-            task_cfg, (HoverTaskCfg, AttitudeTaskCfg)
+        if (
+            task_cfg is None
+            or isinstance(task_cfg, TaskBaseCfg)
+            and not isinstance(task_cfg, (HoverTaskCfg, AttitudeTaskCfg))
         ):
             task_cfg = HoverTaskCfg(
                 goal_pos_range=self.cfg.goal_pos_range,

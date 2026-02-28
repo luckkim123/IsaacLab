@@ -11,6 +11,7 @@ from .hero_agent import (
     HERO_AGENT_ALBC_LINK1_LENGTH,
     HERO_AGENT_ALBC_LINK2_LENGTH,
     HERO_AGENT_CFG,
+    HERO_AGENT_USD_PATH,
     HeroAgentBuoyHydrodynamicsCfg,
     HeroAgentHydrodynamicsCfg,
 )

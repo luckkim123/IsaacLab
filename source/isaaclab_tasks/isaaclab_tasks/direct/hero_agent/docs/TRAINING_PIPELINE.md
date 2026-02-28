@@ -13,7 +13,7 @@ RMA/HORA의 2-phase 학습 구조를 수중 UVMS 자세 제어에 적용한다:
 
 ```
 Phase 1: Teacher Training (PPO + Encoder, base RL)
-    Privileged Info (26D) --> Encoder --> z (13D)
+    Privileged Info (28D) --> Encoder --> z (13D)
     Policy Obs (13D) + z --> Actor --> 2D velocity actions
 
 Phase 2: Adaptation Module Training (Supervised, base RL)
@@ -41,7 +41,7 @@ Deployment: Real World
 ### 2.1 Network Architecture
 
 ```
-Encoder:  Privileged (26D) --> MLP [256, 128, 64] --> softplus + z_min=0.01 --> z (13D)
+Encoder:  Privileged (28D) --> MLP [256, 128, 64] --> sigmoid --> z (13D) in [0.01, 2.0]
 Actor:    cat([policy_obs(13D), z(13D)]) = 26D --> MLP [256, 128, 64] --> 2D velocity actions
 Critic:   cat([policy_obs(13D), z(13D)]) = 26D --> MLP [256, 128, 64] --> 1D value
 ```
@@ -53,20 +53,24 @@ Privileged info를 직접 받지 않으므로, encoder가 유용한 정보를 z�
 
 ### 2.2 I/O Variable Map
 
-#### Privileged Information (24D)
+#### Privileged Information (28D)
 
 ```
-Main body (10D):  [volume(1), CoG(3), CoB(3), inertia(3)]
-Buoy body (10D):  [volume(1), CoG(3), CoB(3), inertia(3)]
-Payload    (4D):  [mass(1), cog_offset_xyz(3)]
+Main body hydro (7D):     [volume(1), CoG(3), CoB(3)]
+Buoy body hydro (7D):     [volume(1), CoG(3), CoB(3)]
+Main body dynamics (4D):  [inertia Ixx/Iyy/Izz(3), body_mass(1)]
+Buoy dynamics (4D):       [inertia Ixx/Iyy/Izz(3), body_mass(1)]
+Payload (4D):             [mass(1), cog_offset_xyz(3)]
+Main added mass surge (1D)
+Buoy added mass surge (1D)
 ```
 
-Hydrostatic 파라미터만 포함. Added mass와 damping은 제외.
+Hydrostatic + dynamics + surge added mass를 포함. Damping은 제외.
 
-- Added mass 제외 근거: TDC의 TDE 메커니즘이 이전 step의 실제 dynamics를 암묵적으로 포착하므로, encoder가 정확한 added mass를 알 필요가 없다.
 - Damping 제외 근거: 자세 안정화(steady state)에서 damping 효과는 미미하다.
+- Surge added mass 포함 근거: UUV added mass는 rigid body inertia에 필적하며 (main body M_a_surge=5.76kg), DR로 변동. Encoder가 effective dynamics를 관찰하려면 필요.
 
-Source: `mdp/observations.py` (`_hydro_privileged_info`)
+Source: `mdp/observations.py` (`_hydro_privileged_info`, `_added_mass_surge`)
 
 #### Encoder Latent z (6D)
 
@@ -265,7 +269,7 @@ Encoder는 배포 시 불필요 (adapt module이 대체).
 
 | Aspect | Design Notes (07) | Current Implementation | Status |
 |:---|:---|:---|:---|
-| Encoder input | Privileged (CoM, CoB, mass, inertia) | 24D hydro + payload | OK |
+| Encoder input | Privileged (CoM, CoB, mass, inertia) | 28D hydro + dynamics + added_mass + payload | OK |
 | Latent dim | TBD (HORA: 8) | 6D | OK |
 | Latent activation | softplus | softplus + z_min=0.1 | OK |
 | M_hat extraction | Separate MLP f_theta | Direct z[3:5] slice | Acceptable |
@@ -278,8 +282,8 @@ Encoder는 배포 시 불필요 (adapt module이 대체).
 
 ### Key Changes from Design Notes
 
-1. **Privileged 22D -> 24D**: Payload 항목이 [mass, attachment_z] (2D)에서 [mass, cog_offset_xyz] (4D)로 확장.
-   CoG offset의 3D 랜덤화가 payload torque에 직접 영향을 미치므로, 3축 모두 포함.
+1. **Privileged 22D -> 28D**: Payload 항목 확장 (2D->4D), dynamics (inertia+body_mass, 8D 추가),
+   surge added mass (2D 추가). 최종 28D = hydro(14) + dynamics(8) + payload(4) + added_mass(2).
 
 2. **Proprio 8D -> 12D**: 초기 설계(arm joint only)에서 body orientation + angular rates를 추가.
    Arm state만으로는 body dynamics 정보가 부족하다는 분석 결과(Issue A) 반영.

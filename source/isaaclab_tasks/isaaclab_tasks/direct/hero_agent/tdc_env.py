@@ -171,15 +171,6 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         """
         self._encoder_policy = policy
 
-    def _create_m_hat_buffer(self) -> torch.Tensor:
-        """Create an M_hat buffer initialized with config defaults.
-
-        Returns:
-            M_hat buffer. Shape: (num_envs, 2).
-        """
-        m_hat_default = torch.tensor(self.cfg.tdc.m_hat, device=self.device, dtype=torch.float32)
-        return m_hat_default.unsqueeze(0).expand(self.num_envs, -1).clone()
-
     def _reset_m_hat_defaults(self, env_ids: torch.Tensor) -> None:
         """Reset M_hat to config defaults for specified envs and push to TDC controller.
 

@@ -17,7 +17,7 @@
 
 Hero Agent ALBC (Active Linear Buoyancy Controller) is a reinforcement learning environment for NVIDIA Isaac Lab that trains an underwater vehicle to stabilize its attitude without thrusters. Instead of conventional propulsion, the robot repositions a buoyancy element through a 2-link revolute arm (l1 = l2 = 0.233 m), generating restoring torques from buoyancy forces alone.
 
-The package implements a multi-phase training pipeline with HORA/RMA-style online adaptation. An encoder compresses 26D privileged hydrodynamic information into a 13D latent; a temporal convolution adaptation module then reconstructs this latent from proprioception history alone, enabling sim-to-real transfer without access to simulator-internal parameters. A separate classical TDC controller environment is also provided for comparison.
+The package implements a multi-phase training pipeline with HORA/RMA-style online adaptation. An encoder compresses 28D privileged hydrodynamic information into a 13D latent; a temporal convolution adaptation module then reconstructs this latent from proprioception history alone, enabling sim-to-real transfer without access to simulator-internal parameters. A separate classical TDC controller environment is also provided for comparison.
 
 Domain randomization spans 15+ physical parameters (hydrodynamics, ocean currents, payloads, sensor noise) to bridge the sim-to-real gap.
 
@@ -71,9 +71,9 @@ Train a base RL policy for attitude stabilization:
 |:---|:---:|:---|
 | `Isaac-HeroAgent-v0` | 13 / -- / 2 | Debug (no DR, no ocean current) |
 | `Isaac-HeroAgent-Base-v0` | 13 / -- / 2 | Base training (DR + ocean current + payload) |
-| `Isaac-HeroAgent-Encoder-Base-v0` | 13 / 24 / 2 | HORA Phase 1 encoder training |
+| `Isaac-HeroAgent-Encoder-Base-v0` | 13 / 28 / 2 | HORA Phase 1 encoder training |
 | `Isaac-HeroAgent-TDC-v0` | 13 / -- / 2 | Classical TDC control (no RL actions) |
-| `Isaac-HeroAgent-Adapt-Base-v0` | 13 / 26 / 2 | Phase 2 adaptation (proprio history, base RL) |
+| `Isaac-HeroAgent-Adapt-Base-v0` | 13 / 28 / 2 | Phase 2 adaptation (proprio history, base RL) |
 
 <details>
 <summary><strong>Observation and Action Spaces</strong></summary>
@@ -87,11 +87,15 @@ Train a base RL policy for attitude stabilization:
 [11:13] previous actions
 ```
 
-**Privileged Observations (24D)** -- visible only during training:
+**Privileged Observations (28D)** -- visible only during training:
 ```
-[0:10]  main body  (volume, r_cg(3), r_cb(3), inertia(3))
-[10:20] buoy body  (volume, r_cg(3), r_cb(3), inertia(3))
-[20:24] payload    (mass, cog_offset(3))
+[0:7]   main body hydro   (volume, r_cg(3), r_cb(3))
+[7:14]  buoy body hydro   (volume, r_cg(3), r_cb(3))
+[14:18] main dynamics      (inertia Ixx/Iyy/Izz, body_mass)
+[18:22] buoy dynamics      (inertia Ixx/Iyy/Izz, body_mass)
+[22:26] payload            (mass, cog_offset(3))
+[26:27] main added mass    (surge)
+[27:28] buoy added mass    (surge)
 ```
 
 **Actions**:
@@ -106,7 +110,7 @@ Train a base RL policy for attitude stabilization:
 ```
 Phase 1: Encoder-Base Teacher          Phase 2: Adapt-Base           Phase 3: Deploy
 
-privileged (26D) --> Encoder --> z(13D) proprio_hist (30x8D)          adapt_tconv
+privileged (28D) --> Encoder --> z(13D) proprio_hist (30x8D)          adapt_tconv
 policy_obs (13D) + z --> Actor --> 2D   --> adapt_tconv --> z_hat     + frozen actor
                          |              L2 loss: ||z_hat - z_gt||    --> TorchScript/ONNX
                          v
@@ -115,7 +119,7 @@ policy_obs (13D) + z --> Actor --> 2D   --> adapt_tconv --> z_hat     + frozen a
 
 #### Phase 1: Encoder-Base Teacher Training
 
-Train the encoder to compress privileged hydrodynamic information (26D) into a 13D latent, while the actor learns velocity commands:
+Train the encoder to compress privileged hydrodynamic information (28D) into a 13D latent, while the actor learns velocity commands:
 
 ```bash
 ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \

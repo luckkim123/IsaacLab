@@ -29,7 +29,7 @@ HERO_AGENT_USD_PATH = os.path.join(_HERO_AGENT_MESHES_DIR, "Agent.usd")
 
 
 ##
-# Hydrodynamics Configuration
+# Configuration - Hydrodynamics.
 ##
 
 
@@ -147,7 +147,7 @@ class HeroAgentBuoyHydrodynamicsCfg(HydrodynamicsCfg):
 
 
 ##
-# ALBC Constants
+# Configuration - ALBC Constants.
 ##
 
 # ALBC (Active Linear Buoyancy Controller) joint names
@@ -164,7 +164,7 @@ HERO_AGENT_ALBC_HEIGHT_OFFSET: float = 0.1625  # meters (joint1 z-offset from ba
 
 
 ##
-# Articulation Configuration
+# Configuration - Articulation.
 ##
 
 HERO_AGENT_CFG = ArticulationCfg(

@@ -53,7 +53,7 @@ hero_agent/
 │   ├── deploy_module.py        # JIT-scriptable deploy module
 │   └── deploy_exporter.py      # JIT/ONNX/JSON export
 ├── mdp/
-│   ├── observations.py         # Policy obs (13D) + privileged obs (24D)
+│   ├── observations.py         # Policy obs (13D) + privileged obs (28D)
 │   ├── rewards.py              # RewardManager + reward terms
 │   └── events.py               # Domain randomization + reset functions
 ├── utils/
@@ -212,12 +212,16 @@ DLS IK가 analytical IK를 대체한 이유:
 | 9:11 | Joint positions (normalized [-1,1]) | `joint_pos[:, albc_ids]` |
 | 11:13 | Previous actions | `_prev_actions_obs` |
 
-### Privileged Observations (24D, encoder envs only)
+### Privileged Observations (28D, encoder envs only)
 
 ```
-Main body (10D):  [volume(1), CoG(3), CoB(3), inertia(3)]
-Buoy body (10D):  [volume(1), CoG(3), CoB(3), inertia(3)]
-Payload    (4D):  [mass(1), cog_offset_xyz(3)]
+Main body hydro (7D):     [volume(1), CoG(3), CoB(3)]
+Buoy body hydro (7D):     [volume(1), CoG(3), CoB(3)]
+Main body dynamics (4D):  [inertia Ixx/Iyy/Izz(3), body_mass(1)]
+Buoy dynamics (4D):       [inertia Ixx/Iyy/Izz(3), body_mass(1)]
+Payload (4D):             [mass(1), cog_offset_xyz(3)]
+Main added mass surge (1D)
+Buoy added mass surge (1D)
 ```
 
 ### Sensor Noise (DR enabled)
@@ -236,9 +240,9 @@ Payload    (4D):  [mass(1), cog_offset_xyz(3)]
 |:---|:---|:---|:---:|:---:|:---:|:---|
 | `Isaac-HeroAgent-v0` | `HeroAgentEnvCfg` | `HeroAgentEnv` | OFF | OFF | OFF | 13D |
 | `Isaac-HeroAgent-Base-v0` | `HeroAgentTrainEnvCfg` | `HeroAgentEnv` | ON | ON | ON | 13D |
-| `Isaac-HeroAgent-Encoder-Base-v0` | `HeroAgentEncoderTrainEnvCfg` | `HeroAgentEnv` | ON | ON | ON | 13D+24D |
+| `Isaac-HeroAgent-Encoder-Base-v0` | `HeroAgentEncoderTrainEnvCfg` | `HeroAgentEnv` | ON | ON | ON | 13D+28D |
 | `Isaac-HeroAgent-TDC-v0` | `HeroAgentTDCEnvCfg` | `HeroAgentTDCEnv` | ON | ON | ON | 13D |
-| `Isaac-HeroAgent-Adapt-Base-v0` | `HeroAgentAdaptBaseEnvCfg` | `HeroAgentAdaptBaseEnv` | ON | ON | ON | 13D+26D+hist |
+| `Isaac-HeroAgent-Adapt-Base-v0` | `HeroAgentAdaptBaseEnvCfg` | `HeroAgentAdaptBaseEnv` | ON | ON | ON | 13D+28D+hist |
 
 ### Environment Inheritance
 
@@ -253,7 +257,7 @@ HeroAgentEnv (base_env.py)                    # Base RL: 2D joint velocity actio
 ```
 HeroAgentEnvCfg (debug, no DR)
   └── HeroAgentTrainEnvCfg (DR + current + payload)
-       ├── HeroAgentEncoderTrainEnvCfg (+ 26D privileged obs)
+       ├── HeroAgentEncoderTrainEnvCfg (+ 28D privileged obs)
        │    └── HeroAgentAdaptBaseEnvCfg (+ proprio history)
        └── HeroAgentTDCEnvCfg (+ TDC config, TDC joint gains)
 ```

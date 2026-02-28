@@ -550,7 +550,7 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
 class HeroAgentAdaptBaseEnvCfg(HeroAgentEncoderTrainEnvCfg):
     """Phase 2 adaptation training config (base RL pipeline).
 
-    Inherits from HeroAgentEncoderTrainEnvCfg (state_space=32 for privileged z_gt).
+    Inherits from HeroAgentEncoderTrainEnvCfg (state_space=28 for privileged z_gt).
     Adds proprioception history buffer for the adaptation module.
 
     Per-timestep feature (8D):

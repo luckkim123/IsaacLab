@@ -53,6 +53,7 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
+import importlib
 import os
 import time
 
@@ -82,21 +83,23 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 def _load_runner_and_policy(env, agent_cfg, resume_path):
     """Create runner, load checkpoint, extract inference policy and nn module."""
-    if agent_cfg.class_name == "OnPolicyRunner":
-        # Check if this is an AdaptRunner task (same pattern as train.py)
-        policy_class_name = getattr(agent_cfg.policy, "class_name", None)
-        if policy_class_name == "ActorCriticEncoderAdapt":
-            from isaaclab_tasks.direct.hero_agent.runners import AdaptRunner
+    # Runner dispatch: custom runners resolved by class_name via lazy import.
+    _RUNNER_MAP = {
+        "BaseRunner": ("isaaclab_tasks.direct.hero_agent.runners", "BaseRunner"),
+        "EncoderRunner": ("isaaclab_tasks.direct.hero_agent.runners", "EncoderRunner"),
+        "AdaptRunner": ("isaaclab_tasks.direct.hero_agent.runners", "AdaptRunner"),
+        "SACMPCRunner": ("isaaclab_tasks.direct.hero_agent_mpc.runners", "SACMPCRunner"),
+    }
 
-            runner = AdaptRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-        else:
-            runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    if agent_cfg.class_name in _RUNNER_MAP:
+        module_path, cls_name = _RUNNER_MAP[agent_cfg.class_name]
+        module = importlib.import_module(module_path)
+        runner_cls = getattr(module, cls_name)
+        runner = runner_cls(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    elif agent_cfg.class_name == "OnPolicyRunner":
+        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "SACMPCRunner":
-        from isaaclab_tasks.direct.hero_agent_mpc.runners import SACMPCRunner
-
-        runner = SACMPCRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
     runner.load(resume_path)

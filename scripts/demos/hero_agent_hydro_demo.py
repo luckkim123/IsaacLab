@@ -77,9 +77,9 @@ def create_lights():
 # Format: {"body_name": {"mass": kg, "volume": m^3}}
 # Note: link3 (buoy) uses full hydrodynamics, not simple buoyancy
 CHILD_BODY_BUOYANCY_PARAMS = {
-    "gripper": {"mass": 0.3, "volume": 0.00023},    # cylinder R=0.015, L=0.325
-    "link1": {"mass": 0.1, "volume": 0.000058},     # box 0.233x0.025x0.01
-    "link2": {"mass": 0.1, "volume": 0.000058},     # box 0.233x0.025x0.01
+    "gripper": {"mass": 0.3, "volume": 0.00023},  # cylinder R=0.015, L=0.325
+    "link1": {"mass": 0.1, "volume": 0.000058},  # box 0.233x0.025x0.01
+    "link2": {"mass": 0.1, "volume": 0.000058},  # box 0.233x0.025x0.01
 }
 
 WATER_DENSITY = 997.0  # kg/m^3
@@ -161,9 +161,8 @@ def main():
     print(f"  Total: {total_mass:.3f} kg")
 
     # Get volumes from hydrodynamics models (may be auto-calculated)
-    # Note: volume is now auto-calculated from collision geometry if not specified
-    base_volume = hydro_model._volume[0].item() if hasattr(hydro_model, "_volume") else 0.0
-    buoy_volume = buoy_hydro_model._volume[0].item() if hasattr(buoy_hydro_model, "_volume") else 0.0
+    base_volume = hydro_model.volume[0].item()
+    buoy_volume = buoy_hydro_model.volume[0].item()
 
     # Print configuration
     print("\n[Hydrodynamics Configuration]")
@@ -195,7 +194,7 @@ def main():
     for name, params in CHILD_BODY_BUOYANCY_PARAMS.items():
         net = compute_buoyancy_force(params["mass"], params["volume"])
         total_net += net
-        print(f"    {name:10s}: mass={params['mass']:.2f}kg, vol={params['volume']*1000:.4f}L, net={net:+.2f}N")
+        print(f"    {name:10s}: mass={params['mass']:.2f}kg, vol={params['volume'] * 1000:.4f}L, net={net:+.2f}N")
 
     print(f"\n  System Total Net Force: {total_net:+.2f} N")
     if abs(total_net) < 1.0:
@@ -225,7 +224,7 @@ def main():
             )
         if buoy_hydro_model.apply_added_mass:
             buoy_hydro_model.update_physx_state(
-                body_com_acc_w=robot.data.body_com_acc_w[:, buoy_idx:buoy_idx+1, :],
+                body_com_acc_w=robot.data.body_com_acc_w[:, buoy_idx : buoy_idx + 1, :],
                 root_quat_w=robot.data.body_quat_w[:, buoy_idx, :],
             )
 
@@ -261,9 +260,7 @@ def main():
         buoy_ang_vel = robot.data.body_ang_vel_w[:, buoy_idx, :]
         buoy_quat = robot.data.body_quat_w[:, buoy_idx, :]
 
-        buoy_force_b, buoy_torque_b = buoy_hydro_model.compute_forces(
-            buoy_lin_vel, buoy_ang_vel, buoy_quat
-        )
+        buoy_force_b, buoy_torque_b = buoy_hydro_model.compute_forces(buoy_lin_vel, buoy_ang_vel, buoy_quat)
 
         forces[:, buoy_idx, :] = buoy_force_b
         torques[:, buoy_idx, :] = buoy_torque_b
@@ -315,7 +312,7 @@ def main():
             print(
                 f"[t={sim_time:5.1f}s] base_z={root_pos[2]:+.3f} | buoy_z={buoy_pos[2]:+.3f} | "
                 f"diff={height_diff:+.3f} | vel_z={root_vel[2]:+.3f} | ang={root_ang[0]:+.2f},{root_ang[1]:+.2f}",
-                flush=True
+                flush=True,
             )
 
     # Final status

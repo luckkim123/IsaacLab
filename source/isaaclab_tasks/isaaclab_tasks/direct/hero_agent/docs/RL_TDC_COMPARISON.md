@@ -101,7 +101,7 @@ HORA (History-based Online Robust Adaptation) 프레임워크에 TDC를 통합.
 RL은 PD 게인을 출력하고, encoder는 privileged info로부터 M_hat을 추정한다.
 
 ```
-Privileged Info (24D) --> Encoder --> z (6D latent)
+Privileged Info (28D) --> Encoder --> z (13D latent)
     |-- z[3:5] --> M_hat (roll, pitch inertia) --> TDC Controller
     |-- z (full 6D) + policy_obs (13D) --> Actor (19D) --> 4D gains
                                                             |
@@ -136,10 +136,13 @@ $$\tau = \hat{M} \cdot u_{pd} + \hat{U} + \Delta T_b$$
 
 + Encoder z (6D) = 총 19D 입력
 
-**Privileged Observations (24D)**:
-- Main body (10D): volume, CoG(3), CoB(3), inertia(3)
-- Buoy body (10D): volume, CoG(3), CoB(3), inertia(3)
+**Privileged Observations (28D)**:
+- Main body hydro (7D): volume, CoG(3), CoB(3)
+- Buoy body hydro (7D): volume, CoG(3), CoB(3)
+- Main dynamics (4D): inertia(3), body_mass(1)
+- Buoy dynamics (4D): inertia(3), body_mass(1)
 - Payload (4D): mass, cog_offset_xyz(3)
+- Added mass surge (2D): main(1), buoy(1)
 
 **Action (4D)**: sigmoid scaling으로 범위 보장
 

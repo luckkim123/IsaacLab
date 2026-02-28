@@ -18,7 +18,6 @@ Available Tasks:
     - Isaac-HeroAgent-Encoder-Base-Debug-v0: Encoder debug (half DR, no curriculum)
     - Isaac-HeroAgent-Encoder-Base-v0: Encoder training with privileged info
     - Isaac-HeroAgent-TDC-v0: Classical TDC control (no RL)
-    - Isaac-HeroAgent-Encoder-TDC-v0: Encoder-TDC (RL M_hat + gains for TDC)
     - Isaac-HeroAgent-Adapt-Base-v0: Phase 2 adaptation (proprio history -> z_hat, base RL)
 
 MPC environments are in the separate hero_agent_mpc package.
