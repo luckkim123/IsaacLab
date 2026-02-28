@@ -13,8 +13,8 @@ Reward design principles:
       ([0,1] dense gradient). Penalties (joint_oscillation, joint_angle,
       angular_velocity) provide directional regularization with a combined
       max of ~-3.2 per step, ramped via penalty curriculum.
-    - dt-scaling: state-quality terms (tracking, settling, linear_error,
-      joint_oscillation, joint_angle, angular_velocity) are dt-scaled.
+    - dt-scaling: state-quality terms (tracking, settling, joint_oscillation,
+      joint_angle, angular_velocity) are dt-scaled.
     - PBRS progress shaping (Ng 1999): preserves optimal policy guarantee.
     - Joint oscillation: EMA high-pass filter isolates high-frequency
       joint velocity oscillation while allowing smooth movement.
@@ -330,7 +330,7 @@ def progress_reward(
     scale: float = 0.01,
     **_kwargs,
 ) -> torch.Tensor:
-    """Potential-based progress reward: tanh((prev - curr) / scale).
+    """Tanh-wrapped progress reward: tanh((prev - curr) / scale).
 
     tanh breaks the telescoping property of raw delta (which sums to ~0 over
     an episode as positive/negative steps cancel). With tanh, each convergence
