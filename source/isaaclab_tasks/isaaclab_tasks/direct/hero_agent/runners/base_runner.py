@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 
 import torch
 from rsl_rl.runners import OnPolicyRunner
@@ -68,6 +69,35 @@ class BaseRunner(OnPolicyRunner):
             if self.log_dir is not None and not self.disable_logs:
                 for key, value in metrics.items():
                     self.writer.add_scalar(f"DORAEMON/{key}", value, iteration)
+
+    def save(self, path: str, infos: dict | None = None) -> None:
+        """Save model checkpoint and DORAEMON state.
+
+        DORAEMON state is saved as a separate ``doraemon_state.pt`` file alongside
+        the model checkpoint to avoid modifying the RSL-RL checkpoint format.
+        """
+        super().save(path, infos)
+        raw_env = unwrap_env(self.env)
+        if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
+            doraemon_path = os.path.join(os.path.dirname(path), "doraemon_state.pt")
+            torch.save(raw_env._doraemon.state_dict(), doraemon_path)
+
+    def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
+        """Load model checkpoint and restore DORAEMON state if available.
+
+        Looks for ``doraemon_state.pt`` in the same directory as the model
+        checkpoint.  Missing file is silently ignored (backward compat with
+        old checkpoints that lack DORAEMON state).
+        """
+        infos = super().load(path, load_optimizer, map_location)
+        raw_env = unwrap_env(self.env)
+        if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
+            doraemon_path = os.path.join(os.path.dirname(path), "doraemon_state.pt")
+            if os.path.exists(doraemon_path):
+                state = torch.load(doraemon_path, map_location=self.device, weights_only=False)
+                raw_env._doraemon.load_state_dict(state)
+                logger.info("[DORAEMON] Loaded distribution state from %s", doraemon_path)
+        return infos
 
     def _apply_noise_floor(self) -> None:
         """Clamp action noise std to minimum floor.

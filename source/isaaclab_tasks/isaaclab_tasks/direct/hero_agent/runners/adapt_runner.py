@@ -374,6 +374,12 @@ class AdaptRunner:
         )
         logger.info("Checkpoint saved: %s", path)
 
+        # Save DORAEMON state alongside model checkpoint
+        raw_env = unwrap_env(self.env)
+        if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
+            doraemon_path = os.path.join(os.path.dirname(path), "doraemon_state.pt")
+            torch.save(raw_env._doraemon.state_dict(), doraemon_path)
+
     def load(self, path: str) -> None:
         """Load checkpoint, auto-detecting Phase 1 / v2 / v3 format.
 
@@ -419,6 +425,15 @@ class AdaptRunner:
             logger.info("Loaded Phase 1 checkpoint: %s (adapt_tconv + hist_normalizer initialized fresh)", path)
 
         self.policy.freeze_base()
+
+        # Restore DORAEMON state if available alongside checkpoint
+        raw_env = unwrap_env(self.env)
+        if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
+            doraemon_path = os.path.join(os.path.dirname(path), "doraemon_state.pt")
+            if os.path.exists(doraemon_path):
+                state = torch.load(doraemon_path, map_location=self.device, weights_only=False)
+                raw_env._doraemon.load_state_dict(state)
+                logger.info("[DORAEMON] Loaded distribution state from %s", doraemon_path)
 
     def get_inference_policy(self, device=None):
         """Return inference-ready policy function.

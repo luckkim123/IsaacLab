@@ -41,13 +41,13 @@ class DoraemonCfg:
     alpha: float = 0.5
     """Success rate threshold. Distribution expands only when success >= alpha."""
 
-    kl_ub: float = 0.02
+    kl_ub: float = 0.005
     """Trust region KL divergence upper bound per step."""
 
-    init_concentration: float = 8.0
+    init_concentration: float = 30.0
     """Initial Beta(a, b) concentration (a + b). Higher = tighter initial distribution.
-    Low values (5-10) ensure the initial buffer covers enough DR space for IS
-    estimation to work when expanding the distribution."""
+    With concentration=30, Beta(15,15) has std~0.065 vs Beta(4,4) std~0.17,
+    requiring more KL budget to reach bounds (~500 iters vs ~100)."""
 
     success_threshold_deg: float = 15.0
     """Attitude error below this (deg) counts as success. Evaluated over settling window.
@@ -668,6 +668,55 @@ class DoraemonScheduler:
                 self.dist.set_flat_params(result.x)
         except Exception as e:
             logger.warning("[DORAEMON] Backup step failed: %s", e)
+
+    def state_dict(self) -> dict:
+        """Serialize scheduler state for checkpoint persistence.
+
+        Captures the learned Beta distribution parameters, optimization counters,
+        and the episode buffer contents so training can resume without re-learning
+        the DR distribution from scratch.
+        """
+        return {
+            "dist_a": self.dist._a.clone(),
+            "dist_b": self.dist._b.clone(),
+            "step_count": self._step_count,
+            "backup_count": self._backup_count,
+            "total_episodes": self._total_episodes,
+            "current_threshold_deg": self._current_threshold_deg,
+            "threshold_anneal_count": self._threshold_anneal_count,
+            "buffer_xi": self.buffer.xi[: self.buffer._count].clone(),
+            "buffer_returns": self.buffer.returns[: self.buffer._count].clone(),
+            "buffer_success": self.buffer.success[: self.buffer._count].clone(),
+            "buffer_log_probs": self.buffer.log_probs[: self.buffer._count].clone(),
+            "buffer_write_idx": self.buffer._write_idx,
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restore scheduler state from a checkpoint.
+
+        Args:
+            state: Dictionary produced by :meth:`state_dict`.
+        """
+        # Restore Beta distribution parameters
+        self.dist._a = state["dist_a"].double()
+        self.dist._b = state["dist_b"].double()
+
+        # Restore scheduler counters
+        self._step_count = state["step_count"]
+        self._backup_count = state["backup_count"]
+        self._total_episodes = state["total_episodes"]
+        self._current_threshold_deg = state["current_threshold_deg"]
+        self._threshold_anneal_count = state["threshold_anneal_count"]
+
+        # Restore buffer (optional keys for backward compat with early checkpoints)
+        if "buffer_xi" in state:
+            n = state["buffer_xi"].shape[0]
+            self.buffer.xi[:n] = state["buffer_xi"].to(self.device)
+            self.buffer.returns[:n] = state["buffer_returns"].to(self.device)
+            self.buffer.success[:n] = state["buffer_success"].to(self.device)
+            self.buffer.log_probs[:n] = state["buffer_log_probs"].to(self.device)
+            self.buffer._count = n
+            self.buffer._write_idx = state["buffer_write_idx"]
 
     def get_metrics(self) -> dict[str, float]:
         """Current distribution stats for logging."""

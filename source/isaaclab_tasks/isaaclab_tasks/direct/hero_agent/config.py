@@ -101,7 +101,7 @@ class DomainRandomizationCfg:
     yaw_damping_scale: tuple[float, float] = (0.5, 1.5)
 
     # -- Joint Effort Limit (scale applied to asset default effort_limit) --
-    joint_effort_limit_range: tuple[float, float] = (0.7, 1.5)
+    joint_effort_limit_range: tuple[float, float] = (0.5, 1.5)
 
     # -- Joint Friction --
     joint_static_friction_range: tuple[float, float] = (0.0, 0.03)
@@ -193,7 +193,7 @@ class DomainRandomizationCfg:
             joint_viscous_friction_range=(0.0, 0.15),
             water_density_range=(997.0, 1003.0),
             yaw_damping_scale=(0.8, 1.2),
-            joint_effort_limit_range=(0.75, 1.5),
+            joint_effort_limit_range=(0.75, 1.25),
             payload_mass_range=(0.0, 0.75),
             payload_cog_offset_xy_radius=0.05,
             payload_cog_offset_z=(-0.015, 0.0),
