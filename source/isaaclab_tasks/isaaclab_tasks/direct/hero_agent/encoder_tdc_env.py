@@ -27,11 +27,6 @@ from .config import HeroAgentEncoderTDCEnvCfg
 from .tdc_env import HeroAgentTDCEnv
 
 
-def _scale_range(lo: float, hi: float) -> tuple[float, float]:
-    """Return (midpoint, half_range) for linear [-1, 1] -> [lo, hi] scaling."""
-    return (lo + hi) / 2.0, (hi - lo) / 2.0
-
-
 class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
     """Encoder-TDC environment: RL policy outputs M_hat + gains for TDC controller.
 
@@ -46,13 +41,18 @@ class HeroAgentEncoderTDCEnv(HeroAgentTDCEnv):
 
     cfg: HeroAgentEncoderTDCEnvCfg
 
+    @staticmethod
+    def _scale_range(lo: float, hi: float) -> tuple[float, float]:
+        """Return (midpoint, half_range) for linear [-1, 1] -> [lo, hi] scaling."""
+        return (lo + hi) / 2.0, (hi - lo) / 2.0
+
     def __init__(self, cfg: HeroAgentEncoderTDCEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Pre-compute scaling constants: value = mid + action * half_range
-        self._m_hat_mid, self._m_hat_half = _scale_range(cfg.m_hat_min, cfg.m_hat_max)
-        self._kp_mid, self._kp_half = _scale_range(cfg.kp_min, cfg.kp_max)
-        self._kd_mid, self._kd_half = _scale_range(cfg.kd_min, cfg.kd_max)
+        self._m_hat_mid, self._m_hat_half = self._scale_range(cfg.m_hat_min, cfg.m_hat_max)
+        self._kp_mid, self._kp_half = self._scale_range(cfg.kp_min, cfg.kp_max)
+        self._kd_mid, self._kd_half = self._scale_range(cfg.kd_min, cfg.kd_max)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Parse 6D actions, scale to physical ranges, update TDC, then run pipeline.
