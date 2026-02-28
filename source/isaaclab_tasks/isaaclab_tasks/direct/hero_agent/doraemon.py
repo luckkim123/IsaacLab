@@ -90,22 +90,22 @@ class ParamSpec(NamedTuple):
 # 16 DORAEMON-managed DR parameters.
 # Order matches BetaDistribution dimension indices.
 PARAM_SPECS: list[ParamSpec] = [
-    ParamSpec("inertia_scale", 0.5, 2.0, 1.0),
-    ParamSpec("body_mass_scale", 0.7, 1.3, 1.0),
-    ParamSpec("volume_scale", 0.7, 1.3, 1.0),
-    ParamSpec("added_mass_scale", 0.5, 2.0, 1.0),
-    ParamSpec("linear_damping_scale", 0.5, 2.0, 1.0),
-    ParamSpec("quadratic_damping_scale", 0.3, 2.0, 1.0),
+    ParamSpec("inertia_scale", 0.6, 1.5, 1.0),
+    ParamSpec("body_mass_scale", 0.85, 1.15, 1.0),
+    ParamSpec("volume_scale", 0.85, 1.15, 1.0),
+    ParamSpec("added_mass_scale", 0.7, 1.4, 1.0),
+    ParamSpec("linear_damping_scale", 0.5, 1.5, 1.0),
+    ParamSpec("quadratic_damping_scale", 0.5, 1.5, 1.0),
     ParamSpec("water_density", 990.0, 1030.0, 1000.0),
-    ParamSpec("cog_offset_z", -0.04, 0.04, 0.0),
-    ParamSpec("cob_offset_z", -0.04, 0.04, 0.0),
-    ParamSpec("joint_stiffness", 40.0, 200.0, 100.0),
+    ParamSpec("cog_offset_z", -0.03, 0.03, 0.0),
+    ParamSpec("cob_offset_z", -0.03, 0.03, 0.0),
+    ParamSpec("joint_stiffness", 60.0, 150.0, 100.0),
     ParamSpec("joint_damping", 1.0, 4.0, 3.0),
-    ParamSpec("joint_static_friction", 0.0, 0.1, 0.015),
-    ParamSpec("joint_viscous_friction", 0.0, 0.5, 0.1),
-    ParamSpec("payload_mass", 0.0, 3.0, 1.0),
-    ParamSpec("joint_effort_limit", 0.3, 3.0, 1.0),
-    ParamSpec("yaw_damping_scale", 0.3, 2.0, 1.0),
+    ParamSpec("joint_static_friction", 0.0, 0.05, 0.015),
+    ParamSpec("joint_viscous_friction", 0.0, 0.3, 0.1),
+    ParamSpec("payload_mass", 0.0, 1.5, 0.5),
+    ParamSpec("joint_effort_limit", 0.4, 2.7, 1.0),
+    ParamSpec("yaw_damping_scale", 0.5, 1.5, 1.0),
 ]
 
 NDIMS = len(PARAM_SPECS)

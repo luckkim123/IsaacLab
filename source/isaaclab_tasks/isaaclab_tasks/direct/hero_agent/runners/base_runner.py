@@ -54,7 +54,7 @@ class BaseRunner(OnPolicyRunner):
         super().log(locs, width, pad)
 
         # Noise std floor: always active, prevents exploration collapse under DR
-        self._apply_noise_floor(locs)
+        self._apply_noise_floor()
 
         iteration = locs["it"]
         raw_env = unwrap_env(self.env)
@@ -69,7 +69,7 @@ class BaseRunner(OnPolicyRunner):
                 for key, value in metrics.items():
                     self.writer.add_scalar(f"DORAEMON/{key}", value, iteration)
 
-    def _apply_noise_floor(self, locs: dict) -> None:
+    def _apply_noise_floor(self) -> None:
         """Clamp action noise std to minimum floor.
 
         Prevents exploration collapse under domain randomization.
@@ -80,8 +80,3 @@ class BaseRunner(OnPolicyRunner):
             if not hasattr(self, "_cached_min_log_std"):
                 self._cached_min_log_std = torch.log(torch.tensor(min_std, device=self.device))
             self.alg.policy.log_std.data.clamp_(min=self._cached_min_log_std)
-
-        iteration = locs["it"]
-        if self.log_dir is not None and not self.disable_logs:
-            current_std = self.alg.policy.action_std.mean().item()
-            self.writer.add_scalar("Entropy/noise_std_floor_active", float(current_std <= min_std + 1e-4), iteration)

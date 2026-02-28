@@ -634,6 +634,22 @@ def randomize_joint_effort_limit(
 
     env._robot.write_joint_effort_limit_to_sim(effort, joint_ids=env._albc_joint_ids, env_ids=env_ids)
 
+    # Sync actuator internal buffers (Isaac Lab #128 workaround).
+    # write_joint_effort_limit_to_sim updates _data.joint_effort_limits + PhysX,
+    # but actuator.effort_limit / effort_limit_sim remain at init-time values.
+    albc_ids_t = torch.tensor(env._albc_joint_ids, device=env.device)
+    for actuator in env._robot.actuators.values():
+        jids = actuator.joint_indices
+        if isinstance(jids, torch.Tensor):
+            mask = torch.isin(jids, albc_ids_t)
+            if mask.any():
+                local_ids = mask.nonzero(as_tuple=True)[0]
+                actuator.effort_limit[env_ids[:, None], local_ids] = effort[..., : local_ids.shape[0]]
+                actuator.effort_limit_sim[env_ids[:, None], local_ids] = effort[..., : local_ids.shape[0]]
+        elif jids == slice(None):
+            actuator.effort_limit[env_ids[:, None], albc_ids_t] = effort
+            actuator.effort_limit_sim[env_ids[:, None], albc_ids_t] = effort
+
 
 # -----------------------------------------------------------------------------
 # Body Mass Randomization

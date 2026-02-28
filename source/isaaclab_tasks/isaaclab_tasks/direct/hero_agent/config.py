@@ -69,8 +69,8 @@ class DomainRandomizationCfg:
 
     # -- Hydrodynamic Parameter Scales --
     added_mass_scale: tuple[float, float] = (0.85, 1.15)
-    linear_damping_scale: tuple[float, float] = (0.5, 2.0)
-    quadratic_damping_scale: tuple[float, float] = (0.3, 2.0)
+    linear_damping_scale: tuple[float, float] = (0.5, 1.5)
+    quadratic_damping_scale: tuple[float, float] = (0.5, 1.5)
     volume_scale: tuple[float, float] = (0.9, 1.1)
 
     # -- Center of Buoyancy Offset (meters) --
@@ -98,10 +98,10 @@ class DomainRandomizationCfg:
     joint_damping_range: tuple[float, float] = (1.5, 4.0)
 
     # -- Yaw-specific quadratic damping scale (independent of general quad_damping) --
-    yaw_damping_scale: tuple[float, float] = (0.3, 2.0)
+    yaw_damping_scale: tuple[float, float] = (0.5, 1.5)
 
     # -- Joint Effort Limit (scale applied to asset default effort_limit) --
-    joint_effort_limit_range: tuple[float, float] = (0.5, 2.7)
+    joint_effort_limit_range: tuple[float, float] = (0.7, 1.5)
 
     # -- Joint Friction --
     joint_static_friction_range: tuple[float, float] = (0.0, 0.03)
@@ -191,6 +191,15 @@ class DomainRandomizationCfg:
             joint_damping_range=(2.7, 3.3),
             joint_static_friction_range=(0.0, 0.025),
             joint_viscous_friction_range=(0.0, 0.15),
+            water_density_range=(997.0, 1003.0),
+            yaw_damping_scale=(0.8, 1.2),
+            joint_effort_limit_range=(0.75, 1.5),
+            payload_mass_range=(0.0, 0.75),
+            payload_cog_offset_xy_radius=0.05,
+            payload_cog_offset_z=(-0.015, 0.0),
+            perturbation_force_range=(0.0, 2.5),
+            perturbation_torque_range=(0.0, 0.4),
+            action_latency_range=(0, 2),
         )
 
     # ==========================================================================
@@ -503,7 +512,10 @@ class HeroAgentTDCEnvCfg(HeroAgentTrainEnvCfg):
     # TDC needs higher stiffness for stability. Override DORAEMON bounds
     # to prevent sampling low stiffness values that cause TDC instability.
     doraemon: DoraemonCfg = DoraemonCfg(
-        param_overrides={"joint_stiffness": (120.0, 300.0)},
+        param_overrides={
+            "joint_stiffness": (120.0, 300.0),
+            "joint_damping": (6.0, 15.0),
+        },
     )
 
 
