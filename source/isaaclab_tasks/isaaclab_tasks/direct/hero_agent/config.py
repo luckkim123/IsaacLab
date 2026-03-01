@@ -413,11 +413,11 @@ class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
         - Encoder: privileged(20D) -> tanh -> latent z(13D) in [-1, 1]
         - Actual Actor/Critic input: policy_obs(13) + z(13) = 26D
 
-    DORAEMON adaptive DR is inherited from HeroAgentTrainEnvCfg (shared across
-    all training envs).
+    DORAEMON disabled: fixed uniform DR covers the full DomainRandomizationCfg range.
     """
 
     state_space: int = 20
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
 
 
 @configclass
