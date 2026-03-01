@@ -47,8 +47,8 @@ class _HeroAgentPolicyCfg(RslRlPpoActorCriticCfg):
 
     init_noise_std: float = 1.0
     noise_std_type: str = "log"
-    actor_obs_normalization: bool = False
-    critic_obs_normalization: bool = False
+    actor_obs_normalization: bool = True
+    critic_obs_normalization: bool = True
     actor_hidden_dims: list[int] = [256, 128, 64]
     critic_hidden_dims: list[int] = [256, 128, 64]
     activation: str = "elu"
@@ -117,13 +117,13 @@ class _HeroAgentBaseRunnerCfg(RslRlOnPolicyRunnerCfg):
     """Shared runner fields and PPO algorithm for all Hero Agent configs."""
 
     seed = 30
-    num_steps_per_env = 128
+    num_steps_per_env = 32
     save_interval = 50
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.02,
+        entropy_coef=0.005,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=3.0e-4,
@@ -205,14 +205,14 @@ class HeroAgentEncoderPPORunnerCfg(_HeroAgentBaseRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.02,
+        entropy_coef=0.005,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=3.0e-4,
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
-        desired_kl=0.01,
+        desired_kl=0.002,
         max_grad_norm=1.0,
         weight_decay=1e-4,
     )

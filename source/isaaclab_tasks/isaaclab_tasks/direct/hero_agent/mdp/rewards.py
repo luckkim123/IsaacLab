@@ -135,10 +135,9 @@ class RewardTermCfg:
     params: dict[str, Any] = field(default_factory=dict)
     """Additional parameters passed to the function."""
 
-    scale_by_dt: bool = False
-    """Whether to scale reward by dt. Default False: raw per-step values for
-    stronger PPO advantage signal. Set True only for rate-based quantities
-    that must be time-invariant (e.g., power consumption in W)."""
+    scale_by_dt: bool = True
+    """Whether to scale reward by dt. Default True: ensures time-invariant
+    reward accumulation across different simulation timesteps."""
 
 
 # =============================================================================

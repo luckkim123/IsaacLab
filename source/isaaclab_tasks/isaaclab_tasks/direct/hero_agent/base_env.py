@@ -332,6 +332,7 @@ class HeroAgentEnv(DirectRLEnv):
                 func=func,
                 weight=rcfg.progress_weight,
                 params=params,
+                scale_by_dt=False,  # PBRS is per-transition, not a rate
             )
         if rcfg.settling_weight != 0.0:
             terms["settling"] = RewardTermCfg(
