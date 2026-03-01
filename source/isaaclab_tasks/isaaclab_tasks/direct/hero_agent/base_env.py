@@ -290,11 +290,11 @@ class HeroAgentEnv(DirectRLEnv):
     def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
         """Build the reward terms dict. Override in subclasses to add/modify terms.
 
-        Base terms:
-            1. tracking: Gaussian kernel exp(-e^2/sigma^2), dt-scaled
-            2. linear_error: -min(||err||, max)/max, dt-scaled (strong tail gradient)
-            3. joint_oscillation: EMA high-pass joint vel^2, dt-scaled
-            4. joint_velocity: quadratic joint velocity penalty, dt-scaled
+        Base terms (all raw per-step, NOT dt-scaled for strong PPO advantage signal):
+            1. tracking: Laplacian kernel exp(-||e||/sigma)
+            2. linear_error: -min(||err||, max)/max (constant gradient tail)
+            3. joint_oscillation: EMA high-pass joint vel^2
+            4. joint_velocity: quadratic joint velocity penalty
             5. progress: potential-based shaping (optional, default off)
         """
         rcfg = self.cfg.reward
@@ -332,7 +332,6 @@ class HeroAgentEnv(DirectRLEnv):
                 func=func,
                 weight=rcfg.progress_weight,
                 params=params,
-                scale_by_dt=False,
             )
         if rcfg.settling_weight != 0.0:
             terms["settling"] = RewardTermCfg(

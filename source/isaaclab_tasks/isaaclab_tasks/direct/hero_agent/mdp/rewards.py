@@ -46,16 +46,17 @@ if TYPE_CHECKING:
 class ALBCRewardCfg:
     """ALBC reward configuration with Laplacian tracking + regularization penalties.
 
-    Active terms (5):
-        tracking          * w_t  * dt   (Laplacian kernel, positive)
-        settling          * w_s  * dt   (sigmoid near-target bonus, positive)
-        joint_oscillation * w_jo * dt   (EMA high-pass filtered, negative)
-        joint_velocity    * w_jv * dt   (joint speed penalty, negative)
-        progress          * w_p        (PBRS, NOT dt-scaled)
+    Active terms (5, all raw per-step — NOT dt-scaled):
+        tracking          * w_t   (Laplacian kernel, positive)
+        settling          * w_s   (binary near-target bonus, positive)
+        joint_oscillation * w_jo  (EMA high-pass filtered, negative)
+        joint_velocity    * w_jv  (joint speed penalty, negative)
+        progress          * w_p   (PBRS, positive)
 
     Design: tracking + settling dominate the positive signal. Two
     penalties (joint_oscillation, joint_velocity) provide directional
-    regularization, ramped via penalty curriculum.
+    regularization. Raw per-step rewards (no dt-scaling) ensure PPO
+    advantage estimates have sufficient signal-to-noise ratio.
     """
 
     # Tracking (Laplacian kernel): exp(-||e|| / sigma)
@@ -134,8 +135,10 @@ class RewardTermCfg:
     params: dict[str, Any] = field(default_factory=dict)
     """Additional parameters passed to the function."""
 
-    scale_by_dt: bool = True
-    """Whether to scale reward by dt. Set False for progress-style rewards."""
+    scale_by_dt: bool = False
+    """Whether to scale reward by dt. Default False: raw per-step values for
+    stronger PPO advantage signal. Set True only for rate-based quantities
+    that must be time-invariant (e.g., power consumption in W)."""
 
 
 # =============================================================================
