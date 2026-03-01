@@ -44,10 +44,10 @@ if TYPE_CHECKING:
 
 @configclass
 class ALBCRewardCfg:
-    """ALBC reward configuration with Gaussian tracking + regularization penalties.
+    """ALBC reward configuration with Laplacian tracking + regularization penalties.
 
     Active terms (5):
-        tracking          * w_t  * dt   (Gaussian kernel, positive)
+        tracking          * w_t  * dt   (Laplacian kernel, positive)
         settling          * w_s  * dt   (sigmoid near-target bonus, positive)
         joint_oscillation * w_jo * dt   (EMA high-pass filtered, negative)
         joint_velocity    * w_jv * dt   (joint speed penalty, negative)
@@ -58,8 +58,8 @@ class ALBCRewardCfg:
     regularization, ramped via penalty curriculum.
     """
 
-    # Tracking (Gaussian kernel): exp(-||e||^2 / sigma^2)
-    # Fixed sigma -- fine-tuning gradient provided by settling term instead.
+    # Tracking (Laplacian kernel): exp(-||e|| / sigma)
+    # Gradient = 1/sigma at all errors (maximum at e=0, unlike Gaussian which is 0 at e=0).
     tracking_weight: float = 5.0
     tracking_sigma: float = 0.35  # 20.1 deg 1/e point
 
@@ -260,17 +260,18 @@ def tracking_reward(
     sigma: float = 1.0,
     **_kwargs,
 ) -> torch.Tensor:
-    """Gaussian kernel tracking reward: exp(-||e||^2 / sigma^2).
+    """Laplacian kernel tracking reward: exp(-||e|| / sigma).
 
     Output in [0, 1]. error=0 -> 1.0, error=sigma -> 1/e (~0.37).
-    Uses L2 squared norm of roll/pitch errors for smoother gradient near zero.
+    Gradient = (1/sigma) * exp(-||e||/sigma), maximum at error=0.
+    Unlike Gaussian (gradient=0 at target), Laplacian provides the strongest
+    corrective signal exactly at the target, eliminating steady-state error.
 
     Args:
         env: Environment instance (provides _potentials = ||[roll_err, pitch_err]||).
-        sigma: Gaussian kernel width in radians. Default 1.0 rad (~57.3 deg).
+        sigma: Kernel width in radians. Default 1.0 rad (~57.3 deg).
     """
-    err_sq = env._potentials**2
-    return torch.exp(-err_sq / (sigma**2))
+    return torch.exp(-env._potentials / sigma)
 
 
 def joint_oscillation_penalty(
