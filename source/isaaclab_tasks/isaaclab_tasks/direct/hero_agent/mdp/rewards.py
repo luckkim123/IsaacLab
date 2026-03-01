@@ -60,13 +60,13 @@ class ALBCRewardCfg:
 
     # Tracking (Gaussian kernel): exp(-||e||^2 / sigma^2)
     # Fixed sigma -- fine-tuning gradient provided by settling term instead.
-    tracking_weight: float = 3.0
-    tracking_sigma: float = 0.5  # 28.6 deg 1/e point
+    tracking_weight: float = 5.0
+    tracking_sigma: float = 0.35  # 20.1 deg 1/e point
 
     # Joint oscillation penalty (EMA high-pass filtered joint velocity).
     # Penalizes high-frequency oscillation while allowing smooth movement.
     # dt-scaled. Use with negative weight.
-    joint_oscillation_weight: float = -5.0
+    joint_oscillation_weight: float = -2.5
     joint_oscillation_alpha: float = 0.2  # EMA smoothing factor (cutoff ~1.6Hz at 50Hz)
 
     # Joint velocity penalty: mean(joint_vel^2). Penalizes fast joint movement,
@@ -99,7 +99,7 @@ class ALBCRewardCfg:
     # Penalty curriculum: linearly ramp penalty scale from 0 to 1 over this
     # ratio of max_iterations. 0 = disabled (penalties always at full weight).
     # Applies to all terms with negative weight.
-    penalty_curriculum_ratio: float = 0.75
+    penalty_curriculum_ratio: float = 0.5
 
     # TDC stability gate: multiply total reward by 0 when |1 - M_hat/M_true| >= 1
     # Only effective in TDC envs. Based on Baek et al. (ACC 2022).
