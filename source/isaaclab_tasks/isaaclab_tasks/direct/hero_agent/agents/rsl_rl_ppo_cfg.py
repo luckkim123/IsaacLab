@@ -70,7 +70,7 @@ class _RslRlPpoEncoderBaseCfg(_HeroAgentPolicyCfg):
     encoder_obs_normalization: bool = True
     policy_obs_dim: int = 13
     privileged_dim: int = 19
-    z_bounds_coef: float = 0.1
+    z_bounds_coef: float = 0.3
     z_bounds_soft_bound: float = 0.9
 
 
@@ -212,9 +212,8 @@ class HeroAgentEncoderPPORunnerCfg(_HeroAgentBaseRunnerCfg):
         schedule="adaptive",
         gamma=0.99,
         lam=0.95,
-        desired_kl=0.002,
+        desired_kl=0.02,
         max_grad_norm=1.0,
-        weight_decay=1e-4,
     )
     policy = RslRlPpoActorCriticEncoderCfg()
 
