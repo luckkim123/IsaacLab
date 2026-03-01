@@ -29,15 +29,17 @@ if TYPE_CHECKING:
 
 
 def _hydro_privileged_info(hydro: HydrodynamicsModel) -> torch.Tensor:
-    """Pack hydrodynamic parameters into a 7D privileged observation vector.
+    """Pack hydrodynamic parameters into a 5D privileged observation vector.
 
-    Returns: (num_envs, 7) = [volume(1), r_cg(3), r_cb(3)].
+    Only includes z-components of CoG/CoB (x/y are negligible for roll/pitch control).
+
+    Returns: (num_envs, 5) = [volume(1), r_cg_xyz(3), r_cb_z(1)].
     """
     return torch.cat(
         [
             hydro.volume.unsqueeze(-1),
             hydro.center_of_gravity,
-            hydro.center_of_buoyancy,
+            hydro.center_of_buoyancy[:, 2:3],  # z-component only
         ],
         dim=-1,
     )
@@ -96,15 +98,16 @@ def compute_privileged_obs(
     """Compute privileged observations for asymmetric training.
 
     Returns privileged info containing hydrostatic + dynamics + added mass parameters:
-        - Main body hydro (7D): volume, r_cg (3), r_cb (3)
-        - Buoy body hydro (7D): volume, r_cg (3), r_cb (3)
-        - Main body dynamics (4D): inertia Ixx/Iyy/Izz (3), body_mass (1)
-        - Buoy dynamics (4D): inertia Ixx/Iyy/Izz (3), body_mass (1)
+        - Main body hydro (5D): volume, r_cg_xyz (3), r_cb_z (1)
+        - Buoy body hydro (5D): volume, r_cg_xyz (3), r_cb_z (1)
+        - Main body inertia (2D): Ixx, Iyy (roll/pitch only, Izz excluded)
+        - Buoy inertia (2D): Ixx, Iyy
         - Payload (4D): mass, cog_offset (3)
         - Main body added mass surge (1D)
         - Buoy added mass surge (1D)
 
-    Total: 28D (26D base + 2D added mass). Requires state_space >= 28.
+    Total: 20D (14D base + 4D payload + 2D added mass).
+    Removed from previous 28D: CoB x/y (4D), Izz (2D), body_mass (2D).
 
     Args:
         env: The Hero Agent environment instance.
@@ -113,23 +116,17 @@ def compute_privileged_obs(
         Privileged observation tensor of shape (num_envs, state_space).
     """
     priv_obs = [
-        _hydro_privileged_info(env._hydro),  # 7D: volume, CoG, CoB
-        _hydro_privileged_info(env._buoy_hydro),  # 7D: volume, CoG, CoB
+        _hydro_privileged_info(env._hydro),  # 5D: volume, CoG_xyz, CoB_z
+        _hydro_privileged_info(env._buoy_hydro),  # 5D: volume, CoG_xyz, CoB_z
     ]
 
-    # Dynamics parameters affected by DR (inertia_scale, body_mass_scale)
-    # Inertia: independently randomized per body by _randomize_hydro_model()
-    # Body mass: single scale for all bodies via randomize_body_mass() -> PhysX
-    main_mass = env._hydro.body_mass
-    buoy_mass = env._buoy_hydro.body_mass
-    assert main_mass is not None and buoy_mass is not None, "body_mass required for privileged obs"
-    priv_obs.append(env._hydro.rigid_body_inertia)  # 3D: main Ixx, Iyy, Izz
-    priv_obs.append(main_mass.unsqueeze(-1))  # 1D: main body mass (DR synced)
-    priv_obs.append(env._buoy_hydro.rigid_body_inertia)  # 3D: buoy Ixx, Iyy, Izz
-    priv_obs.append(buoy_mass.unsqueeze(-1))  # 1D: buoy body mass (DR synced)
+    # Inertia: Ixx/Iyy only (Izz irrelevant for roll/pitch attitude control).
+    # Independently randomized per body by _randomize_hydro_model().
+    priv_obs.append(env._hydro.rigid_body_inertia[:, :2])  # 2D: main Ixx, Iyy
+    priv_obs.append(env._buoy_hydro.rigid_body_inertia[:, :2])  # 2D: buoy Ixx, Iyy
 
     # Include payload info if enabled and state_space is large enough
-    if env._payload_mass is not None and env._payload_cog_offset is not None and env.cfg.state_space >= 26:
+    if env._payload_mass is not None and env._payload_cog_offset is not None and env.cfg.state_space >= 18:
         payload_priv = torch.cat(
             [env._payload_mass.unsqueeze(-1), env._payload_cog_offset],
             dim=-1,
@@ -137,10 +134,7 @@ def compute_privileged_obs(
         priv_obs.append(payload_priv)  # 4D: mass, cog_offset_xyz
 
     # Surge added mass: effective inertia = I_rigid + M_added.
-    # UUV added mass is comparable to rigid body inertia (e.g., main body M_a_surge=5.76kg)
-    # and is DR'd via added_mass_scale. Without this, the encoder cannot observe
-    # a major component of the effective dynamics (M_true via parallel axis theorem).
-    if env.cfg.state_space >= 28:
+    if env.cfg.state_space >= 20:
         priv_obs.append(_added_mass_surge(env._hydro))  # 1D: main M_a surge
         priv_obs.append(_added_mass_surge(env._buoy_hydro))  # 1D: buoy M_a surge
 

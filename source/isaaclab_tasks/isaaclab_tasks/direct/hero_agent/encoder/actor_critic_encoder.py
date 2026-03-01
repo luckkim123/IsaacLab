@@ -9,7 +9,7 @@ This module provides the encoder-based actor-critic network:
     - ActorCriticEncoder: Base encoder network (Phase 1 teacher training)
 
 Architecture (symmetric critic):
-    Encoder: privileged (28D) -> MLP [256, 128, 64] -> z (13D)
+    Encoder: privileged (20D) -> MLP [256, 128, 64] -> tanh -> z (13D) in [-1, 1]
     Actor:   cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> actions
     Critic:  cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> value (1D)
 
@@ -50,8 +50,8 @@ class ActorCriticEncoder(nn.Module):
     The encoder receives gradient from both actor loss and critic value loss.
 
     Activation modes:
-        - "tanh": z = tanh(raw) in [-1, 1]. Built into MLP last layer (matches HORA original).
-        - "sigmoid": z = z_min + sigmoid(raw) * (z_max - z_min). Bounded in [z_min, z_max]. Default.
+        - "tanh": z = tanh(raw) in [-1, 1]. Built into MLP last layer (matches HORA original). Default.
+        - "sigmoid": z = z_min + sigmoid(raw) * (z_max - z_min). Bounded in [z_min, z_max].
     """
 
     is_recurrent: bool = False
@@ -63,11 +63,11 @@ class ActorCriticEncoder(nn.Module):
         num_actions: int,
         # Encoder parameters
         policy_obs_dim: int = 13,
-        privileged_dim: int = 28,
+        privileged_dim: int = 20,
         encoder_hidden_dims: list[int] | tuple[int, ...] = (256, 128, 64),
         encoder_latent_dim: int = 13,
-        encoder_activation: str = "relu",
-        encoder_output_activation: str = "sigmoid",
+        encoder_activation: str = "elu",
+        encoder_output_activation: str = "tanh",
         encoder_obs_normalization: bool = False,
         z_min: float = 0.01,
         z_max: float = 2.0,

@@ -425,7 +425,7 @@ class HeroAgentEncoderBaseDebugEnvCfg(HeroAgentEncoderTrainEnvCfg):
     """Encoder-Base with half-strength DR and no DORAEMON for diagnostics.
 
     DR enabled at ~50% of full range (narrower scales, smaller offsets).
-    No DORAEMON (constant DR from start). Privileged obs (state_space=28)
+    No DORAEMON (constant DR from start). Privileged obs (state_space=20)
     inherited from HeroAgentEncoderTrainEnvCfg.
 
     If error diverges here, the encoder/reward design cannot handle even mild DR.
@@ -535,7 +535,7 @@ class HeroAgentTDCEnvCfg(HeroAgentTrainEnvCfg):
 class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
     """Encoder-TDC environment: RL policy outputs M_hat + gains for TDC controller.
 
-    The encoder compresses privileged info (28D) into a latent z (13D).
+    The encoder compresses privileged info (20D) into a latent z (13D).
     The actor takes [policy_obs(13D), z(13D)] = 26D input and outputs 6D actions:
         [m_hat_roll, m_hat_pitch, Kp_roll, Kp_pitch, Kd_roll, Kd_pitch]
 
@@ -547,7 +547,7 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
 
     action_space: int = 6  # m_hat(2) + Kp(2) + Kd(2)
     state_space: int = 20  # privileged obs for encoder
-    enable_payload: bool = True  # 28D privileged requires payload
+    enable_payload: bool = True  # 20D privileged requires payload
 
     # Override TDC DR: enable action latency (RL inference delay exists in real deployment)
     randomization: DomainRandomizationCfg = _tdc_randomization(action_latency=True)

@@ -98,7 +98,7 @@ class HeroAgentEnv(DirectRLEnv):
 
     Physical Parameters:
         - sim_dt: 1/200 s (200 Hz physics), decimation: 1, control_decimation: 4 (50 Hz control)
-        - max_joint_velocity: pi rad/s (180 deg/s)
+        - max_joint_velocity: 4*pi/3 rad/s (40 RPM at 12V, ~240 deg/s)
         - joint stiffness: 100.0, damping: 3.0 (ImplicitActuator default)
         - joint_limits: from URDF (±2*pi rad, i.e. ±360 deg)
     """
@@ -140,7 +140,7 @@ class HeroAgentEnv(DirectRLEnv):
             raise ValueError(f"state_space={self.cfg.state_space} must be non-negative")
 
         # Validate state_space vs enable_payload consistency
-        if self.cfg.state_space >= 26 and not self.cfg.enable_payload:
+        if self.cfg.state_space >= 18 and not self.cfg.enable_payload:
             raise ValueError(
                 f"state_space={self.cfg.state_space} requires enable_payload=True "
                 f"(payload provides 4D of the {self.cfg.state_space}D privileged obs)"

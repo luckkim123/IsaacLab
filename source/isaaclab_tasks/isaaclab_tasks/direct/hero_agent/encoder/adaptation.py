@@ -96,7 +96,7 @@ class ProprioAdaptTConv(nn.Module):
 
         self.low_dim_proj = nn.Linear(hidden_dim * final_time_steps, output_dim)
 
-        # Match Phase 1 encoder init: output near zero -> _activate_z(~0) = midpoint of [z_min, z_max].
+        # Match Phase 1 encoder init: output near zero -> _activate_z(~0) = tanh(0) = 0 (midpoint).
         nn.init.constant_(self.low_dim_proj.bias, 0.0)
         nn.init.normal_(self.low_dim_proj.weight, std=0.01)
 

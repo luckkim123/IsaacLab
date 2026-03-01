@@ -66,12 +66,10 @@ class _RslRlPpoEncoderBaseCfg(_HeroAgentPolicyCfg):
     encoder_hidden_dims: list[int] = [256, 128, 64]
     encoder_latent_dim: int = 13
     encoder_activation: str = "elu"
-    encoder_output_activation: str = "sigmoid"
+    encoder_output_activation: str = "tanh"
     encoder_obs_normalization: bool = True
-    z_min: float = 0.01
-    z_max: float = 2.0
     policy_obs_dim: int = 13
-    privileged_dim: int = 28
+    privileged_dim: int = 20
 
 
 @configclass
@@ -170,10 +168,10 @@ class HeroAgentPrivBasePPORunnerCfg(_HeroAgentBaseRunnerCfg):
     """RSL-RL PPO configuration for Hero Agent with raw privileged info (ablation).
 
     Uses standard ActorCritic with privileged observations concatenated directly
-    to the policy input (13D + 28D = 41D). No encoder compression.
+    to the policy input (13D + 20D = 33D). No encoder compression.
     Serves as ablation baseline to isolate encoder's contribution:
         - Base (13D): no privileged info
-        - Priv-Base (41D): privileged concatenated, no encoder
+        - Priv-Base (33D): privileged concatenated, no encoder
         - Encoder-Base (26D): privileged compressed via encoder
     """
 
@@ -189,7 +187,7 @@ class HeroAgentEncoderPPORunnerCfg(_HeroAgentBaseRunnerCfg):
     """RSL-RL PPO configuration for Hero Agent encoder training (HORA Phase 1).
 
     Uses ActorCriticEncoder with symmetric critic (HORA/RMA standard):
-        - Encoder: privileged (28D) -> sigmoid -> z (13D) in [0.01, 2.0]
+        - Encoder: privileged (20D) -> tanh -> z (13D) in [-1, 1]
         - Actor: cat([policy_obs, z]) = 26D -> actions
         - Critic: cat([policy_obs, z]) = 26D -> value (symmetric, encoder gets critic gradient)
 
@@ -201,6 +199,21 @@ class HeroAgentEncoderPPORunnerCfg(_HeroAgentBaseRunnerCfg):
     max_iterations = 2500
     experiment_name = "hero_agent_albc_encoder"
     obs_groups = _PRIVILEGED_OBS_GROUPS
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.005,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.99,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+        weight_decay=1e-4,
+    )
     policy = RslRlPpoActorCriticEncoderCfg()
 
 
