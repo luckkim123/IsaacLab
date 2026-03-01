@@ -314,7 +314,7 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # ALBC Joint Control
     # ==========================================================================
     albc_joint_names: list[str] = HERO_AGENT_ALBC_JOINT_NAMES
-    max_joint_velocity: float = math.pi
+    max_joint_velocity: float = 4.0 * math.pi / 3.0  # 40 RPM at 12V = 4*pi/3 rad/s
     control_decimation: int = 4  # target updates every 4th step = 0.02s (50Hz control)
     initial_joint_pos_range: tuple[float, float] = (-math.pi, math.pi)
 
@@ -400,22 +400,24 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
 class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
     """Hero Agent encoder training with privileged hydrodynamic info.
 
-    state_space=28 returns privileged information for HORA/RMA Phase 1 training.
-    Main hydro (7D) + Buoy hydro (7D) + Main dynamics (4D: Ixx,Iyy,Izz,body_mass)
-    + Buoy dynamics (4D) + Payload (4D: mass, cog_offset_xyz)
-    + Main added mass surge (1D) + Buoy added mass surge (1D) = 28D.
+    state_space=20 returns privileged information for HORA/RMA Phase 1 training.
+    Main hydro (5D: volume, CoG_xyz, CoB_z) + Buoy hydro (5D)
+    + Main inertia (2D: Ixx, Iyy) + Buoy inertia (2D: Ixx, Iyy)
+    + Payload (4D: mass, cog_offset_xyz) + Added mass surge (2D) = 20D.
+
+    Removed from 28D: CoB x/y (4D), Izz (2D), body_mass (2D).
 
     Network Input Dimensions (ActorCriticEncoder):
         - observation_space (13): Used for gym.spaces.Box definition only
-        - state_space (28): Privileged info, returned as observations["privileged"]
-        - Encoder: privileged(28D) -> latent z(13D)
+        - state_space (20): Privileged info, returned as observations["privileged"]
+        - Encoder: privileged(20D) -> tanh -> latent z(13D) in [-1, 1]
         - Actual Actor/Critic input: policy_obs(13) + z(13) = 26D
 
     DORAEMON adaptive DR is inherited from HeroAgentTrainEnvCfg (shared across
-    all training envs). Sigmoid encoder activation prevents z collapse.
+    all training envs).
     """
 
-    state_space: int = 28
+    state_space: int = 20
 
 
 @configclass
@@ -544,7 +546,7 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
     """
 
     action_space: int = 6  # m_hat(2) + Kp(2) + Kd(2)
-    state_space: int = 28  # privileged obs for encoder
+    state_space: int = 20  # privileged obs for encoder
     enable_payload: bool = True  # 28D privileged requires payload
 
     # Override TDC DR: enable action latency (RL inference delay exists in real deployment)
@@ -572,7 +574,7 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
 class HeroAgentAdaptBaseEnvCfg(HeroAgentEncoderTrainEnvCfg):
     """Phase 2 adaptation training config (base RL pipeline).
 
-    Inherits from HeroAgentEncoderTrainEnvCfg (state_space=28 for privileged z_gt).
+    Inherits from HeroAgentEncoderTrainEnvCfg (state_space=20 for privileged z_gt).
     Adds proprioception history buffer for the adaptation module.
 
     Per-timestep feature (8D):
