@@ -71,6 +71,8 @@ class ActorCriticEncoder(nn.Module):
         encoder_obs_normalization: bool = False,
         z_min: float = 0.01,
         z_max: float = 2.0,
+        z_bounds_coef: float = 0.1,
+        z_bounds_soft_bound: float = 0.9,
         # Actor-Critic parameters
         actor_obs_normalization: bool = False,
         critic_obs_normalization: bool = False,
@@ -95,6 +97,11 @@ class ActorCriticEncoder(nn.Module):
         self.encoder_output_activation = encoder_output_activation
         self.z_min = z_min
         self.z_max = z_max
+        self.z_bounds_coef = z_bounds_coef
+        self.z_bounds_soft_bound = z_bounds_soft_bound
+
+        # Last encoded z (retained with grad for z_bounds_loss computation in PPO)
+        self._last_z: torch.Tensor | None = None
 
         # Encoder input normalization (Welford's online mean/var)
         self.encoder_obs_normalization = encoder_obs_normalization
@@ -217,7 +224,7 @@ class ActorCriticEncoder(nn.Module):
             return torch.tanh(raw)
         return self.z_min + torch.sigmoid(raw) * (self.z_max - self.z_min)
 
-    def _encode(self, privileged: torch.Tensor) -> torch.Tensor:
+    def _encode(self, privileged: torch.Tensor, *, store_z: bool = False) -> torch.Tensor:
         """Encode privileged info into latent z.
 
         For tanh mode: z = tanh(raw) in [-1, 1] (built into MLP last layer).
@@ -225,19 +232,48 @@ class ActorCriticEncoder(nn.Module):
 
         Privileged obs is normalized before the encoder MLP when
         encoder_obs_normalization is enabled.
+
+        Args:
+            privileged: Privileged observations to encode.
+            store_z: If True, stores z as _last_z for z_bounds_loss computation.
+                Only the act() path should set this to True, so the bounds loss
+                gradient flows independently of the critic value loss graph.
         """
         normalized = self.encoder_obs_normalizer(privileged)
         if self.encoder_output_activation == "tanh":
-            return self.encoder(normalized)
-        return self._activate_z(self.encoder(normalized))
+            z = self.encoder(normalized)
+        else:
+            z = self._activate_z(self.encoder(normalized))
+        if store_z:
+            self._last_z = z
+        return z
 
-    def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
+    def z_bounds_loss(self) -> torch.Tensor:
+        """Compute soft quadratic penalty when |z| exceeds z_bounds_soft_bound.
+
+        Follows the same principle as HORA's bounds_loss on action means:
+        penalize outputs that approach activation saturation boundaries.
+
+        Returns zero tensor if z_bounds_coef is 0 or _last_z is not available.
+        """
+        if self.z_bounds_coef <= 0.0 or self._last_z is None:
+            return torch.tensor(0.0, device=self._last_z.device if self._last_z is not None else "cpu")
+        z = self._last_z
+        excess = torch.clamp_min(z.abs() - self.z_bounds_soft_bound, 0.0)
+        return self.z_bounds_coef * excess.pow(2).sum(dim=-1).mean()
+
+    def _get_combined_obs(self, obs: TensorDict, *, store_z: bool = False) -> torch.Tensor:
         """Combined observation: cat([policy_obs, z_from_encoder]).
 
         Symmetric design: both actor and critic see the same encoder z.
+
+        Args:
+            obs: TensorDict with policy and privileged observations.
+            store_z: If True, stores z as _last_z for z_bounds_loss. Only
+                the act() path should set this to True.
         """
         policy_obs = obs[self._policy_obs_key]
-        z = self._encode(obs[self._privileged_key])
+        z = self._encode(obs[self._privileged_key], store_z=store_z)
         return torch.cat([policy_obs, z], dim=-1)
 
     # --- Action distribution ---
@@ -252,7 +288,7 @@ class ActorCriticEncoder(nn.Module):
 
     def act(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
         """Sample an action from the policy distribution."""
-        actor_obs = self.actor_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
+        actor_obs = self.actor_obs_normalizer(self._get_combined_obs(obs, store_z=True))  # type: ignore[operator]
         self._update_distribution(actor_obs)
         assert self.distribution is not None
         return self.distribution.sample()

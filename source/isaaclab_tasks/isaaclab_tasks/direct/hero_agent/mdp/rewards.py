@@ -99,7 +99,7 @@ class ALBCRewardCfg:
     # Penalty curriculum: linearly ramp penalty scale from 0 to 1 over this
     # ratio of max_iterations. 0 = disabled (penalties always at full weight).
     # Applies to all terms with negative weight.
-    penalty_curriculum_ratio: float = 0.5
+    penalty_curriculum_ratio: float = 0.25
 
     # TDC stability gate: multiply total reward by 0 when |1 - M_hat/M_true| >= 1
     # Only effective in TDC envs. Based on Baek et al. (ACC 2022).

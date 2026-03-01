@@ -154,6 +154,8 @@ def build_dr_config(scale: float, is_tdc: bool) -> DomainRandomizationCfg:
         "cob_offset_x", "cob_offset_y", "cob_offset_z",
         "cog_offset_x", "cog_offset_y", "cog_offset_z",
         "joint_stiffness_range", "joint_damping_range",
+        "yaw_damping_scale",
+        "joint_effort_limit_range",
         "joint_static_friction_range", "joint_viscous_friction_range",
     ]
     # tuple[int,int] fields lerp and round
@@ -514,6 +516,11 @@ def run_evaluation(
         elif hasattr(policy_nn, "reset"):
             policy_nn.reset(torch.ones(num_envs, 1, dtype=torch.bool, device=device))
 
+    # Clear episode length counter to prevent timeout during evaluation.
+    # Without this, _reset_framework() jitters episode_length_buf to [0, half_ep),
+    # causing ~60% of environments to timeout before the trajectory completes.
+    raw_env.episode_length_buf[:] = 0
+
     target_roll_rad = np.deg2rad(target_roll_deg)
     target_pitch_rad = np.deg2rad(target_pitch_deg)
     terminated_ever = np.zeros(num_envs, dtype=bool)
@@ -603,7 +610,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     else:
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         # e.g. "Isaac-HeroAgent-Encoder-Base-v0" -> "hero_agent_encoder_base"
-        folder_name = task_name.removeprefix("Isaac-").lower().replace("-", "_").rstrip("_v0")
+        folder_name = task_name.removeprefix("Isaac-").lower().replace("-", "_").removesuffix("_v0")
         output_dir = os.path.join("logs", "eval_dr", folder_name, ts)
     os.makedirs(output_dir, exist_ok=True)
     print(f"[INFO] Output directory: {output_dir}")
@@ -676,12 +683,12 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             runner = EncoderRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
             runner.load(resume_path, load_optimizer=False)
             policy = runner.get_inference_policy(device=device)
-            policy_nn = runner.alg.actor_critic
+            policy_nn = runner.alg.policy
         elif runner_cls_name == "BaseRunner":
             runner = BaseRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
             runner.load(resume_path, load_optimizer=False)
             policy = runner.get_inference_policy(device=device)
-            policy_nn = runner.alg.actor_critic
+            policy_nn = runner.alg.policy
         else:
             runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
             runner.load(resume_path, load_optimizer=False)

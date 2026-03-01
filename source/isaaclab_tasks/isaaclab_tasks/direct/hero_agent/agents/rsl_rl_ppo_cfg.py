@@ -70,6 +70,8 @@ class _RslRlPpoEncoderBaseCfg(_HeroAgentPolicyCfg):
     encoder_obs_normalization: bool = True
     policy_obs_dim: int = 13
     privileged_dim: int = 19
+    z_bounds_coef: float = 0.1
+    z_bounds_soft_bound: float = 0.9
 
 
 @configclass

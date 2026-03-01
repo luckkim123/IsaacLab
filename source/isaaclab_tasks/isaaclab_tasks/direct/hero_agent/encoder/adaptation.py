@@ -175,12 +175,15 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
         z_hat_raw = self.adapt_tconv(proprio_hist_norm)
         return self._activate_z(z_hat_raw)
 
-    def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
+    def _get_combined_obs(self, obs: TensorDict, *, store_z: bool = False) -> torch.Tensor:
         """Actor obs: use z_hat from adaptation module instead of z from encoder.
 
         z_hat is DETACHED before actor input so PPO gradient does not
         interfere with L2 loss supervision. AdaptRunner recomputes z_hat
         independently for L2 gradient flow.
+
+        Note: store_z is accepted for API compatibility with ActorCriticEncoder
+        but is a no-op here since z_hat is detached (bounds loss would have no gradient).
         """
         policy_obs = obs[self._policy_obs_key]
         z_hat = self.compute_z_hat(obs)
