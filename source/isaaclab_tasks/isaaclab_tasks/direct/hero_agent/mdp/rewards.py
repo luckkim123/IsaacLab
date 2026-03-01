@@ -72,7 +72,7 @@ class ALBCRewardCfg:
     # Joint velocity penalty: mean(joint_vel^2). Penalizes fast joint movement,
     # improving control stability and energy efficiency.
     # dt-scaled. Use with negative weight.
-    joint_velocity_weight: float = -1.0
+    joint_velocity_weight: float = -0.5
 
     # Linear error penalty: -min(||err||, max_err) / max_err.
     # Provides constant gradient at ALL error levels (unlike Gaussian which

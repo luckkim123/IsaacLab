@@ -105,7 +105,7 @@ class BaseRunner(OnPolicyRunner):
         Prevents exploration collapse under domain randomization.
         Always active regardless of other settings.
         """
-        min_std = 0.1
+        min_std = 0.15
         if hasattr(self.alg.policy, "log_std"):
             if not hasattr(self, "_cached_min_log_std"):
                 self._cached_min_log_std = torch.log(torch.tensor(min_std, device=self.device))

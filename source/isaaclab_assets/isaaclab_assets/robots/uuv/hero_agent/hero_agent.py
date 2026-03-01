@@ -178,7 +178,7 @@ HERO_AGENT_CFG = ArticulationCfg(
             # PhysX numerical damping (not hydrodynamic); 0.2 matches MarineGym
             linear_damping=0.2,
             angular_damping=0.2,
-            max_angular_velocity=180.0,  # deg/s (= pi rad/s), matching MarineGym
+            max_angular_velocity=720.0,  # deg/s (= 4*pi rad/s); arm links accumulate parent joint velocities
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=False,
