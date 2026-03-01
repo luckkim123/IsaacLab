@@ -77,7 +77,7 @@ class ALBCRewardCfg:
     # Linear error penalty: -min(||err||, max_err) / max_err.
     # Provides constant gradient at ALL error levels (unlike Gaussian which
     # vanishes at large errors). Clamped to [-1, 0]. dt-scaled.
-    linear_error_weight: float = -1.0
+    linear_error_weight: float = -3.0
     linear_error_max: float = 1.0  # clamp at ~57 degrees
 
     # Progress (potential-based shaping): PBRS (Ng 1999) preserves optimal policy.
@@ -87,11 +87,11 @@ class ALBCRewardCfg:
     progress_mode: str = "pbrs"  # "tanh" or "pbrs" (SAC-safe, policy-preserving)
     progress_gamma: float = 0.99  # discount factor for PBRS (match PPO gamma)
 
-    # Settling bonus: sigmoid(sharpness * (threshold - error)), dt-scaled.
-    # Dense gradient near target where Gaussian tracking has flat top.
+    # Settling bonus: binary per-step (1 if error < threshold, 0 otherwise).
+    # Incentivizes fast response time: sooner you enter threshold, more steps
+    # you accumulate reward. dt-scaled episode sum = weight * dt * (steps inside).
     settling_weight: float = 3.0
-    settling_threshold: float = 0.175  # radians (~10 deg)
-    settling_sharpness: float = 20.0  # 1/radians
+    settling_threshold: float = 0.087  # radians (~5 deg)
 
     # Angular velocity penalty (dt-scaled, discourages oscillation under DR)
     angular_velocity_weight: float = 0.0
@@ -374,24 +374,26 @@ def settling_bonus(
     _robot: Articulation,
     env: HeroAgentEnv,
     threshold: float = 0.10,
-    sharpness: float = 30.0,
     **_kwargs,
 ) -> torch.Tensor:
-    """Sigmoid-gated settling bonus: sigmoid(k * (threshold - error)).
+    """Binary per-step settling bonus: 1.0 if error < threshold, 0.0 otherwise.
 
-    Provides dense gradient in the near-target zone where Gaussian tracking
-    reward has a flat top (gradient -> 0 as error -> 0).
+    Incentivizes fast response time: the sooner the agent enters the threshold
+    zone, the more steps it accumulates reward for. With dt-scaling, episode sum
+    equals weight * dt * (number of steps within threshold).
 
-    Output [0, 1]. sigmoid(0)=0.5 at error=threshold.
+    Role separation from tracking/linear_error:
+        - tracking/linear_error: "reduce error magnitude" (continuous gradient)
+        - settling: "reach threshold quickly and stay there" (time-based)
+
     Markov-safe: depends only on current state. Compatible with SAC replay buffer.
-    dt-scaled (instantaneous state quality). Use with positive weight.
+    dt-scaled. Use with positive weight.
 
     Args:
         env: Environment instance (provides _potentials = ||[roll_err, pitch_err]||).
         threshold: Settling zone boundary in radians. Default 0.10 rad (~5.7 deg).
-        sharpness: Sigmoid slope coefficient (1/rad). Higher = sharper transition.
     """
-    return torch.sigmoid(sharpness * (threshold - env._potentials))
+    return (env._potentials < threshold).float()
 
 
 def angular_velocity_penalty(

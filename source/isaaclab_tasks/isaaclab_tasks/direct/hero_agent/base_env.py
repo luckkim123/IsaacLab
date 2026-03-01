@@ -338,10 +338,7 @@ class HeroAgentEnv(DirectRLEnv):
             terms["settling"] = RewardTermCfg(
                 func=settling_bonus,
                 weight=rcfg.settling_weight,
-                params={
-                    "threshold": rcfg.settling_threshold,
-                    "sharpness": rcfg.settling_sharpness,
-                },
+                params={"threshold": rcfg.settling_threshold},
             )
         if rcfg.angular_velocity_weight != 0.0:
             terms["angular_velocity"] = RewardTermCfg(

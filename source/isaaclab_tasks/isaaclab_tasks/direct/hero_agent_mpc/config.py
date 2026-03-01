@@ -69,7 +69,6 @@ class HeroAgentMPCEnvCfg(HeroAgentTrainEnvCfg):
         progress_gamma=0.99,  # match SAC gamma
         settling_weight=1.0,
         settling_threshold=0.10,
-        settling_sharpness=30.0,
     )
 
     # MPC extracts state directly from physics; obs noise would corrupt MPC state

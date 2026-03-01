@@ -9,7 +9,7 @@ This module provides the encoder-based actor-critic network:
     - ActorCriticEncoder: Base encoder network (Phase 1 teacher training)
 
 Architecture (symmetric critic):
-    Encoder: privileged (20D) -> MLP [256, 128, 64] -> tanh -> z (13D) in [-1, 1]
+    Encoder: privileged (19D) -> MLP [256, 128, 64] -> tanh -> z (13D) in [-1, 1]
     Actor:   cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> actions
     Critic:  cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> value (1D)
 
@@ -63,7 +63,7 @@ class ActorCriticEncoder(nn.Module):
         num_actions: int,
         # Encoder parameters
         policy_obs_dim: int = 13,
-        privileged_dim: int = 20,
+        privileged_dim: int = 19,
         encoder_hidden_dims: list[int] | tuple[int, ...] = (256, 128, 64),
         encoder_latent_dim: int = 13,
         encoder_activation: str = "elu",

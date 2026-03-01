@@ -104,10 +104,9 @@ def compute_privileged_obs(
         - Buoy inertia (2D): Ixx, Iyy
         - Payload (4D): mass, cog_offset (3)
         - Main body added mass surge (1D)
-        - Buoy added mass surge (1D)
 
-    Total: 20D (14D base + 4D payload + 2D added mass).
-    Removed from previous 28D: CoB x/y (4D), Izz (2D), body_mass (2D).
+    Total: 19D (14D base + 4D payload + 1D added mass).
+    Removed from previous 20D: buoy added mass surge (1D, zero encoder sensitivity).
 
     Args:
         env: The Hero Agent environment instance.
@@ -133,9 +132,9 @@ def compute_privileged_obs(
         )
         priv_obs.append(payload_priv)  # 4D: mass, cog_offset_xyz
 
-    # Surge added mass: effective inertia = I_rigid + M_added.
-    if env.cfg.state_space >= 20:
+    # Main body surge added mass: effective inertia = I_rigid + M_added.
+    # Buoy added mass surge excluded (zero encoder sensitivity across all runs).
+    if env.cfg.state_space >= 19:
         priv_obs.append(_added_mass_surge(env._hydro))  # 1D: main M_a surge
-        priv_obs.append(_added_mass_surge(env._buoy_hydro))  # 1D: buoy M_a surge
 
     return torch.cat(priv_obs, dim=-1)

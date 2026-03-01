@@ -69,7 +69,7 @@ class _RslRlPpoEncoderBaseCfg(_HeroAgentPolicyCfg):
     encoder_output_activation: str = "tanh"
     encoder_obs_normalization: bool = True
     policy_obs_dim: int = 13
-    privileged_dim: int = 20
+    privileged_dim: int = 19
 
 
 @configclass
@@ -187,7 +187,7 @@ class HeroAgentEncoderPPORunnerCfg(_HeroAgentBaseRunnerCfg):
     """RSL-RL PPO configuration for Hero Agent encoder training (HORA Phase 1).
 
     Uses ActorCriticEncoder with symmetric critic (HORA/RMA standard):
-        - Encoder: privileged (20D) -> tanh -> z (13D) in [-1, 1]
+        - Encoder: privileged (19D) -> tanh -> z (13D) in [-1, 1]
         - Actor: cat([policy_obs, z]) = 26D -> actions
         - Critic: cat([policy_obs, z]) = 26D -> value (symmetric, encoder gets critic gradient)
 
