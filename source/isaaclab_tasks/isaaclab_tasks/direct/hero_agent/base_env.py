@@ -37,6 +37,7 @@ from .config import HeroAgentEnvCfg
 from .mdp import (
     RewardManager,
     RewardTermCfg,
+    action_rate_penalty,
     angular_velocity_penalty,
     compute_policy_obs,
     compute_privileged_obs,
@@ -290,12 +291,12 @@ class HeroAgentEnv(DirectRLEnv):
     def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
         """Build the reward terms dict. Override in subclasses to add/modify terms.
 
-        Base terms (all raw per-step, NOT dt-scaled for strong PPO advantage signal):
+        Base terms (dt-scaled via RewardTermCfg.scale_by_dt, default True):
             1. tracking: Laplacian kernel exp(-||e||/sigma)
             2. linear_error: -min(||err||, max)/max (constant gradient tail)
             3. joint_oscillation: EMA high-pass joint vel^2
             4. joint_velocity: quadratic joint velocity penalty
-            5. progress: potential-based shaping (optional, default off)
+            5. progress: PBRS (scale_by_dt=False, per-transition not per-time)
         """
         rcfg = self.cfg.reward
         terms = {
@@ -320,6 +321,11 @@ class HeroAgentEnv(DirectRLEnv):
             terms["joint_velocity"] = RewardTermCfg(
                 func=joint_velocity_penalty,
                 weight=rcfg.joint_velocity_weight,
+            )
+        if rcfg.action_rate_weight != 0.0:
+            terms["action_rate"] = RewardTermCfg(
+                func=action_rate_penalty,
+                weight=rcfg.action_rate_weight,
             )
         if rcfg.progress_weight != 0.0:
             if rcfg.progress_mode == "pbrs":
@@ -831,6 +837,10 @@ class HeroAgentEnv(DirectRLEnv):
             prev_actions=self._prev_actions,
             env=self,  # Pass env for accessing potentials, EMA state
         )
+
+        # Termination penalty: large one-time penalty on early termination
+        if self.cfg.reward.termination_penalty != 0.0:
+            reward += self.reset_terminated * self.cfg.reward.termination_penalty
 
         # DORAEMON: accumulate episode return and settling error
         if self._doraemon is not None:

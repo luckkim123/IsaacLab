@@ -117,14 +117,14 @@ class _HeroAgentBaseRunnerCfg(RslRlOnPolicyRunnerCfg):
     """Shared runner fields and PPO algorithm for all Hero Agent configs."""
 
     seed = 30
-    num_steps_per_env = 32
+    num_steps_per_env = 64
     save_interval = 50
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
         entropy_coef=0.005,
-        num_learning_epochs=5,
+        num_learning_epochs=8,
         num_mini_batches=4,
         learning_rate=3.0e-4,
         schedule="adaptive",
@@ -206,7 +206,7 @@ class HeroAgentEncoderPPORunnerCfg(_HeroAgentBaseRunnerCfg):
         use_clipped_value_loss=True,
         clip_param=0.2,
         entropy_coef=0.005,
-        num_learning_epochs=5,
+        num_learning_epochs=8,
         num_mini_batches=4,
         learning_rate=3.0e-4,
         schedule="adaptive",

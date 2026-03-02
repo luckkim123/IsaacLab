@@ -46,17 +46,17 @@ if TYPE_CHECKING:
 class ALBCRewardCfg:
     """ALBC reward configuration with Laplacian tracking + regularization penalties.
 
-    Active terms (5, all raw per-step — NOT dt-scaled):
+    Active terms (dt-scaled via RewardTermCfg.scale_by_dt=True, except PBRS):
         tracking          * w_t   (Laplacian kernel, positive)
         settling          * w_s   (binary near-target bonus, positive)
         joint_oscillation * w_jo  (EMA high-pass filtered, negative)
         joint_velocity    * w_jv  (joint speed penalty, negative)
-        progress          * w_p   (PBRS, positive)
+        progress          * w_p   (PBRS, scale_by_dt=False)
 
     Design: tracking + settling dominate the positive signal. Two
     penalties (joint_oscillation, joint_velocity) provide directional
-    regularization. Raw per-step rewards (no dt-scaling) ensure PPO
-    advantage estimates have sufficient signal-to-noise ratio.
+    regularization. dt-scaling ensures time-invariant reward accumulation
+    across different simulation timesteps.
     """
 
     # Tracking (Laplacian kernel): exp(-||e|| / sigma)
@@ -67,13 +67,13 @@ class ALBCRewardCfg:
     # Joint oscillation penalty (EMA high-pass filtered joint velocity).
     # Penalizes high-frequency oscillation while allowing smooth movement.
     # dt-scaled. Use with negative weight.
-    joint_oscillation_weight: float = -2.5
+    joint_oscillation_weight: float = -1.0
     joint_oscillation_alpha: float = 0.2  # EMA smoothing factor (cutoff ~1.6Hz at 50Hz)
 
     # Joint velocity penalty: mean(joint_vel^2). Penalizes fast joint movement,
     # improving control stability and energy efficiency.
     # dt-scaled. Use with negative weight.
-    joint_velocity_weight: float = -0.5
+    joint_velocity_weight: float = -0.2
 
     # Linear error penalty: -min(||err||, max_err) / max_err.
     # Provides constant gradient at ALL error levels (unlike Gaussian which
@@ -93,6 +93,17 @@ class ALBCRewardCfg:
     # you accumulate reward. dt-scaled episode sum = weight * dt * (steps inside).
     settling_weight: float = 3.0
     settling_threshold: float = 0.087  # radians (~5 deg)
+
+    # Action rate penalty: mean(|a_t - a_{t-1}|^2). Penalizes rapid changes
+    # in policy output, directly suppressing command-level limit cycles.
+    # Unlike joint_oscillation (physical result after actuator PD filtering),
+    # this targets the policy decision itself. dt-scaled. Use with negative weight.
+    action_rate_weight: float = 0.0
+
+    # Termination penalty: one-time large negative reward on early termination.
+    # Discourages policies that trigger too_fast/bad_state terminations.
+    # NOT dt-scaled (one-time event, not a rate).
+    termination_penalty: float = -10.0
 
     # Angular velocity penalty (dt-scaled, discourages oscillation under DR)
     angular_velocity_weight: float = 0.0
@@ -397,6 +408,31 @@ def settling_bonus(
         threshold: Settling zone boundary in radians. Default 0.10 rad (~5.7 deg).
     """
     return (env._potentials < threshold).float()
+
+
+def action_rate_penalty(
+    _robot: Articulation,
+    actions: torch.Tensor,
+    prev_actions: torch.Tensor,
+    **_kwargs,
+) -> torch.Tensor:
+    """Quadratic action rate penalty: mean(|a_t - a_{t-1}|^2).
+
+    Penalizes rapid changes in policy output (command-level smoothness).
+    Unlike joint_oscillation which measures physical joint velocity after
+    actuator PD filtering, this directly targets the policy's decision
+    changes, suppressing command-level limit cycles.
+
+    dt-scaled. Use with negative weight.
+
+    Args:
+        actions: Current actions (num_envs, action_dim).
+        prev_actions: Previous step actions (num_envs, action_dim).
+
+    Returns:
+        (num_envs,) penalty value (positive; apply negative weight).
+    """
+    return torch.mean((actions - prev_actions) ** 2, dim=-1)
 
 
 def angular_velocity_penalty(

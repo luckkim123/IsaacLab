@@ -160,6 +160,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
+    # Play always evaluates at fixed target pose (0, 0, 0)
+    if hasattr(env_cfg, "randomize_target_attitude"):
+        env_cfg.randomize_target_attitude = False
+        env_cfg.target_attitude = (0.0, 0.0, 0.0)
+
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)

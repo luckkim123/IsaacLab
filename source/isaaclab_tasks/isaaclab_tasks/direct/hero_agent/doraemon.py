@@ -103,7 +103,7 @@ PARAM_SPECS: list[ParamSpec] = [
     ParamSpec("joint_damping", 1.0, 4.0, 3.0),
     ParamSpec("joint_static_friction", 0.0, 0.05, 0.015),
     ParamSpec("joint_viscous_friction", 0.0, 0.3, 0.1),
-    ParamSpec("payload_mass", 0.0, 1.5, 0.5),
+    ParamSpec("payload_mass", 0.0, 1.0, 0.35),
     ParamSpec("yaw_damping_scale", 0.5, 1.5, 1.0),
 ]
 

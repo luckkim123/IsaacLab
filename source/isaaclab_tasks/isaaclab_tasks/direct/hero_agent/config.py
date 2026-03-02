@@ -107,21 +107,6 @@ class DomainRandomizationCfg:
     joint_static_friction_range: tuple[float, float] = (0.0, 0.03)
     joint_viscous_friction_range: tuple[float, float] = (0.0, 0.2)
 
-    def disable_all(
-        self,
-        roll: float = 0.0,
-        pitch: float = 0.0,
-        yaw: float = 0.0,
-        position: tuple[float, float, float] = (0.0, 0.0, 4.5),
-    ) -> None:
-        """Fix all randomization to exact values for controlled experiments.
-
-        Delegates to ``fixed_pose()`` and copies all fields to self.
-        """
-        fixed = type(self).fixed_pose(roll, pitch, yaw, position)
-        for field_name in self.__dataclass_fields__:
-            setattr(self, field_name, getattr(fixed, field_name))
-
     @classmethod
     def fixed_pose(
         cls,
@@ -130,11 +115,7 @@ class DomainRandomizationCfg:
         yaw: float = 0.0,
         position: tuple[float, float, float] = (0.0, 0.0, 4.5),
     ) -> DomainRandomizationCfg:
-        """Create a DR config with all randomization disabled except a fixed pose.
-
-        Use this classmethod for declarative config construction (no mutable
-        ``disable_all()`` needed).
-        """
+        """Create a DR config with all randomization disabled except a fixed pose."""
         return cls(
             enable=True,
             roll_range=(roll, roll),
@@ -195,11 +176,11 @@ class DomainRandomizationCfg:
             water_density_range=(997.0, 1003.0),
             yaw_damping_scale=(0.8, 1.2),
             joint_effort_limit_range=(0.75, 1.25),
-            payload_mass_range=(0.0, 0.75),
+            payload_mass_range=(0.0, 0.5),
             payload_cog_offset_xy_radius=0.05,
             payload_cog_offset_z=(-0.015, 0.0),
             perturbation_force_range=(0.0, 2.5),
-            perturbation_torque_range=(0.0, 0.4),
+            perturbation_torque_range=(0.0, 0.2),
             action_latency_range=(0, 2),
         )
 
@@ -210,7 +191,7 @@ class DomainRandomizationCfg:
     # ==========================================================================
     enable_perturbation: bool = True
     perturbation_force_range: tuple[float, float] = (0.0, 5.0)  # N (Hero Agent ~10kg -> 0.5 m/s^2 max)
-    perturbation_torque_range: tuple[float, float] = (0.0, 0.75)  # Nm (5N x 0.15m half-body)
+    perturbation_torque_range: tuple[float, float] = (0.0, 0.4)  # Nm (~38% of restoring torque at 10deg)
     perturbation_interval: int = 100  # physics steps between events (~0.5s at 200Hz)
     perturbation_duration: int = 20  # physics steps active (~0.1s)
 
@@ -235,7 +216,7 @@ class DomainRandomizationCfg:
     # Payload is attached to the gripper body (fixed to base via base_to_gripper joint).
     # Offsets are in gripper body frame.
     # ==========================================================================
-    payload_mass_range: tuple[float, float] = (0.0, 1.5)  # kg (up to ~15% body weight)
+    payload_mass_range: tuple[float, float] = (0.0, 1.0)  # kg (up to ~10% body weight)
 
     # -- Payload CoG Offset (meters, relative to attachment point) --
     # XY sampled uniformly in disk of radius payload_cog_offset_xy_radius.
@@ -334,7 +315,7 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # Initialization and Termination
     # ==========================================================================
     initial_height: float = 4.5
-    max_angular_velocity: float = 2.0  # rad/s (~115 deg/s); terminate if roll/pitch rate exceeds this
+    max_angular_velocity: float = 3.14  # rad/s (~180 deg/s); terminate if roll/pitch rate exceeds this
     max_attitude_angle: float = 1.5708  # rad (~90 deg), prevents Lambda sign reversal
 
     # ==========================================================================
@@ -425,7 +406,7 @@ class HeroAgentEncoderBaseDebugEnvCfg(HeroAgentEncoderTrainEnvCfg):
     """Encoder-Base with half-strength DR and no DORAEMON for diagnostics.
 
     DR enabled at ~50% of full range (narrower scales, smaller offsets).
-    No DORAEMON (constant DR from start). Privileged obs (state_space=20)
+    No DORAEMON (constant DR from start). Privileged obs (state_space=19)
     inherited from HeroAgentEncoderTrainEnvCfg.
 
     If error diverges here, the encoder/reward design cannot handle even mild DR.

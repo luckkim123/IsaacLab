@@ -32,6 +32,7 @@ from .rewards import (
     ALBCRewardCfg,
     RewardManager,
     RewardTermCfg,
+    action_rate_penalty,
     angular_velocity_penalty,
     compute_stability_gate,
     joint_oscillation_penalty,
@@ -65,6 +66,7 @@ __all__ = [
     "RewardManager",
     "RewardTermCfg",
     # Rewards (functions)
+    "action_rate_penalty",
     "angular_velocity_penalty",
     "compute_stability_gate",
     "joint_velocity_penalty",
