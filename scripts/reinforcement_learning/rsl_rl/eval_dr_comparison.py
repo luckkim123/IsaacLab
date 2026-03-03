@@ -650,6 +650,10 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             resume_path = retrieve_file_path(args_cli.checkpoint)
         else:
             resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+            # Prefer best_model.pt when no checkpoint is explicitly specified
+            best_model_path = os.path.join(os.path.dirname(resume_path), "best_model.pt")
+            if os.path.isfile(best_model_path):
+                resume_path = best_model_path
         print(f"[INFO] Checkpoint: {resume_path}")
 
     # ---- Create env (initial DR = none) ----

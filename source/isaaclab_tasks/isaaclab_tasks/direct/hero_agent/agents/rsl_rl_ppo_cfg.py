@@ -201,12 +201,20 @@ class HeroAgentEncoderPPORunnerCfg(_HeroAgentBaseRunnerCfg):
     max_iterations = 2500
     experiment_name = "hero_agent_albc_encoder"
     obs_groups = _PRIVILEGED_OBS_GROUPS
+
+    # Encoder LR cosine decay schedule (fraction of max_iterations).
+    # Warmup: encoder LR stays at initial value. Decay: cosine anneal to min_ratio.
+    encoder_lr_warmup_frac: float = 0.2
+    """Fraction of max_iterations for encoder LR warmup (default: first 20%)."""
+
+    encoder_lr_min_ratio: float = 0.1
+    """Minimum encoder LR as fraction of initial (default: decay to 10%)."""
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
         entropy_coef=0.005,
-        num_learning_epochs=8,
+        num_learning_epochs=6,
         num_mini_batches=4,
         learning_rate=3.0e-4,
         schedule="adaptive",
