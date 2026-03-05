@@ -115,6 +115,7 @@ class ConstraintTRPO:
         self.barrier_t_final = barrier_t_final
         self.barrier_t_schedule_iters = barrier_t_schedule_iters
         self.adaptive_alpha = adaptive_threshold_alpha
+        self.z_bounds_coef = z_bounds_coef
 
         # Discounted budgets: d_k = D_k / (1 - gamma)
         self.d_k = torch.tensor(
@@ -126,30 +127,38 @@ class ConstraintTRPO:
         self.d_k_adaptive = self.d_k.clone()
 
         # Separate parameter groups:
-        # - Policy params (actor + encoder): TRPO natural gradient (no optimizer)
+        # - Actor params: TRPO natural gradient (no optimizer)
+        # - Encoder params: separate Adam (indirect distribution influence)
         # - Value params (critic + cost_critic): Adam optimizer
-        policy_param_names = set()
         value_params = []
-        self._policy_params = []
+        encoder_params = []
+        self._policy_params = []  # Actor-only for TRPO
 
         for name, param in self.policy.named_parameters():
             is_value = name.startswith("critic") or name.startswith("cost_critic")
+            is_encoder = name.startswith("encoder")
             if is_value:
                 value_params.append(param)
+            elif is_encoder:
+                encoder_params.append(param)
             else:
                 self._policy_params.append(param)
-                policy_param_names.add(name)
 
         self.value_optimizer = optim.Adam(value_params, lr=value_lr)
+        self._has_encoder_params = len(encoder_params) > 0
+        self.encoder_lr = 3e-3
+        if self._has_encoder_params:
+            self._encoder_params = encoder_params
+            self.encoder_optimizer = optim.Adam(encoder_params, lr=self.encoder_lr)
+        else:
+            self._encoder_params = []
+            self.encoder_optimizer = None
         logger.info(
-            "ConstraintTRPO: %d policy params, %d value params",
+            "ConstraintTRPO: %d actor params (TRPO), %d encoder params (Adam), %d value params (Adam)",
             len(self._policy_params),
+            len(encoder_params),
             len(value_params),
         )
-
-        # Encoder LR (compatibility with EncoderRunner schedule)
-        self._has_encoder_params = any("encoder" in n for n in policy_param_names)
-        self.encoder_lr = 3e-3  # placeholder for EncoderRunner compatibility
 
         # Storage
         self.storage: RolloutStorage | None = None
@@ -233,6 +242,11 @@ class ConstraintTRPO:
         # Store costs from environment
         step = self.storage.step
         costs = extras.get("costs", torch.zeros(self.storage.num_envs, self.num_constraints, device=self.device))
+
+        # Bootstrap cost values on time outs (same logic as reward bootstrapping)
+        if "time_outs" in extras:
+            time_out_mask = extras["time_outs"].unsqueeze(1).to(self.device)  # (N, 1)
+            costs = costs + self.cost_gamma * self._current_cost_values * time_out_mask
         self.storage.costs[step] = costs
         self.storage.cost_values[step] = self._current_cost_values
 
@@ -311,7 +325,9 @@ class ConstraintTRPO:
         mu = self.policy.action_mean
         sigma = self.policy.action_std
         kl = (
-            torch.log(sigma / old_sigma + 1e-5) + (old_sigma.pow(2) + (old_mu - mu).pow(2)) / (2.0 * sigma.pow(2)) - 0.5
+            torch.log((sigma / old_sigma).clamp(min=1e-5))
+            + (old_sigma.pow(2) + (old_mu - mu).pow(2)) / (2.0 * sigma.pow(2))
+            - 0.5
         )
         return kl.sum(dim=-1).mean()
 
@@ -336,7 +352,7 @@ class ConstraintTRPO:
         # KL divergence
         kl = (
             (
-                torch.log(sigma / old_sigma + 1e-5)
+                torch.log((sigma / old_sigma).clamp(min=1e-5))
                 + (old_sigma.pow(2) + (old_mu - mu).pow(2)) / (2.0 * sigma.pow(2))
                 - 0.5
             )
@@ -391,12 +407,19 @@ class ConstraintTRPO:
         actions: torch.Tensor,
         old_log_prob: torch.Tensor,
         advantages: torch.Tensor,
+        cost_advantages: torch.Tensor,
         old_mu: torch.Tensor,
         old_sigma: torch.Tensor,
         step_dir: torch.Tensor,
         old_loss: torch.Tensor,
+        mean_cost_returns: torch.Tensor,
     ) -> bool:
-        """Backtracking line search with KL and feasibility checks.
+        """Backtracking line search with KL and cost feasibility checks.
+
+        Checks three conditions:
+            1. Reward surrogate improvement > 0
+            2. KL divergence <= max_kl * 1.5
+            3. Cost feasibility: no constraint cost surrogate increases beyond margin
 
         Returns True if a valid step was found.
         """
@@ -411,9 +434,22 @@ class ConstraintTRPO:
                 new_loss = self._surrogate_loss(obs, actions, advantages, old_log_prob)
                 kl = self._kl_divergence(obs, old_mu, old_sigma)
 
-            # Check improvement and KL constraint
+                # Cost feasibility: check that cost surrogate ratio stays bounded
+                self.policy.act(obs)
+                new_log_prob = self.policy.get_actions_log_prob(actions)
+                new_ratio = torch.exp(new_log_prob - old_log_prob)
+                cost_feasible = True
+                for k in range(self.num_constraints):
+                    margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=1e-6)
+                    cost_surr_k = (new_ratio * cost_advantages[:, k]).mean()
+                    # Reject if cost surrogate exceeds half the margin
+                    if cost_surr_k > 0.5 * margin:
+                        cost_feasible = False
+                        break
+
+            # Check improvement, KL constraint, and cost feasibility
             improvement = old_loss - new_loss
-            if improvement > 0 and kl <= self.max_kl * 1.5:
+            if improvement > 0 and kl <= self.max_kl * 1.5 and cost_feasible:
                 logger.debug(
                     "Line search step %d: improvement=%.6f, kl=%.6f",
                     i,
@@ -512,20 +548,13 @@ class ConstraintTRPO:
                     cost_value_pred = self.policy.evaluate_costs(obs_mb)
                     cost_value_loss = (cost_returns_mb - cost_value_pred).pow(2).mean()
 
-                # Barrier loss
-                barrier_loss = self._compute_barrier_loss(mean_cost_returns)
+                # Barrier loss (amortized over all mini-batch updates)
+                num_total_updates = self.num_learning_epochs * self.num_mini_batches
+                barrier_loss = self._compute_barrier_loss(mean_cost_returns) / num_total_updates
 
-                # Z bounds loss
-                z_b_loss = torch.tensor(0.0, device=self.device)
-                if hasattr(self.policy, "z_bounds_loss"):
-                    z_b_loss = self.policy.z_bounds_loss()
-
-                # Combined value update
+                # Combined value update (value + cost_value + barrier only)
                 total_value_loss = (
-                    self.value_loss_coef * value_loss
-                    + self.cost_value_loss_coef * cost_value_loss
-                    + barrier_loss
-                    + z_b_loss
+                    self.value_loss_coef * value_loss + self.cost_value_loss_coef * cost_value_loss + barrier_loss
                 )
 
                 self.value_optimizer.zero_grad()
@@ -535,6 +564,19 @@ class ConstraintTRPO:
                     self.max_grad_norm,
                 )
                 self.value_optimizer.step()
+
+                # Z bounds loss: update encoder params via encoder_optimizer
+                # (not value_optimizer -- z_bounds_loss depends on encoder params)
+                # Requires fresh encoder forward pass to get _last_z with grad_fn
+                z_b_loss = torch.tensor(0.0, device=self.device)
+                if hasattr(self.policy, "z_bounds_loss") and self.encoder_optimizer is not None:
+                    self.policy.act(obs_mb)  # fresh forward to populate _last_z with grad
+                    z_b_loss = self.z_bounds_coef * self.policy.z_bounds_loss()
+                    if z_b_loss.requires_grad:
+                        self.encoder_optimizer.zero_grad()
+                        z_b_loss.backward()
+                        nn.utils.clip_grad_norm_(self._encoder_params, self.max_grad_norm)
+                        self.encoder_optimizer.step()
 
                 mean_value_loss += value_loss.item()
                 mean_cost_value_loss += cost_value_loss.item()
@@ -551,18 +593,41 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         # 2. TRPO policy update (full-batch, single step)
         # ------------------------------------------------------------------
+        # Cost advantages for IPO policy gradient (flatten: (T*N, K))
+        cost_advantages_flat = self.storage.cost_advantages.flatten(0, 1).clone()  # (B, K)
+
         # Compute policy gradient
         self.policy.act(obs_flat)
         log_prob = self.policy.get_actions_log_prob(actions_flat)
         entropy = self.policy.entropy
 
-        surrogate_loss = -(advantages_flat.squeeze() * torch.exp(log_prob - old_log_prob_flat.squeeze())).mean()
-        # Add entropy bonus to gradient
-        policy_loss = surrogate_loss - self.entropy_coef * entropy.mean()
+        ratio = torch.exp(log_prob - old_log_prob_flat.squeeze())
+        reward_surrogate = -(advantages_flat.squeeze() * ratio).mean()
+
+        # IPO: barrier-weighted cost surrogate
+        # For each constraint k, add (1/t) * E[ratio * cost_advantage_k] / margin_k
+        cost_surrogate = torch.tensor(0.0, device=self.device)
+        for k in range(self.num_constraints):
+            margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=1e-6)
+            cost_surrogate += (ratio * cost_advantages_flat[:, k]).mean() / (self.barrier_t * margin)
+
+        # Combined: reward surrogate + cost barrier surrogate - entropy
+        policy_loss = reward_surrogate + cost_surrogate - self.entropy_coef * entropy.mean()
 
         mean_entropy = entropy.mean().item()
 
-        # Gradient of surrogate loss w.r.t. policy params
+        # Compute encoder gradients now (but defer step until after TRPO line search)
+        _encoder_grads_cache: list[torch.Tensor | None] = []
+        if self.encoder_optimizer is not None:
+            encoder_grads = torch.autograd.grad(
+                policy_loss,
+                self._encoder_params,
+                retain_graph=True,
+                allow_unused=True,
+            )
+            _encoder_grads_cache = list(encoder_grads)
+
+        # Gradient of surrogate loss w.r.t. actor params (TRPO)
         g = self._flat_grad(policy_loss, self._policy_params, retain_graph=True)
 
         # Natural gradient via conjugate gradient: x = F^{-1} g
@@ -584,11 +649,22 @@ class ConstraintTRPO:
             actions_flat,
             old_log_prob_flat.squeeze(),
             advantages_flat.squeeze(),
+            cost_advantages_flat,
             old_mu_flat,
             old_sigma_flat,
             step_dir,
             old_loss,
+            mean_cost_returns,
         )
+
+        # Apply deferred encoder Adam step (after TRPO line search)
+        if self.encoder_optimizer is not None and _encoder_grads_cache:
+            self.encoder_optimizer.zero_grad()
+            for p, g_enc in zip(self._encoder_params, _encoder_grads_cache):
+                if g_enc is not None:
+                    p.grad = g_enc
+            nn.utils.clip_grad_norm_(self._encoder_params, self.max_grad_norm)
+            self.encoder_optimizer.step()
 
         # Compute KL after update for logging
         with torch.no_grad():
@@ -599,10 +675,20 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         for k in range(self.num_constraints):
             j_c_k = mean_cost_returns[k].item()
-            self.d_k_adaptive[k] = max(
-                self.d_k[k].item(),
-                j_c_k + self.adaptive_alpha * self.d_k[k].item(),
-            )
+            target = max(self.d_k[k].item(), j_c_k + self.adaptive_alpha * self.d_k[k].item())
+            # EMA toward target: allows tightening when cost decreases
+            self.d_k_adaptive[k] = (1.0 - self.adaptive_alpha) * self.d_k_adaptive[k] + self.adaptive_alpha * target
+
+        # ------------------------------------------------------------------
+        # 3b. Store constraint monitoring metrics as instance attributes
+        #     (read by ConstraintEncoderRunner._log_constraint_metrics)
+        # ------------------------------------------------------------------
+        self._last_cost_returns = [mean_cost_returns[k].item() for k in range(self.num_constraints)]
+        self._last_cost_return_stds = [cost_returns_flat[:, k].std().item() for k in range(self.num_constraints)]
+        self._last_feasibility_rates = [
+            (cost_returns_flat[:, k] < self.d_k[k]).float().mean().item() for k in range(self.num_constraints)
+        ]
+        self._last_line_search_success = float(ls_success)
 
         # Clear storage
         self.storage.clear()
@@ -611,26 +697,19 @@ class ConstraintTRPO:
         # are indexed by the same step counter via add_transitions)
 
         # ------------------------------------------------------------------
-        # Return loss dict (compatible with OnPolicyRunner logging)
+        # Return loss dict (only actual optimization losses)
         # ------------------------------------------------------------------
         loss_dict: dict[str, float] = {
             "value_function": mean_value_loss,
-            "surrogate": surrogate_loss.item(),
+            "surrogate": reward_surrogate.item(),
+            "cost_surrogate": cost_surrogate.item(),
             "entropy": mean_entropy,
             "kl": mean_kl,
             "cost_value": mean_cost_value_loss,
             "barrier": mean_barrier_loss,
-            "line_search_success": float(ls_success),
         }
         if hasattr(self.policy, "z_bounds_loss"):
             loss_dict["z_bounds"] = mean_z_bounds_loss
-
-        # Per-constraint cost returns for logging
-        for k in range(self.num_constraints):
-            loss_dict[f"cost_return_{k}"] = mean_cost_returns[k].item()
-            loss_dict[f"d_k_adaptive_{k}"] = self.d_k_adaptive[k].item()
-
-        loss_dict["barrier_t"] = self.barrier_t
 
         return loss_dict
 

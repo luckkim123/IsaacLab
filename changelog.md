@@ -4,6 +4,55 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-05] NORBC Constrained RL (IPO + TRPO) Code Review Fixes
+
+### Context
+Systematic code review of constraint_trpo.py identified 9 issues (2 critical, 1 moderate-critical,
+3 moderate, 3 minor). The most significant finding: cost constraints were computed via GAE but
+never incorporated into the policy gradient -- the policy optimized reward only, making the
+"constrained" RL functionally equivalent to unconstrained TRPO with a barrier that only nudged
+value estimates. Additionally, encoder params were updated via TRPO natural gradient (FIM step
+size), but encoder affects the distribution only indirectly through z, making FIM calibration
+inappropriate.
+
+Runtime fixes during testing:
+- z_bounds_loss crashed (`RuntimeError: does not require grad`) because `_last_z` was stored
+  from inference-mode rollout collection. Fixed by adding fresh forward pass before z_bounds_loss.
+- Line search crashed (`RuntimeError: normal expects all elements of std >= 0.0`) because
+  encoder Adam step was applied between gradient computation and line search, corrupting params.
+  Fixed by deferring encoder Adam step until after line search completes.
+
+### Changed
+- `constraint_trpo.py`: **[Critical]** Added barrier-weighted cost surrogate to TRPO policy loss.
+  Each constraint k contributes `(1/t) * E[ratio * cost_adv_k] / margin_k`, making policy aware
+  of constraints via IPO gradient
+- `constraint_trpo.py`: **[Critical]** Added cost feasibility check to line search. New third
+  condition: rejects steps where any cost surrogate exceeds 50% of constraint margin
+- `constraint_trpo.py`: Added cost value bootstrapping on episode time-outs (matching reward
+  bootstrapping pattern: `costs + cost_gamma * V_C * timeout_mask`)
+- `constraint_trpo.py`: Barrier loss amortized by `num_epochs * num_mini_batches` to prevent
+  20x amplification from being applied as constant in every mini-batch update
+- `constraint_trpo.py`: Separated encoder params from TRPO natural gradient into dedicated
+  Adam optimizer (lr=3e-3). Actor uses TRPO, encoder uses Adam, value/cost_critic use Adam.
+  Encoder gradients computed eagerly but Adam step deferred until after TRPO line search
+- `constraint_trpo.py`: Fixed KL epsilon from `log(sigma/old_sigma + 1e-5)` to
+  `log((sigma/old_sigma).clamp(min=1e-5))` removing positive bias
+- `constraint_trpo.py`: Adaptive threshold now uses EMA toward target (allows tightening)
+  instead of `max()` (loosening only)
+- `constraint_trpo.py`: `z_bounds_coef` parameter now stored and applied as coefficient
+  (was previously accepted but unused)
+- `constraint_trpo.py`: z_bounds_loss moved from value optimizer (gradient waste on encoder
+  params) to encoder_optimizer with fresh forward pass to populate `_last_z` with grad_fn
+
+### Notes
+- User also added constraint monitoring metrics (`_last_cost_returns`, `_last_cost_return_stds`,
+  `_last_feasibility_rates`) and cleaned up loss_dict to separate optimization losses from
+  monitoring metrics
+- All Pyright warnings are expected (RSL-RL/Isaac Sim imports, dynamic storage attributes)
+- First training run pending to verify all fixes work together end-to-end
+
+---
+
 ## [2026-03-05] Theoretical/Logical Error Fixes
 
 ### Context
