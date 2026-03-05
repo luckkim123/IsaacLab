@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 
+from ..utils.logging import flush_metrics
 from .encoder_runner import EncoderRunner
 
 logger = logging.getLogger(__name__)
@@ -50,22 +51,39 @@ class ConstraintEncoderRunner(EncoderRunner):
             self._log_constraint_metrics(locs, iteration)
 
     def _log_constraint_metrics(self, _locs: dict, iteration: int) -> None:
-        """Log constraint metrics to TensorBoard/WandB."""
+        """Log constraint metrics to TensorBoard/WandB.
+
+        Reads monitoring metrics stored as instance attributes on ConstraintTRPO
+        (populated during update()) and logs them with proper prefixes:
+            - Constraint/: barrier state, cost returns, feasibility
+            - Policy/: line search success
+        """
         alg = self.alg
         if not hasattr(alg, "num_constraints"):
             return
 
         K = alg.num_constraints
+        metrics: dict[str, float] = {}
 
-        # Barrier steepness
+        # Barrier steepness + schedule progress
         if hasattr(alg, "barrier_t"):
-            self.writer.add_scalar("Constraint/barrier_t", alg.barrier_t, iteration)
+            metrics["Constraint/barrier_t"] = alg.barrier_t
+            if alg.barrier_t_schedule_iters > 0:
+                metrics["Constraint/barrier_schedule_progress"] = min(1.0, iteration / alg.barrier_t_schedule_iters)
 
-        # Per-constraint adaptive thresholds
-        if hasattr(alg, "d_k_adaptive"):
-            for k in range(K):
-                self.writer.add_scalar(
-                    f"Constraint/d_k_adaptive_{k}",
-                    alg.d_k_adaptive[k].item(),
-                    iteration,
-                )
+        # Per-constraint metrics
+        for k in range(K):
+            if hasattr(alg, "d_k_adaptive"):
+                metrics[f"Constraint/d_k_adaptive_{k}"] = alg.d_k_adaptive[k].item()
+            if hasattr(alg, "_last_cost_returns"):
+                metrics[f"Constraint/cost_return_{k}"] = alg._last_cost_returns[k]
+            if hasattr(alg, "_last_cost_return_stds"):
+                metrics[f"Constraint/cost_return_std_{k}"] = alg._last_cost_return_stds[k]
+            if hasattr(alg, "_last_feasibility_rates"):
+                metrics[f"Constraint/feasibility_rate_{k}"] = alg._last_feasibility_rates[k]
+
+        # Line search (policy update metric)
+        if hasattr(alg, "_last_line_search_success"):
+            metrics["Policy/line_search_success"] = alg._last_line_search_success
+
+        flush_metrics(self.writer, metrics, iteration, self.logger_type)

@@ -45,11 +45,33 @@ Runtime fixes during testing:
   params) to encoder_optimizer with fresh forward pass to populate `_last_z` with grad_fn
 
 ### Notes
-- User also added constraint monitoring metrics (`_last_cost_returns`, `_last_cost_return_stds`,
-  `_last_feasibility_rates`) and cleaned up loss_dict to separate optimization losses from
-  monitoring metrics
 - All Pyright warnings are expected (RSL-RL/Isaac Sim imports, dynamic storage attributes)
 - First training run pending to verify all fixes work together end-to-end
+
+## [2026-03-05] NORBC Constraint Logging Refactor
+
+### Context
+Constraint monitoring metrics (barrier_t, d_k_adaptive, cost_return, line_search_success) were
+logged twice per iteration: once via loss_dict (prefixed `Loss/` by OnPolicyRunner.log() at
+on_policy_runner.py:212) and again via `_log_constraint_metrics()` (prefixed `Constraint/`).
+This caused 8 redundant scalar writes and polluted the `Loss/` WandB panel with non-loss metrics.
+
+### Changed
+- `constraint_encoder_runner.py`: Expanded `_log_constraint_metrics()` to read all constraint
+  metrics from algorithm instance attributes and log with proper prefixes (`Constraint/` for
+  barrier/cost metrics, `Policy/` for line_search_success). Now uses `flush_metrics()` utility
+  instead of raw `writer.add_scalar()` calls
+- `constraint_encoder_runner.py`: Added `flush_metrics` import from utils.logging
+
+### Added
+- `constraint_encoder_runner.py`: New metrics -- `Constraint/barrier_schedule_progress` (0~1),
+  `Constraint/cost_return_std_{k}`, `Constraint/feasibility_rate_{k}` (fraction of envs
+  satisfying constraint budget)
+
+### Removed
+- `constraint_trpo.py`: Removed `cost_return_{k}`, `d_k_adaptive_{k}`, `barrier_t`,
+  `line_search_success` from loss_dict (these were non-loss metrics causing `Loss/` prefix
+  pollution). Now stored as `_last_*` instance attributes read by runner
 
 ---
 
