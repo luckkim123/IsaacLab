@@ -133,6 +133,18 @@ class HeroAgentEnv(DirectRLEnv):
                 f"(payload provides 4D of the {self.cfg.state_space}D privileged obs)"
             )
 
+        # Validate control frequency: control_decimation must be a positive divisor
+        # of episode steps. step_dt * control_decimation gives the control period.
+        if cfg.control_decimation < 1:
+            raise ValueError(f"control_decimation={cfg.control_decimation} must be >= 1")
+        control_dt = self.step_dt * cfg.control_decimation
+        control_freq = 1.0 / control_dt
+        if control_freq < 10.0 or control_freq > 1000.0:
+            raise ValueError(
+                f"Control frequency {control_freq:.1f}Hz (step_dt={self.step_dt}, "
+                f"control_decimation={cfg.control_decimation}) outside valid range [10, 1000]Hz"
+            )
+
         self._init_body_ids()
         self._init_hydrodynamics()
         self._init_payload()
@@ -397,6 +409,10 @@ class HeroAgentEnv(DirectRLEnv):
             self._tde_ema_alpha = self.cfg.tde_nu_dot_ema_alpha
             self._tde_l1 = HERO_AGENT_ALBC_LINK1_LENGTH
             self._tde_l2 = HERO_AGENT_ALBC_LINK2_LENGTH
+            # History buffers for true TDE (H_t approx H_{t-L}):
+            # Lambda*p_EE and T_b from previous step, matching TDC controller pattern
+            self._tde_Lambda_p_EE_prev = torch.zeros(self.num_envs, 2, device=self.device)
+            self._tde_T_b_prev = torch.zeros(self.num_envs, 2, device=self.device)
 
         # Action latency buffer (ring buffer for delayed action application)
         max_latency = rand_cfg.action_latency_range[1]
@@ -728,14 +744,18 @@ class HeroAgentEnv(DirectRLEnv):
     def _compute_tde_obs(self) -> torch.Tensor:
         """Compute TDE-based dynamics mismatch observation H_hat (2D).
 
-        H_hat encodes all unmodeled dynamics using the TDE identity:
-            H = Lambda * p_EE + T_b - M_bar * nu_dot
+        Uses Time Delay Estimation: H_hat_t = H_{t-L}, computed from
+        **previous step** values of Lambda*p_EE and T_b, matching the
+        TDC controller's TDE implementation.
 
-        Where H = (M_true - M_bar)*nu_dot + B_t captures inertia error,
-        coupling, Coriolis, damping, gravity, and external disturbances.
+        TDE identity:
+            H_hat = (Lambda*p_EE)_prev + T_b_prev - M_bar * nu_dot
+
+        Where H captures inertia error, coupling, Coriolis, damping,
+        gravity, and external disturbances.
 
         Uses EMA-filtered angular acceleration to reduce sensor noise.
-        On the first step after reset, returns zeros (no valid finite diff).
+        On the first step after reset, returns zeros (no valid history).
 
         Returns:
             H_hat tensor of shape (num_envs, 2).
@@ -752,7 +772,7 @@ class HeroAgentEnv(DirectRLEnv):
         # Buoyancy force from buoy hydro model (per-env, DR'd)
         F_bu = self._buoy_hydro.buoyancy_force
 
-        # Lambda * p_EE (2x2 anti-diagonal @ 2D EE position)
+        # Current Lambda * p_EE (computed now, used as _prev next step)
         lf = torch.cos(pitch) * torch.cos(roll) * F_bu
         joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
         g1 = joint_pos[:, 0]
@@ -762,23 +782,30 @@ class HeroAgentEnv(DirectRLEnv):
         # Lambda = [[0, lf], [-lf, 0]] -> Lambda @ [x, y] = [lf*y, -lf*x]
         Lambda_p_EE_roll = lf * p_EE_y
         Lambda_p_EE_pitch = -lf * p_EE_x
+        Lambda_p_EE_current = torch.stack([Lambda_p_EE_roll, Lambda_p_EE_pitch], dim=-1)
 
-        # Restoring torque T_b
+        # Current restoring torque T_b (computed now, used as _prev next step)
         h = self._tde_h
         T_b_roll = -torch.cos(pitch) * torch.sin(roll) * F_bu * h
         T_b_pitch = -torch.sin(pitch) * F_bu * h
+        T_b_current = torch.stack([T_b_roll, T_b_pitch], dim=-1)
 
-        # H_hat = Lambda*p_EE + T_b - M_bar*nu_dot
-        H_hat_roll = Lambda_p_EE_roll + T_b_roll - self._tde_m_hat[0] * self._tde_nu_dot_filtered[:, 0]
-        H_hat_pitch = Lambda_p_EE_pitch + T_b_pitch - self._tde_m_hat[1] * self._tde_nu_dot_filtered[:, 1]
+        # H_hat = (Lambda*p_EE)_prev + T_b_prev - M_bar*nu_dot  (TDE: use previous step)
+        lp_prev = self._tde_Lambda_p_EE_prev
+        tb_prev = self._tde_T_b_prev
+        nu_dot_f = self._tde_nu_dot_filtered
+        H_hat_roll = lp_prev[:, 0] + tb_prev[:, 0] - self._tde_m_hat[0] * nu_dot_f[:, 0]
+        H_hat_pitch = lp_prev[:, 1] + tb_prev[:, 1] - self._tde_m_hat[1] * nu_dot_f[:, 1]
 
         h_hat = torch.stack([H_hat_roll, H_hat_pitch], dim=-1)
 
         # Zero out for envs without valid history (first step after reset)
         h_hat = torch.where(self._tde_is_initialized.unsqueeze(-1), h_hat, torch.zeros_like(h_hat))
 
-        # Update history
+        # Update history for next step
         self._tde_nu_prev.copy_(nu)
+        self._tde_Lambda_p_EE_prev.copy_(Lambda_p_EE_current)
+        self._tde_T_b_prev.copy_(T_b_current)
         self._tde_is_initialized[:] = True
         self._tde_h_hat = h_hat
 
@@ -1088,6 +1115,8 @@ class HeroAgentEnv(DirectRLEnv):
             self._tde_nu_prev[env_ids] = 0.0
             self._tde_nu_dot_filtered[env_ids] = 0.0
             self._tde_h_hat[env_ids] = 0.0
+            self._tde_Lambda_p_EE_prev[env_ids] = 0.0
+            self._tde_T_b_prev[env_ids] = 0.0
             self._tde_is_initialized[env_ids] = False
 
         # Reset action latency: sample new per-env latency and clear history

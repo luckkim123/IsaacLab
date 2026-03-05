@@ -190,10 +190,15 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
         return torch.cat([policy_obs, z_hat.detach()], dim=-1)
 
     def evaluate(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
-        """Critic uses encoder z (symmetric design), not z_hat from adaptation."""
+        """Critic uses z_hat from adaptation, matching actor's state representation.
+
+        PPO requires V(s) to evaluate the same state the actor sees.
+        Using encoder z here would bias the advantage estimate since the
+        actor conditions on z_hat (from adapt_tconv), not z (from encoder).
+        """
         policy_obs = obs[self._policy_obs_key]
-        z = self._encode(obs[self._privileged_key])
-        critic_obs = torch.cat([policy_obs, z], dim=-1)
+        z_hat = self.compute_z_hat(obs)
+        critic_obs = torch.cat([policy_obs, z_hat.detach()], dim=-1)
         critic_obs = self.critic_obs_normalizer(critic_obs)  # type: ignore[operator]
         return self.critic(critic_obs)
 

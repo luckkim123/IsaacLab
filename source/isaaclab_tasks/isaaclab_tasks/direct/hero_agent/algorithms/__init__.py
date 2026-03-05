@@ -6,5 +6,10 @@
 """RL algorithms for Hero Agent environments."""
 
 from .constraint_trpo import ConstraintTRPO
+from .ppo_patch import apply_ppo_patch
 
-__all__ = ["ConstraintTRPO"]
+# Ensure PPO is patched with encoder support when this module is imported.
+# This runs before any PPO instance is created (imported by rsl_rl_ppo_cfg.py).
+apply_ppo_patch()
+
+__all__ = ["ConstraintTRPO", "apply_ppo_patch"]

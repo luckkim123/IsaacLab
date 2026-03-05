@@ -4,6 +4,57 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-05] Theoretical/Logical Error Fixes
+
+### Context
+Conducted systematic theoretical audit of the Hero Agent codebase against TDE/HORA
+theory after NORBC paper analysis. Three exploration agents reported 32 potential issues;
+direct code reading and formula verification classified them into 3 critical, 2 high,
+4 medium issues and 4 false positives (pitch T_b derivation, action latency indexing,
+z activation mismatch, Lambda_inv math -- all verified correct).
+
+Key findings:
+- C1: TDE observation computed instantaneous residual (current-step values) instead of
+  time-delayed estimate (previous-step values). TDC controller correctly uses _prev
+  buffers but the observation function did not, violating the TDE identity H_t ~ H_{t-L}.
+- C2: Phase 2 (Adapt-Base) critic used encoder z while actor used z_hat from adapt_tconv.
+  PPO assumes V(s) evaluates the same state the actor sees -- using different z representations
+  biases the advantage estimate.
+- C3: TDCController initialized with F_bu.mean() (scalar), losing per-env DR variation.
+  First episode steps used averaged Lambda matrix.
+- H1/M4: z_bounds_loss and encoder weight_decay patches only existed in site-packages
+  rsl_rl/algorithms/ppo.py (not git-tracked, lost on container rebuild).
+- M2 (EMA reset to 0): Re-verified as correct -- joint velocities are reset to 0 in
+  events.py, so EMA=0 matches the post-reset state. No fix needed.
+
+### Added
+- `algorithms/ppo_patch.py`: Monkey-patch module for RSL-RL PPO. Adds encoder-aware
+  optimizer (separate param groups with WD=1e-5 for encoder, WD=0 for actor/critic)
+  and z_bounds_loss integration. Auto-applied at import time via `algorithms/__init__.py`.
+  Idempotent: detects if site-packages is already patched and skips.
+
+### Changed
+- `base_env.py`: TDE observation now uses previous-step Lambda*p_EE and T_b buffers
+  (2 new history tensors: `_tde_Lambda_p_EE_prev`, `_tde_T_b_prev`), matching TDC
+  controller's TDE pattern. Added control frequency validation (decimation >= 1,
+  frequency in [10Hz, 1000Hz]).
+- `encoder/adaptation.py`: Phase 2 critic `evaluate()` changed from encoder z to
+  z_hat (detached), ensuring actor and critic see the same state representation.
+- `controllers/tdc.py`: `__init__` F_bu parameter type changed from `float` to
+  `torch.Tensor | float`, supporting per-env tensor initialization.
+- `tdc_env.py`: Passes full per-env F_bu tensor to TDCController instead of
+  `F_bu.mean().item()`.
+- `algorithms/__init__.py`: Added `apply_ppo_patch()` auto-invocation on import.
+
+### Notes
+- TDE-Base-v0 training should be re-evaluated after C1 fix (observation semantics changed)
+- Phase 2 Adapt-Base value loss convergence may improve with C2 fix (critic sees actor's state)
+- M2 (EMA reset) verified as non-issue: joint velocities reset to 0 in events.py
+- False positives documented: pitch T_b formula, action latency indexing, z activation
+  consistency, Lambda_inv DLS math -- all verified correct against derivation docs
+
+---
+
 ## [2026-03-05] IPO + TRPO Constrained RL Implementation
 
 ### Context

@@ -98,7 +98,7 @@ class TDCController:
         num_envs: int,
         device: str,
         cfg: TDCControllerCfg,
-        F_bu: float = 26.24,
+        F_bu: torch.Tensor | float = 26.24,
         dt: float = 0.02,
     ) -> None:
         """Initialize TDC controller.
@@ -107,7 +107,7 @@ class TDCController:
             num_envs: Number of parallel environments.
             device: Computation device (e.g., "cuda:0").
             cfg: TDC controller configuration.
-            F_bu: Buoyancy force magnitude in N (from buoy hydrodynamics).
+            F_bu: Buoyancy force magnitude in N. Per-env tensor (num_envs,) or scalar.
             dt: Control timestep in seconds (= TDE delay L).
         """
         self.num_envs = num_envs
@@ -132,7 +132,10 @@ class TDCController:
         self._nu_dot_ema_alpha = cfg.nu_dot_ema_alpha
 
         # Buoyancy force (per-env, updated at reset from hydrodynamics model)
-        self._F_bu = torch.full((num_envs,), F_bu, device=device, dtype=torch.float32)
+        if isinstance(F_bu, torch.Tensor):
+            self._F_bu = F_bu.to(device=device, dtype=torch.float32).clone()
+        else:
+            self._F_bu = torch.full((num_envs,), F_bu, device=device, dtype=torch.float32)
 
         # --- History buffers for TDE ---
         self._nu_prev = torch.zeros(num_envs, 2, device=device)

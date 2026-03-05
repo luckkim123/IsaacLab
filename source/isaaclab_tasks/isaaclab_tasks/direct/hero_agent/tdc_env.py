@@ -71,12 +71,12 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         # TDC dt = step_dt * control_decimation (50Hz with dec=1, ctrl_dec=4)
         self._tdc_dt = self.step_dt * self.cfg.control_decimation
 
-        # TDC controller
+        # TDC controller (per-env F_bu for correct Lambda from first step)
         self._tdc = TDCController(
             num_envs=self.num_envs,
             device=self.device,
             cfg=tdc_cfg,
-            F_bu=F_bu.mean().item() if F_bu.dim() > 0 else float(F_bu),
+            F_bu=F_bu,
             dt=self._tdc_dt,
         )
 
