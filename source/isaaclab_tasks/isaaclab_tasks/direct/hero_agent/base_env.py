@@ -1081,8 +1081,8 @@ class HeroAgentEnv(DirectRLEnv):
 
         for buf in (self._actions, self._prev_actions, self._prev_actions_obs):
             buf[env_ids] = 0.0
-        # Warm-start EMA with current joint velocity (avoids transient spike after reset)
-        self._ema_joint_vel[env_ids] = self._robot.data.joint_vel[env_ids][:, self._albc_joint_ids]
+        # Reset EMA to zero (velocity is reset to 0 in _reset_task_and_state after this)
+        self._ema_joint_vel[env_ids] = 0.0
         self._cumulative_effort[env_ids] = 0.0
 
         # Reset perturbation state: randomize timer phase to decorrelate envs

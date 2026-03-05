@@ -315,8 +315,8 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # Initialization and Termination
     # ==========================================================================
     initial_height: float = 4.5
-    max_angular_velocity: float = 3.14  # rad/s (~180 deg/s); terminate if roll/pitch rate exceeds this
-    max_attitude_angle: float = 1.5708  # rad (~90 deg), prevents Lambda sign reversal
+    max_angular_velocity: float = math.pi  # rad/s (~180 deg/s); terminate if roll/pitch rate exceeds this
+    max_attitude_angle: float = math.pi / 2.0  # rad (~90 deg), prevents Lambda sign reversal
 
     # ==========================================================================
     # Domain Randomization
