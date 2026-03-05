@@ -662,27 +662,37 @@ class ConstraintTRPO:
 
         # Step size: sqrt(2 * max_kl / (g^T F^{-1} g))
         shs = 0.5 * nat_grad.dot(g)  # 0.5 * x^T F x approximation
-        step_scale = torch.sqrt(self.max_kl / (shs + 1e-8))
-        step_dir = step_scale * nat_grad
 
-        # Line search with feasibility check
-        with torch.no_grad():
-            old_loss = self._surrogate_loss(
-                obs_flat, actions_flat, advantages_flat.squeeze(-1), old_log_prob_flat.squeeze(-1)
-            )
+        if shs <= 0 or not torch.isfinite(shs):
+            # CG approximation broke positive-definiteness -- skip TRPO step
+            logger.warning("TRPO: shs=%.6e non-positive or non-finite, skipping policy step", shs.item())
+            ls_success = False
+        else:
+            step_scale = torch.sqrt(self.max_kl / shs)
+            step_dir = step_scale * nat_grad
 
-        ls_success = self._line_search(
-            obs_flat,
-            actions_flat,
-            old_log_prob_flat.squeeze(-1),
-            advantages_flat.squeeze(-1),
-            cost_advantages_flat,
-            old_mu_flat,
-            old_sigma_flat,
-            step_dir,
-            old_loss,
-            mean_cost_returns,
-        )
+            if not torch.isfinite(step_dir).all():
+                logger.warning("TRPO: step_dir contains NaN/Inf, skipping policy step")
+                ls_success = False
+            else:
+                # Line search with feasibility check
+                with torch.no_grad():
+                    old_loss = self._surrogate_loss(
+                        obs_flat, actions_flat, advantages_flat.squeeze(-1), old_log_prob_flat.squeeze(-1)
+                    )
+
+                ls_success = self._line_search(
+                    obs_flat,
+                    actions_flat,
+                    old_log_prob_flat.squeeze(-1),
+                    advantages_flat.squeeze(-1),
+                    cost_advantages_flat,
+                    old_mu_flat,
+                    old_sigma_flat,
+                    step_dir,
+                    old_loss,
+                    mean_cost_returns,
+                )
 
         # Apply deferred encoder Adam step (after TRPO line search)
         if self.encoder_optimizer is not None and _encoder_grads_cache:

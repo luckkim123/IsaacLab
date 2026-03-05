@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-05] Fix TRPO NaN Crash from Negative shs
+
+### Context
+ConstraintTRPO training crashed at iteration 1 with `RuntimeError: normal expects all
+elements of std >= 0.0`. Root cause: `shs = 0.5 * nat_grad.dot(g)` can be negative when
+conjugate gradient approximation breaks Fisher matrix positive-definiteness. When `shs < 0`,
+`torch.sqrt(max_kl / shs)` produces NaN, which propagates through `step_dir` into
+`_set_policy_params_flat()`, corrupting `log_std` to NaN. `exp(NaN) = NaN` fails the
+Normal distribution's std >= 0 check. Standard TRPO implementations (OpenAI Spinning Up,
+stable-baselines3) all guard against `shs <= 0` -- this guard was missing.
+
+### Fixed
+- `algorithms/constraint_trpo.py`: Added `shs <= 0` and `torch.isfinite(shs)` guard before
+  step size computation. When triggered, TRPO policy step is skipped (same as line search
+  failure) and a warning is logged
+- `algorithms/constraint_trpo.py`: Added `torch.isfinite(step_dir).all()` guard as secondary
+  safety net against NaN/Inf in the natural gradient step direction
+- `algorithms/constraint_trpo.py`: Removed `+ 1e-8` epsilon from `shs` denominator (no longer
+  needed since only positive `shs` enters the sqrt)
+
+### Notes
+- Previous 10-iteration success was lucky -- `shs < 0` is stochastic depending on CG quality
+- Policy params are preserved when step is skipped (no regression from guard)
+- Ruff lint + format clean
+
+---
+
 ## [2026-03-05] Theoretical Analysis - ConstraintTRPO Parameter Refinement
 
 ### Context
