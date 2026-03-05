@@ -72,6 +72,10 @@ class ConstraintTRPO:
         barrier_t_final: float = 50.0,
         barrier_t_schedule_iters: int = 1000,
         adaptive_threshold_alpha: float = 0.1,
+        adaptive_ema_alpha: float | None = None,
+        # Line search acceptance thresholds
+        line_search_kl_margin: float = 1.5,
+        line_search_cost_margin: float = 0.5,
         # Entropy
         entropy_coef: float = 0.005,
         # Encoder z bounds
@@ -114,7 +118,10 @@ class ConstraintTRPO:
         self.barrier_t = barrier_t
         self.barrier_t_final = barrier_t_final
         self.barrier_t_schedule_iters = barrier_t_schedule_iters
-        self.adaptive_alpha = adaptive_threshold_alpha
+        self.adaptive_threshold_scale = adaptive_threshold_alpha
+        self.adaptive_ema_alpha = adaptive_ema_alpha if adaptive_ema_alpha is not None else adaptive_threshold_alpha
+        self.line_search_kl_margin = line_search_kl_margin
+        self.line_search_cost_margin = line_search_cost_margin
         self.z_bounds_coef = z_bounds_coef
 
         if cost_gamma >= 1.0:
@@ -425,8 +432,13 @@ class ConstraintTRPO:
 
         Checks three conditions:
             1. Reward surrogate improvement > 0
-            2. KL divergence <= max_kl * 1.5
-            3. Cost feasibility: no constraint cost surrogate increases beyond margin
+            2. KL divergence <= max_kl * line_search_kl_margin (soft KL constraint)
+            3. Cost feasibility: cost surrogate stays below line_search_cost_margin * margin
+
+        The KL margin (default 1.5x) relaxes the hard TRPO constraint during line
+        search to avoid overly conservative steps -- the natural gradient direction
+        already targets max_kl. The cost margin (default 0.5x) ensures the policy
+        step consumes at most half the remaining constraint budget per step.
 
         Returns True if a valid step was found.
         """
@@ -449,14 +461,13 @@ class ConstraintTRPO:
                 for k in range(self.num_constraints):
                     margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=1e-6)
                     cost_surr_k = (new_ratio * cost_advantages[:, k]).mean()
-                    # Reject if cost surrogate exceeds half the margin
-                    if cost_surr_k > 0.5 * margin:
+                    if cost_surr_k > self.line_search_cost_margin * margin:
                         cost_feasible = False
                         break
 
             # Check improvement, KL constraint, and cost feasibility
             improvement = old_loss - new_loss
-            if improvement > 0 and kl <= self.max_kl * 1.5 and cost_feasible:
+            if improvement > 0 and kl <= self.max_kl * self.line_search_kl_margin and cost_feasible:
                 logger.debug(
                     "Line search step %d: improvement=%.6f, kl=%.6f",
                     i,
@@ -691,9 +702,12 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         for k in range(self.num_constraints):
             j_c_k = mean_cost_returns[k].item()
-            target = max(self.d_k[k].item(), j_c_k + self.adaptive_alpha * self.d_k[k].item())
+            # Threshold target: at least d_k, or current cost + scale * d_k
+            target = max(self.d_k[k].item(), j_c_k + self.adaptive_threshold_scale * self.d_k[k].item())
             # EMA toward target: allows tightening when cost decreases
-            self.d_k_adaptive[k] = (1.0 - self.adaptive_alpha) * self.d_k_adaptive[k] + self.adaptive_alpha * target
+            self.d_k_adaptive[k] = (1.0 - self.adaptive_ema_alpha) * self.d_k_adaptive[
+                k
+            ] + self.adaptive_ema_alpha * target
 
         # ------------------------------------------------------------------
         # 3b. Store constraint monitoring metrics as instance attributes

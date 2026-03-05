@@ -315,6 +315,9 @@ class RslRlConstraintTRPOAlgorithmCfg:
     barrier_t_final: float = 50.0
     barrier_t_schedule_iters: int = 1000
     adaptive_threshold_alpha: float = 0.1
+    adaptive_ema_alpha: float | None = None
+    line_search_kl_margin: float = 1.5
+    line_search_cost_margin: float = 0.5
 
     # Entropy
     entropy_coef: float = 0.005

@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-05] Theoretical Analysis - ConstraintTRPO Parameter Refinement
+
+### Context
+Comprehensive theoretical/logical deep analysis of the entire Hero Agent codebase against
+NORBC paper theory. The analysis confirmed no Tier 1 theoretical errors exist across TDC
+controller, reward system, encoder/adaptation gradient flow, and ConstraintTRPO (TRPO + IPO
++ Cost GAE + Barrier). Three Tier 2 design observations were identified and addressed:
+(1) line search acceptance constants were hardcoded without theoretical justification,
+(2) adaptive threshold alpha served dual purpose (threshold scale + EMA smoothing) limiting
+independent tuning, (3) reward crossover at ~20 deg (no code change needed, PBRS mitigates).
+
+### Changed
+- `algorithms/constraint_trpo.py`: Parameterized line search constants -- `line_search_kl_margin`
+  (default 1.5, was hardcoded) and `line_search_cost_margin` (default 0.5, was hardcoded). Added
+  docstring explaining the design rationale for both constants
+- `algorithms/constraint_trpo.py`: Split `adaptive_alpha` into `adaptive_threshold_scale` (controls
+  `target = max(d_k, j_c_k + scale * d_k)`) and `adaptive_ema_alpha` (controls EMA smoothing).
+  When `adaptive_ema_alpha=None` (default), falls back to `adaptive_threshold_alpha` for backward
+  compatibility
+- `agents/rsl_rl_ppo_cfg.py`: Added `adaptive_ema_alpha`, `line_search_kl_margin`,
+  `line_search_cost_margin` config fields to `RslRlConstraintTRPOAlgorithmCfg`
+
+### Added
+- `docs/THEORETICAL_ANALYSIS.md`: Full theoretical analysis document covering TDC controller,
+  reward system, NORBC constraint pipeline, DR, and encoder/adaptation gradient flow. Includes
+  per-component verification results and design observation rationale
+
+### Notes
+- All default values match previous hardcoded behavior -- zero functional change without explicit config
+- Ruff lint + format clean. No new Pyright issues beyond pre-existing false positives
+
 ## [2026-03-05] NORBC Constrained RL - 2nd Review Fixes (6 Issues)
 
 ### Context
