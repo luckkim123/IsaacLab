@@ -117,6 +117,9 @@ class ConstraintTRPO:
         self.adaptive_alpha = adaptive_threshold_alpha
         self.z_bounds_coef = z_bounds_coef
 
+        if cost_gamma >= 1.0:
+            raise ValueError(f"cost_gamma must be < 1.0, got {cost_gamma}")
+
         # Discounted budgets: d_k = D_k / (1 - gamma)
         self.d_k = torch.tensor(
             [b / (1.0 - cost_gamma) for b in constraint_budgets],
@@ -144,6 +147,7 @@ class ConstraintTRPO:
             else:
                 self._policy_params.append(param)
 
+        self._value_params = value_params
         self.value_optimizer = optim.Adam(value_params, lr=value_lr)
         self._has_encoder_params = len(encoder_params) > 0
         self.encoder_lr = 3e-3
@@ -159,6 +163,9 @@ class ConstraintTRPO:
             len(encoder_params),
             len(value_params),
         )
+
+        # Iteration counter for barrier schedule (updated in update())
+        self._iteration = 0
 
         # Storage
         self.storage: RolloutStorage | None = None
@@ -496,6 +503,10 @@ class ConstraintTRPO:
             2. TRPO policy update (full-batch natural gradient + line search)
             3. Update adaptive thresholds and clear storage
         """
+        # Update barrier schedule before this iteration's update
+        self.update_barrier_schedule(self._iteration)
+        self._iteration += 1
+
         # Flatten storage for value update (clone to escape inference_mode)
         obs_flat = self.storage.observations.flatten(0, 1).clone()
         # Clone all storage tensors -- they are inference tensors (collected under
@@ -548,9 +559,14 @@ class ConstraintTRPO:
                     cost_value_pred = self.policy.evaluate_costs(obs_mb)
                     cost_value_loss = (cost_returns_mb - cost_value_pred).pow(2).mean()
 
-                # Barrier loss (amortized over all mini-batch updates)
+                # Barrier loss: use mini-batch cost predictions (differentiable) for gradient path
                 num_total_updates = self.num_learning_epochs * self.num_mini_batches
-                barrier_loss = self._compute_barrier_loss(mean_cost_returns) / num_total_updates
+                if hasattr(self.policy, "evaluate_costs"):
+                    # cost_value_pred has gradient to cost_critic params
+                    mb_mean_cost_pred = cost_value_pred.mean(dim=0)  # (K,)
+                    barrier_loss = self._compute_barrier_loss(mb_mean_cost_pred) / num_total_updates
+                else:
+                    barrier_loss = torch.tensor(0.0, device=self.device)
 
                 # Combined value update (value + cost_value + barrier only)
                 total_value_loss = (
@@ -558,11 +574,11 @@ class ConstraintTRPO:
                 )
 
                 self.value_optimizer.zero_grad()
+                # Clear stale encoder grads to prevent accumulation across mini-batches
+                if self.encoder_optimizer is not None:
+                    self.encoder_optimizer.zero_grad()
                 total_value_loss.backward()
-                nn.utils.clip_grad_norm_(
-                    [p for p in self.policy.parameters() if p.grad is not None],
-                    self.max_grad_norm,
-                )
+                nn.utils.clip_grad_norm_(self._value_params, self.max_grad_norm)
                 self.value_optimizer.step()
 
                 # Z bounds loss: update encoder params via encoder_optimizer
@@ -601,8 +617,8 @@ class ConstraintTRPO:
         log_prob = self.policy.get_actions_log_prob(actions_flat)
         entropy = self.policy.entropy
 
-        ratio = torch.exp(log_prob - old_log_prob_flat.squeeze())
-        reward_surrogate = -(advantages_flat.squeeze() * ratio).mean()
+        ratio = torch.exp(log_prob - old_log_prob_flat.squeeze(-1))
+        reward_surrogate = -(advantages_flat.squeeze(-1) * ratio).mean()
 
         # IPO: barrier-weighted cost surrogate
         # For each constraint k, add (1/t) * E[ratio * cost_advantage_k] / margin_k
@@ -641,14 +657,14 @@ class ConstraintTRPO:
         # Line search with feasibility check
         with torch.no_grad():
             old_loss = self._surrogate_loss(
-                obs_flat, actions_flat, advantages_flat.squeeze(), old_log_prob_flat.squeeze()
+                obs_flat, actions_flat, advantages_flat.squeeze(-1), old_log_prob_flat.squeeze(-1)
             )
 
         ls_success = self._line_search(
             obs_flat,
             actions_flat,
-            old_log_prob_flat.squeeze(),
-            advantages_flat.squeeze(),
+            old_log_prob_flat.squeeze(-1),
+            advantages_flat.squeeze(-1),
             cost_advantages_flat,
             old_mu_flat,
             old_sigma_flat,

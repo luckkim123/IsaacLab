@@ -6,8 +6,8 @@
 """EncoderRunner with constraint metrics logging and barrier schedule for IPO.
 
 Extends EncoderRunner to:
-    - Update ConstraintTRPO barrier schedule each iteration
     - Log per-constraint cost returns, feasibility rates, and barrier_t
+    (Barrier schedule is updated internally in ConstraintTRPO.update())
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class ConstraintEncoderRunner(EncoderRunner):
         """No-op: ConstraintTRPO updates encoder via natural gradient, not Adam."""
 
     def log(self, locs: dict, width: int = 80, pad: int = 35) -> None:
-        """Extended log with barrier schedule update and constraint metrics.
+        """Extended log with constraint metrics.
 
         Args:
             locs: Local variables from the learn() training loop.
@@ -41,10 +41,6 @@ class ConstraintEncoderRunner(EncoderRunner):
         super().log(locs, width, pad)
 
         iteration = locs["it"]
-
-        # Update barrier schedule in ConstraintTRPO
-        if hasattr(self.alg, "update_barrier_schedule"):
-            self.alg.update_barrier_schedule(iteration)
 
         # Log constraint-specific metrics
         if self.log_dir is not None and not self.disable_logs:
@@ -68,7 +64,7 @@ class ConstraintEncoderRunner(EncoderRunner):
         # Barrier steepness + schedule progress
         if hasattr(alg, "barrier_t"):
             metrics["Constraint/barrier_t"] = alg.barrier_t
-            if alg.barrier_t_schedule_iters > 0:
+            if hasattr(alg, "barrier_t_schedule_iters") and alg.barrier_t_schedule_iters > 0:
                 metrics["Constraint/barrier_schedule_progress"] = min(1.0, iteration / alg.barrier_t_schedule_iters)
 
         # Per-constraint metrics

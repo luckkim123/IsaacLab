@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-05] NORBC Constrained RL - 2nd Review Fixes (6 Issues)
+
+### Context
+Deep review of constraint_trpo.py after 1st round fixes uncovered 6 additional issues, two
+critical. The barrier loss had no gradient path: `mean_cost_returns` (from `cost_returns_flat.mean()`)
+is a detached leaf tensor, so `_compute_barrier_loss(mean_cost_returns)` always produced a constant
+scalar -- IPO barrier training on the cost critic was silently disabled. Second, `clip_grad_norm_`
+clipped ALL policy params (including encoder), and `value_optimizer.zero_grad()` didn't clear encoder
+grads from `total_value_loss.backward()`, causing stale encoder gradients to accumulate across
+mini-batches and corrupt the subsequent z_bounds_loss update.
+
+### Fixed
+- `constraint_trpo.py`: **[Critical]** Barrier loss now uses mini-batch `cost_value_pred.mean(dim=0)`
+  (differentiable through cost_critic) instead of detached `mean_cost_returns`. The cost critic now
+  receives actual IPO barrier gradient signal
+- `constraint_trpo.py`: **[Critical]** `clip_grad_norm_` scoped to `self._value_params` only (was
+  clipping all params including encoder). Added `encoder_optimizer.zero_grad()` before value backward
+  to prevent encoder gradient accumulation across mini-batches
+- `constraint_trpo.py`: All 5 `.squeeze()` calls changed to `.squeeze(-1)` to prevent shape collapse
+  when batch size B=1 (lines 620-621, 660, 666-667)
+- `constraint_trpo.py`: Barrier schedule moved from runner's `log()` (1-iteration lag) to the start
+  of `update()` with internal `_iteration` counter. First iteration now uses correct barrier_t
+- `constraint_trpo.py`: Added `cost_gamma >= 1.0` validation in `__init__` (prevents silent inf
+  from `d_k = b / (1.0 - cost_gamma)`)
+
+### Changed
+- `constraint_encoder_runner.py`: Removed `update_barrier_schedule` call from `log()` (moved to
+  ConstraintTRPO.update()). Added `hasattr` guard for `barrier_t_schedule_iters` access. Updated
+  docstrings to reflect new barrier schedule ownership
+
+### Notes
+- Pyright warnings are all pre-existing false positives (RSL-RL/Isaac Sim not pip-installed)
+- Smoke test requires Isaac Sim runtime (user manual verification pending)
+
 ## [2026-03-05] NORBC Constrained RL (IPO + TRPO) Code Review Fixes
 
 ### Context
