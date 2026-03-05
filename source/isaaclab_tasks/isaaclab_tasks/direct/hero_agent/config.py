@@ -41,7 +41,7 @@ from isaaclab_assets.robots.uuv import (
 
 from .controllers import TDCControllerCfg
 from .doraemon import DoraemonCfg
-from .mdp import ALBCRewardCfg
+from .mdp import ALBCConstraintCfg, ALBCRewardCfg
 
 
 @configclass
@@ -560,3 +560,24 @@ class HeroAgentAdaptBaseEnvCfg(HeroAgentEncoderTrainEnvCfg):
 
     proprio_history_len: int = 30
     proprio_feature_dim: int = 8  # body_state(2) + ang_vel(2) + joint_pos(2) + prev_actions(2)
+
+
+@configclass
+class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
+    """Constrained encoder training with IPO (Interior-point Policy Optimization).
+
+    Inherits from HeroAgentEncoderTrainEnvCfg (state_space=19 for privileged obs).
+    Adds constraint configuration for the NORBC-style constrained RL pipeline.
+
+    Constraint terms (joint_velocity, joint_oscillation) that were previously
+    soft reward penalties are moved to explicit constraints. Their reward weights
+    are zeroed to avoid double-counting.
+    """
+
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg()
+
+    # Zero out reward weights for terms moved to constraints
+    reward: ALBCRewardCfg = ALBCRewardCfg(
+        joint_velocity_weight=0.0,
+        joint_oscillation_weight=0.0,
+    )

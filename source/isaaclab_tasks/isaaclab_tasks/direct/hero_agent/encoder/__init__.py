@@ -12,10 +12,12 @@ Neural network architectures for the HORA pipeline:
 """
 
 from .actor_critic_encoder import ActorCriticEncoder
+from .actor_critic_encoder_constrained import ActorCriticEncoderConstrained
 from .adaptation import ActorCriticEncoderAdapt, ProprioAdaptTConv
 
 __all__ = [
     "ActorCriticEncoder",
+    "ActorCriticEncoderConstrained",
     "ActorCriticEncoderAdapt",
     "ProprioAdaptTConv",
 ]

@@ -24,16 +24,21 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 # Register custom classes in RSL-RL runner module namespace.
 # The runner resolves policy class_name and runner class dynamically.
 # This injection makes custom classes resolvable in that scope.
+from ..algorithms import ConstraintTRPO
 from ..encoder import (
     ActorCriticEncoder,
     ActorCriticEncoderAdapt,
+    ActorCriticEncoderConstrained,
 )
-from ..runners import BaseRunner, EncoderRunner
+from ..runners import BaseRunner, ConstraintEncoderRunner, EncoderRunner
 
 _runner_module.ActorCriticEncoder = ActorCriticEncoder
 _runner_module.ActorCriticEncoderAdapt = ActorCriticEncoderAdapt
+_runner_module.ActorCriticEncoderConstrained = ActorCriticEncoderConstrained
 _runner_module.BaseRunner = BaseRunner
 _runner_module.EncoderRunner = EncoderRunner
+_runner_module.ConstraintEncoderRunner = ConstraintEncoderRunner
+_runner_module.ConstraintTRPO = ConstraintTRPO
 
 
 # =============================================================================
@@ -265,3 +270,84 @@ class HeroAgentAdaptBaseRunnerCfg(_HeroAgentBaseRunnerCfg):
     max_grad_norm: float = 10.0
     """Gradient clipping threshold for adapt_tconv. Relaxed vs Phase 1 (1.0) to
     preserve fast initial convergence while catching anomalous gradient spikes."""
+
+
+# =============================================================================
+# Constrained Encoder (IPO + TRPO) Configurations
+# =============================================================================
+
+
+@configclass
+class RslRlConstraintTRPOAlgorithmCfg:
+    """Algorithm configuration for ConstraintTRPO (IPO).
+
+    These fields are forwarded as kwargs to ConstraintTRPO.__init__().
+    The class_name tells the runner to instantiate ConstraintTRPO instead of PPO.
+    """
+
+    class_name: str = "ConstraintTRPO"
+
+    # TRPO parameters
+    max_kl: float = 0.01
+    cg_iters: int = 10
+    cg_damping: float = 0.1
+    line_search_max_backtracks: int = 10
+    line_search_shrink_factor: float = 0.5
+
+    # Value function
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    value_loss_coef: float = 1.0
+    cost_value_loss_coef: float = 1.0
+    value_lr: float = 3e-4
+    max_grad_norm: float = 1.0
+
+    # GAE
+    gamma: float = 0.99
+    lam: float = 0.95
+
+    # Constraint / IPO
+    num_constraints: int = 3
+    constraint_budgets: tuple[float, ...] = (0.1, 0.05, 0.1)
+    cost_gamma: float = 0.99
+    cost_lam: float = 0.95
+    barrier_t: float = 1.0
+    barrier_t_final: float = 50.0
+    barrier_t_schedule_iters: int = 1000
+    adaptive_threshold_alpha: float = 0.1
+
+    # Entropy
+    entropy_coef: float = 0.005
+
+    # Encoder z bounds
+    z_bounds_coef: float = 0.3
+
+
+@configclass
+class RslRlPpoActorCriticEncoderConstrainedCfg(_RslRlPpoEncoderBaseCfg):
+    """Policy config for ActorCriticEncoderConstrained (encoder + cost critic)."""
+
+    class_name: str = "ActorCriticEncoderConstrained"
+    num_constraints: int = 3
+    cost_critic_hidden_dims: list[int] = [256, 128, 64]
+
+
+@configclass
+class HeroAgentConstrainedEncoderRunnerCfg(_HeroAgentBaseRunnerCfg):
+    """Runner configuration for constrained encoder training (IPO + TRPO).
+
+    Uses ConstraintEncoderRunner which inherits EncoderRunner and adds
+    barrier schedule + constraint metrics logging.
+    """
+
+    class_name: str = "ConstraintEncoderRunner"
+    max_iterations = 2500
+    experiment_name = "hero_agent_constrained_encoder"
+    obs_groups = _PRIVILEGED_OBS_GROUPS
+
+    # Encoder LR schedule (inherited from EncoderRunner)
+    encoder_lr_warmup_frac: float = 0.2
+    encoder_lr_min_ratio: float = 0.1
+
+    algorithm = RslRlConstraintTRPOAlgorithmCfg()
+    policy = RslRlPpoActorCriticEncoderConstrainedCfg()

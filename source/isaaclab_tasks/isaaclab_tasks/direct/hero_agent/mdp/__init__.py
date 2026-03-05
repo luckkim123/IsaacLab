@@ -12,6 +12,13 @@ This module provides:
 Following Isaac Lab conventions, all MDP components are organized under this module.
 """
 
+from .constraints import (
+    ALBCConstraintCfg,
+    accumulated_rotation_cost,
+    compute_all_costs,
+    joint_oscillation_cost,
+    joint_velocity_cost,
+)
 from .events import (
     randomize_body_mass,
     randomize_hydrodynamics,
@@ -45,6 +52,12 @@ from .rewards import (
 )
 
 __all__ = [
+    # Constraints
+    "ALBCConstraintCfg",
+    "accumulated_rotation_cost",
+    "compute_all_costs",
+    "joint_oscillation_cost",
+    "joint_velocity_cost",
     # Events
     "randomize_body_mass",
     "randomize_hydrodynamics",

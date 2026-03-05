@@ -12,29 +12,35 @@ This module provides:
     - HeroAgentTDEBasePPORunnerCfg: TDE-Base with training enhancements
     - HeroAgentEncoderPPORunnerCfg: HORA Phase 1 with extrinsics encoder
     - HeroAgentAdaptBaseRunnerCfg: Phase 2 adaptation (supervised, base RL)
-
-MPC agent configurations are in the hero_agent_mpc.agents package.
+    - HeroAgentConstrainedEncoderRunnerCfg: IPO + TRPO constrained encoder training
 """
 
-from ..encoder import ActorCriticEncoder, ActorCriticEncoderAdapt
+from ..encoder import ActorCriticEncoder, ActorCriticEncoderAdapt, ActorCriticEncoderConstrained
 from .rsl_rl_ppo_cfg import (
     HeroAgentAdaptBaseRunnerCfg,
+    HeroAgentConstrainedEncoderRunnerCfg,
     HeroAgentEncoderPPORunnerCfg,
     HeroAgentPPORunnerCfg,
     HeroAgentPrivBasePPORunnerCfg,
     HeroAgentTDEBasePPORunnerCfg,
+    RslRlConstraintTRPOAlgorithmCfg,
     RslRlPpoActorCriticEncoderAdaptCfg,
     RslRlPpoActorCriticEncoderCfg,
+    RslRlPpoActorCriticEncoderConstrainedCfg,
 )
 
 __all__ = [
     "ActorCriticEncoder",
     "ActorCriticEncoderAdapt",
+    "ActorCriticEncoderConstrained",
     "HeroAgentPPORunnerCfg",
     "HeroAgentPrivBasePPORunnerCfg",
     "HeroAgentTDEBasePPORunnerCfg",
     "HeroAgentEncoderPPORunnerCfg",
     "HeroAgentAdaptBaseRunnerCfg",
+    "HeroAgentConstrainedEncoderRunnerCfg",
     "RslRlPpoActorCriticEncoderCfg",
     "RslRlPpoActorCriticEncoderAdaptCfg",
+    "RslRlPpoActorCriticEncoderConstrainedCfg",
+    "RslRlConstraintTRPOAlgorithmCfg",
 ]

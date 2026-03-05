@@ -200,6 +200,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "BaseRunner": ("isaaclab_tasks.direct.hero_agent.runners", "BaseRunner"),
         "EncoderRunner": ("isaaclab_tasks.direct.hero_agent.runners", "EncoderRunner"),
         "AdaptRunner": ("isaaclab_tasks.direct.hero_agent.runners", "AdaptRunner"),
+        "ConstraintEncoderRunner": ("isaaclab_tasks.direct.hero_agent.runners", "ConstraintEncoderRunner"),
         "SACMPCRunner": ("isaaclab_tasks.direct.hero_agent_mpc.runners", "SACMPCRunner"),
     }
 

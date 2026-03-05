@@ -19,8 +19,7 @@ Available Tasks:
     - Isaac-HeroAgent-Encoder-Base-v0: Encoder training with privileged info
     - Isaac-HeroAgent-TDC-v0: Classical TDC control (no RL)
     - Isaac-HeroAgent-Adapt-Base-v0: Phase 2 adaptation (proprio history -> z_hat, base RL)
-
-MPC environments are in the separate hero_agent_mpc package.
+    - Isaac-HeroAgent-Constrained-Encoder-Base-v0: IPO + TRPO constrained encoder training
 """
 
 import gymnasium as gym
@@ -30,6 +29,7 @@ from .base_env import HeroAgentEnv
 from .config import (
     DomainRandomizationCfg,
     HeroAgentAdaptBaseEnvCfg,
+    HeroAgentConstrainedEncoderEnvCfg,
     HeroAgentEncoderBaseDebugEnvCfg,
     HeroAgentEncoderTrainEnvCfg,
     HeroAgentEnvCfg,
@@ -144,6 +144,17 @@ gym.register(
     },
 )
 
+# Constrained Encoder (IPO + TRPO): reward constraints via log-barrier
+gym.register(
+    id="Isaac-HeroAgent-Constrained-Encoder-Base-v0",
+    entry_point="isaaclab_tasks.direct.hero_agent:HeroAgentEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": "isaaclab_tasks.direct.hero_agent:HeroAgentConstrainedEncoderEnvCfg",
+        "rsl_rl_cfg_entry_point": "isaaclab_tasks.direct.hero_agent.agents:HeroAgentConstrainedEncoderRunnerCfg",
+    },
+)
+
 __all__ = [
     # Environments
     "HeroAgentEnv",
@@ -158,6 +169,7 @@ __all__ = [
     "HeroAgentEncoderBaseDebugEnvCfg",
     "HeroAgentEncoderTrainEnvCfg",
     "HeroAgentAdaptBaseEnvCfg",
+    "HeroAgentConstrainedEncoderEnvCfg",
     "DomainRandomizationCfg",
     "TDCControllerCfg",
 ]

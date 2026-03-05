@@ -12,6 +12,7 @@ AdaptRunner handles Phase 2 supervised adaptation.
 
 from .adapt_runner import AdaptRunner
 from .base_runner import BaseRunner
+from .constraint_encoder_runner import ConstraintEncoderRunner
 from .encoder_runner import EncoderRunner
 
-__all__ = ["BaseRunner", "EncoderRunner", "AdaptRunner"]
+__all__ = ["BaseRunner", "EncoderRunner", "AdaptRunner", "ConstraintEncoderRunner"]

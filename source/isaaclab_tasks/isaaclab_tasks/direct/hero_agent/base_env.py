@@ -36,6 +36,7 @@ from .config import HeroAgentEnvCfg
 from .mdp import (
     RewardManager,
     RewardTermCfg,
+    compute_all_costs,
     compute_policy_obs,
     compute_privileged_obs,
     joint_oscillation_penalty,
@@ -354,6 +355,10 @@ class HeroAgentEnv(DirectRLEnv):
         self._prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
         self._prev_actions_obs = torch.zeros(self.num_envs, 2, device=self.device)
 
+        # Accumulated rotation tracking (for IPO constraint)
+        self._accumulated_rotation = torch.zeros(self.num_envs, 2, device=self.device)
+        self._prev_joint_pos = torch.zeros(self.num_envs, 2, device=self.device)
+
         # EMA joint velocity (for high-pass oscillation penalty)
         self._ema_joint_vel = torch.zeros(self.num_envs, 2, device=self.device)
         self._ema_joint_vel_alpha = self.cfg.reward.joint_oscillation_alpha
@@ -619,6 +624,13 @@ class HeroAgentEnv(DirectRLEnv):
         """
         self._update_action_buffers(actions)
 
+        # Accumulate joint rotation delta (for IPO constraint)
+        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
+        delta = joint_pos - self._prev_joint_pos
+        delta = torch.atan2(torch.sin(delta), torch.cos(delta))  # wrap to [-pi, pi]
+        self._accumulated_rotation += delta
+        self._prev_joint_pos = joint_pos.clone()
+
         if self._control_step_counter % self.cfg.control_decimation == 0:
             # Apply action latency (delayed actions for control, raw actions kept for obs)
             effective_actions = self._get_delayed_actions(self._actions)
@@ -826,6 +838,11 @@ class HeroAgentEnv(DirectRLEnv):
             idx = self._settling_idx % self._settling_window
             self._settling_errors.scatter_(1, idx.unsqueeze(1), err.unsqueeze(1))
             self._settling_idx += 1
+
+        # Compute constraint costs for IPO pipeline (if constraints configured)
+        constraints_cfg = getattr(self.cfg, "constraints", None)
+        if constraints_cfg is not None:
+            self.extras["costs"] = compute_all_costs(self._robot, self, constraints_cfg)
 
         return reward
 
@@ -1052,6 +1069,9 @@ class HeroAgentEnv(DirectRLEnv):
             buf[env_ids] = 0.0
         # Reset EMA to zero (velocity is reset to 0 in _reset_task_and_state after this)
         self._ema_joint_vel[env_ids] = 0.0
+        # Reset accumulated rotation tracking (IPO constraint)
+        self._accumulated_rotation[env_ids] = 0.0
+        self._prev_joint_pos[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
 
         # Reset perturbation state: randomize timer phase to decorrelate envs
         rand_cfg = self.cfg.randomization

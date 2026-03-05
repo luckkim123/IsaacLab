@@ -4,7 +4,52 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [2026-03-05]
+## [2026-03-05] IPO + TRPO Constrained RL Implementation
+
+### Context
+Implemented NORBC-style Interior-point Policy Optimization (IPO) with TRPO natural
+gradient for the Hero Agent Encoder-Base pipeline. The underwater environment has
+physical constraints (joint velocity limits, rotation limits, oscillation) previously
+handled as soft reward penalties. IPO separates constraints from rewards using explicit
+cost budgets and log-barrier penalties, producing more robust controllers with simpler
+reward design. Three binary indicator constraints (K=3): joint velocity (|vel|>3 rad/s),
+accumulated rotation (>2 full rotations), and joint oscillation (HF RMS >1.5 rad/s).
+
+During integration, fixed multiple runtime compatibility issues:
+- `agents/__init__.py` missing exports for new runner/algorithm/policy configs
+- `train.py` `_RUNNER_MAP` missing `ConstraintEncoderRunner` entry
+- `ConstraintTRPO` missing `rnd` and `optimizer` attributes expected by RSL-RL OnPolicyRunner
+- Inference tensors from rollout storage (collected under `torch.inference_mode()`) cannot
+  be used in autograd -- fixed by `.clone()` on all storage tensors before backward passes
+- `EncoderRunner._update_encoder_lr()` assumes Adam param groups for encoder -- overridden
+  to no-op since ConstraintTRPO uses natural gradient (no optimizer) for policy/encoder
+
+### Added
+- `mdp/constraints.py`: ALBCConstraintCfg dataclass + 3 binary cost functions (joint_velocity_cost, accumulated_rotation_cost, joint_oscillation_cost, compute_all_costs)
+- `algorithms/__init__.py`: New module for algorithm exports
+- `algorithms/constraint_trpo.py`: Full TRPO + IPO implementation (~600 lines). Conjugate gradient solver, Fisher-vector product via Hessian-free double backprop, backtracking line search with KL + feasibility checks, log-barrier on constraint margins, adaptive thresholds
+- `encoder/actor_critic_encoder_constrained.py`: ActorCriticEncoderConstrained with multi-head cost critic (K outputs), backward-compatible load_state_dict
+- `runners/constraint_encoder_runner.py`: ConstraintEncoderRunner with barrier schedule update, constraint metrics logging, encoder LR override (no-op for TRPO)
+
+### Changed
+- `base_env.py`: Added `_accumulated_rotation` / `_prev_joint_pos` buffers, delta rotation tracking in `_pre_physics_step()`, cost computation via `compute_all_costs()` in `_get_rewards()`, reset in `_reset_framework()`
+- `config.py`: Added `HeroAgentConstrainedEncoderEnvCfg` (inherits EncoderTrain, adds constraints, zeros joint_velocity/oscillation reward weights)
+- `agents/rsl_rl_ppo_cfg.py`: Added `RslRlConstraintTRPOAlgorithmCfg`, `RslRlPpoActorCriticEncoderConstrainedCfg`, `HeroAgentConstrainedEncoderRunnerCfg` + module namespace injections for RSL-RL eval resolution
+- `agents/__init__.py`: Added exports for constrained configs (HeroAgentConstrainedEncoderRunnerCfg, etc.)
+- `__init__.py`: Registered `Isaac-HeroAgent-Constrained-Encoder-Base-v0` gym environment
+- `encoder/__init__.py`: Added `ActorCriticEncoderConstrained` export
+- `runners/__init__.py`: Added `ConstraintEncoderRunner` export
+- `mdp/__init__.py`: Added constraint function exports
+- `train.py`: Added `ConstraintEncoderRunner` to `_RUNNER_MAP`
+
+### Notes
+- Training partially verified (env loads, rollout completes, update runs to TRPO policy step)
+- Still debugging: may have additional runtime issues in TRPO line search or logging
+- Architecture: value params (critic + cost_critic) use Adam; policy params (actor + encoder) use TRPO natural gradient
+
+---
+
+## [2026-03-05] Code Simplification
 
 ### Context
 Code simplification session for hero_agent codebase (~7,700 lines, 27 Python files).
