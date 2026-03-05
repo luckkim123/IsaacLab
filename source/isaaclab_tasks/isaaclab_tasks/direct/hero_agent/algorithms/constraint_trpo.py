@@ -459,7 +459,7 @@ class ConstraintTRPO:
                 new_ratio = torch.exp(new_log_prob - old_log_prob)
                 cost_feasible = True
                 for k in range(self.num_constraints):
-                    margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=1e-6)
+                    margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=0.1 * self.d_k[k].item())
                     cost_surr_k = (new_ratio * cost_advantages[:, k]).mean()
                     if cost_surr_k > self.line_search_cost_margin * margin:
                         cost_feasible = False

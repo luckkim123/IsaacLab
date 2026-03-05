@@ -48,7 +48,7 @@ class ALBCConstraintCfg:
     oscillation_limit: float = 1.5
 
     # Per-constraint budgets D_k (probability of violation per step)
-    constraint_budgets: tuple[float, ...] = (0.1, 0.05, 0.1)
+    constraint_budgets: tuple[float, ...] = (0.3, 0.05, 0.3)
 
     # IPO barrier parameters
     barrier_t: float = 1.0

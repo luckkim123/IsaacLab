@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-05] Fix ConstraintTRPO Line Search Deadlock
+
+### Context
+ConstraintTRPO training at ~100 iterations showed line search success rate ~0% for the
+first 35 steps, with sporadic acceptance after. Root cause: when a constraint is violated
+(`cost_return > d_k_adaptive`), the feasibility margin `(d_k_adaptive - cost_return)` goes
+negative and gets clamped to `1e-6` (essentially zero). This makes the acceptance criterion
+`cost_surr < 0.5 * 1e-6` mathematically impossible to satisfy, creating a deadlock where
+the policy can't update to reduce violations because the violation blocks policy updates.
+
+Additionally, constraint budgets D_k=(0.1, 0.05, 0.1) produced d_k=10 (via d_k = D_k/(1-gamma)),
+which was too tight for early exploration -- joint velocity cost_return reached 20+ by step 15,
+immediately violating the budget and triggering the deadlock.
+
+### Fixed
+- `algorithms/constraint_trpo.py`: Changed margin floor from `1e-6` to `0.1 * d_k[k]`,
+  ensuring a meaningful acceptance region even when constraints are violated. With d_k=30,
+  floor is 3.0, so cost surrogate must exceed 1.5 to fail (vs. 5e-7 before)
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: Relaxed constraint budgets from (0.1, 0.05, 0.1) to
+  (0.3, 0.05, 0.3) -- joint velocity d_k: 10->30, oscillation d_k: 10->30
+- `mdp/constraints.py`: Same budget relaxation in ALBCConstraintCfg defaults
+
+### Notes
+- Rotation constraint (d_k=5) left unchanged as it was already satisfied
+- Step 3 (threshold relaxation: velocity 3.0->4.5, oscillation 1.5->2.5) deferred pending
+  verification that margin fix + budget relaxation are sufficient
+- Verification targets: line_search_success >50% in first 50 steps, encoder z_std <0.9
+
+---
+
 ## [2026-03-05] Fix TRPO NaN Crash from Negative shs
 
 ### Context

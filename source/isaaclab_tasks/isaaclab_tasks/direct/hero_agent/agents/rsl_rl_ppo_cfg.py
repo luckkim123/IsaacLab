@@ -308,7 +308,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
 
     # Constraint / IPO
     num_constraints: int = 3
-    constraint_budgets: tuple[float, ...] = (0.1, 0.05, 0.1)
+    constraint_budgets: tuple[float, ...] = (0.3, 0.05, 0.3)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
     barrier_t: float = 1.0
