@@ -157,6 +157,20 @@ class TDCController:
         self._Lambda_inv_scratch = torch.zeros(num_envs, 2, 2, device=device)
         self._T_b_scratch = torch.zeros(num_envs, 2, device=device)
 
+        # Buffers zeroed on reset (excludes _kp/_kd which reset to defaults)
+        self._zero_buffers = [
+            self._nu_prev,
+            self._nu_dot_filtered,
+            self._p_EE_prev,
+            self._Lambda_prev,
+            self._T_b_prev,
+            self._u_hat,
+            self._m_hat_u_pd,
+            self._delta_T_b,
+            self._u_hat_prev,
+            self._epsilon_approx,
+        ]
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -173,6 +187,14 @@ class TDCController:
         """
         self._p_EE_prev[:] = p_EE
 
+    @staticmethod
+    def _set_param(buf: torch.Tensor, value: torch.Tensor, env_ids: torch.Tensor | None) -> None:
+        """Assign value to buffer, either all envs or indexed subset."""
+        if env_ids is None:
+            buf[:] = value
+        else:
+            buf[env_ids] = value
+
     def update_controller_params(
         self,
         m_hat: torch.Tensor | None = None,
@@ -186,16 +208,10 @@ class TDCController:
             F_bu: Buoyancy force. Shape: (N,) or scalar.
             env_ids: Environment indices. None = all.
         """
-        if env_ids is None:
-            if m_hat is not None:
-                self._m_hat[:] = m_hat
-            if F_bu is not None:
-                self._F_bu[:] = F_bu
-        else:
-            if m_hat is not None:
-                self._m_hat[env_ids] = m_hat
-            if F_bu is not None:
-                self._F_bu[env_ids] = F_bu
+        if m_hat is not None:
+            self._set_param(self._m_hat, m_hat, env_ids)
+        if F_bu is not None:
+            self._set_param(self._F_bu, F_bu, env_ids)
 
     def update_gains(
         self,
@@ -210,12 +226,8 @@ class TDCController:
             kd: Derivative gains. Shape: (N, 2) or (2,).
             env_ids: Environment indices. None = all.
         """
-        if env_ids is None:
-            self._kp[:] = kp
-            self._kd[:] = kd
-        else:
-            self._kp[env_ids] = kp
-            self._kd[env_ids] = kd
+        self._set_param(self._kp, kp, env_ids)
+        self._set_param(self._kd, kd, env_ids)
 
     @property
     def F_bu(self) -> torch.Tensor:
@@ -310,17 +322,9 @@ class TDCController:
         Args:
             env_ids: Environment indices to reset.
         """
-        self._nu_prev[env_ids] = 0.0
-        self._nu_dot_filtered[env_ids] = 0.0
-        self._p_EE_prev[env_ids] = 0.0
-        self._Lambda_prev[env_ids] = 0.0
-        self._T_b_prev[env_ids] = 0.0
+        for buf in self._zero_buffers:
+            buf[env_ids] = 0.0
         self._is_initialized[env_ids] = False
-        self._u_hat[env_ids] = 0.0
-        self._m_hat_u_pd[env_ids] = 0.0
-        self._delta_T_b[env_ids] = 0.0
-        self._u_hat_prev[env_ids] = 0.0
-        self._epsilon_approx[env_ids] = 0.0
 
         # Reset PD gains to defaults for reset environments
         self._kp[env_ids] = self._kp_default

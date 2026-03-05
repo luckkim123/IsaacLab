@@ -23,7 +23,6 @@ import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
-from isaaclab.envs.ui import BaseEnvWindow
 from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse
 
 from isaaclab_tasks.models import HydrodynamicsModel
@@ -37,8 +36,6 @@ from .config import HeroAgentEnvCfg
 from .mdp import (
     RewardManager,
     RewardTermCfg,
-    action_rate_penalty,
-    angular_velocity_penalty,
     compute_policy_obs,
     compute_privileged_obs,
     joint_oscillation_penalty,
@@ -63,18 +60,6 @@ from .mdp.events import (
     reset_robot_pose_default,
 )
 from .utils import DebugVisualization, log_dr_metrics, log_tdc_diagnostics
-
-
-class HeroAgentEnvWindow(BaseEnvWindow):
-    """Window manager for the Hero Agent environment."""
-
-    def __init__(self, env: HeroAgentEnv, window_name: str = "IsaacLab"):
-        """Initialize the window."""
-        super().__init__(env, window_name)
-        with self.ui_window_elements["main_vstack"]:
-            with self.ui_window_elements["debug_frame"]:
-                with self.ui_window_elements["debug_vstack"]:
-                    self._create_debug_vis_ui_element("targets", self.env)
 
 
 class HeroAgentEnv(DirectRLEnv):
@@ -164,13 +149,8 @@ class HeroAgentEnv(DirectRLEnv):
         self.set_debug_vis(self.cfg.debug_vis)
 
     @staticmethod
-    def _pad_noise_cfg_for_tde(cfg: HeroAgentEnvCfg) -> None:
-        """Pad observation noise config by 2 dims (zeros) for TDE obs channels.
-
-        TDE obs (H_hat) has no sensor noise model -- it's a computed signal
-        whose noise comes from nu_dot estimation and is handled by the EMA filter.
-        Must be called before _convert_noise_cfg_tuples() to preserve tuple format.
-        """
+    def _iter_noise_params(cfg: HeroAgentEnvCfg):
+        """Yield (sub_cfg, param_name, value) for all tuple/list noise params."""
         noise_model = getattr(cfg, "observation_noise_model", None)
         if noise_model is None:
             return
@@ -181,8 +161,18 @@ class HeroAgentEnv(DirectRLEnv):
             for param in ("std", "mean", "n_min", "n_max"):
                 val = getattr(sub_cfg, param, None)
                 if isinstance(val, (list, tuple)):
-                    # Append 2 zeros for TDE dims (no artificial noise on computed signal)
-                    setattr(sub_cfg, param, type(val)(list(val) + [0.0, 0.0]))
+                    yield sub_cfg, param, val
+
+    @staticmethod
+    def _pad_noise_cfg_for_tde(cfg: HeroAgentEnvCfg) -> None:
+        """Pad observation noise config by 2 dims (zeros) for TDE obs channels.
+
+        TDE obs (H_hat) has no sensor noise model -- it's a computed signal
+        whose noise comes from nu_dot estimation and is handled by the EMA filter.
+        Must be called before _convert_noise_cfg_tuples() to preserve tuple format.
+        """
+        for sub_cfg, param, val in HeroAgentEnv._iter_noise_params(cfg):
+            setattr(sub_cfg, param, type(val)(list(val) + [0.0, 0.0]))
 
     @staticmethod
     def _convert_noise_cfg_tuples(cfg: HeroAgentEnvCfg) -> None:
@@ -192,17 +182,8 @@ class HeroAgentEnv(DirectRLEnv):
         The noise model functions require float or torch.Tensor for arithmetic.
         Must be called before DirectRLEnv.__init__() which instantiates noise models.
         """
-        noise_model = getattr(cfg, "observation_noise_model", None)
-        if noise_model is None:
-            return
-        for sub_cfg_attr in ("noise_cfg", "bias_noise_cfg"):
-            sub_cfg = getattr(noise_model, sub_cfg_attr, None)
-            if sub_cfg is None:
-                continue
-            for param in ("std", "mean", "n_min", "n_max"):
-                val = getattr(sub_cfg, param, None)
-                if isinstance(val, (list, tuple)):
-                    setattr(sub_cfg, param, torch.tensor(val))
+        for sub_cfg, param, val in HeroAgentEnv._iter_noise_params(cfg):
+            setattr(sub_cfg, param, torch.tensor(val))
 
     def _init_body_ids(self) -> None:
         """Initialize body IDs and physics parameters."""
@@ -322,11 +303,6 @@ class HeroAgentEnv(DirectRLEnv):
                 func=joint_velocity_penalty,
                 weight=rcfg.joint_velocity_weight,
             )
-        if rcfg.action_rate_weight != 0.0:
-            terms["action_rate"] = RewardTermCfg(
-                func=action_rate_penalty,
-                weight=rcfg.action_rate_weight,
-            )
         if rcfg.progress_weight != 0.0:
             if rcfg.progress_mode == "pbrs":
                 func = progress_reward_pbrs
@@ -345,11 +321,6 @@ class HeroAgentEnv(DirectRLEnv):
                 func=settling_bonus,
                 weight=rcfg.settling_weight,
                 params={"threshold": rcfg.settling_threshold},
-            )
-        if rcfg.angular_velocity_weight != 0.0:
-            terms["angular_velocity"] = RewardTermCfg(
-                func=angular_velocity_penalty,
-                weight=rcfg.angular_velocity_weight,
             )
         return terms
 
@@ -391,9 +362,6 @@ class HeroAgentEnv(DirectRLEnv):
         # this modulo always passes. If control_decimation > 1, all envs share
         # the same control phase.
         self._control_step_counter = 0
-
-        # Energy accumulator for control effort tracking
-        self._cumulative_effort = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
 
         # Force/torque buffers
         self._hydro_forces = torch.zeros(self.num_envs, 3, device=self.device)
@@ -552,6 +520,44 @@ class HeroAgentEnv(DirectRLEnv):
         env_idx = torch.arange(self.num_envs, device=self.device)
         return self._action_history[env_idx, self._action_latency]
 
+    def _apply_perturbation_cycle(
+        self,
+        timer: torch.Tensor,
+        forces: torch.Tensor,
+        torques: torch.Tensor,
+        force_range: tuple[float, float],
+        torque_range: tuple[float, float],
+        cycle: int,
+        duration: int,
+    ) -> torch.Tensor:
+        """Advance perturbation timer and generate/clear random wrench.
+
+        Returns updated timer.
+        """
+        timer = (timer + 1) % cycle
+
+        trigger = timer == 0
+        if trigger.any():
+            n = trigger.sum().item()
+            f_dir = torch.randn(n, 3, device=self.device)
+            f_dir = f_dir / f_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
+            f_lo, f_hi = force_range
+            f_mag = torch.rand(n, device=self.device) * (f_hi - f_lo) + f_lo
+            forces[trigger] = f_dir * f_mag.unsqueeze(1)
+
+            t_dir = torch.randn(n, 3, device=self.device)
+            t_dir = t_dir / t_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
+            t_lo, t_hi = torque_range
+            t_mag = torch.rand(n, device=self.device) * (t_hi - t_lo) + t_lo
+            torques[trigger] = t_dir * t_mag.unsqueeze(1)
+
+        deactivate = timer == duration
+        if deactivate.any():
+            forces[deactivate] = 0.0
+            torques[deactivate] = 0.0
+
+        return timer
+
     def _update_perturbation(self) -> None:
         """Update per-step random perturbation forces on the base body and buoy.
 
@@ -579,53 +585,27 @@ class HeroAgentEnv(DirectRLEnv):
         duration = rand_cfg.perturbation_duration
         cycle = interval + duration
 
-        # -- Main body perturbation --
         if main_perturb:
-            self._perturb_timer = (self._perturb_timer + 1) % cycle
+            self._perturb_timer = self._apply_perturbation_cycle(
+                self._perturb_timer,
+                self._perturb_forces,
+                self._perturb_torques,
+                rand_cfg.perturbation_force_range,
+                rand_cfg.perturbation_torque_range,
+                cycle,
+                duration,
+            )
 
-            trigger = self._perturb_timer == 0
-            if trigger.any():
-                n = trigger.sum().item()
-                f_dir = torch.randn(n, 3, device=self.device)
-                f_dir = f_dir / f_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
-                f_lo, f_hi = rand_cfg.perturbation_force_range
-                f_mag = torch.rand(n, device=self.device) * (f_hi - f_lo) + f_lo
-                self._perturb_forces[trigger] = f_dir * f_mag.unsqueeze(1)
-
-                t_dir = torch.randn(n, 3, device=self.device)
-                t_dir = t_dir / t_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
-                t_lo, t_hi = rand_cfg.perturbation_torque_range
-                t_mag = torch.rand(n, device=self.device) * (t_hi - t_lo) + t_lo
-                self._perturb_torques[trigger] = t_dir * t_mag.unsqueeze(1)
-
-            deactivate = self._perturb_timer == duration
-            if deactivate.any():
-                self._perturb_forces[deactivate] = 0.0
-                self._perturb_torques[deactivate] = 0.0
-
-        # -- Buoy perturbation (independent timer, same interval/duration) --
         if buoy_perturb:
-            self._buoy_perturb_timer = (self._buoy_perturb_timer + 1) % cycle
-
-            buoy_trigger = self._buoy_perturb_timer == 0
-            if buoy_trigger.any():
-                n = buoy_trigger.sum().item()
-                f_dir = torch.randn(n, 3, device=self.device)
-                f_dir = f_dir / f_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
-                f_lo, f_hi = rand_cfg.buoy_perturbation_force_range
-                f_mag = torch.rand(n, device=self.device) * (f_hi - f_lo) + f_lo
-                self._buoy_perturb_forces[buoy_trigger] = f_dir * f_mag.unsqueeze(1)
-
-                t_dir = torch.randn(n, 3, device=self.device)
-                t_dir = t_dir / t_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
-                t_lo, t_hi = rand_cfg.buoy_perturbation_torque_range
-                t_mag = torch.rand(n, device=self.device) * (t_hi - t_lo) + t_lo
-                self._buoy_perturb_torques[buoy_trigger] = t_dir * t_mag.unsqueeze(1)
-
-            buoy_deactivate = self._buoy_perturb_timer == duration
-            if buoy_deactivate.any():
-                self._buoy_perturb_forces[buoy_deactivate] = 0.0
-                self._buoy_perturb_torques[buoy_deactivate] = 0.0
+            self._buoy_perturb_timer = self._apply_perturbation_cycle(
+                self._buoy_perturb_timer,
+                self._buoy_perturb_forces,
+                self._buoy_perturb_torques,
+                rand_cfg.buoy_perturbation_force_range,
+                rand_cfg.buoy_perturbation_torque_range,
+                cycle,
+                duration,
+            )
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Process actions before physics step with control decimation.
@@ -827,9 +807,6 @@ class HeroAgentEnv(DirectRLEnv):
         alpha = self._ema_joint_vel_alpha
         self._ema_joint_vel = alpha * vel + (1.0 - alpha) * self._ema_joint_vel
 
-        # Accumulate control effort: sum(||a||^2 * dt) over episode
-        self._cumulative_effort += torch.sum(self._actions**2, dim=-1) * self.step_dt
-
         reward = self._reward_manager.compute(
             robot=self._robot,
             dt=self.step_dt,
@@ -888,18 +865,14 @@ class HeroAgentEnv(DirectRLEnv):
         log["Episode_Reward/total"] = total
 
         # Termination rates (0.0~1.0, scale-invariant for weighted averaging)
-        n_terminated = torch.count_nonzero(self.reset_terminated[env_ids]).item()
-        n_timeout = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
-        log["Episode_Termination/terminated"] = n_terminated / n if n > 0 else 0.0
-        log["Episode_Termination/time_out"] = n_timeout / n if n > 0 else 0.0
+        def _term_rate(flag: torch.Tensor) -> float:
+            return torch.count_nonzero(flag[env_ids]).item() / n if n > 0 else 0.0
 
-        # Per-condition termination diagnostics
-        n_too_fast = torch.count_nonzero(self._term_too_fast[env_ids]).item()
-        n_bad_state = torch.count_nonzero(self._term_bad_state[env_ids]).item()
-        n_excessive_tilt = torch.count_nonzero(self._term_excessive_tilt[env_ids]).item()
-        log["Episode_Termination/too_fast"] = n_too_fast / n if n > 0 else 0.0
-        log["Episode_Termination/bad_state"] = n_bad_state / n if n > 0 else 0.0
-        log["Episode_Termination/excessive_tilt"] = n_excessive_tilt / n if n > 0 else 0.0
+        log["Episode_Termination/terminated"] = _term_rate(self.reset_terminated)
+        log["Episode_Termination/time_out"] = _term_rate(self.reset_time_outs)
+        log["Episode_Termination/too_fast"] = _term_rate(self._term_too_fast)
+        log["Episode_Termination/bad_state"] = _term_rate(self._term_bad_state)
+        log["Episode_Termination/excessive_tilt"] = _term_rate(self._term_excessive_tilt)
 
         if n == 0:
             return log
@@ -934,15 +907,11 @@ class HeroAgentEnv(DirectRLEnv):
         computed = self._robot.data.computed_torque[env_ids][:, jids]
         log["Dynamics/effort_limit_mean"] = effort_lim.mean().item()
         log["Dynamics/computed_torque_abs_max"] = computed.abs().max().item()
-        log["Dynamics/effort_saturation_frac"] = (
-            (computed.abs() >= effort_lim * 0.99).float().mean().item()
-        )
+        log["Dynamics/effort_saturation_frac"] = (computed.abs() >= effort_lim * 0.99).float().mean().item()
 
         # Velocity limit saturation (verify PhysX velocity limits are active)
         vel_lim = self._robot.data.joint_vel_limits[env_ids][:, jids]
-        log["Dynamics/vel_saturation_frac"] = (
-            (joint_vel.abs() >= vel_lim.clamp(min=1e-6) * 0.95).float().mean().item()
-        )
+        log["Dynamics/vel_saturation_frac"] = (joint_vel.abs() >= vel_lim.clamp(min=1e-6) * 0.95).float().mean().item()
 
         # TDC diagnostics (for any env with TDC controller)
         if hasattr(self, "_tdc"):
@@ -1083,7 +1052,6 @@ class HeroAgentEnv(DirectRLEnv):
             buf[env_ids] = 0.0
         # Reset EMA to zero (velocity is reset to 0 in _reset_task_and_state after this)
         self._ema_joint_vel[env_ids] = 0.0
-        self._cumulative_effort[env_ids] = 0.0
 
         # Reset perturbation state: randomize timer phase to decorrelate envs
         rand_cfg = self.cfg.randomization

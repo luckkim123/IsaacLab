@@ -94,19 +94,10 @@ class ALBCRewardCfg:
     settling_weight: float = 3.0
     settling_threshold: float = 0.087  # radians (~5 deg)
 
-    # Action rate penalty: mean(|a_t - a_{t-1}|^2). Penalizes rapid changes
-    # in policy output, directly suppressing command-level limit cycles.
-    # Unlike joint_oscillation (physical result after actuator PD filtering),
-    # this targets the policy decision itself. dt-scaled. Use with negative weight.
-    action_rate_weight: float = 0.0
-
     # Termination penalty: one-time large negative reward on early termination.
     # Discourages policies that trigger too_fast/bad_state terminations.
     # NOT dt-scaled (one-time event, not a rate).
     termination_penalty: float = -10.0
-
-    # Angular velocity penalty (dt-scaled, discourages oscillation under DR)
-    angular_velocity_weight: float = 0.0
 
     # Penalty curriculum: linearly ramp penalty scale from 0 to 1 over this
     # ratio of max_iterations. 0 = disabled (penalties always at full weight).
@@ -410,50 +401,6 @@ def settling_bonus(
     return (env._potentials < threshold).float()
 
 
-def action_rate_penalty(
-    _robot: Articulation,
-    actions: torch.Tensor,
-    prev_actions: torch.Tensor,
-    **_kwargs,
-) -> torch.Tensor:
-    """Quadratic action rate penalty: mean(|a_t - a_{t-1}|^2).
-
-    Penalizes rapid changes in policy output (command-level smoothness).
-    Unlike joint_oscillation which measures physical joint velocity after
-    actuator PD filtering, this directly targets the policy's decision
-    changes, suppressing command-level limit cycles.
-
-    dt-scaled. Use with negative weight.
-
-    Args:
-        actions: Current actions (num_envs, action_dim).
-        prev_actions: Previous step actions (num_envs, action_dim).
-
-    Returns:
-        (num_envs,) penalty value (positive; apply negative weight).
-    """
-    return torch.mean((actions - prev_actions) ** 2, dim=-1)
-
-
-def angular_velocity_penalty(
-    robot: Articulation,
-    **_kwargs,
-) -> torch.Tensor:
-    """Sum of squared roll/pitch angular velocities (body frame).
-
-    Only penalizes controllable axes (roll, pitch). Yaw is excluded because
-    buoyancy-based control cannot generate Z-axis torque.
-    dt-scaled (instantaneous quality measure). Use with negative weight.
-
-    Note: Uses ``sum`` (not ``mean``) over the 2 axes so the penalty scales
-    with total angular velocity magnitude. The axis count is fixed at 2.
-
-    Returns:
-        (num_envs,) penalty value (positive; apply negative weight).
-    """
-    return torch.sum(robot.data.root_ang_vel_b[:, :2] ** 2, dim=-1)
-
-
 def tdc_torque_penalty(
     _robot: Articulation,
     env: HeroAgentEnv,
@@ -478,6 +425,24 @@ def tdc_torque_penalty(
 # =============================================================================
 # TDC-Specific Reward Functions
 # =============================================================================
+
+
+def _compute_M_true(env: HeroAgentEnv) -> torch.Tensor:
+    """Compute configuration-dependent true inertia M_bb via parallel axis theorem.
+
+    Returns:
+        M_true [roll, pitch]. Shape: (num_envs, 2).
+    """
+    joint_pos = env._robot.data.joint_pos[:, env._albc_joint_ids]
+    p_EE = env._kinematics.forward(joint_pos)
+    return compute_M_bb(
+        I_ROV=env._hydro.rigid_body_inertia[:, :2],
+        m_A=env._buoy_hydro.added_mass_matrix[:, 1, 1],
+        x_bu=p_EE[:, 0],
+        y_bu=p_EE[:, 1],
+        h=env.cfg.tdc.h,
+        m_body=env._buoy_hydro.body_mass,
+    )
 
 
 def mhat_accuracy_reward(
@@ -510,18 +475,7 @@ def mhat_accuracy_reward(
         sigma: Kernel width for relative error.
         kernel: "cauchy" (default) or "gaussian".
     """
-    joint_pos = env._robot.data.joint_pos[:, env._albc_joint_ids]
-    p_EE = env._kinematics.forward(joint_pos)
-
-    M_true = compute_M_bb(
-        I_ROV=env._hydro.rigid_body_inertia[:, :2],
-        m_A=env._buoy_hydro.added_mass_matrix[:, 1, 1],
-        x_bu=p_EE[:, 0],
-        y_bu=p_EE[:, 1],
-        h=env.cfg.tdc.h,
-        m_body=env._buoy_hydro.body_mass,
-    )
-
+    M_true = _compute_M_true(env)
     M_hat = env._tdc._m_hat
     rel_error_sq = ((M_hat - M_true) / M_true.clamp(min=1e-4)) ** 2
     score = rel_error_sq.sum(dim=-1) / (sigma**2)
@@ -548,18 +502,7 @@ def compute_stability_gate(env: HeroAgentEnv) -> torch.Tensor:
     Returns:
         Gate mask (num_envs,): 1.0 if all axes stable, 0.0 if any axis violated.
     """
-    joint_pos = env._robot.data.joint_pos[:, env._albc_joint_ids]
-    p_EE = env._kinematics.forward(joint_pos)
-
-    M_true = compute_M_bb(
-        I_ROV=env._hydro.rigid_body_inertia[:, :2],
-        m_A=env._buoy_hydro.added_mass_matrix[:, 1, 1],
-        x_bu=p_EE[:, 0],
-        y_bu=p_EE[:, 1],
-        h=env.cfg.tdc.h,
-        m_body=env._buoy_hydro.body_mass,
-    )
-
+    M_true = _compute_M_true(env)
     M_hat = env._tdc._m_hat
     ratio = M_true / M_hat.clamp(min=1e-6)
     stability_norm = (1.0 - ratio).abs().max(dim=-1).values

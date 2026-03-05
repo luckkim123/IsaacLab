@@ -16,6 +16,7 @@ Reference:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -530,7 +531,6 @@ class DoraemonScheduler:
         Uses trust-constr optimizer with keep_feasible=True to guarantee
         KL constraint satisfaction at every iteration.
         """
-        x0 = self.dist.get_flat_params()
         prev_flat = prev_dist.get_flat_params()
         ranges = self.dist._ranges
         mins = self.dist._mins
@@ -575,25 +575,40 @@ class DoraemonScheduler:
             """KL(new || prev)."""
             return _compute_kl(flat, prev_flat)
 
-        bounds = [(float(_MIN_BETA_PARAM), float(_MAX_BETA_PARAM))] * (2 * NDIMS)
-
         success_con = NonlinearConstraint(success_constraint_fun, lb=self.cfg.alpha, ub=np.inf)
         kl_con = NonlinearConstraint(kl_constraint_fun, lb=0.0, ub=self.cfg.kl_ub, keep_feasible=True)
 
+        self._run_scipy_step(objective_and_grad, [success_con, kl_con], "Entropy maximization")
+
+    def _run_scipy_step(
+        self,
+        objective_fn: Callable[[np.ndarray], tuple[float, np.ndarray]],
+        constraints: list,
+        label: str,
+    ) -> None:
+        """Run a single trust-constr optimization step on the Beta distribution.
+
+        Args:
+            objective_fn: Callable returning (value, gradient) given flat params.
+            constraints: List of NonlinearConstraint objects for the optimizer.
+            label: Human-readable label for warning messages on failure.
+        """
+        bounds = [(float(_MIN_BETA_PARAM), float(_MAX_BETA_PARAM))] * (2 * NDIMS)
+        x0 = self.dist.get_flat_params()
         try:
             result = minimize(
-                objective_and_grad,
+                objective_fn,
                 x0,
                 method="trust-constr",
                 jac=True,
                 bounds=bounds,
-                constraints=[success_con, kl_con],
+                constraints=constraints,
                 options={"maxiter": 50, "gtol": 1e-8},
             )
-            if result.success or result.fun < objective_and_grad(x0)[0]:
+            if result.success or result.fun < objective_fn(x0)[0]:
                 self.dist.set_flat_params(result.x)
         except Exception as e:
-            logger.warning("[DORAEMON] Entropy maximization failed: %s", e)
+            logger.warning("[DORAEMON] %s failed: %s", label, e)
 
     def _backup(
         self,
@@ -612,7 +627,6 @@ class DoraemonScheduler:
             logger.debug("[DORAEMON] Backup skipped: no successful episodes in buffer.")
             return
 
-        x0 = self.dist.get_flat_params()
         prev_flat = prev_dist.get_flat_params()
         mins = self.dist._mins
         ranges = self.dist._ranges
@@ -650,23 +664,9 @@ class DoraemonScheduler:
         def kl_constraint_fun(flat: np.ndarray) -> float:
             return _compute_kl(flat, prev_flat)
 
-        bounds = [(float(_MIN_BETA_PARAM), float(_MAX_BETA_PARAM))] * (2 * NDIMS)
         kl_con = NonlinearConstraint(kl_constraint_fun, lb=0.0, ub=self.cfg.kl_ub, keep_feasible=True)
 
-        try:
-            result = minimize(
-                neg_success_and_grad,
-                x0,
-                method="trust-constr",
-                jac=True,
-                bounds=bounds,
-                constraints=[kl_con],
-                options={"maxiter": 50, "gtol": 1e-8},
-            )
-            if result.success or result.fun < neg_success_and_grad(x0)[0]:
-                self.dist.set_flat_params(result.x)
-        except Exception as e:
-            logger.warning("[DORAEMON] Backup step failed: %s", e)
+        self._run_scipy_step(neg_success_and_grad, [kl_con], "Backup step")
 
     def state_dict(self) -> dict:
         """Serialize scheduler state for checkpoint persistence.

@@ -103,8 +103,7 @@ class EncoderRunner(BaseRunner):
             progress = (iteration - warmup_end) / max(total_iterations - warmup_end, 1)
             progress = min(progress, 1.0)
             enc_lr = initial_lr * (
-                self._enc_lr_min_ratio
-                + (1 - self._enc_lr_min_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
+                self._enc_lr_min_ratio + (1 - self._enc_lr_min_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
             )
 
         self.alg.optimizer.param_groups[1]["lr"] = enc_lr

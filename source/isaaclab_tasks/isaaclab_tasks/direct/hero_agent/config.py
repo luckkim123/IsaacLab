@@ -16,8 +16,6 @@ This module consolidates all environment configurations:
 - HeroAgentEncoderTrainEnvCfg: Encoder training with privileged info
 - HeroAgentTDCEnvCfg: Classical TDC control (no RL)
 - HeroAgentAdaptBaseEnvCfg: Phase 2 adaptation (proprio history -> z_hat, base RL)
-
-MPC configurations are in the separate hero_agent_mpc package.
 """
 
 from __future__ import annotations
@@ -353,10 +351,6 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
 
     # DORAEMON: adaptive DR distribution (replaces linear DR curriculum).
     doraemon: DoraemonCfg = DoraemonCfg()
-    ocean_current = OceanCurrentCfg(
-        max_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-        noise_scale=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-    )
     enable_payload: bool = True
     randomize_target_attitude: bool = True
 
@@ -368,11 +362,11 @@ class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
     observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
         noise_cfg=GaussianNoiseCfg(
             mean=0.0,
-            std=(0.02, 0.02, 0.02, 0.04, 0.04, 0.04, 0.02, 0.02, 0.02, 0.0, 0.0, 0.0, 0.0),
+            std=tuple([0.02] * 3 + [0.04] * 3 + [0.02] * 3 + [0.0] * 4),
         ),
         bias_noise_cfg=UniformNoiseCfg(
-            n_min=(-0.02, -0.02, -0.02, -0.03, -0.03, -0.03, -0.02, -0.02, -0.02, 0, 0, 0, 0),
-            n_max=(0.02, 0.02, 0.02, 0.03, 0.03, 0.03, 0.02, 0.02, 0.02, 0, 0, 0, 0),
+            n_min=tuple([-0.02] * 3 + [-0.03] * 3 + [-0.02] * 3 + [0] * 4),
+            n_max=tuple([0.02] * 3 + [0.03] * 3 + [0.02] * 3 + [0] * 4),
         ),
     )
 
@@ -527,8 +521,7 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
     """
 
     action_space: int = 6  # m_hat(2) + Kp(2) + Kd(2)
-    state_space: int = 19  # privileged obs for encoder
-    enable_payload: bool = True  # 19D privileged requires payload
+    state_space: int = 19  # privileged obs for encoder (19D requires payload, inherited from TrainEnvCfg)
 
     # Override TDC DR: enable action latency (RL inference delay exists in real deployment)
     randomization: DomainRandomizationCfg = _tdc_randomization(action_latency=True)

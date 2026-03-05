@@ -88,32 +88,29 @@ def _rand_uniform_range(
     return _rand_uniform(shape, range_tuple[0], range_tuple[1], device)
 
 
-def _apply_xyz_offset(
+def _apply_xyz_offset_with_doraemon(
     target: torch.Tensor,
     env_ids: torch.Tensor,
     base: torch.Tensor,
     x_range: tuple[float, float],
     y_range: tuple[float, float],
     z_range: tuple[float, float],
+    z_key: str,
+    sampled: dict[str, torch.Tensor] | None,
     device: str | torch.device,
 ) -> None:
-    """Apply random XYZ offsets to a target tensor.
+    """Apply XYZ offsets with optional DORAEMON override on Z axis.
 
-    Each axis is set to ``base[i] + uniform(range[i])``.
-
-    Args:
-        target: Target tensor to modify (shape: [num_envs, 3]).
-        env_ids: Environment indices to modify.
-        base: Base XYZ values to offset from (shape: [3]).
-        x_range: Random offset range for X.
-        y_range: Random offset range for Y.
-        z_range: Random offset range for Z.
-        device: Torch device.
+    XY axes always use uniform random offsets. Z axis uses the DORAEMON-sampled
+    value if available (keyed by ``z_key``), otherwise uniform random.
     """
-    num_envs = len(env_ids)
-    target[env_ids, 0] = base[0] + _rand_uniform_range(num_envs, x_range, device)
-    target[env_ids, 1] = base[1] + _rand_uniform_range(num_envs, y_range, device)
-    target[env_ids, 2] = base[2] + _rand_uniform_range(num_envs, z_range, device)
+    num = len(env_ids)
+    target[env_ids, 0] = base[0] + _rand_uniform_range(num, x_range, device)
+    target[env_ids, 1] = base[1] + _rand_uniform_range(num, y_range, device)
+    if sampled and z_key in sampled:
+        target[env_ids, 2] = base[2] + sampled[z_key]
+    else:
+        target[env_ids, 2] = base[2] + _rand_uniform_range(num, z_range, device)
 
 
 def _sample_or_uniform(
@@ -243,39 +240,30 @@ def _randomize_hydro_model(
     hydro.update_buoyancy_force(env_ids)
 
     # Center of Buoyancy (offset from base)
-    # CoB XY always uniform (not DORAEMON-managed); Z can be overridden.
-    if sampled and "cob_offset_z" in sampled:
-        num = len(env_ids)
-        hydro.center_of_buoyancy[env_ids, 0] = base.cob[0] + _rand_uniform_range(num, rand_cfg.cob_offset_x, device)
-        hydro.center_of_buoyancy[env_ids, 1] = base.cob[1] + _rand_uniform_range(num, rand_cfg.cob_offset_y, device)
-        hydro.center_of_buoyancy[env_ids, 2] = base.cob[2] + sampled["cob_offset_z"]
-    else:
-        _apply_xyz_offset(
-            hydro.center_of_buoyancy,
-            env_ids,
-            base.cob,
-            rand_cfg.cob_offset_x,
-            rand_cfg.cob_offset_y,
-            rand_cfg.cob_offset_z,
-            device,
-        )
+    _apply_xyz_offset_with_doraemon(
+        hydro.center_of_buoyancy,
+        env_ids,
+        base.cob,
+        rand_cfg.cob_offset_x,
+        rand_cfg.cob_offset_y,
+        rand_cfg.cob_offset_z,
+        "cob_offset_z",
+        sampled,
+        device,
+    )
 
     # Center of Gravity (offset from base)
-    if sampled and "cog_offset_z" in sampled:
-        num = len(env_ids)
-        hydro.center_of_gravity[env_ids, 0] = base.cog[0] + _rand_uniform_range(num, rand_cfg.cog_offset_x, device)
-        hydro.center_of_gravity[env_ids, 1] = base.cog[1] + _rand_uniform_range(num, rand_cfg.cog_offset_y, device)
-        hydro.center_of_gravity[env_ids, 2] = base.cog[2] + sampled["cog_offset_z"]
-    else:
-        _apply_xyz_offset(
-            hydro.center_of_gravity,
-            env_ids,
-            base.cog,
-            rand_cfg.cog_offset_x,
-            rand_cfg.cog_offset_y,
-            rand_cfg.cog_offset_z,
-            device,
-        )
+    _apply_xyz_offset_with_doraemon(
+        hydro.center_of_gravity,
+        env_ids,
+        base.cog,
+        rand_cfg.cog_offset_x,
+        rand_cfg.cog_offset_y,
+        rand_cfg.cog_offset_z,
+        "cog_offset_z",
+        sampled,
+        device,
+    )
 
     # Rigid body inertia
     inertia_scales = _sample_or_uniform("inertia_scale", sampled, (num_envs, 3), rand_cfg.inertia_scale, device, 3)
