@@ -320,7 +320,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
     line_search_cost_margin: float = 0.5
 
     # Entropy
-    entropy_coef: float = 0.005
+    entropy_coef: float = 0.01
 
     # Encoder z bounds
     z_bounds_coef: float = 0.3

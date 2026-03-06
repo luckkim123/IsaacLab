@@ -23,6 +23,7 @@ Reference:
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 import torch
@@ -697,6 +698,15 @@ class ConstraintTRPO:
                     mean_cost_returns,
                 )
 
+        # Enforce minimum noise floor (prevent entropy collapse)
+        min_log_std = math.log(0.1)
+        with torch.no_grad():
+            self.policy.log_std.data.clamp_(min=min_log_std)
+
+        # Measure KL right after TRPO step (before encoder update shifts z)
+        with torch.no_grad():
+            kl_after_trpo = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
+
         # Apply deferred encoder Adam step (after TRPO line search)
         if self.encoder_optimizer is not None and _encoder_grads_cache:
             self.encoder_optimizer.zero_grad()
@@ -758,6 +768,7 @@ class ConstraintTRPO:
             "cost_surrogate": cost_surrogate.item(),
             "entropy": mean_entropy,
             "kl": mean_kl,
+            "kl_trpo": kl_after_trpo,
             "cost_value": mean_cost_value_loss,
             "barrier": mean_barrier_loss,
         }

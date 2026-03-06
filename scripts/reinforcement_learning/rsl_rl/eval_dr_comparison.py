@@ -94,15 +94,17 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 from isaaclab_tasks.direct.hero_agent.config import DomainRandomizationCfg
 from isaaclab_tasks.direct.hero_agent.utils import unwrap_env, connect_encoder_to_env
-from isaaclab_tasks.direct.hero_agent.encoder import ActorCriticEncoder, ActorCriticEncoderAdapt
-from isaaclab_tasks.direct.hero_agent.runners import BaseRunner, EncoderRunner
+from isaaclab_tasks.direct.hero_agent.encoder import ActorCriticEncoder, ActorCriticEncoderAdapt, ActorCriticEncoderConstrained
+from isaaclab_tasks.direct.hero_agent.runners import BaseRunner, EncoderRunner, ConstraintEncoderRunner
 
 # Register custom classes in RSL-RL runner module namespace so the runner
 # can resolve class_name strings (same pattern as rsl_rl_ppo_cfg.py).
 _runner_module.ActorCriticEncoder = ActorCriticEncoder
 _runner_module.ActorCriticEncoderAdapt = ActorCriticEncoderAdapt
+_runner_module.ActorCriticEncoderConstrained = ActorCriticEncoderConstrained
 _runner_module.BaseRunner = BaseRunner
 _runner_module.EncoderRunner = EncoderRunner
+_runner_module.ConstraintEncoderRunner = ConstraintEncoderRunner
 
 matplotlib.use("Agg")  # non-interactive backend for headless
 
@@ -683,8 +685,9 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             runner.actor.eval()
             policy = runner.actor.act_inference
             policy_nn = runner.actor
-        elif runner_cls_name == "EncoderRunner":
-            runner = EncoderRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        elif runner_cls_name in ("EncoderRunner", "ConstraintEncoderRunner"):
+            runner_cls = ConstraintEncoderRunner if runner_cls_name == "ConstraintEncoderRunner" else EncoderRunner
+            runner = runner_cls(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
             runner.load(resume_path, load_optimizer=False)
             policy = runner.get_inference_policy(device=device)
             policy_nn = runner.alg.policy

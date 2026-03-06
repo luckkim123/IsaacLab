@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] Add ConstraintEncoderRunner support to eval_dr + TRPO stability fixes
+
+### Context
+Needed to evaluate constrained encoder policy (Isaac-HeroAgent-Constrained-Encoder-Base-v0)
+using eval_dr_comparison.py, which only supported EncoderRunner/BaseRunner/OnPolicyRunner/SACMPCRunner.
+Also includes ConstraintTRPO stability improvements: minimum log_std floor to prevent entropy
+collapse, post-TRPO KL measurement for debugging, and entropy_coef bump 0.005->0.01.
+
+### Added
+- `eval_dr_comparison.py`: ConstraintEncoderRunner + ActorCriticEncoderConstrained support (import, module registration, runner dispatch)
+
+### Changed
+- `rsl_rl_ppo_cfg.py`: entropy_coef 0.005 -> 0.01 for ConstraintTRPO
+- `constraint_trpo.py`: Added min log_std floor (log(0.1)) to prevent entropy collapse after TRPO step
+- `constraint_trpo.py`: Added `kl_trpo` metric (KL measured after TRPO step, before encoder update)
+
 ## [2026-03-06] Fix play.py: Register ConstraintEncoderRunner
 
 ### Context
