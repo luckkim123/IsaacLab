@@ -48,6 +48,7 @@ from .mdp import (
     tracking_reward,
 )
 from .mdp.events import (
+    compute_equilibrium_joint_positions,
     randomize_body_mass,
     randomize_hydrodynamics,
     randomize_joint_effort_limit,
@@ -1185,12 +1186,19 @@ class HeroAgentEnv(DirectRLEnv):
         self._prev_potentials[env_ids] = 0.0
 
         rand_cfg = self.cfg.randomization
+        # Pose must be set BEFORE joints so equilibrium init can read current attitude
         if rand_cfg.enable:
-            randomize_joint_positions(env=self, env_ids=env_ids, joint_pos_range=self.cfg.initial_joint_pos_range)
             randomize_robot_pose(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
         else:
-            reset_joint_positions_default(env=self, env_ids=env_ids)
             reset_robot_pose_default(env=self, env_ids=env_ids, initial_height=self.cfg.initial_height)
+
+        # Joint initialization: equilibrium-based or random
+        if self.cfg.joint_init_mode == "equilibrium":
+            compute_equilibrium_joint_positions(env=self, env_ids=env_ids, noise_range=self.cfg.equilibrium_joint_noise)
+        elif rand_cfg.enable:
+            randomize_joint_positions(env=self, env_ids=env_ids, joint_pos_range=self.cfg.initial_joint_pos_range)
+        else:
+            reset_joint_positions_default(env=self, env_ids=env_ids)
 
         # Joint actuator DR: always applied (when DR disabled, ranges collapse to defaults).
         # TDC envs override stiffness/damping in their own _reset_idx().

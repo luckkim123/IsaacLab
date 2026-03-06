@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] Equilibrium-consistent joint initialization
+
+### Context
+Hero Agent episodes started with large initial attitude errors because ALBC joints
+were initialized uniformly in [-pi, pi], placing the buoy far from the gravity-buoyancy
+equilibrium. This caused large unbalanced torques and violent initial transients that
+the controller had to fight through before meaningful learning could begin.
+
+Solution: compute the zero-torque equilibrium EE position from the current attitude
+(roll, pitch) using the analytical relation tau = Lambda @ p_EE + T_b = 0, then solve
+2-link analytical IK for joint angles, and add small noise (+-0.3 rad). This ensures
+the buoy starts near its natural resting position for the given attitude.
+
+Critical implementation detail: robot pose must be set BEFORE joint initialization
+(previously joints were set first), because equilibrium computation reads roll/pitch
+from the already-written root quaternion.
+
+### Added
+- `mdp/events.py`: `compute_equilibrium_joint_positions()` -- computes equilibrium
+  EE from roll/pitch (x_eq = -h*tan(pitch)/cos(roll), y_eq = h*tan(roll)), solves
+  2-link analytical IK, adds per-joint noise, clamps to limits
+- `config.py`: `joint_init_mode` ("equilibrium" default) and `equilibrium_joint_noise`
+  (+-0.3 rad) parameters in HeroAgentEnvCfg
+- `mdp/__init__.py`: Export `compute_equilibrium_joint_positions`
+
+### Changed
+- `base_env.py`: Reordered `_reset_task_and_state()` -- pose reset now happens BEFORE
+  joint initialization. Added 3-way dispatch: equilibrium (default) / random (legacy) /
+  default (no DR). Backward compatible via `joint_init_mode="random"`.
+
 ## [2026-03-06] Fix encoder gradient starvation in ConstraintTRPO
 
 ### Context

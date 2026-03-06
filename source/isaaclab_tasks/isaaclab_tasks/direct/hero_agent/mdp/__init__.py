@@ -20,6 +20,7 @@ from .constraints import (
     joint_velocity_cost,
 )
 from .events import (
+    compute_equilibrium_joint_positions,
     randomize_body_mass,
     randomize_hydrodynamics,
     randomize_joint_friction,
@@ -59,6 +60,7 @@ __all__ = [
     "joint_oscillation_cost",
     "joint_velocity_cost",
     # Events
+    "compute_equilibrium_joint_positions",
     "randomize_body_mass",
     "randomize_hydrodynamics",
     "randomize_joint_friction",

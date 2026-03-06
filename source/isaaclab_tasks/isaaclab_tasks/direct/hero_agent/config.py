@@ -296,6 +296,8 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     max_joint_velocity: float = 4.0 * math.pi / 3.0  # 40 RPM at 12V = 4*pi/3 rad/s
     control_decimation: int = 4  # target updates every 4th step = 0.02s (50Hz control)
     initial_joint_pos_range: tuple[float, float] = (-math.pi, math.pi)
+    joint_init_mode: str = "equilibrium"  # "equilibrium" or "random"
+    equilibrium_joint_noise: tuple[float, float] = (-0.3, 0.3)  # rad, noise around equilibrium
 
     # ==========================================================================
     # Attitude Task and Rewards

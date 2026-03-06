@@ -19,7 +19,12 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from isaaclab.utils.math import quat_from_euler_xyz, quat_mul
+from isaaclab.utils.math import euler_xyz_from_quat, quat_from_euler_xyz, quat_mul
+
+from isaaclab_assets.robots.uuv import (
+    HERO_AGENT_ALBC_LINK1_LENGTH,
+    HERO_AGENT_ALBC_LINK2_LENGTH,
+)
 
 if TYPE_CHECKING:
     from isaaclab_tasks.models import HydrodynamicsModel
@@ -467,6 +472,66 @@ def reset_joint_positions_default(
 
     # Reset joint position targets to zero (default position for ALBC joints)
     env._joint_pos_targets[env_ids] = 0.0
+
+    env._robot.write_joint_state_to_sim(default_joint_pos, default_joint_vel, env_ids=env_ids)
+
+
+def compute_equilibrium_joint_positions(
+    env: HeroAgentEnv,
+    env_ids: torch.Tensor | None,
+    noise_range: tuple[float, float] = (-0.3, 0.3),
+) -> None:
+    """Compute joint positions from gravity-buoyancy equilibrium at current attitude.
+
+    Zero-torque equilibrium: tau = Lambda @ p_EE + T_b = 0, which gives:
+        x_eq = -h * tan(pitch) / cos(roll)
+        y_eq =  h * tan(roll)
+    Then 2-link analytical IK computes (g1, g2) from (x_eq, y_eq).
+
+    Args:
+        env: The Hero Agent environment instance.
+        env_ids: Environment indices to reset. If None, resets all.
+        noise_range: Uniform noise range (rad) added around equilibrium.
+    """
+    env_ids = _ensure_env_ids(env, env_ids)
+    num_reset = len(env_ids)
+    device = env.device
+
+    # Get current roll/pitch from already-set robot pose
+    root_quat = env._robot.data.root_quat_w[env_ids]
+    roll, pitch, _ = euler_xyz_from_quat(root_quat)
+
+    # Equilibrium EE position (h = buoy pivot height above CoG)
+    h = 0.180  # meters, same as TDCControllerCfg.h
+    x_eq = -h * torch.tan(pitch) / torch.cos(roll)
+    y_eq = h * torch.tan(roll)
+
+    # 2-link analytical IK
+    l1 = HERO_AGENT_ALBC_LINK1_LENGTH  # 0.233m
+    l2 = HERO_AGENT_ALBC_LINK2_LENGTH  # 0.233m
+    r_sq = x_eq**2 + y_eq**2
+    cos_g2 = (r_sq - l1**2 - l2**2) / (2.0 * l1 * l2)
+    cos_g2 = torch.clamp(cos_g2, -1.0, 1.0)
+    g2 = torch.acos(cos_g2)
+    g1 = torch.atan2(y_eq, x_eq) - torch.atan2(l2 * torch.sin(g2), l1 + l2 * cos_g2)
+
+    # Add noise
+    noise = _rand_uniform_range((num_reset,), noise_range, device)
+    g1 = g1 + noise
+    noise = _rand_uniform_range((num_reset,), noise_range, device)
+    g2 = g2 + noise
+
+    # Clamp to joint limits
+    g1 = torch.clamp(g1, env._joint_limits_lower[0, 0], env._joint_limits_upper[0, 0])
+    g2 = torch.clamp(g2, env._joint_limits_lower[0, 1], env._joint_limits_upper[0, 1])
+
+    # Build full joint state
+    default_joint_pos = env._robot.data.default_joint_pos[env_ids].clone()
+    default_joint_vel = torch.zeros_like(default_joint_pos)
+
+    joint_pos = torch.stack([g1, g2], dim=-1)
+    default_joint_pos[:, env._albc_joint_ids] = joint_pos
+    env._joint_pos_targets[env_ids] = joint_pos
 
     env._robot.write_joint_state_to_sim(default_joint_pos, default_joint_vel, env_ids=env_ids)
 
