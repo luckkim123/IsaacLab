@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] Revert equilibrium joint init default to random
+
+### Context
+Code review of equilibrium joint initialization (commit ac6b2112) identified a
+sim-to-real coverage gap: with equilibrium init as default, the policy never trains
+from large joint-attitude mismatches at episode start. Real deployment will not
+guarantee equilibrium starting conditions (e.g., robot placed into water at arbitrary
+joint config). Per-step perturbations provide mid-episode recovery training but do not
+replicate the specific pattern of starting with joints misconfigured relative to attitude.
+
+Physics and math were verified correct (x_eq = -h*tan(pitch)/cos(roll), y_eq = h*tan(roll),
+F_bu cancels, analytical IK matches). No code bugs found. The feature itself is sound
+but premature as the default -- better suited as an opt-in mode or part of a mixed-init
+curriculum when sim-to-real transfer is attempted.
+
+### Changed
+- `config.py`: Reverted `joint_init_mode` default from "equilibrium" to "random"
+  (equilibrium code and config toggle preserved for future use)
+
 ## [2026-03-06] Revert value grad accumulation + encoder sensitivity analysis
 
 ### Context
