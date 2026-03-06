@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] Fix play.py: Register ConstraintEncoderRunner
+
+### Context
+Running `play.py` with a trained ConstraintEncoderRunner checkpoint failed with
+`ValueError: Unsupported runner class: ConstraintEncoderRunner`. The runner was
+already registered in `train.py`'s `_RUNNER_MAP` but was missing from `play.py`'s
+identical map -- a sync issue from when ConstraintEncoderRunner was added.
+
+### Fixed
+- `scripts/reinforcement_learning/rsl_rl/play.py`: Added `ConstraintEncoderRunner` entry to `_RUNNER_MAP`, matching `train.py`
+
 ## [2026-03-06] Fix ConstraintTRPO: Negate Step Direction (Gradient Descent, Not Ascent)
 
 ### Context

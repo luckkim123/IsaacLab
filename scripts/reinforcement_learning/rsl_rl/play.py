@@ -88,6 +88,7 @@ def _load_runner_and_policy(env, agent_cfg, resume_path):
         "BaseRunner": ("isaaclab_tasks.direct.hero_agent.runners", "BaseRunner"),
         "EncoderRunner": ("isaaclab_tasks.direct.hero_agent.runners", "EncoderRunner"),
         "AdaptRunner": ("isaaclab_tasks.direct.hero_agent.runners", "AdaptRunner"),
+        "ConstraintEncoderRunner": ("isaaclab_tasks.direct.hero_agent.runners", "ConstraintEncoderRunner"),
         "SACMPCRunner": ("isaaclab_tasks.direct.hero_agent_mpc.runners", "SACMPCRunner"),
     }
 
