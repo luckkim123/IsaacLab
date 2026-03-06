@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] Fix ConstraintTRPO: Negate Step Direction (Gradient Descent, Not Ascent)
+
+### Context
+After removing cost normalization and aligning line search objective, diagnostic logging
+revealed the ROOT CAUSE of all previous line search failures: the TRPO step direction
+was inverted. The natural gradient step was doing gradient ASCENT on the loss instead
+of descent.
+
+Diagnostic output showed:
+```
+old=1.6667  new=1.6993  impr=-0.0326  FAIL:impr
+```
+Loss INCREASED at every backtrack step -- even the smallest step (1/1024) made it worse.
+KL was fine (8.2e-3 < 1.5e-2 limit). The issue: `step_dir = +step_scale * nat_grad`
+steps in the +gradient direction (ascent), but policy_loss should be MINIMIZED.
+
+Standard TRPO maximizes `surrogate = +(ratio * adv).mean()` so `+F^{-1}g` is correct
+(ascent on thing to maximize). Our code minimizes `policy_loss = -(adv*ratio).mean() +
+cost_surr - entropy`, so the step must be `-F^{-1}g` (descent on thing to minimize).
+
+This sign error has been present since initial implementation. All 4 previous fix rounds
+(margin floor, cost normalization, objective alignment, 1/(1-gamma) scaling) were
+addressing real issues but could never work because the step always went the wrong way.
+
+Also changed diagnostic logging from `logger.info()` to `print()` since Python logging
+default level is WARNING, making info-level messages invisible.
+
+### Fixed
+- `algorithms/constraint_trpo.py`: Negated TRPO step direction from
+  `step_dir = step_scale * nat_grad` to `step_dir = -step_scale * nat_grad`.
+  Gradient of loss-to-minimize requires descent (-F^{-1}g), not ascent (+F^{-1}g)
+
+### Changed
+- `algorithms/constraint_trpo.py`: Changed diagnostic logging from `logger.info()` to
+  `print()` for stdout visibility (Python logging default level=WARNING suppresses info)
+
+---
+
 ## [2026-03-06] Fix ConstraintTRPO: Remove Cost Normalization + Align Line Search Objective
 
 ### Context

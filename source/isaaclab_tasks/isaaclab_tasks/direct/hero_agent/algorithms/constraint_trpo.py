@@ -489,16 +489,11 @@ class ConstraintTRPO:
 
             # Log diagnostics for first and last backtrack
             if i == 0 or i == self.line_search_max_backtracks - 1:
-                logger.info(
-                    "LS[%d] step=%.4e old=%.6e new=%.6e impr=%.6e kl=%.6e (lim=%.4e) %s",
-                    i,
-                    step_size,
-                    old_loss.item(),
-                    new_loss.item(),
-                    improvement.item(),
-                    kl.item(),
-                    kl_limit,
-                    "FAIL:kl" if improvement > 0 else "FAIL:impr",
+                reason = "FAIL:kl" if improvement > 0 else "FAIL:impr"
+                print(
+                    f"  LS[{i}] step={step_size:.4e} old={old_loss.item():.6e}"
+                    f" new={new_loss.item():.6e} impr={improvement.item():.6e}"
+                    f" kl={kl.item():.6e} (lim={kl_limit:.4e}) {reason}"
                 )
 
             step_size *= self.line_search_shrink_factor
@@ -682,13 +677,9 @@ class ConstraintTRPO:
 
         g_norm = g.norm().item()
         nat_grad_norm = nat_grad.norm().item()
-        logger.info(
-            "TRPO grad: |g|=%.4e |nat_grad|=%.4e shs=%.4e rew_surr=%.4e cost_surr=%.4e",
-            g_norm,
-            nat_grad_norm,
-            shs.item(),
-            reward_surrogate.item(),
-            cost_surrogate.item(),
+        print(
+            f"[TRPO] |g|={g_norm:.4e} |nat_grad|={nat_grad_norm:.4e} shs={shs.item():.4e}"
+            f" rew_surr={reward_surrogate.item():.4e} cost_surr={cost_surrogate.item():.4e}"
         )
 
         if shs <= 0 or not torch.isfinite(shs):
@@ -697,7 +688,8 @@ class ConstraintTRPO:
             ls_success = False
         else:
             step_scale = torch.sqrt(self.max_kl / shs)
-            step_dir = step_scale * nat_grad
+            # Negate: g is gradient of loss to MINIMIZE, so descent = -F^{-1}g
+            step_dir = -step_scale * nat_grad
 
             if not torch.isfinite(step_dir).all():
                 logger.warning("TRPO: step_dir contains NaN/Inf, skipping policy step")
