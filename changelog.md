@@ -51,6 +51,12 @@ dropping to 0 despite target >= d_k[0] guaranteed by formula -- needs investigat
 ### Removed
 - `constraint_trpo.py`: `_log_barrier_objective()`, `_surrogate_loss()`, `_full_surrogate_loss()`, diagnostic print()
 
+### Notes
+- Constraints 1,2 remain trivially satisfied (feasibility_rate=1.0 constant). Budget tightening deferred to next run.
+- Encoder grad_norm weakened in new run -- higher entropy may cause noisier signals that cancel in expectation.
+- `d_k_adaptive_0` anomaly: formula guarantees target >= d_k[0], but metric drops to 0. Config forwarding issue suspected.
+- Value function LR is fixed 3e-4 (Adam). TRPO policy has no LR (natural gradient + line search).
+
 ---
 
 ## [2026-03-05] ConstraintTRPO implementation + code cleanup
