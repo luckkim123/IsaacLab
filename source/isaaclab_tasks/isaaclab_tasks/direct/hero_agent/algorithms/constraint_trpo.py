@@ -304,6 +304,13 @@ class ConstraintTRPO:
                 self.storage.cost_returns[:, :, k : k + 1] - self.storage.cost_values[:, :, k : k + 1]
             )
 
+        # Normalize cost advantages per constraint (matching reward advantage normalization)
+        for k in range(self.num_constraints):
+            adv_k = self.storage.cost_advantages[:, :, k]
+            std_k = adv_k.std()
+            if std_k > 1e-8:
+                self.storage.cost_advantages[:, :, k] = (adv_k - adv_k.mean()) / (std_k + 1e-8)
+
     # ==================================================================
     # TRPO Core
     # ==================================================================
@@ -498,7 +505,7 @@ class ConstraintTRPO:
         """
         barrier = torch.tensor(0.0, device=self.device)
         for k in range(self.num_constraints):
-            margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=1e-6)
+            margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=0.1 * self.d_k[k].item())
             barrier += -torch.log(margin) / self.barrier_t
         return barrier
 
@@ -585,25 +592,17 @@ class ConstraintTRPO:
                 )
 
                 self.value_optimizer.zero_grad()
-                # Clear stale encoder grads to prevent accumulation across mini-batches
-                if self.encoder_optimizer is not None:
-                    self.encoder_optimizer.zero_grad()
                 total_value_loss.backward()
                 nn.utils.clip_grad_norm_(self._value_params, self.max_grad_norm)
                 self.value_optimizer.step()
 
-                # Z bounds loss: update encoder params via encoder_optimizer
-                # (not value_optimizer -- z_bounds_loss depends on encoder params)
-                # Requires fresh encoder forward pass to get _last_z with grad_fn
+                # Z bounds loss: log only (no encoder update here to avoid shifting
+                # actor distribution before TRPO step -- see RC2 fix)
                 z_b_loss = torch.tensor(0.0, device=self.device)
                 if hasattr(self.policy, "z_bounds_loss") and self.encoder_optimizer is not None:
-                    self.policy.act(obs_mb)  # fresh forward to populate _last_z with grad
-                    z_b_loss = self.z_bounds_coef * self.policy.z_bounds_loss()
-                    if z_b_loss.requires_grad:
-                        self.encoder_optimizer.zero_grad()
-                        z_b_loss.backward()
-                        nn.utils.clip_grad_norm_(self._encoder_params, self.max_grad_norm)
-                        self.encoder_optimizer.step()
+                    with torch.no_grad():
+                        self.policy.act(obs_mb)
+                        z_b_loss = self.z_bounds_coef * self.policy.z_bounds_loss()
 
                 mean_value_loss += value_loss.item()
                 mean_cost_value_loss += cost_value_loss.item()
@@ -635,7 +634,7 @@ class ConstraintTRPO:
         # For each constraint k, add (1/t) * E[ratio * cost_advantage_k] / margin_k
         cost_surrogate = torch.tensor(0.0, device=self.device)
         for k in range(self.num_constraints):
-            margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=1e-6)
+            margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=0.1 * self.d_k[k].item())
             cost_surrogate += (ratio * cost_advantages_flat[:, k]).mean() / (self.barrier_t * margin)
 
         # Combined: reward surrogate + cost barrier surrogate - entropy
@@ -702,6 +701,16 @@ class ConstraintTRPO:
                     p.grad = g_enc
             nn.utils.clip_grad_norm_(self._encoder_params, self.max_grad_norm)
             self.encoder_optimizer.step()
+
+        # Single z_bounds encoder update (replaces 20 per-minibatch updates)
+        if hasattr(self.policy, "z_bounds_loss") and self.encoder_optimizer is not None:
+            self.policy.act(obs_flat)
+            z_b_loss_post = self.z_bounds_coef * self.policy.z_bounds_loss()
+            if z_b_loss_post.requires_grad:
+                self.encoder_optimizer.zero_grad()
+                z_b_loss_post.backward()
+                nn.utils.clip_grad_norm_(self._encoder_params, self.max_grad_norm)
+                self.encoder_optimizer.step()
 
         # Compute KL after update for logging
         with torch.no_grad():

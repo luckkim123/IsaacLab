@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] Fix ConstraintTRPO Training Failure -- NORBC Discrepancies
+
+### Context
+ConstraintTRPO training (1900 iterations, 2026-03-05 run) showed no learning: line search
+success ~5%, attitude error 20-50 deg flat, encoder grad_norm collapsing to 0 after step
+1200, cost_surrogate exploding to 30,000+ around step 1000. Previous margin floor fix was
+insufficient. Analysis revealed 3 fundamental discrepancies with the NORBC paper.
+
+RC1: RSL-RL normalizes reward advantages `(adv - mean) / std`, but cost advantages were
+stored raw. Unpredictable cost scale dominated the natural gradient direction, making reward
+improvement impossible.
+
+RC2: z_bounds_loss updated the encoder 20 times per iteration (5 epochs x 4 minibatches)
+during the value loop. This shifted the actor distribution before the TRPO step, violating
+TRPO's assumption that the gradient is computed at the old policy. Result: ratio != 1.0
+before TRPO starts, KL budget partially consumed by uncontrolled drift.
+
+RC3: Barrier loss and cost surrogate still used `clamp(min=1e-6)` margin floor (only line
+search was fixed previously). Near-zero margins caused gradient explosion.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Added per-constraint cost advantage normalization
+  `(adv - mean) / (std + 1e-8)` after `_compute_cost_returns()`, matching reward advantage
+  normalization (NORBC Eq. 10 notes require standardization before policy gradient)
+- `algorithms/constraint_trpo.py`: Replaced 20 per-minibatch z_bounds encoder updates in
+  value loop with no-grad logging only. Added single full-batch z_bounds encoder update
+  after the deferred policy gradient step. Encoder now gets exactly 2 updates per iteration
+  (1 policy grads + 1 z_bounds) instead of 21
+- `algorithms/constraint_trpo.py`: Changed margin floor from `clamp(min=1e-6)` to
+  `clamp(min=0.1 * d_k[k])` in barrier loss (line 508) and cost surrogate (line 637),
+  consistent with the line search fix already applied
+
+### Notes
+- Verification targets: line_search_success >30%, cost_surrogate <100, encoder grad_norm
+  sustained >0.01, attitude error downward trend, total reward increasing over 300 iterations
+
+---
+
 ## [2026-03-05] Fix ConstraintTRPO Line Search Deadlock
 
 ### Context
