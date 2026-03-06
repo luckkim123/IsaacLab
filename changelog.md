@@ -4,6 +4,55 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] Full-batch value gradient for TRPO encoder
+
+### Context
+Replaced the mini-batch value gradient accumulation (20:1 ratio imbalance) with a
+single full-batch value loss forward pass after critic training. The previous approach
+accumulated encoder grads across 20 mini-batch backward() calls then averaged, creating
+numerical noise and an outsized gradient signal. The new approach uses `autograd.grad()`
+to extract encoder-only gradients from a single full-batch forward, yielding a clean
+1:1 ratio with the policy gradient.
+
+Implementation: removed `self._encoder_value_grads` instance attribute and mini-batch
+accumulation loop; added Section 1b (full-batch value forward with `autograd.grad`,
+`retain_graph=False`) between value training and TRPO policy update; updated merge
+logic to use local `_encoder_value_grads_cache` (no averaging needed for single pass).
+
+Experimental run (18-00-16, scale=0.1, 700 iter):
+- Encoder grad_norm: 0.002-0.005 (2-5x increase vs baseline 0.001). Value gradient
+  path is mechanically working.
+- z_std: 0.25->0.35 (marginal improvement, not the 0.5+ target)
+- Attitude error: 5-8 deg, BUT with upward drift after step 400 (baseline stable at 3-5)
+- cost_return_0 (joint velocity): escalating after step 400 (1->3+), cost_return_std
+  doubling (2->6). Constraint violation increasing.
+- value_function loss: 5x increase after step 200 (0.005->0.025). Critic prediction
+  accuracy degrading as encoder shifts z representation.
+- mean_reward: declining after step 400 (80->65)
+
+Diagnosis: scale=0.1 is still too aggressive. Value gradient pushes encoder toward
+"z that minimizes critic prediction error" which conflicts with "z that helps policy".
+The critic was trained on fixed z, then encoder is shifted by value grad, creating a
+representation mismatch that compounds over iterations. Next experiment: scale=0.01-0.03.
+
+### Changed
+- `constraint_trpo.py`: Removed `self._encoder_value_grads` instance attribute from
+  `__init__` (was accumulated across mini-batches, creating 20:1 ratio imbalance)
+- `constraint_trpo.py`: Removed mini-batch encoder grad accumulation (reset block +
+  capture block inside value loop). Kept encoder grad zeroing to prevent stale leakage.
+- `constraint_trpo.py`: Added Section 1b -- single full-batch value forward using
+  `torch.autograd.grad(loss, encoder_params)` after critic training. Uses trained critic
+  weights, `retain_graph=False`, extracts encoder grads without touching critic `.grad`.
+- `constraint_trpo.py`: Updated encoder grad merge to use local `_encoder_value_grads_cache`
+  (no averaging -- single pass). Removed `/= num_value_updates` division.
+- `constraint_trpo.py`: Added `encoder_value_loss_fb` to loss_dict for WandB logging.
+
+### Notes
+- `encoder_value_grad_scale=0.0` (default) skips full-batch forward entirely (safe)
+- scale=0.1 too aggressive: performance degradation after step 400
+- Proposed next: scale=0.01-0.03, or alternative approach (constraint expansion for
+  richer gradient signal instead of value gradient injection)
+
 ## [2026-03-06] Revert equilibrium joint init default to random
 
 ### Context

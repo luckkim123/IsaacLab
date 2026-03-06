@@ -178,9 +178,6 @@ class ConstraintTRPO:
         # Iteration counter for barrier schedule (updated in update())
         self._iteration = 0
 
-        # Accumulated encoder gradients from value loss path (only when scale > 0)
-        self._encoder_value_grads: list[torch.Tensor | None] = []
-
         # Storage
         self.storage: RolloutStorage | None = None
         self.transition = RolloutStorage.Transition()
@@ -556,10 +553,6 @@ class ConstraintTRPO:
         # Mean cost returns for barrier (computed once, full batch)
         mean_cost_returns = cost_returns_flat.mean(dim=0)  # (K,)
 
-        # Reset encoder gradient accumulation from value loss path (only when enabled)
-        if self._has_encoder_params and self.encoder_value_grad_scale > 0:
-            self._encoder_value_grads = [None] * len(self._encoder_params)
-
         for _epoch in range(self.num_learning_epochs):
             indices = torch.randperm(batch_size, device=self.device)
             mini_batch_size = batch_size // self.num_mini_batches
@@ -605,19 +598,6 @@ class ConstraintTRPO:
                             p.grad = None
                 total_value_loss.backward()
 
-                # Optionally capture encoder gradients from value loss path.
-                # Default (scale=0.0): skip entirely (baseline behavior).
-                # When enabled, accumulated grads are scaled and merged with policy grads
-                # in the encoder step below.
-                if self._has_encoder_params and self.encoder_value_grad_scale > 0:
-                    for i, p in enumerate(self._encoder_params):
-                        if p.grad is not None:
-                            if self._encoder_value_grads[i] is None:
-                                self._encoder_value_grads[i] = p.grad.clone()
-                            else:
-                                self._encoder_value_grads[i] += p.grad.clone()
-                            p.grad = None
-
                 nn.utils.clip_grad_norm_(self._value_params, self.max_grad_norm)
                 self.value_optimizer.step()
 
@@ -640,6 +620,34 @@ class ConstraintTRPO:
             mean_cost_value_loss /= num_value_updates
             mean_barrier_loss /= num_value_updates
             mean_z_bounds_loss /= num_value_updates
+
+        # ------------------------------------------------------------------
+        # 1b. Full-batch value loss for encoder gradient (deferred step)
+        # ------------------------------------------------------------------
+        _encoder_value_grads_cache: list[torch.Tensor | None] = []
+        encoder_value_loss_fb = 0.0
+        if self._has_encoder_params and self.encoder_value_grad_scale > 0:
+            value_pred_fb = self.policy.evaluate(obs_flat)
+            value_loss_fb = (returns_flat - value_pred_fb).pow(2).mean()
+
+            cost_value_loss_fb = torch.tensor(0.0, device=self.device)
+            if hasattr(self.policy, "evaluate_costs"):
+                cost_value_pred_fb = self.policy.evaluate_costs(obs_flat)
+                cost_value_loss_fb = (cost_returns_flat - cost_value_pred_fb).pow(2).mean()
+
+            total_encoder_value_loss = (
+                self.value_loss_coef * value_loss_fb + self.cost_value_loss_coef * cost_value_loss_fb
+            )
+            encoder_value_loss_fb = total_encoder_value_loss.item()
+
+            _encoder_value_grads_cache = list(
+                torch.autograd.grad(
+                    total_encoder_value_loss,
+                    self._encoder_params,
+                    retain_graph=False,
+                    allow_unused=True,
+                )
+            )
 
         # ------------------------------------------------------------------
         # 2. TRPO policy update (full-batch, single step)
@@ -738,7 +746,7 @@ class ConstraintTRPO:
         # Gradient sources:
         #   1. Policy loss (reward + cost surrogate) -- always applied
         #   2. Value loss path -- only when encoder_value_grad_scale > 0
-        has_value_grads = self.encoder_value_grad_scale > 0 and any(g is not None for g in self._encoder_value_grads)
+        has_value_grads = len(_encoder_value_grads_cache) > 0 and any(g is not None for g in _encoder_value_grads_cache)
         if self.encoder_optimizer is not None and (_encoder_grads_cache or has_value_grads):
             self.encoder_optimizer.zero_grad()
             for i, p in enumerate(self._encoder_params):
@@ -746,14 +754,17 @@ class ConstraintTRPO:
                 # Policy-loss gradient
                 if i < len(_encoder_grads_cache) and _encoder_grads_cache[i] is not None:
                     total_grad = _encoder_grads_cache[i]
-                # Value-loss gradient (averaged and scaled)
-                if has_value_grads and i < len(self._encoder_value_grads) and self._encoder_value_grads[i] is not None:
-                    avg_value_grad = self._encoder_value_grads[i] / max(num_value_updates, 1)
-                    avg_value_grad = avg_value_grad * self.encoder_value_grad_scale
+                # Value-loss gradient (single full-batch pass, scaled)
+                if (
+                    has_value_grads
+                    and i < len(_encoder_value_grads_cache)
+                    and _encoder_value_grads_cache[i] is not None
+                ):
+                    scaled_value_grad = _encoder_value_grads_cache[i] * self.encoder_value_grad_scale
                     if total_grad is None:
-                        total_grad = avg_value_grad
+                        total_grad = scaled_value_grad
                     else:
-                        total_grad = total_grad + avg_value_grad
+                        total_grad = total_grad + scaled_value_grad
                 if total_grad is not None:
                     p.grad = total_grad
             nn.utils.clip_grad_norm_(self._encoder_params, self.max_grad_norm)
@@ -828,6 +839,8 @@ class ConstraintTRPO:
         }
         if hasattr(self.policy, "z_bounds_loss"):
             loss_dict["z_bounds"] = mean_z_bounds_loss
+        if self._has_encoder_params and self.encoder_value_grad_scale > 0:
+            loss_dict["encoder_value_loss_fb"] = encoder_value_loss_fb
 
         return loss_dict
 
