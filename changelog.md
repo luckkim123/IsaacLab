@@ -4,6 +4,57 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] Fix ConstraintTRPO: Remove Cost Normalization + Align Line Search Objective
+
+### Context
+Line_search_success remained 0% after 4 rounds of fixes. Code audit identified two
+interacting bugs creating a fatal combination:
+
+Bug 1 (PRIMARY): Cost advantage normalization (added in RC1 as band-aid for 1e-6 margin
+floor) amplified noise 1000x when constraints were satisfied. With raw cost std~0.001,
+normalization blew it to std=1.0. Combined with 1/(1-gamma)=100 and 1/(t*margin)=1/30,
+each constraint contributed ~3.3x reward gradient scale. Total cost gradient was ~10x
+reward, but filled with normalized noise. Natural gradient direction became random.
+
+Bug 2 (SECONDARY): Gradient used linearized cost surrogate but line search used nonlinear
+log-barrier (_log_barrier_objective). TRPO guarantees improvement on the objective whose
+gradient was used for CG -- using a different objective breaks this guarantee.
+
+The margin floor fix (RC3: 0.1*d_k~3.0) already solved the original explosion that
+motivated normalization. With proper margin floor, raw cost advantages naturally scale:
+p=0.1 violation rate -> cost_gradient~10 (strong), p=0.001 -> ~1.0 (balanced with reward).
+
+Run result: line_search_success still 0%. Reward increase (2->20) is purely curriculum +
+encoder learning; actor remains frozen (surrogate~0, entropy~3 constant, noise_std=1.0).
+Added diagnostic logging (gradient norms, per-backtrack improvement/KL) to identify
+remaining failure mode.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Removed cost advantage normalization loop in
+  `_compute_cost_returns()`. Raw GAE cost advantages used directly -- barrier weighting
+  `1/(t * margin * (1-gamma))` handles cost-vs-reward scaling automatically
+- `algorithms/constraint_trpo.py`: Replaced `_log_barrier_objective()` (nonlinear
+  log-barrier) with `_linearized_surrogate()` using same formula as gradient computation
+  (reward_surr + barrier-weighted cost_surr - entropy). Ensures natural gradient direction
+  is guaranteed to improve line search objective
+- `algorithms/constraint_trpo.py`: Updated `_line_search()` and `update()` to call
+  `_linearized_surrogate()` instead of `_log_barrier_objective()`
+- `algorithms/constraint_trpo.py`: Added diagnostic logging -- TRPO gradient norms
+  (|g|, |nat_grad|, shs, rew_surr, cost_surr) and per-backtrack line search diagnostics
+  (old_loss, new_loss, improvement, kl, failure reason: FAIL:impr vs FAIL:kl)
+
+### Removed
+- `algorithms/constraint_trpo.py`: Deleted `_log_barrier_objective()` method entirely
+
+### Notes
+- NORBC paper does NOT normalize cost advantages -- barrier function handles scaling
+- Reward advantages ARE normalized (standard TRPO practice); cost advantages are NOT
+  (deliberate asymmetry, correct per barrier theory)
+- Next step: run 10 iterations with diagnostic logging to determine if failure is
+  improvement<=0 (gradient direction issue) or KL>threshold (step size issue)
+
+---
+
 ## [2026-03-06] Fix ConstraintTRPO 3 NORBC Paper Bugs -- Cost Scaling, Log-Barrier, Reward Contamination
 
 ### Context

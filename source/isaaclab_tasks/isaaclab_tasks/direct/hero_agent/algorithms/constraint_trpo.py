@@ -304,12 +304,11 @@ class ConstraintTRPO:
                 self.storage.cost_returns[:, :, k : k + 1] - self.storage.cost_values[:, :, k : k + 1]
             )
 
-        # Normalize cost advantages per constraint (matching reward advantage normalization)
-        for k in range(self.num_constraints):
-            adv_k = self.storage.cost_advantages[:, :, k]
-            std_k = adv_k.std()
-            if std_k > 1e-8:
-                self.storage.cost_advantages[:, :, k] = (adv_k - adv_k.mean()) / (std_k + 1e-8)
+        # NOTE: Cost advantages are NOT normalized (unlike reward advantages).
+        # The barrier weighting 1/(t * margin * (1-gamma)) handles cost-vs-reward
+        # scaling automatically: tight constraints get large gradients, satisfied
+        # constraints get small gradients. Normalizing would destroy this mechanism
+        # by amplifying noise when costs are near zero.
 
     # ==================================================================
     # TRPO Core
@@ -327,7 +326,7 @@ class ConstraintTRPO:
             p.data.copy_(flat_params[offset : offset + numel].view_as(p))
             offset += numel
 
-    def _log_barrier_objective(
+    def _linearized_surrogate(
         self,
         obs: TensorDict,
         actions: torch.Tensor,
@@ -336,26 +335,27 @@ class ConstraintTRPO:
         old_log_prob: torch.Tensor,
         mean_cost_returns: torch.Tensor,
     ) -> torch.Tensor:
-        """Evaluate actual NORBC Eq.(10) log-barrier for line search.
+        """Evaluate linearized IPO surrogate matching the gradient objective.
 
-        Unlike the linearized surrogate, the barrier margin depends on the new
-        policy (via ratio), so old_loss != new_loss when the policy changes.
+        Uses the SAME formula as the policy gradient computation (reward surrogate
+        + barrier-weighted cost surrogate - entropy). This ensures the natural
+        gradient direction is guaranteed to improve the line search objective.
         """
         self.policy.act(obs)
         log_prob = self.policy.get_actions_log_prob(actions)
         ratio = torch.exp(log_prob - old_log_prob)
         reward_surr = -(advantages * ratio).mean()
 
-        barrier = torch.tensor(0.0, device=self.device)
+        cost_surr = torch.tensor(0.0, device=self.device)
         for k in range(self.num_constraints):
-            # 1/(1-gamma) converts advantage expectation to discounted return change
-            cost_change = (ratio * cost_advantages[:, k]).mean() / (1.0 - self.cost_gamma)
-            new_J_Ck = mean_cost_returns[k] + cost_change
-            margin = (self.d_k_adaptive[k] - new_J_Ck).clamp(min=0.1 * self.d_k[k].item())
-            barrier += -torch.log(margin) / self.barrier_t
+            margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(
+                min=0.1 * self.d_k[k].item()
+            )
+            cost_adv_k = (ratio * cost_advantages[:, k]).mean()
+            cost_surr += cost_adv_k / ((1.0 - self.cost_gamma) * self.barrier_t * margin)
 
         entropy = self.policy.entropy
-        return reward_surr + barrier - self.entropy_coef * entropy.mean()
+        return reward_surr + cost_surr - self.entropy_coef * entropy.mean()
 
     def _kl_divergence(self, obs: TensorDict, old_mu: torch.Tensor, old_sigma: torch.Tensor) -> torch.Tensor:
         """Compute mean KL(pi_old || pi_new) analytically for Gaussian."""
@@ -452,32 +452,33 @@ class ConstraintTRPO:
         old_loss: torch.Tensor,
         mean_cost_returns: torch.Tensor,
     ) -> bool:
-        """Backtracking line search on the NORBC Eq.(10) log-barrier objective.
+        """Backtracking line search on the linearized IPO surrogate.
+
+        Uses the same objective as the gradient computation to ensure the
+        natural gradient direction is guaranteed to improve the objective.
 
         Checks two conditions:
-            1. Log-barrier objective improvement > 0
-            2. KL divergence <= max_kl * line_search_kl_margin (soft KL constraint)
-
-        The log-barrier margin depends on the new policy (via ratio), so
-        constraint-violating steps naturally increase the barrier penalty.
+            1. Linearized surrogate improvement > 0
+            2. KL divergence <= max_kl * line_search_kl_margin
 
         Returns True if a valid step was found.
         """
         old_params = self._get_policy_params_flat()
         step_size = 1.0
+        kl_limit = self.max_kl * self.line_search_kl_margin
 
         for i in range(self.line_search_max_backtracks):
             new_params = old_params + step_size * step_dir
             self._set_policy_params_flat(new_params)
 
             with torch.no_grad():
-                new_loss = self._log_barrier_objective(
+                new_loss = self._linearized_surrogate(
                     obs, actions, advantages, cost_advantages, old_log_prob, mean_cost_returns
                 )
                 kl = self._kl_divergence(obs, old_mu, old_sigma)
 
             improvement = old_loss - new_loss
-            if improvement > 0 and kl <= self.max_kl * self.line_search_kl_margin:
+            if improvement > 0 and kl <= kl_limit:
                 logger.debug(
                     "Line search step %d: improvement=%.6f, kl=%.6f",
                     i,
@@ -486,11 +487,24 @@ class ConstraintTRPO:
                 )
                 return True
 
+            # Log diagnostics for first and last backtrack
+            if i == 0 or i == self.line_search_max_backtracks - 1:
+                logger.info(
+                    "LS[%d] step=%.4e old=%.6e new=%.6e impr=%.6e kl=%.6e (lim=%.4e) %s",
+                    i,
+                    step_size,
+                    old_loss.item(),
+                    new_loss.item(),
+                    improvement.item(),
+                    kl.item(),
+                    kl_limit,
+                    "FAIL:kl" if improvement > 0 else "FAIL:impr",
+                )
+
             step_size *= self.line_search_shrink_factor
 
         # Revert to old parameters if no valid step found
         self._set_policy_params_flat(old_params)
-        logger.debug("Line search failed after %d backtracks", self.line_search_max_backtracks)
         return False
 
     # ==================================================================
@@ -666,6 +680,17 @@ class ConstraintTRPO:
         # Step size: sqrt(2 * max_kl / (g^T F^{-1} g))
         shs = 0.5 * nat_grad.dot(g)  # 0.5 * x^T F x approximation
 
+        g_norm = g.norm().item()
+        nat_grad_norm = nat_grad.norm().item()
+        logger.info(
+            "TRPO grad: |g|=%.4e |nat_grad|=%.4e shs=%.4e rew_surr=%.4e cost_surr=%.4e",
+            g_norm,
+            nat_grad_norm,
+            shs.item(),
+            reward_surrogate.item(),
+            cost_surrogate.item(),
+        )
+
         if shs <= 0 or not torch.isfinite(shs):
             # CG approximation broke positive-definiteness -- skip TRPO step
             logger.warning("TRPO: shs=%.6e non-positive or non-finite, skipping policy step", shs.item())
@@ -678,9 +703,9 @@ class ConstraintTRPO:
                 logger.warning("TRPO: step_dir contains NaN/Inf, skipping policy step")
                 ls_success = False
             else:
-                # Line search on the full objective (reward + cost barrier - entropy)
+                # Evaluate old loss using the same linearized surrogate as the gradient
                 with torch.no_grad():
-                    old_loss = self._log_barrier_objective(
+                    old_loss = self._linearized_surrogate(
                         obs_flat,
                         actions_flat,
                         advantages_flat.squeeze(-1),
