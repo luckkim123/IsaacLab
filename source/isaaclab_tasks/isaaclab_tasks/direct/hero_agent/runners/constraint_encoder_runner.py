@@ -69,6 +69,8 @@ class ConstraintEncoderRunner(EncoderRunner):
 
         # Per-constraint metrics
         for k in range(K):
+            if hasattr(alg, "d_k"):
+                metrics[f"Constraint/d_k_{k}"] = alg.d_k[k].item()
             if hasattr(alg, "d_k_adaptive"):
                 metrics[f"Constraint/d_k_adaptive_{k}"] = alg.d_k_adaptive[k].item()
             if hasattr(alg, "_last_cost_returns"):

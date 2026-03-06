@@ -4,6 +4,51 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] ConstraintTRPO Round 2: entropy, budget, diagnostic logging
+
+### Context
+Round 2 tuning based on comparison of runs 15-30-39 (baseline) and 15-54-09 (entropy
+fix). Previous round applied entropy_coef 0.005->0.01 and min_std floor -- slowed
+entropy collapse but didn't stop it. Also d_k_adaptive_0 anomalously dropped to 0
+(should be impossible by formula).
+
+Applied 4 changes: entropy_coef 0.01->0.02, constraint_budgets halved (0.3,0.05,0.3)
+->(0.15,0.02,0.15), d_k diagnostic warning, and d_k base value logging.
+
+Run 16-17-25 results vs previous runs:
+- Entropy: STABILIZED at 1.0-1.2 (no longer collapsing). entropy_coef=0.02 worked.
+- d_k anomaly RESOLVED: d_k_0=15, d_k_adaptive_0=15, both flat. Previous anomaly
+  was likely a logging/comparison artifact (no d_k base metric to compare against).
+- noise_std: 0.40 (vs 0.25 baseline) -- much more exploration maintained.
+
+However, Dynamics metrics revealed the entropy fix HURT overall quality:
+- Torque: 3-5 Nm (vs 2-3 Nm baseline) -- 2x higher actuator effort
+- Joint velocity: 1.5-2.0 (vs 1.0 baseline) -- faster, less controlled
+- Oscillation HF RMS: 0.5-0.8 (vs 0.3-0.4 baseline) -- more vibration
+- Attitude error: 10-15 deg (vs 8-10 deg baseline) -- worse tracking
+- Action rate: 0.6-0.8 (vs 0.4 baseline) -- jerkier commands
+
+Key insight: entropy collapse is NOT a bug for 2-DOF attitude control. The baseline's
+entropy collapse produced a smooth, conservative policy (low torque, low oscillation)
+which is actually desirable. Forcing high entropy injects noise into actuators.
+ConstraintTRPO's value may lie in constraint enforcement, not entropy maintenance.
+
+### Changed
+- `rsl_rl_ppo_cfg.py`: entropy_coef 0.01 -> 0.02 in RslRlConstraintTRPOAlgorithmCfg
+- `rsl_rl_ppo_cfg.py`: constraint_budgets (0.3, 0.05, 0.3) -> (0.15, 0.02, 0.15)
+- `constraint_trpo.py`: Aligned __init__ defaults with config (budgets + entropy_coef)
+
+### Added
+- `constraint_trpo.py`: Diagnostic warning when d_k_adaptive drops below d_k (invariant violation)
+- `constraint_encoder_runner.py`: Log `Constraint/d_k_{k}` base budget values alongside d_k_adaptive
+
+### Notes
+- Baseline run (15-30-39) remains best overall: similar attitude error with half the torque/velocity
+- Next direction: either revert entropy_coef to 0.005 and focus on constraint tightening,
+  or conclude ConstraintTRPO experiment and return to PPO Encoder-Base for Phase 2
+
+---
+
 ## [2026-03-06] ConstraintEncoderRunner support + ConstraintTRPO stabilization
 
 ### Context

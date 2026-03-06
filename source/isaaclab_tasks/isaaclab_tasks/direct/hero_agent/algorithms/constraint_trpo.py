@@ -66,7 +66,7 @@ class ConstraintTRPO:
         lam: float = 0.95,
         # Constraint / IPO parameters
         num_constraints: int = 3,
-        constraint_budgets: tuple[float, ...] = (0.1, 0.05, 0.1),
+        constraint_budgets: tuple[float, ...] = (0.15, 0.02, 0.15),
         cost_gamma: float = 0.99,
         cost_lam: float = 0.95,
         barrier_t: float = 1.0,
@@ -78,7 +78,7 @@ class ConstraintTRPO:
         line_search_kl_margin: float = 1.5,
         line_search_cost_margin: float = 0.5,
         # Entropy
-        entropy_coef: float = 0.005,
+        entropy_coef: float = 0.02,
         # Encoder z bounds
         z_bounds_coef: float = 0.3,
         # Device
@@ -349,9 +349,7 @@ class ConstraintTRPO:
 
         cost_surr = torch.tensor(0.0, device=self.device)
         for k in range(self.num_constraints):
-            margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(
-                min=0.1 * self.d_k[k].item()
-            )
+            margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=0.1 * self.d_k[k].item())
             cost_adv_k = (ratio * cost_advantages[:, k]).mean()
             cost_surr += cost_adv_k / ((1.0 - self.cost_gamma) * self.barrier_t * margin)
 
@@ -741,6 +739,17 @@ class ConstraintTRPO:
             self.d_k_adaptive[k] = (1.0 - self.adaptive_ema_alpha) * self.d_k_adaptive[
                 k
             ] + self.adaptive_ema_alpha * target
+            # Diagnostic: d_k_adaptive should never drop below d_k
+            if self.d_k_adaptive[k] < self.d_k[k].item() - 1e-6:
+                logger.warning(
+                    "d_k_adaptive[%d]=%.4f < d_k[%d]=%.4f (target=%.4f, j_c=%.4f)",
+                    k,
+                    self.d_k_adaptive[k],
+                    k,
+                    self.d_k[k].item(),
+                    target,
+                    j_c_k,
+                )
 
         # ------------------------------------------------------------------
         # 3b. Store constraint monitoring metrics as instance attributes

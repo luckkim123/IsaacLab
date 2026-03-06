@@ -308,7 +308,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
 
     # Constraint / IPO
     num_constraints: int = 3
-    constraint_budgets: tuple[float, ...] = (0.3, 0.05, 0.3)
+    constraint_budgets: tuple[float, ...] = (0.15, 0.02, 0.15)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
     barrier_t: float = 1.0
@@ -320,7 +320,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
     line_search_cost_margin: float = 0.5
 
     # Entropy
-    entropy_coef: float = 0.01
+    entropy_coef: float = 0.02
 
     # Encoder z bounds
     z_bounds_coef: float = 0.3
