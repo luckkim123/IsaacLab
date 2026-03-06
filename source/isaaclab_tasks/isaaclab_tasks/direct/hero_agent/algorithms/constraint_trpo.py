@@ -81,6 +81,8 @@ class ConstraintTRPO:
         entropy_coef: float = 0.005,
         # Encoder z bounds
         z_bounds_coef: float = 0.3,
+        # Encoder value gradient scale (0.0 = disabled, baseline behavior)
+        encoder_value_grad_scale: float = 0.0,
         # Device
         device: str = "cpu",
         # Unused kwargs from RSL-RL config forwarding
@@ -124,6 +126,7 @@ class ConstraintTRPO:
         self.line_search_kl_margin = line_search_kl_margin
         self.line_search_cost_margin = line_search_cost_margin
         self.z_bounds_coef = z_bounds_coef
+        self.encoder_value_grad_scale = encoder_value_grad_scale
 
         if cost_gamma >= 1.0:
             raise ValueError(f"cost_gamma must be < 1.0, got {cost_gamma}")
@@ -175,7 +178,7 @@ class ConstraintTRPO:
         # Iteration counter for barrier schedule (updated in update())
         self._iteration = 0
 
-        # Accumulated encoder gradients from value loss path (populated in update())
+        # Accumulated encoder gradients from value loss path (only when scale > 0)
         self._encoder_value_grads: list[torch.Tensor | None] = []
 
         # Storage
@@ -553,8 +556,8 @@ class ConstraintTRPO:
         # Mean cost returns for barrier (computed once, full batch)
         mean_cost_returns = cost_returns_flat.mean(dim=0)  # (K,)
 
-        # Reset encoder gradient accumulation from value loss path
-        if self._has_encoder_params:
+        # Reset encoder gradient accumulation from value loss path (only when enabled)
+        if self._has_encoder_params and self.encoder_value_grad_scale > 0:
             self._encoder_value_grads = [None] * len(self._encoder_params)
 
         for _epoch in range(self.num_learning_epochs):
@@ -602,18 +605,18 @@ class ConstraintTRPO:
                             p.grad = None
                 total_value_loss.backward()
 
-                # Capture encoder gradients from value loss path before they're discarded.
-                # The symmetric critic design means evaluate(obs) routes through the encoder,
-                # so backward() populates encoder .grad. But value_optimizer only steps
-                # value params, so these gradients would be silently lost.
-                if self._has_encoder_params:
+                # Optionally capture encoder gradients from value loss path.
+                # Default (scale=0.0): skip entirely (baseline behavior).
+                # When enabled, accumulated grads are scaled and merged with policy grads
+                # in the encoder step below.
+                if self._has_encoder_params and self.encoder_value_grad_scale > 0:
                     for i, p in enumerate(self._encoder_params):
                         if p.grad is not None:
                             if self._encoder_value_grads[i] is None:
                                 self._encoder_value_grads[i] = p.grad.clone()
                             else:
                                 self._encoder_value_grads[i] += p.grad.clone()
-                            p.grad = None  # Clear so value_optimizer doesn't touch encoder
+                            p.grad = None
 
                 nn.utils.clip_grad_norm_(self._value_params, self.max_grad_norm)
                 self.value_optimizer.step()
@@ -732,10 +735,10 @@ class ConstraintTRPO:
             kl_after_trpo = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
 
         # Apply deferred encoder Adam step (after TRPO line search).
-        # Merge gradients from two sources:
-        #   1. Policy loss (reward + cost surrogate) -- from autograd.grad above
-        #   2. Value loss path (critic + cost_critic + barrier) -- accumulated in value loop
-        has_value_grads = any(g is not None for g in self._encoder_value_grads)
+        # Gradient sources:
+        #   1. Policy loss (reward + cost surrogate) -- always applied
+        #   2. Value loss path -- only when encoder_value_grad_scale > 0
+        has_value_grads = self.encoder_value_grad_scale > 0 and any(g is not None for g in self._encoder_value_grads)
         if self.encoder_optimizer is not None and (_encoder_grads_cache or has_value_grads):
             self.encoder_optimizer.zero_grad()
             for i, p in enumerate(self._encoder_params):
@@ -743,9 +746,10 @@ class ConstraintTRPO:
                 # Policy-loss gradient
                 if i < len(_encoder_grads_cache) and _encoder_grads_cache[i] is not None:
                     total_grad = _encoder_grads_cache[i]
-                # Value-loss gradient (averaged over mini-batch updates)
-                if i < len(self._encoder_value_grads) and self._encoder_value_grads[i] is not None:
+                # Value-loss gradient (averaged and scaled)
+                if has_value_grads and i < len(self._encoder_value_grads) and self._encoder_value_grads[i] is not None:
                     avg_value_grad = self._encoder_value_grads[i] / max(num_value_updates, 1)
+                    avg_value_grad = avg_value_grad * self.encoder_value_grad_scale
                     if total_grad is None:
                         total_grad = avg_value_grad
                     else:

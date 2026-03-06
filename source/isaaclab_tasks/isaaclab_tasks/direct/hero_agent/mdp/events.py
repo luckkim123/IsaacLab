@@ -522,8 +522,8 @@ def compute_equilibrium_joint_positions(
     g2 = g2 + noise
 
     # Clamp to joint limits
-    g1 = torch.clamp(g1, env._joint_limits_lower[0, 0], env._joint_limits_upper[0, 0])
-    g2 = torch.clamp(g2, env._joint_limits_lower[0, 1], env._joint_limits_upper[0, 1])
+    g1 = torch.clamp(g1, env._joint_limits_lower[0], env._joint_limits_upper[0])
+    g2 = torch.clamp(g2, env._joint_limits_lower[1], env._joint_limits_upper[1])
 
     # Build full joint state
     default_joint_pos = env._robot.data.default_joint_pos[env_ids].clone()

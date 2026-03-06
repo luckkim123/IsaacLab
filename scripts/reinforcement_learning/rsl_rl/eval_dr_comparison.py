@@ -606,17 +606,6 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     is_pure_tdc = task_name == "Isaac-HeroAgent-TDC-v0"
     use_checkpoint = args_cli.checkpoint != "none" if args_cli.checkpoint else True
 
-    # ---- Output directory ----
-    if args_cli.output_dir:
-        output_dir = args_cli.output_dir
-    else:
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        # e.g. "Isaac-HeroAgent-Encoder-Base-v0" -> "hero_agent_encoder_base"
-        folder_name = task_name.removeprefix("Isaac-").lower().replace("-", "_").removesuffix("_v0")
-        output_dir = os.path.join("logs", "eval_dr", folder_name, ts)
-    os.makedirs(output_dir, exist_ok=True)
-    print(f"[INFO] Output directory: {output_dir}")
-
     # ---- Env config overrides (evaluation mode) ----
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.randomize_target_attitude = False
@@ -657,6 +646,20 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             if os.path.isfile(best_model_path):
                 resume_path = best_model_path
         print(f"[INFO] Checkpoint: {resume_path}")
+
+    # ---- Output directory ----
+    if args_cli.output_dir:
+        output_dir = args_cli.output_dir
+    else:
+        # Use training run timestamp from checkpoint path instead of current time
+        if resume_path:
+            ts = os.path.basename(os.path.dirname(resume_path))
+        else:
+            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        folder_name = task_name.removeprefix("Isaac-").lower().replace("-", "_").removesuffix("_v0")
+        output_dir = os.path.join("logs", "eval_dr", folder_name, ts)
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"[INFO] Output directory: {output_dir}")
 
     # ---- Create env (initial DR = none) ----
     apply_dr_config(env_cfg, DR_SCALE["none"], is_tdc)

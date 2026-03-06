@@ -4,6 +4,60 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] Revert value grad accumulation + encoder sensitivity analysis
+
+### Context
+Post-run review of 5 ConstraintTRPO encoder runs revealed the value gradient
+accumulation (commit 68b4483f) was harmful: it accumulated encoder grads across
+20 mini-batch backward passes creating a 20:1 ratio imbalance vs the single
+full-batch policy gradient. At scale=1.0, the encoder optimized for "minimize
+value prediction error" by collapsing z variance (z_std 0.8 -> 0.2).
+
+Fix: gated all value gradient code behind `encoder_value_grad_scale` (default=0.0,
+disabled). When disabled, encoder receives only policy loss gradient (baseline
+behavior). Scale parameter preserved for future experimentation.
+
+Validation run (17-16-19, 700 iter): NO catastrophic instability, attitude error
+~7-8 deg (baseline-equivalent), constraints satisfied (feasibility_rate > 0.98).
+However, encoder sensitivity analysis (z_sweep heatmap) showed max z_range 0.29
+vs PPO baseline's 1.24 -- ~4x weaker.
+
+Deep gradient flow analysis identified root cause: PPO encoder gets gradient from
+surrogate loss (20x/iter) + value loss (20x/iter) + z_bounds (20x/iter) = 60 updates.
+TRPO encoder gets only policy loss (1x/iter) + z_bounds (1x/iter) = 2 updates.
+The value loss through the symmetric critic (encoder -> z -> critic -> value) is the
+strongest signal and is completely absent in TRPO.
+
+Proposed next step: replace mini-batch accumulation with a single full-batch value
+forward pass after critic training, providing value gradient at 1:1 ratio with policy
+gradient. This avoids the 20:1 imbalance while restoring the missing signal.
+
+### Changed
+- `constraint_trpo.py`: Added `encoder_value_grad_scale` parameter (default=0.0) to
+  `__init__`. Gated value gradient accumulation reset, capture, and merge on `scale > 0`.
+  When scale=0.0 (default), encoder receives only policy loss gradient -- identical
+  to original baseline behavior.
+- `rsl_rl_ppo_cfg.py`: Added `encoder_value_grad_scale: float = 0.0` to
+  `RslRlConstraintTRPOAlgorithmCfg` with documentation comment.
+
+### Fixed
+- `mdp/events.py`: Fixed `IndexError: too many indices for tensor of dimension 1` in
+  `compute_equilibrium_joint_positions()`. `_joint_limits_lower/upper` are shape `(2,)`
+  (1D), but indexing used `[0, 0]`/`[0, 1]` (2D). Changed to `[0]`/`[1]`.
+- `base_runner.py`: Removed `_save_best_model()` and `_best_mean_reward` tracking
+  (dead code after OnPolicyRunner upstream added its own best model saving).
+- `eval_dr_comparison.py`: Output directory now uses training run timestamp from
+  checkpoint path instead of current time (easier to correlate eval with training).
+
+### Notes
+- Encoder sensitivity at iter 650: Main Volume z_range=0.29, Payload Mass=0.06 (near dead)
+  vs PPO baseline Main Volume=1.24, Payload Mass=0.28
+- Full-batch value gradient plan written (see plan file). Conservative start: scale=0.1
+- Run may improve with longer training (currently 700/2500 iter) but structural gradient
+  deficit suggests sensitivity plateau without value signal
+
+---
+
 ## [2026-03-06] Equilibrium-consistent joint initialization
 
 ### Context
