@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] Fix encoder gradient starvation in ConstraintTRPO
+
+### Context
+Deep analysis of 3-run comparison (baseline 15-30-39, entropy-fix 15-54-09, round-2
+16-17-25) revealed a structural bug: encoder gets NO gradient from value/cost_value
+loss in ConstraintTRPO, unlike PPO where a shared optimizer propagates value gradients
+to the encoder naturally. In ConstraintTRPO, `value_optimizer` only contains
+critic/cost_critic params, so encoder `.grad` from `total_value_loss.backward()` is
+populated (via symmetric critic computation graph through z) but never applied.
+
+Fix: accumulate encoder gradients during the value update mini-batch loop, then merge
+(averaged) with the policy-loss gradients in the deferred encoder Adam step. Also
+reverted entropy_coef 0.02 -> 0.005 (analysis showed entropy collapse is desirable
+for 2-DOF control; high entropy injects actuator noise).
+
+Run 16-46-07 results:
+- Encoder grad_norm: **0.005-0.015** in first 100 iter (3-10x increase vs ~0.001 broken runs).
+  Confirms value gradient path is mechanically working.
+- However, catastrophic instability at iter ~150: z_std collapsed 0.8 -> 0.2, cost_return_0
+  spiked to 40 (d_k=15), feasibility_rate_0 dropped to 0.3, mean_reward dropped to 20.
+- Recovery after iter 200 to near-baseline performance, but with z_std=0.2 (dead encoder).
+- Root cause of crisis: value MSE gradient magnitude far exceeds policy surrogate gradient
+  (~0 for TRPO at ratio=1), so encoder optimizes for "minimize value prediction error"
+  rather than "improve policy". z converges to a constant (low z variance = easier prediction).
+- Next step: add `encoder_value_grad_scale` (e.g., 0.1) to balance the two gradient sources.
+
+### Changed
+- `constraint_trpo.py`: Added encoder value gradient accumulation in value update loop --
+  captures encoder `.grad` after `total_value_loss.backward()`, accumulates across
+  mini-batches, merges (averaged) with policy-loss gradient in deferred encoder step
+- `constraint_trpo.py`: Reverted entropy_coef default 0.02 -> 0.005
+- `rsl_rl_ppo_cfg.py`: Reverted entropy_coef 0.02 -> 0.005 in RslRlConstraintTRPOAlgorithmCfg
+
+### Notes
+- Value gradient to encoder is too strong without scaling -- causes z collapse (z_std 0.8 -> 0.2)
+- Need `encoder_value_grad_scale` parameter to attenuate value-path gradients relative to policy-path
+- Entropy revert confirmed correct: noise_std follows baseline collapse pattern (0.95 -> 0.2)
+- First time constraints were genuinely active (feasibility_rate_0 dropped to 0.3 during crisis)
+
+---
+
 ## [2026-03-06] ConstraintTRPO Round 2: entropy, budget, diagnostic logging
 
 ### Context
