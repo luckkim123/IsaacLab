@@ -48,6 +48,30 @@ entropy_coef, add task-level constraints (attitude safety, yaw rate).
   (15 deg), yaw rate suppression. Current 3 constraints need budget tightening too.
 - Tracking sigma reduction is highest-priority change for breaking the reward plateau.
 
+## [2026-03-06] eval_dr_comparison.py code review cleanup
+
+### Context
+Code review of `eval_dr_comparison.py` (DR robustness evaluation script) found 4 issues:
+(1) SAC-MPC references to deleted `hero_agent_mpc/` module (deleted 2026-03-05) causing
+`ModuleNotFoundError` at runtime, (2) missing `buoy_perturbation_*` fields in DR
+interpolation list, (3) dead code (`env_cfg.randomization.enable = True` overwritten by
+`apply_dr_config`), (4) misleading comment ("5s out of 10s" when default is 5s segments).
+
+Core evaluation logic (trajectory generation, DR interpolation, metrics, plotting) verified
+correct. No theoretical or logical issues found in the main evaluation pipeline.
+
+### Changed
+- `eval_dr_comparison.py`: Added `buoy_perturbation_force_range` and
+  `buoy_perturbation_torque_range` to DR interpolation `float_tuple_fields`
+
+### Fixed
+- `eval_dr_comparison.py`: Fixed steady-state comment ("5s out of 10s" -> "last 50% of segment")
+
+### Removed
+- `eval_dr_comparison.py`: SAC-MPC dead code -- import, docstring, runner branch, step-loop
+  prediction/reset_mpc hooks, pred_error_buf init (~40 lines)
+- `eval_dr_comparison.py`: Dead `env_cfg.randomization.enable = True` (overwritten by apply_dr_config)
+
 ---
 
 ## [2026-03-06] Full-batch value gradient for TRPO encoder

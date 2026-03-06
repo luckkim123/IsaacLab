@@ -21,7 +21,6 @@ Supported tasks:
     Isaac-HeroAgent-Encoder-Base-v0 (HORA Phase 1)
     Isaac-HeroAgent-TDC-v0          (classical TDC)
     Isaac-HeroAgent-Adapt-Base-v0   (HORA Phase 2)
-    Isaac-HeroAgent-SAC-MPC-v0      (SAC-MPC)
 
 Usage:
     # Pure TDC baseline
@@ -31,10 +30,6 @@ Usage:
     # Encoder-Base policy
     ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/eval_dr_comparison.py \
         --task Isaac-HeroAgent-Encoder-Base-v0 --num_envs 64 --headless
-
-    # SAC-MPC policy
-    ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/eval_dr_comparison.py \
-        --task Isaac-HeroAgent-SAC-MPC-v0 --num_envs 64 --headless
 """
 
 """Launch Isaac Sim Simulator first."""
@@ -152,6 +147,7 @@ def build_dr_config(scale: float, is_tdc: bool) -> DomainRandomizationCfg:
         "added_mass_scale", "linear_damping_scale", "quadratic_damping_scale",
         "water_density_range",
         "perturbation_force_range", "perturbation_torque_range",
+        "buoy_perturbation_force_range", "buoy_perturbation_torque_range",
         "payload_mass_range", "payload_cog_offset_z",
         "cob_offset_x", "cob_offset_y", "cob_offset_z",
         "cog_offset_x", "cog_offset_y", "cog_offset_z",
@@ -340,7 +336,7 @@ def compute_metrics(data: dict) -> dict:
         seg_alive = alive[s:e]
         seg_time = time_s[s:e]
 
-        # Steady-state: last 50% of segment (5s out of 10s)
+        # Steady-state: last 50% of segment
         ss_start = int(seg_steps * 0.5)
         ss_error = seg_error[ss_start:]
         ss_alive = seg_alive[ss_start:]
@@ -513,9 +509,7 @@ def run_evaluation(
     obs = env.get_observations()
     with torch.inference_mode():
         obs, _, _, _ = env.step(policy(obs))
-        if hasattr(policy_nn, "reset_mpc"):
-            policy_nn.reset_mpc(torch.arange(num_envs, device=device))
-        elif hasattr(policy_nn, "reset"):
+        if hasattr(policy_nn, "reset"):
             policy_nn.reset(torch.ones(num_envs, 1, dtype=torch.bool, device=device))
 
     # Clear episode length counter to prevent timeout during evaluation.
@@ -535,19 +529,8 @@ def run_evaluation(
 
         with torch.inference_mode():
             actions = policy(obs)
-            # SAC-MPC: store dynamics prediction before env.step
-            if hasattr(policy_nn, "store_prediction"):
-                policy_nn.store_prediction(obs["mpc_state"], actions)
             obs, _, dones, _ = env.step(actions)
-            # SAC-MPC: update prediction error after env.step
-            if hasattr(policy_nn, "update_pred_error"):
-                policy_nn.update_pred_error(obs["mpc_state"])
-            # Reset policy states
-            if hasattr(policy_nn, "reset_mpc"):
-                env_ids = dones.nonzero(as_tuple=False).squeeze(-1)
-                if env_ids.numel() > 0:
-                    policy_nn.reset_mpc(env_ids)
-            elif hasattr(policy_nn, "reset"):
+            if hasattr(policy_nn, "reset"):
                 policy_nn.reset(dones)
 
         # Collect Euler angles
@@ -619,7 +602,6 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     if hasattr(env_cfg, "doraemon"):
         env_cfg.doraemon.enable = False
-    env_cfg.randomization.enable = True
 
     # Compute episode_length_s from the longest trajectory across all DR levels
     _max_segs = 0
@@ -677,18 +659,9 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
 
     # ---- Create runner + load policy ----
     runner_cls_name = getattr(agent_cfg, "class_name", "OnPolicyRunner")
-    is_sac_mpc = runner_cls_name == "SACMPCRunner"
 
     if use_checkpoint and resume_path:
-        if is_sac_mpc:
-            from isaaclab_tasks.direct.hero_agent_mpc.runners import SACMPCRunner
-
-            runner = SACMPCRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-            runner.load(resume_path)
-            runner.actor.eval()
-            policy = runner.actor.act_inference
-            policy_nn = runner.actor
-        elif runner_cls_name in ("EncoderRunner", "ConstraintEncoderRunner"):
+        if runner_cls_name in ("EncoderRunner", "ConstraintEncoderRunner"):
             runner_cls = ConstraintEncoderRunner if runner_cls_name == "ConstraintEncoderRunner" else EncoderRunner
             runner = runner_cls(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
             runner.load(resume_path, load_optimizer=False)
@@ -710,10 +683,6 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
 
         print(f"[INFO] Loaded {runner_cls_name} from {resume_path}")
         connect_encoder_to_env(env, policy_nn, "EvalDR")
-
-        # SAC-MPC: initialize prediction error buffer
-        if hasattr(policy_nn, "_ensure_pred_error_buf"):
-            policy_nn._ensure_pred_error_buf(num_envs, device)
     else:
         action_dim = env_cfg.action_space
         policy = lambda obs: torch.zeros(num_envs, action_dim, device=device)  # noqa: E731
