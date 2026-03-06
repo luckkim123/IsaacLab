@@ -479,22 +479,7 @@ class ConstraintTRPO:
 
             improvement = old_loss - new_loss
             if improvement > 0 and kl <= kl_limit:
-                logger.debug(
-                    "Line search step %d: improvement=%.6f, kl=%.6f",
-                    i,
-                    improvement.item(),
-                    kl.item(),
-                )
                 return True
-
-            # Log diagnostics for first and last backtrack
-            if i == 0 or i == self.line_search_max_backtracks - 1:
-                reason = "FAIL:kl" if improvement > 0 else "FAIL:impr"
-                print(
-                    f"  LS[{i}] step={step_size:.4e} old={old_loss.item():.6e}"
-                    f" new={new_loss.item():.6e} impr={improvement.item():.6e}"
-                    f" kl={kl.item():.6e} (lim={kl_limit:.4e}) {reason}"
-                )
 
             step_size *= self.line_search_shrink_factor
 
@@ -674,13 +659,6 @@ class ConstraintTRPO:
 
         # Step size: sqrt(2 * max_kl / (g^T F^{-1} g))
         shs = 0.5 * nat_grad.dot(g)  # 0.5 * x^T F x approximation
-
-        g_norm = g.norm().item()
-        nat_grad_norm = nat_grad.norm().item()
-        print(
-            f"[TRPO] |g|={g_norm:.4e} |nat_grad|={nat_grad_norm:.4e} shs={shs.item():.4e}"
-            f" rew_surr={reward_surrogate.item():.4e} cost_surr={cost_surrogate.item():.4e}"
-        )
 
         if shs <= 0 or not torch.isfinite(shs):
             # CG approximation broke positive-definiteness -- skip TRPO step

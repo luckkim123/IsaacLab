@@ -37,8 +37,18 @@ default level is WARNING, making info-level messages invisible.
   Gradient of loss-to-minimize requires descent (-F^{-1}g), not ascent (+F^{-1}g)
 
 ### Changed
-- `algorithms/constraint_trpo.py`: Changed diagnostic logging from `logger.info()` to
-  `print()` for stdout visibility (Python logging default level=WARNING suppresses info)
+- `algorithms/constraint_trpo.py`: Removed all diagnostic print() statements after
+  verifying fix (were temporary: TRPO gradient norms, per-backtrack LS diagnostics)
+
+### Verified
+Run 2026-03-06_15-30-39 (40+ iterations, 4096 envs):
+- `line_search_success`: **100%** (was 0% in all previous runs)
+- `mean_noise_std`: 0.95 -> 0.15 (policy specializing, was flat 1.0)
+- `Loss/entropy`: 2.8 -> 0.5 (was flat 3.0)
+- `Loss/kl`: ~0.01 active (was 0.03 from encoder-only drift)
+- `Train/mean_reward`: 1 -> 16 (genuine learning, not just curriculum)
+- `cost_surrogate`: 8 -> 0 (policy actively reducing violations)
+- `cost_value`: 2.5 -> 0.3 (cost critic learning)
 
 ---
 
