@@ -327,20 +327,7 @@ class ConstraintTRPO:
             p.data.copy_(flat_params[offset : offset + numel].view_as(p))
             offset += numel
 
-    def _surrogate_loss(
-        self,
-        obs: TensorDict,
-        actions: torch.Tensor,
-        advantages: torch.Tensor,
-        old_log_prob: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute policy surrogate loss: -E[A * ratio]."""
-        self.policy.act(obs)
-        log_prob = self.policy.get_actions_log_prob(actions)
-        ratio = torch.exp(log_prob - old_log_prob)
-        return -(advantages * ratio).mean()
-
-    def _full_surrogate_loss(
+    def _log_barrier_objective(
         self,
         obs: TensorDict,
         actions: torch.Tensor,
@@ -349,17 +336,26 @@ class ConstraintTRPO:
         old_log_prob: torch.Tensor,
         mean_cost_returns: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute full policy loss matching gradient objective: reward + cost barrier - entropy."""
+        """Evaluate actual NORBC Eq.(10) log-barrier for line search.
+
+        Unlike the linearized surrogate, the barrier margin depends on the new
+        policy (via ratio), so old_loss != new_loss when the policy changes.
+        """
         self.policy.act(obs)
         log_prob = self.policy.get_actions_log_prob(actions)
         ratio = torch.exp(log_prob - old_log_prob)
         reward_surr = -(advantages * ratio).mean()
-        cost_surr = torch.tensor(0.0, device=self.device)
+
+        barrier = torch.tensor(0.0, device=self.device)
         for k in range(self.num_constraints):
-            margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=0.1 * self.d_k[k].item())
-            cost_surr += (ratio * cost_advantages[:, k]).mean() / (self.barrier_t * margin)
+            # 1/(1-gamma) converts advantage expectation to discounted return change
+            cost_change = (ratio * cost_advantages[:, k]).mean() / (1.0 - self.cost_gamma)
+            new_J_Ck = mean_cost_returns[k] + cost_change
+            margin = (self.d_k_adaptive[k] - new_J_Ck).clamp(min=0.1 * self.d_k[k].item())
+            barrier += -torch.log(margin) / self.barrier_t
+
         entropy = self.policy.entropy
-        return reward_surr + cost_surr - self.entropy_coef * entropy.mean()
+        return reward_surr + barrier - self.entropy_coef * entropy.mean()
 
     def _kl_divergence(self, obs: TensorDict, old_mu: torch.Tensor, old_sigma: torch.Tensor) -> torch.Tensor:
         """Compute mean KL(pi_old || pi_new) analytically for Gaussian."""
@@ -456,15 +452,14 @@ class ConstraintTRPO:
         old_loss: torch.Tensor,
         mean_cost_returns: torch.Tensor,
     ) -> bool:
-        """Backtracking line search on the full surrogate (reward + cost barrier - entropy).
+        """Backtracking line search on the NORBC Eq.(10) log-barrier objective.
 
         Checks two conditions:
-            1. Full surrogate improvement > 0 (same objective as gradient)
+            1. Log-barrier objective improvement > 0
             2. KL divergence <= max_kl * line_search_kl_margin (soft KL constraint)
 
-        Cost feasibility is handled implicitly by the barrier term in the full
-        surrogate -- steps that worsen cost will increase the barrier penalty,
-        reducing the surrogate improvement below zero.
+        The log-barrier margin depends on the new policy (via ratio), so
+        constraint-violating steps naturally increase the barrier penalty.
 
         Returns True if a valid step was found.
         """
@@ -476,7 +471,7 @@ class ConstraintTRPO:
             self._set_policy_params_flat(new_params)
 
             with torch.no_grad():
-                new_loss = self._full_surrogate_loss(
+                new_loss = self._log_barrier_objective(
                     obs, actions, advantages, cost_advantages, old_log_prob, mean_cost_returns
                 )
                 kl = self._kl_divergence(obs, old_mu, old_sigma)
@@ -643,7 +638,8 @@ class ConstraintTRPO:
         cost_surrogate = torch.tensor(0.0, device=self.device)
         for k in range(self.num_constraints):
             margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=0.1 * self.d_k[k].item())
-            cost_surrogate += (ratio * cost_advantages_flat[:, k]).mean() / (self.barrier_t * margin)
+            cost_adv_k = (ratio * cost_advantages_flat[:, k]).mean()
+            cost_surrogate += cost_adv_k / ((1.0 - self.cost_gamma) * self.barrier_t * margin)
 
         # Combined: reward surrogate + cost barrier surrogate - entropy
         policy_loss = reward_surrogate + cost_surrogate - self.entropy_coef * entropy.mean()
@@ -684,7 +680,7 @@ class ConstraintTRPO:
             else:
                 # Line search on the full objective (reward + cost barrier - entropy)
                 with torch.no_grad():
-                    old_loss = self._full_surrogate_loss(
+                    old_loss = self._log_barrier_objective(
                         obs_flat,
                         actions_flat,
                         advantages_flat.squeeze(-1),

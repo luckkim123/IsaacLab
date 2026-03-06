@@ -580,4 +580,5 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
     reward: ALBCRewardCfg = ALBCRewardCfg(
         joint_velocity_weight=0.0,
         joint_oscillation_weight=0.0,
+        linear_error_weight=0.0,
     )

@@ -4,6 +4,48 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] Fix ConstraintTRPO 3 NORBC Paper Bugs -- Cost Scaling, Log-Barrier, Reward Contamination
+
+### Context
+Line_search_success remained 0% after the previous fix (gradient/line-search objective
+alignment). The previous fix was insufficient because it aligned to the wrong (linearized)
+objective and missed a critical scaling factor. Three bugs identified by comparing current
+code against NORBC paper (arXiv:2308.12517v4, Eq. 10):
+
+1. Missing `1/(1-gamma)` factor in cost gradient: NORBC Eq.(10) relates advantage to
+   discounted return via `1/(1-gamma)`. With cost_gamma=0.99, cost gradient was 100x too
+   weak, making constraints invisible to the optimizer.
+2. Line search used linearized surrogate with FIXED margin (old policy): old_loss and
+   new_loss saw identical barrier values, so barrier improvement was always ~0. Replaced
+   with actual log-barrier where margin depends on new policy via ratio.
+3. `linear_error_weight=-3.0` in constrained reward produced ~-2.0/step, dominating total
+   reward (~-0.6) and compressing advantages to near-zero. NORBC philosophy: penalties
+   belong in constraints, not reward.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Added `1/(1-cost_gamma)` factor to cost gradient
+  computation (100x scaling with gamma=0.99), matching NORBC Eq.(10)
+- `algorithms/constraint_trpo.py`: Replaced `_full_surrogate_loss()` with
+  `_log_barrier_objective()` -- barrier margin now depends on new policy via
+  `new_J_Ck = mean_cost_returns[k] + cost_change(ratio)`, enabling actual improvement
+  detection in line search
+- `algorithms/constraint_trpo.py`: Applied same `1/(1-cost_gamma)` factor inside
+  `_log_barrier_objective()` for consistency
+- `config.py`: Set `linear_error_weight=0.0` in `HeroAgentConstrainedEncoderEnvCfg`,
+  removing reward contamination. Reward now = tracking(+5.0) + settling(+3.0) + progress(+0.3)
+
+### Removed
+- `algorithms/constraint_trpo.py`: Deleted `_surrogate_loss()` (reward-only, unused since
+  previous fix) and `_full_surrogate_loss()` (replaced by `_log_barrier_objective()`)
+
+### Notes
+- Cost gradient now 100x stronger; mitigated by barrier schedule (t: 1->50 reduces weight)
+- Log numerical stability safe: margin >= 0.1*d_k >= 3.0, so log(3.0)=1.1
+- Verification targets: line_search_success > 30%, Loss/surrogate non-zero sustained,
+  Episode_Reward/total positive range, Loss/cost_surrogate 100x larger than before
+
+---
+
 ## [2026-03-06] Fix ConstraintTRPO Line Search 0% -- Gradient/LineSearch Objective Mismatch
 
 ### Context
