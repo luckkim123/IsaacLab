@@ -340,6 +340,27 @@ class ConstraintTRPO:
         ratio = torch.exp(log_prob - old_log_prob)
         return -(advantages * ratio).mean()
 
+    def _full_surrogate_loss(
+        self,
+        obs: TensorDict,
+        actions: torch.Tensor,
+        advantages: torch.Tensor,
+        cost_advantages: torch.Tensor,
+        old_log_prob: torch.Tensor,
+        mean_cost_returns: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute full policy loss matching gradient objective: reward + cost barrier - entropy."""
+        self.policy.act(obs)
+        log_prob = self.policy.get_actions_log_prob(actions)
+        ratio = torch.exp(log_prob - old_log_prob)
+        reward_surr = -(advantages * ratio).mean()
+        cost_surr = torch.tensor(0.0, device=self.device)
+        for k in range(self.num_constraints):
+            margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=0.1 * self.d_k[k].item())
+            cost_surr += (ratio * cost_advantages[:, k]).mean() / (self.barrier_t * margin)
+        entropy = self.policy.entropy
+        return reward_surr + cost_surr - self.entropy_coef * entropy.mean()
+
     def _kl_divergence(self, obs: TensorDict, old_mu: torch.Tensor, old_sigma: torch.Tensor) -> torch.Tensor:
         """Compute mean KL(pi_old || pi_new) analytically for Gaussian."""
         self.policy.act(obs)
@@ -435,17 +456,15 @@ class ConstraintTRPO:
         old_loss: torch.Tensor,
         mean_cost_returns: torch.Tensor,
     ) -> bool:
-        """Backtracking line search with KL and cost feasibility checks.
+        """Backtracking line search on the full surrogate (reward + cost barrier - entropy).
 
-        Checks three conditions:
-            1. Reward surrogate improvement > 0
+        Checks two conditions:
+            1. Full surrogate improvement > 0 (same objective as gradient)
             2. KL divergence <= max_kl * line_search_kl_margin (soft KL constraint)
-            3. Cost feasibility: cost surrogate stays below line_search_cost_margin * margin
 
-        The KL margin (default 1.5x) relaxes the hard TRPO constraint during line
-        search to avoid overly conservative steps -- the natural gradient direction
-        already targets max_kl. The cost margin (default 0.5x) ensures the policy
-        step consumes at most half the remaining constraint budget per step.
+        Cost feasibility is handled implicitly by the barrier term in the full
+        surrogate -- steps that worsen cost will increase the barrier penalty,
+        reducing the surrogate improvement below zero.
 
         Returns True if a valid step was found.
         """
@@ -457,24 +476,13 @@ class ConstraintTRPO:
             self._set_policy_params_flat(new_params)
 
             with torch.no_grad():
-                new_loss = self._surrogate_loss(obs, actions, advantages, old_log_prob)
+                new_loss = self._full_surrogate_loss(
+                    obs, actions, advantages, cost_advantages, old_log_prob, mean_cost_returns
+                )
                 kl = self._kl_divergence(obs, old_mu, old_sigma)
 
-                # Cost feasibility: check that cost surrogate ratio stays bounded
-                self.policy.act(obs)
-                new_log_prob = self.policy.get_actions_log_prob(actions)
-                new_ratio = torch.exp(new_log_prob - old_log_prob)
-                cost_feasible = True
-                for k in range(self.num_constraints):
-                    margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=0.1 * self.d_k[k].item())
-                    cost_surr_k = (new_ratio * cost_advantages[:, k]).mean()
-                    if cost_surr_k > self.line_search_cost_margin * margin:
-                        cost_feasible = False
-                        break
-
-            # Check improvement, KL constraint, and cost feasibility
             improvement = old_loss - new_loss
-            if improvement > 0 and kl <= self.max_kl * self.line_search_kl_margin and cost_feasible:
+            if improvement > 0 and kl <= self.max_kl * self.line_search_kl_margin:
                 logger.debug(
                     "Line search step %d: improvement=%.6f, kl=%.6f",
                     i,
@@ -674,10 +682,15 @@ class ConstraintTRPO:
                 logger.warning("TRPO: step_dir contains NaN/Inf, skipping policy step")
                 ls_success = False
             else:
-                # Line search with feasibility check
+                # Line search on the full objective (reward + cost barrier - entropy)
                 with torch.no_grad():
-                    old_loss = self._surrogate_loss(
-                        obs_flat, actions_flat, advantages_flat.squeeze(-1), old_log_prob_flat.squeeze(-1)
+                    old_loss = self._full_surrogate_loss(
+                        obs_flat,
+                        actions_flat,
+                        advantages_flat.squeeze(-1),
+                        cost_advantages_flat,
+                        old_log_prob_flat.squeeze(-1),
+                        mean_cost_returns,
                     )
 
                 ls_success = self._line_search(

@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] Fix ConstraintTRPO Line Search 0% -- Gradient/LineSearch Objective Mismatch
+
+### Context
+Previous fixes (cost adv normalization, encoder deferral, margin floor) stabilized
+cost_surrogate (no longer explodes) but line_search_success remained flat 0% over
+200 iterations. Policy never updated; all loss signals collapsed to ~0.
+
+Root cause: gradient and line search used DIFFERENT objectives. Gradient (line 657)
+was computed from `policy_loss = reward_surr + cost_surr - entropy` (combined IPO
+objective). But line search (lines 460, 476) checked improvement on `_surrogate_loss()`
+which was reward surrogate ONLY. The CG direction optimized the combined objective,
+rotating the step away from pure reward improvement by the cost gradient (~25% of total
+at barrier_t=1). Result: `improvement ~ 0` every iteration -- an IPO gradient with a
+CPO-style line search that doesn't work together.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Added `_full_surrogate_loss()` method computing the
+  same reward + cost barrier - entropy objective used for gradient computation
+- `algorithms/constraint_trpo.py`: Updated `_line_search()` to use `_full_surrogate_loss()`
+  for both `old_loss` and `new_loss` evaluation. Removed separate cost feasibility check
+  (3rd condition) -- barrier term in the full surrogate handles cost feasibility implicitly.
+  Acceptance simplified to 2 conditions: improvement > 0 and KL <= max_kl * margin
+- `algorithms/constraint_trpo.py`: Updated `old_loss` computation in `update()` call site
+  to use `_full_surrogate_loss()` with all required args (cost_advantages, mean_cost_returns)
+
+### Notes
+- `_surrogate_loss()` (reward-only) is now dead code but retained for potential future use
+- `line_search_cost_margin` parameter is now unused (barrier handles cost implicitly)
+- Verification targets: line_search_success > 30%, non-zero sustained Loss/surrogate
+- Fallback if still failing: abandon ConstraintTRPO, switch to Lagrangian PPO
+
 ## [2026-03-06] Fix ConstraintTRPO Training Failure -- NORBC Discrepancies
 
 ### Context
@@ -33,8 +64,8 @@ search was fixed previously). Near-zero margins caused gradient explosion.
   after the deferred policy gradient step. Encoder now gets exactly 2 updates per iteration
   (1 policy grads + 1 z_bounds) instead of 21
 - `algorithms/constraint_trpo.py`: Changed margin floor from `clamp(min=1e-6)` to
-  `clamp(min=0.1 * d_k[k])` in barrier loss (line 508) and cost surrogate (line 637),
-  consistent with the line search fix already applied
+  `clamp(min=0.1 * d_k[k])` in barrier loss and cost surrogate, consistent with the
+  line search fix already applied
 
 ### Notes
 - Verification targets: line_search_success >30%, cost_surrogate <100, encoder grad_norm
@@ -42,330 +73,93 @@ search was fixed previously). Near-zero margins caused gradient explosion.
 
 ---
 
-## [2026-03-05] Fix ConstraintTRPO Line Search Deadlock
+## [2026-03-05] ConstraintTRPO -- Implementation, Reviews, and Stabilization
 
 ### Context
-ConstraintTRPO training at ~100 iterations showed line search success rate ~0% for the
-first 35 steps, with sporadic acceptance after. Root cause: when a constraint is violated
-(`cost_return > d_k_adaptive`), the feasibility margin `(d_k_adaptive - cost_return)` goes
-negative and gets clamped to `1e-6` (essentially zero). This makes the acceptance criterion
-`cost_surr < 0.5 * 1e-6` mathematically impossible to satisfy, creating a deadlock where
-the policy can't update to reduce violations because the violation blocks policy updates.
+Full implementation of NORBC-style constrained RL (IPO + TRPO), followed by 3 rounds of
+code review and bug fixes. The algorithm separates physical constraints (joint velocity,
+rotation, oscillation) from rewards using explicit cost budgets and log-barrier penalties.
+Architecture: actor uses TRPO natural gradient, encoder uses separate Adam (lr=3e-3),
+value/cost_critic use Adam.
 
-Additionally, constraint budgets D_k=(0.1, 0.05, 0.1) produced d_k=10 (via d_k = D_k/(1-gamma)),
-which was too tight for early exploration -- joint velocity cost_return reached 20+ by step 15,
-immediately violating the budget and triggering the deadlock.
+Implementation uncovered multiple runtime issues: inference tensors from rollout storage
+needed `.clone()` for autograd, encoder Adam step had to be deferred until after TRPO line
+search, and z_bounds_loss required fresh forward pass for grad_fn.
 
-### Fixed
-- `algorithms/constraint_trpo.py`: Changed margin floor from `1e-6` to `0.1 * d_k[k]`,
-  ensuring a meaningful acceptance region even when constraints are violated. With d_k=30,
-  floor is 3.0, so cost surrogate must exceed 1.5 to fail (vs. 5e-7 before)
+Code review (2 rounds, 15 total issues) found critical problems: (1) cost constraints
+computed via GAE but never in policy gradient -- policy was unconstrained TRPO, (2) barrier
+loss had no gradient path (detached leaf tensor), (3) encoder grad accumulation across
+mini-batches, (4) squeeze() shape collapse risk at B=1.
 
-### Changed
-- `agents/rsl_rl_ppo_cfg.py`: Relaxed constraint budgets from (0.1, 0.05, 0.1) to
-  (0.3, 0.05, 0.3) -- joint velocity d_k: 10->30, oscillation d_k: 10->30
-- `mdp/constraints.py`: Same budget relaxation in ALBCConstraintCfg defaults
-
-### Notes
-- Rotation constraint (d_k=5) left unchanged as it was already satisfied
-- Step 3 (threshold relaxation: velocity 3.0->4.5, oscillation 1.5->2.5) deferred pending
-  verification that margin fix + budget relaxation are sufficient
-- Verification targets: line_search_success >50% in first 50 steps, encoder z_std <0.9
-
----
-
-## [2026-03-05] Fix TRPO NaN Crash from Negative shs
-
-### Context
-ConstraintTRPO training crashed at iteration 1 with `RuntimeError: normal expects all
-elements of std >= 0.0`. Root cause: `shs = 0.5 * nat_grad.dot(g)` can be negative when
-conjugate gradient approximation breaks Fisher matrix positive-definiteness. When `shs < 0`,
-`torch.sqrt(max_kl / shs)` produces NaN, which propagates through `step_dir` into
-`_set_policy_params_flat()`, corrupting `log_std` to NaN. `exp(NaN) = NaN` fails the
-Normal distribution's std >= 0 check. Standard TRPO implementations (OpenAI Spinning Up,
-stable-baselines3) all guard against `shs <= 0` -- this guard was missing.
-
-### Fixed
-- `algorithms/constraint_trpo.py`: Added `shs <= 0` and `torch.isfinite(shs)` guard before
-  step size computation. When triggered, TRPO policy step is skipped (same as line search
-  failure) and a warning is logged
-- `algorithms/constraint_trpo.py`: Added `torch.isfinite(step_dir).all()` guard as secondary
-  safety net against NaN/Inf in the natural gradient step direction
-- `algorithms/constraint_trpo.py`: Removed `+ 1e-8` epsilon from `shs` denominator (no longer
-  needed since only positive `shs` enters the sqrt)
-
-### Notes
-- Previous 10-iteration success was lucky -- `shs < 0` is stochastic depending on CG quality
-- Policy params are preserved when step is skipped (no regression from guard)
-- Ruff lint + format clean
-
----
-
-## [2026-03-05] Theoretical Analysis - ConstraintTRPO Parameter Refinement
-
-### Context
-Comprehensive theoretical/logical deep analysis of the entire Hero Agent codebase against
-NORBC paper theory. The analysis confirmed no Tier 1 theoretical errors exist across TDC
-controller, reward system, encoder/adaptation gradient flow, and ConstraintTRPO (TRPO + IPO
-+ Cost GAE + Barrier). Three Tier 2 design observations were identified and addressed:
-(1) line search acceptance constants were hardcoded without theoretical justification,
-(2) adaptive threshold alpha served dual purpose (threshold scale + EMA smoothing) limiting
-independent tuning, (3) reward crossover at ~20 deg (no code change needed, PBRS mitigates).
-
-### Changed
-- `algorithms/constraint_trpo.py`: Parameterized line search constants -- `line_search_kl_margin`
-  (default 1.5, was hardcoded) and `line_search_cost_margin` (default 0.5, was hardcoded). Added
-  docstring explaining the design rationale for both constants
-- `algorithms/constraint_trpo.py`: Split `adaptive_alpha` into `adaptive_threshold_scale` (controls
-  `target = max(d_k, j_c_k + scale * d_k)`) and `adaptive_ema_alpha` (controls EMA smoothing).
-  When `adaptive_ema_alpha=None` (default), falls back to `adaptive_threshold_alpha` for backward
-  compatibility
-- `agents/rsl_rl_ppo_cfg.py`: Added `adaptive_ema_alpha`, `line_search_kl_margin`,
-  `line_search_cost_margin` config fields to `RslRlConstraintTRPOAlgorithmCfg`
+Stabilization: NaN crash from negative `shs` (CG approximation), line search deadlock from
+`1e-6` margin floor when constraints violated, and parameter refinement (line_search_kl/cost
+margins, split adaptive_alpha into threshold_scale + ema_alpha).
 
 ### Added
-- `docs/THEORETICAL_ANALYSIS.md`: Full theoretical analysis document covering TDC controller,
-  reward system, NORBC constraint pipeline, DR, and encoder/adaptation gradient flow. Includes
-  per-component verification results and design observation rationale
+- `algorithms/constraint_trpo.py`: Full TRPO + IPO (~600 lines). CG solver, Fisher-vector
+  product, line search with KL + cost feasibility, log-barrier, adaptive thresholds
+- `encoder/actor_critic_encoder_constrained.py`: Multi-head cost critic (K outputs)
+- `runners/constraint_encoder_runner.py`: Barrier schedule, constraint metrics logging
+- `mdp/constraints.py`: 3 binary cost functions (joint_velocity, accumulated_rotation,
+  joint_oscillation)
+- `algorithms/ppo_patch.py`: Monkey-patch for RSL-RL PPO encoder optimizer (WD=1e-5)
+- `docs/THEORETICAL_ANALYSIS.md`: Full theoretical analysis of TDC, rewards, NORBC pipeline
 
-### Notes
-- All default values match previous hardcoded behavior -- zero functional change without explicit config
-- Ruff lint + format clean. No new Pyright issues beyond pre-existing false positives
-
-## [2026-03-05] NORBC Constrained RL - 2nd Review Fixes (6 Issues)
-
-### Context
-Deep review of constraint_trpo.py after 1st round fixes uncovered 6 additional issues, two
-critical. The barrier loss had no gradient path: `mean_cost_returns` (from `cost_returns_flat.mean()`)
-is a detached leaf tensor, so `_compute_barrier_loss(mean_cost_returns)` always produced a constant
-scalar -- IPO barrier training on the cost critic was silently disabled. Second, `clip_grad_norm_`
-clipped ALL policy params (including encoder), and `value_optimizer.zero_grad()` didn't clear encoder
-grads from `total_value_loss.backward()`, causing stale encoder gradients to accumulate across
-mini-batches and corrupt the subsequent z_bounds_loss update.
+### Changed
+- `base_env.py`: Added accumulated rotation tracking, cost computation, constraint buffers
+- `config.py`: Added `HeroAgentConstrainedEncoderEnvCfg`, zeros constraint reward weights
+- `agents/rsl_rl_ppo_cfg.py`: Added constrained algorithm/policy/runner configs, constraint
+  budgets relaxed from (0.1, 0.05, 0.1) to (0.3, 0.05, 0.3)
+- `__init__.py`: Registered `Isaac-HeroAgent-Constrained-Encoder-Base-v0`
 
 ### Fixed
-- `constraint_trpo.py`: **[Critical]** Barrier loss now uses mini-batch `cost_value_pred.mean(dim=0)`
-  (differentiable through cost_critic) instead of detached `mean_cost_returns`. The cost critic now
-  receives actual IPO barrier gradient signal
-- `constraint_trpo.py`: **[Critical]** `clip_grad_norm_` scoped to `self._value_params` only (was
-  clipping all params including encoder). Added `encoder_optimizer.zero_grad()` before value backward
-  to prevent encoder gradient accumulation across mini-batches
-- `constraint_trpo.py`: All 5 `.squeeze()` calls changed to `.squeeze(-1)` to prevent shape collapse
-  when batch size B=1 (lines 620-621, 660, 666-667)
-- `constraint_trpo.py`: Barrier schedule moved from runner's `log()` (1-iteration lag) to the start
-  of `update()` with internal `_iteration` counter. First iteration now uses correct barrier_t
-- `constraint_trpo.py`: Added `cost_gamma >= 1.0` validation in `__init__` (prevents silent inf
-  from `d_k = b / (1.0 - cost_gamma)`)
-
-### Changed
-- `constraint_encoder_runner.py`: Removed `update_barrier_schedule` call from `log()` (moved to
-  ConstraintTRPO.update()). Added `hasattr` guard for `barrier_t_schedule_iters` access. Updated
-  docstrings to reflect new barrier schedule ownership
-
-### Notes
-- Pyright warnings are all pre-existing false positives (RSL-RL/Isaac Sim not pip-installed)
-- Smoke test requires Isaac Sim runtime (user manual verification pending)
-
-## [2026-03-05] NORBC Constrained RL (IPO + TRPO) Code Review Fixes
-
-### Context
-Systematic code review of constraint_trpo.py identified 9 issues (2 critical, 1 moderate-critical,
-3 moderate, 3 minor). The most significant finding: cost constraints were computed via GAE but
-never incorporated into the policy gradient -- the policy optimized reward only, making the
-"constrained" RL functionally equivalent to unconstrained TRPO with a barrier that only nudged
-value estimates. Additionally, encoder params were updated via TRPO natural gradient (FIM step
-size), but encoder affects the distribution only indirectly through z, making FIM calibration
-inappropriate.
-
-Runtime fixes during testing:
-- z_bounds_loss crashed (`RuntimeError: does not require grad`) because `_last_z` was stored
-  from inference-mode rollout collection. Fixed by adding fresh forward pass before z_bounds_loss.
-- Line search crashed (`RuntimeError: normal expects all elements of std >= 0.0`) because
-  encoder Adam step was applied between gradient computation and line search, corrupting params.
-  Fixed by deferring encoder Adam step until after line search completes.
-
-### Changed
-- `constraint_trpo.py`: **[Critical]** Added barrier-weighted cost surrogate to TRPO policy loss.
-  Each constraint k contributes `(1/t) * E[ratio * cost_adv_k] / margin_k`, making policy aware
-  of constraints via IPO gradient
-- `constraint_trpo.py`: **[Critical]** Added cost feasibility check to line search. New third
-  condition: rejects steps where any cost surrogate exceeds 50% of constraint margin
-- `constraint_trpo.py`: Added cost value bootstrapping on episode time-outs (matching reward
-  bootstrapping pattern: `costs + cost_gamma * V_C * timeout_mask`)
-- `constraint_trpo.py`: Barrier loss amortized by `num_epochs * num_mini_batches` to prevent
-  20x amplification from being applied as constant in every mini-batch update
-- `constraint_trpo.py`: Separated encoder params from TRPO natural gradient into dedicated
-  Adam optimizer (lr=3e-3). Actor uses TRPO, encoder uses Adam, value/cost_critic use Adam.
-  Encoder gradients computed eagerly but Adam step deferred until after TRPO line search
-- `constraint_trpo.py`: Fixed KL epsilon from `log(sigma/old_sigma + 1e-5)` to
-  `log((sigma/old_sigma).clamp(min=1e-5))` removing positive bias
-- `constraint_trpo.py`: Adaptive threshold now uses EMA toward target (allows tightening)
-  instead of `max()` (loosening only)
-- `constraint_trpo.py`: `z_bounds_coef` parameter now stored and applied as coefficient
-  (was previously accepted but unused)
-- `constraint_trpo.py`: z_bounds_loss moved from value optimizer (gradient waste on encoder
-  params) to encoder_optimizer with fresh forward pass to populate `_last_z` with grad_fn
-
-### Notes
-- All Pyright warnings are expected (RSL-RL/Isaac Sim imports, dynamic storage attributes)
-- First training run pending to verify all fixes work together end-to-end
-
-## [2026-03-05] NORBC Constraint Logging Refactor
-
-### Context
-Constraint monitoring metrics (barrier_t, d_k_adaptive, cost_return, line_search_success) were
-logged twice per iteration: once via loss_dict (prefixed `Loss/` by OnPolicyRunner.log() at
-on_policy_runner.py:212) and again via `_log_constraint_metrics()` (prefixed `Constraint/`).
-This caused 8 redundant scalar writes and polluted the `Loss/` WandB panel with non-loss metrics.
-
-### Changed
-- `constraint_encoder_runner.py`: Expanded `_log_constraint_metrics()` to read all constraint
-  metrics from algorithm instance attributes and log with proper prefixes (`Constraint/` for
-  barrier/cost metrics, `Policy/` for line_search_success). Now uses `flush_metrics()` utility
-  instead of raw `writer.add_scalar()` calls
-- `constraint_encoder_runner.py`: Added `flush_metrics` import from utils.logging
-
-### Added
-- `constraint_encoder_runner.py`: New metrics -- `Constraint/barrier_schedule_progress` (0~1),
-  `Constraint/cost_return_std_{k}`, `Constraint/feasibility_rate_{k}` (fraction of envs
-  satisfying constraint budget)
-
-### Removed
-- `constraint_trpo.py`: Removed `cost_return_{k}`, `d_k_adaptive_{k}`, `barrier_t`,
-  `line_search_success` from loss_dict (these were non-loss metrics causing `Loss/` prefix
-  pollution). Now stored as `_last_*` instance attributes read by runner
+- Barrier loss gradient path (detached → differentiable cost_value_pred)
+- Encoder grad isolation (scoped clip_grad_norm_, added zero_grad before value backward)
+- NaN crash guard (shs <= 0, isfinite checks on step_dir)
+- Line search margin floor (1e-6 → 0.1*d_k in line search acceptance)
+- squeeze() → squeeze(-1) for B=1 safety
+- Barrier schedule moved from runner to algorithm (eliminated 1-iteration lag)
+- cost_gamma >= 1.0 validation
 
 ---
 
 ## [2026-03-05] Theoretical/Logical Error Fixes
 
 ### Context
-Conducted systematic theoretical audit of the Hero Agent codebase against TDE/HORA
-theory after NORBC paper analysis. Three exploration agents reported 32 potential issues;
-direct code reading and formula verification classified them into 3 critical, 2 high,
-4 medium issues and 4 false positives (pitch T_b derivation, action latency indexing,
-z activation mismatch, Lambda_inv math -- all verified correct).
-
-Key findings:
-- C1: TDE observation computed instantaneous residual (current-step values) instead of
-  time-delayed estimate (previous-step values). TDC controller correctly uses _prev
-  buffers but the observation function did not, violating the TDE identity H_t ~ H_{t-L}.
-- C2: Phase 2 (Adapt-Base) critic used encoder z while actor used z_hat from adapt_tconv.
-  PPO assumes V(s) evaluates the same state the actor sees -- using different z representations
-  biases the advantage estimate.
-- C3: TDCController initialized with F_bu.mean() (scalar), losing per-env DR variation.
-  First episode steps used averaged Lambda matrix.
-- H1/M4: z_bounds_loss and encoder weight_decay patches only existed in site-packages
-  rsl_rl/algorithms/ppo.py (not git-tracked, lost on container rebuild).
-- M2 (EMA reset to 0): Re-verified as correct -- joint velocities are reset to 0 in
-  events.py, so EMA=0 matches the post-reset state. No fix needed.
-
-### Added
-- `algorithms/ppo_patch.py`: Monkey-patch module for RSL-RL PPO. Adds encoder-aware
-  optimizer (separate param groups with WD=1e-5 for encoder, WD=0 for actor/critic)
-  and z_bounds_loss integration. Auto-applied at import time via `algorithms/__init__.py`.
-  Idempotent: detects if site-packages is already patched and skips.
+Systematic theoretical audit against TDE/HORA theory. 3 critical fixes, plus monkey-patch
+to make encoder optimizer/z_bounds patches persistent (previously only in site-packages).
 
 ### Changed
-- `base_env.py`: TDE observation now uses previous-step Lambda*p_EE and T_b buffers
-  (2 new history tensors: `_tde_Lambda_p_EE_prev`, `_tde_T_b_prev`), matching TDC
-  controller's TDE pattern. Added control frequency validation (decimation >= 1,
-  frequency in [10Hz, 1000Hz]).
-- `encoder/adaptation.py`: Phase 2 critic `evaluate()` changed from encoder z to
-  z_hat (detached), ensuring actor and critic see the same state representation.
-- `controllers/tdc.py`: `__init__` F_bu parameter type changed from `float` to
-  `torch.Tensor | float`, supporting per-env tensor initialization.
-- `tdc_env.py`: Passes full per-env F_bu tensor to TDCController instead of
-  `F_bu.mean().item()`.
-- `algorithms/__init__.py`: Added `apply_ppo_patch()` auto-invocation on import.
+- `base_env.py`: TDE observation now uses previous-step Lambda*p_EE and T_b buffers,
+  matching TDC controller's TDE pattern (was using current-step, violating H_t ~ H_{t-L})
+- `encoder/adaptation.py`: Phase 2 critic evaluate() uses z_hat instead of encoder z,
+  ensuring actor and critic see the same state representation
+- `controllers/tdc.py`: F_bu parameter accepts per-env tensor (was scalar mean)
+- `tdc_env.py`: Passes full per-env F_bu tensor to TDCController
 
 ### Notes
-- TDE-Base-v0 training should be re-evaluated after C1 fix (observation semantics changed)
-- Phase 2 Adapt-Base value loss convergence may improve with C2 fix (critic sees actor's state)
-- M2 (EMA reset) verified as non-issue: joint velocities reset to 0 in events.py
-- False positives documented: pitch T_b formula, action latency indexing, z activation
-  consistency, Lambda_inv DLS math -- all verified correct against derivation docs
-
----
-
-## [2026-03-05] IPO + TRPO Constrained RL Implementation
-
-### Context
-Implemented NORBC-style Interior-point Policy Optimization (IPO) with TRPO natural
-gradient for the Hero Agent Encoder-Base pipeline. The underwater environment has
-physical constraints (joint velocity limits, rotation limits, oscillation) previously
-handled as soft reward penalties. IPO separates constraints from rewards using explicit
-cost budgets and log-barrier penalties, producing more robust controllers with simpler
-reward design. Three binary indicator constraints (K=3): joint velocity (|vel|>3 rad/s),
-accumulated rotation (>2 full rotations), and joint oscillation (HF RMS >1.5 rad/s).
-
-During integration, fixed multiple runtime compatibility issues:
-- `agents/__init__.py` missing exports for new runner/algorithm/policy configs
-- `train.py` `_RUNNER_MAP` missing `ConstraintEncoderRunner` entry
-- `ConstraintTRPO` missing `rnd` and `optimizer` attributes expected by RSL-RL OnPolicyRunner
-- Inference tensors from rollout storage (collected under `torch.inference_mode()`) cannot
-  be used in autograd -- fixed by `.clone()` on all storage tensors before backward passes
-- `EncoderRunner._update_encoder_lr()` assumes Adam param groups for encoder -- overridden
-  to no-op since ConstraintTRPO uses natural gradient (no optimizer) for policy/encoder
-
-### Added
-- `mdp/constraints.py`: ALBCConstraintCfg dataclass + 3 binary cost functions (joint_velocity_cost, accumulated_rotation_cost, joint_oscillation_cost, compute_all_costs)
-- `algorithms/__init__.py`: New module for algorithm exports
-- `algorithms/constraint_trpo.py`: Full TRPO + IPO implementation (~600 lines). Conjugate gradient solver, Fisher-vector product via Hessian-free double backprop, backtracking line search with KL + feasibility checks, log-barrier on constraint margins, adaptive thresholds
-- `encoder/actor_critic_encoder_constrained.py`: ActorCriticEncoderConstrained with multi-head cost critic (K outputs), backward-compatible load_state_dict
-- `runners/constraint_encoder_runner.py`: ConstraintEncoderRunner with barrier schedule update, constraint metrics logging, encoder LR override (no-op for TRPO)
-
-### Changed
-- `base_env.py`: Added `_accumulated_rotation` / `_prev_joint_pos` buffers, delta rotation tracking in `_pre_physics_step()`, cost computation via `compute_all_costs()` in `_get_rewards()`, reset in `_reset_framework()`
-- `config.py`: Added `HeroAgentConstrainedEncoderEnvCfg` (inherits EncoderTrain, adds constraints, zeros joint_velocity/oscillation reward weights)
-- `agents/rsl_rl_ppo_cfg.py`: Added `RslRlConstraintTRPOAlgorithmCfg`, `RslRlPpoActorCriticEncoderConstrainedCfg`, `HeroAgentConstrainedEncoderRunnerCfg` + module namespace injections for RSL-RL eval resolution
-- `agents/__init__.py`: Added exports for constrained configs (HeroAgentConstrainedEncoderRunnerCfg, etc.)
-- `__init__.py`: Registered `Isaac-HeroAgent-Constrained-Encoder-Base-v0` gym environment
-- `encoder/__init__.py`: Added `ActorCriticEncoderConstrained` export
-- `runners/__init__.py`: Added `ConstraintEncoderRunner` export
-- `mdp/__init__.py`: Added constraint function exports
-- `train.py`: Added `ConstraintEncoderRunner` to `_RUNNER_MAP`
-
-### Notes
-- Training partially verified (env loads, rollout completes, update runs to TRPO policy step)
-- Still debugging: may have additional runtime issues in TRPO line search or logging
-- Architecture: value params (critic + cost_critic) use Adam; policy params (actor + encoder) use TRPO natural gradient
+- 4 reported issues verified as false positives (pitch T_b, action latency indexing,
+  z activation, Lambda_inv DLS math)
 
 ---
 
 ## [2026-03-05] Code Simplification
 
 ### Context
-Code simplification session for hero_agent codebase (~7,700 lines, 27 Python files).
-Focused on dead code removal, duplicate code consolidation, and unused reward function cleanup.
-During post-simplification diff analysis against run 2026-03-03_09-24-38, discovered that
-`termination_penalty = -10.0` was mistakenly removed as "unused" -- it was actually active
-(default -10.0, applied on early termination). Restored immediately.
+Cleanup of hero_agent codebase (~7,700 lines). Dead code removal, duplicate consolidation,
+unused reward cleanup. Accidentally removed active `termination_penalty = -10.0` during
+cleanup -- restored immediately.
 
 ### Changed
-- `base_env.py`: Consolidated `_update_perturbation()` main/buoy logic into `_apply_perturbation_cycle()` helper
-- `base_env.py`: Added `_iter_noise_params()` static method; simplified `_pad_noise_cfg_for_tde()` and `_convert_noise_cfg_tuples()` from nested loops to single-line iterations
-- `base_env.py`: Replaced verbose termination logging with `_term_rate()` helper
-- `config.py`: Removed stale MPC docstring reference, removed redundant `ocean_current` and `enable_payload` overrides that matched parent class
-- `config.py`: Observation noise tuples use `[val] * N` pattern for readability
-- `controllers/tdc.py`: Extracted `_set_param()` static helper for `update_controller_params()`/`update_gains()` deduplication
-- `controllers/tdc.py`: Consolidated 11-buffer `reset()` into `_zero_buffers` list + loop
-- `mdp/events.py`: Added `_apply_xyz_offset_with_doraemon()` helper to merge CoB/CoG DORAEMON branches (~16 lines x2 -> 2 calls)
-- `mdp/events.py`: Removed unused `_apply_xyz_offset()` function (26 lines)
+- `base_env.py`: Consolidated perturbation logic (`_apply_perturbation_cycle`), noise config
+  iteration (`_iter_noise_params`), termination logging (`_term_rate`)
+- `controllers/tdc.py`: Extracted `_set_param()` helper, consolidated reset buffers to loop
+- `mdp/events.py`: Merged CoB/CoG DORAEMON branches into `_apply_xyz_offset_with_doraemon`
 
 ### Removed
-- `base_env.py`: Removed `_cumulative_effort` buffer (logging-only, never used in reward)
-- `base_env.py`: Removed `HeroAgentEnvWindow` class and `BaseEnvWindow` import
-- `mdp/rewards.py`: Removed `action_rate_penalty()` and `angular_velocity_penalty()` functions (both had weight=0.0 in all configs)
-- `mdp/__init__.py`: Removed corresponding imports and `__all__` exports
-- `controllers/__init__.py`, `encoder/__init__.py`, `runners/__init__.py`: Removed MPC docstring references
-- `direct/__init__.py`: Removed `from . import hero_agent_mpc` (directory was deleted previously)
+- `base_env.py`: `_cumulative_effort` buffer, `HeroAgentEnvWindow` class
+- `mdp/rewards.py`: `action_rate_penalty()`, `angular_velocity_penalty()` (weight=0 everywhere)
+- MPC docstring references from controllers/encoder/runners `__init__.py`
 
 ### Fixed
-- `mdp/rewards.py`: Restored `termination_penalty: float = -10.0` field that was incorrectly removed during cleanup (was active, not unused)
-- `base_env.py`: Restored termination penalty application code in `_get_rewards()`
-
-### Notes
-- `encoder_tdc_env.py` kept as reference code (not registered, not simplified)
-- All changes verified with `ruff check` and `ruff format`
-- Full step-by-step log: `hero_agent/docs/code-simplification-log.md`
+- `mdp/rewards.py`: Restored `termination_penalty` field incorrectly removed during cleanup
