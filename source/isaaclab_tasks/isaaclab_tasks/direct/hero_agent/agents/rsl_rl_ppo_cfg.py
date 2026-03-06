@@ -329,7 +329,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
     # When > 0, value loss gradients are scaled by this factor before merging
     # with policy gradients for the encoder update. Use with caution:
     # scale=1.0 caused z collapse in run 16-46-07.
-    encoder_value_grad_scale: float = 0.0
+    encoder_value_grad_scale: float = 0.01
 
 
 @configclass

@@ -307,7 +307,7 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     # because buoyancy control cannot generate Z-axis torque
     target_attitude: tuple[float, float, float] = (0.0, 0.0, 0.0)
     randomize_target_attitude: bool = False
-    target_attitude_range: tuple[float, float, float] = (0.5, 0.5, 0.0)
+    target_attitude_range: tuple[float, float, float] = (0.349, 0.349, 0.0)
 
     reward: ALBCRewardCfg = ALBCRewardCfg()
 

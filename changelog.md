@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-06] Config tuning + training analysis
+
+### Context
+Applied two config changes from implementation plan: (1) encoder_value_grad_scale
+default 0.0 -> 0.01 (conservative value gradient signal), (2) target_attitude_range
+0.5 -> 0.349 rad (28.6 deg -> 20.0 deg cap).
+
+Comprehensive WandB analysis of 3 concurrent runs (18-26-36 scale=0.01, 18-00-16
+scale=0.1, 15-30-39 baseline) at ~550 iterations revealed:
+
+**Learning plateau after 100-200 iter**: mean_reward climbs to ~80 then stagnates.
+tracking reward saturates at ~3.0, settling at ~1.5. progress reward DECLINES (0.4->0.1).
+
+**Exploration collapse**: noise_std drops 0.95->0.2 by iter 150, entropy 2.0->0.2.
+Policy becomes near-deterministic before reaching good performance.
+
+**Constraints trivially satisfied**: feasibility_rate_1,2 = 1.0 (NEVER violated).
+cost_return_0,1,2 all far below budgets (d_k). d_k_adaptive never tightens.
+Constraint 1 (accumulated rotation) and 2 (oscillation) are effectively non-existent.
+
+**Reward landscape too flat**: tracking sigma=0.5 rad means at 5-deg error the reward
+is already 0.985 (gradient ~0). No pressure to improve beyond ~5-10 degrees.
+
+**Red run (scale=0.01) vs baseline**: similar final performance (~80 reward), but
+encoder z_std lower (0.6 vs 0.75-0.8) suggesting value gradient slightly suppresses
+encoder expressiveness. Not catastrophic like scale=0.1.
+
+Root cause diagnosis: plateau is NOT from constraints (too easy) but from flat reward
+gradient + exploration death. Proposed directions: reduce tracking sigma, increase
+entropy_coef, add task-level constraints (attitude safety, yaw rate).
+
+### Changed
+- `rsl_rl_ppo_cfg.py`: `encoder_value_grad_scale` default 0.0 -> 0.01 in
+  RslRlConstraintTRPOAlgorithmCfg (conservative value gradient for encoder)
+- `config.py`: `target_attitude_range` (0.5, 0.5, 0.0) -> (0.349, 0.349, 0.0)
+  (cap roll/pitch targets to 20 degrees, was 28.6 degrees)
+
+### Notes
+- encoder_value_grad_scale=0.01 produces grad_norm 0.001-0.005 (stable), but z_std
+  lower than baseline. May need to revert to 0.0 if no benefit at iter 700+.
+- Constraint expansion candidates from NORBC: joint position limit, attitude safety
+  (15 deg), yaw rate suppression. Current 3 constraints need budget tightening too.
+- Tracking sigma reduction is highest-priority change for breaking the reward plateau.
+
+---
+
 ## [2026-03-06] Full-batch value gradient for TRPO encoder
 
 ### Context
