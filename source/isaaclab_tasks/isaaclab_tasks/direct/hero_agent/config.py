@@ -590,8 +590,9 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
         terms=[
             ConstraintTermCfg(
                 func=joint_velocity_cost,
-                params={"limit": 3.0},
-                budget=0.15,
+                params={},
+                budget=1.5,
+                cost_type="average",
                 name="joint_vel",
             ),
             ConstraintTermCfg(
@@ -602,8 +603,9 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
             ),
             ConstraintTermCfg(
                 func=joint_oscillation_cost,
-                params={"limit": 0.6},
-                budget=0.15,
+                params={},
+                budget=0.3,
+                cost_type="average",
                 name="oscillation",
             ),
             ConstraintTermCfg(
@@ -614,8 +616,9 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
             ),
             ConstraintTermCfg(
                 func=attitude_error_cost,
-                params={"limit": 0.262},
-                budget=0.02,
+                params={},
+                budget=0.087,
+                cost_type="average",
                 name="attitude_err",
             ),
             ConstraintTermCfg(

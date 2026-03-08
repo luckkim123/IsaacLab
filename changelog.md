@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-08] Constraint redesign: 3 binary costs -> continuous (NORBC average type)
+
+### Context
+NORBC paper analysis identified a gradient vanishing problem with tight binary constraints:
+when a binary cost fires 100% of the time (all trajectories equally violated), cost_advantage
+approaches zero everywhere, providing no gradient signal. This affected 3 of 6 constraints
+(joint_vel, oscillation, attitude_err) which are quality metrics, not hard safety limits.
+
+Solution: convert these 3 from binary indicator (0/1) to continuous cost (raw physical value),
+with cost_type="average" and budgets in physical units instead of violation probabilities.
+Continuous costs naturally produce trajectory-level variance (different magnitudes), ensuring
+meaningful cost_advantage gradients regardless of how tight the budget is set.
+
+Budget rationale: joint_vel=1.5 rad/s (~36% of 4.19 no-load speed), oscillation=0.3 rad/s
+(half of old binary threshold), attitude_err=0.087 rad (5 deg convergence target).
+
+### Changed
+- `mdp/constraints.py`: `joint_velocity_cost` -- removed `limit` param, returns raw max |vel| (rad/s) instead of binary
+- `mdp/constraints.py`: `joint_oscillation_cost` -- removed `limit` param, returns raw HF RMS (rad/s) instead of binary
+- `mdp/constraints.py`: `attitude_error_cost` -- removed `limit` param, returns raw max |err| (rad) instead of binary
+- `config.py`: `joint_vel` constraint -- budget 0.15 (prob) -> 1.5 (rad/s), cost_type "binary" -> "average", params cleared
+- `config.py`: `oscillation` constraint -- budget 0.15 (prob) -> 0.3 (rad/s), cost_type "binary" -> "average", params cleared
+- `config.py`: `attitude_err` constraint -- budget 0.02 (prob) -> 0.087 (rad, ~5 deg), cost_type "binary" -> "average", params cleared
+- `agents/rsl_rl_ppo_cfg.py`: constraint_budgets default (0.15, 0.02, 0.15, 0.01, 0.02, 0.10) -> (1.5, 0.02, 0.3, 0.01, 0.087, 0.10)
+
+### Notes
+- No algorithm changes needed: ConstraintTRPO treats binary and average costs identically (d_k = D_k / (1-gamma) works for both)
+- 3 remaining binary constraints unchanged: accum_rot (hard safety), attitude_abs (capsizing), singularity (kinematic limit)
+- Amplification sanity check (barrier_t=10): attitude_err ~11.5x, oscillation ~3.3x, joint_vel ~0.67x -- manageable
+
 ## [2026-03-08] Constraint tuning: attitude_abs warning band + attitude_err budget
 
 ### Context

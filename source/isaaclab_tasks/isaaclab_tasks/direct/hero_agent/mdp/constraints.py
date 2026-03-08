@@ -98,26 +98,26 @@ class ALBCConstraintCfg:
 
 
 # =============================================================================
-# Cost functions: binary indicators
+# Cost functions: per-step costs (binary or continuous)
 # =============================================================================
 
 
 def joint_velocity_cost(
     _robot: Articulation,
     env: HeroAgentEnv,
-    limit: float = 3.0,
 ) -> torch.Tensor:
-    """Binary cost: 1 if any ALBC joint velocity exceeds limit.
+    """Continuous cost: max absolute ALBC joint velocity (rad/s).
+
+    Average constraint -- budget D_k is the target mean velocity.
 
     Args:
         env: Environment instance.
-        limit: Velocity threshold in rad/s.
 
     Returns:
-        (num_envs,) binary tensor.
+        (num_envs,) non-negative tensor in rad/s.
     """
     joint_vel = _robot.data.joint_vel[:, env._albc_joint_ids]
-    return (joint_vel.abs().max(dim=-1).values > limit).float()
+    return joint_vel.abs().max(dim=-1).values
 
 
 def accumulated_rotation_cost(
@@ -143,23 +143,21 @@ def accumulated_rotation_cost(
 def joint_oscillation_cost(
     _robot: Articulation,
     env: HeroAgentEnv,
-    limit: float = 0.6,
 ) -> torch.Tensor:
-    """Binary cost: 1 if HF joint velocity RMS exceeds limit.
+    """Continuous cost: HF joint velocity RMS (rad/s).
 
+    Average constraint -- budget D_k is the target mean HF RMS.
     Reuses env._ema_joint_vel for the low-frequency component.
 
     Args:
         env: Environment instance.
-        limit: HF RMS threshold in rad/s.
 
     Returns:
-        (num_envs,) binary tensor.
+        (num_envs,) non-negative tensor in rad/s.
     """
     joint_vel = _robot.data.joint_vel[:, env._albc_joint_ids]
     hf = joint_vel - env._ema_joint_vel
-    hf_rms = hf.pow(2).mean(dim=-1).sqrt()
-    return (hf_rms > limit).float()
+    return hf.pow(2).mean(dim=-1).sqrt()
 
 
 def attitude_absolute_cost(
@@ -186,21 +184,20 @@ def attitude_absolute_cost(
 def attitude_error_cost(
     _robot: Articulation,
     env: HeroAgentEnv,
-    limit: float = 0.262,
 ) -> torch.Tensor:
-    """Binary cost: 1 if attitude tracking error exceeds limit (rad).
+    """Continuous cost: max absolute attitude tracking error (rad).
 
-    Tracking quality constraint. Uses env._attitude_error (target-relative).
+    Average constraint -- budget D_k is the target mean error.
+    Uses env._attitude_error (target-relative).
 
     Args:
         env: Environment instance.
-        limit: Maximum tracking error in radians (~15 deg default).
 
     Returns:
-        (num_envs,) binary tensor.
+        (num_envs,) non-negative tensor in rad.
     """
     err = env._attitude_error[:, :2]
-    return (err.abs().max(dim=-1).values > limit).float()
+    return err.abs().max(dim=-1).values
 
 
 def singularity_cost(
