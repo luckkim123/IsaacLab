@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-08] Cost critic softplus fix + budget tuning (post-750-iter crash analysis)
+
+### Context
+WandB analysis of ~750 iteration ConstraintTRPO run revealed catastrophic instability
+at step ~650: cost_return_joint_vel dropped to -600, cost_return_oscillation to -75,
+while cost_return_singularity exploded to 400 and cost_return_attitude_abs to 300.
+Attitude error regressed from 12-15 deg back to 20-25 deg.
+
+Root cause: cost value function (MLP with linear output) predicted negative V_cost
+values. Since cost GAE return = V_cost + advantage, negative V_cost made the GAE
+return negative despite all per-step costs being non-negative. Negative mean_cost_returns
+inflated the barrier margin (d_k - (-X) = d_k + X), effectively disabling constraint
+pressure. Without constraints, the policy violated singularity and attitude limits.
+
+NORBC theory confirmation: J_{C_k} = E[sum gamma^t * C_k] >= 0 by definition (C_k >= 0,
+gamma > 0). The negative values were purely estimation error from the cost value function.
+
+Also tightened joint_vel budget (50% headroom was excessive) and loosened singularity
+budget (cost_return was crossing d_k at step 375).
+
+### Fixed
+- `encoder/actor_critic_encoder_constrained.py`: Added `F.softplus()` on cost critic output -- ensures V_cost >= 0 (root cause fix)
+- `algorithms/constraint_trpo.py`: Clamped `mean_cost_returns` to non-negative (safety net for residual GAE errors)
+
+### Changed
+- `config.py`: joint_vel budget 1.5 -> 1.0 rad/s (cost_return was only 50% of d_k=150)
+- `config.py`: singularity budget 0.10 -> 0.15 (cost_return 13 was crossing d_k=10)
+- `agents/rsl_rl_ppo_cfg.py`: constraint_budgets tuple synced (1.5->1.0, 0.10->0.15)
+
+### Notes
+- softplus chosen over relu: smooth gradient everywhere, no dead neurons, softplus(x) ~ x for large x
+- Checkpoint compatible: MLP architecture unchanged, only output activation added
+- Two-layer defense: softplus prevents V_cost < 0, clamp catches edge cases in GAE computation
+
 ## [2026-03-08] Constraint redesign: 3 binary costs -> continuous (NORBC average type)
 
 ### Context
