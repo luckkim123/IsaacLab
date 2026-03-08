@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-08] Constraint tuning: attitude_abs warning band + attitude_err budget
+
+### Context
+WandB analysis of ConstraintTRPO run (~600 iter) after barrier_t fix. Key findings:
+
+Rewards healthy: tracking 0.5->2.5, total 1->3, settling increasing, line_search 100%.
+Three constraints working well (singularity, oscillation, joint_vel cost_return all decreasing).
+
+attitude_err (limit=7 deg, budget=0.02): massively violated (cost_return 60-100 vs d_k=2).
+At 15-25 deg error, the 7 deg limit fires 100% of steps. With 100% violation, cost advantage
+approaches 0 everywhere (all trajectories equally bad), providing zero gradient signal. The
+cost_surrogate chart confirms this: drops from 600 to 0 by step 150 and stays flat. Error
+reduction (30->15 deg) was driven entirely by tracking/settling reward, not the constraint.
+Reverted limit to 15 deg (0.262 rad) so the constraint fires ~50% at current error levels,
+producing cost advantage variance and actual gradient signal. Budget kept at 0.02 (tighter
+than original 0.05) for stronger amplification when the constraint is active.
+
+attitude_abs (limit=80 deg, budget=0.01): never active despite episode terminations from
+excessive tilt (90 deg). Root cause: 10 deg warning band (80->90) means only 1-3 steps of
+cost=1 before termination, diluted across 3000-step episodes. Lowered limit to 60 deg
+(1.047 rad) for a 30 deg warning band, giving tens of cost-accumulation steps before
+termination.
+
+### Changed
+- `config.py`: attitude_error_cost limit 0.122 rad (7 deg) -> 0.262 rad (15 deg), budget 0.05 -> 0.02
+- `config.py`: attitude_absolute_cost limit 1.396 rad (80 deg) -> 1.047 rad (60 deg)
+- `agents/rsl_rl_ppo_cfg.py`: constraint_budgets attitude_err slot 0.05 -> 0.02
+
+### Notes
+- Encoder z_std=0.85 with grad_norm 0.008->0.001: insufficient evidence to determine saturation vs convergence. Per-dimension z-DR correlation needed.
+- ConstraintTRPO encoder optimizer has weight_decay=0 (PPO fix was 1e-4). Not addressed this session -- encoder appears functional.
+- A 100%-violated binary constraint provides zero gradient: cost advantage = 0 everywhere. Constraint limits must be set near the current performance boundary, not the final target.
+
 ## [2026-03-08] ConstraintTRPO gradient balance fix + barrier schedule refactor
 
 ### Context

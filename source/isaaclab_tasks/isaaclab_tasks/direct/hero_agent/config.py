@@ -608,14 +608,14 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
             ),
             ConstraintTermCfg(
                 func=attitude_absolute_cost,
-                params={"limit": 1.396},
+                params={"limit": 1.047},
                 budget=0.01,
                 name="attitude_abs",
             ),
             ConstraintTermCfg(
                 func=attitude_error_cost,
                 params={"limit": 0.262},
-                budget=0.05,
+                budget=0.02,
                 name="attitude_err",
             ),
             ConstraintTermCfg(
