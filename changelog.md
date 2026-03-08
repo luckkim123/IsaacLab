@@ -27,7 +27,7 @@ up to 2 rotations per direction as safety margin.
 
 ### Added
 - `mdp/constraints.py`: `ConstraintTermCfg` dataclass for registry pattern (func, params, budget, cost_type, name)
-- `mdp/constraints.py`: `attitude_absolute_cost` -- binary, 1 if |roll| or |pitch| > 25 deg (capsizing prevention)
+- `mdp/constraints.py`: `attitude_absolute_cost` -- binary, 1 if |roll| or |pitch| > 80 deg (safety, pre-termination warning zone)
 - `mdp/constraints.py`: `attitude_error_cost` -- binary, 1 if tracking error > 15 deg (control quality)
 - `mdp/constraints.py`: `singularity_cost` -- binary, 1 if |sin(g2)| < 0.15 (~8.6 deg from singularity)
 - `mdp/constraints.py`: `action_smoothness_cost` -- continuous, L2 action rate (Phase 2 reserve, not in default config)
@@ -42,6 +42,9 @@ up to 2 rotations per direction as safety margin.
 - `mdp/constraints.py`: `joint_oscillation_cost` default threshold 1.5 -> 0.6 rad/s (based on WandB observed range)
 - `config.py`: `HeroAgentConstrainedEncoderEnvCfg.constraints` now uses 6-term list (was 3 hardcoded)
 - `agents/rsl_rl_ppo_cfg.py`: num_constraints 3 -> 6, constraint_budgets updated to match 6 terms
+- `mdp/constraints.py`: `attitude_absolute_cost` default limit 0.436 (25 deg) -> 1.396 (80 deg), now acts as safety warning before termination (90 deg) rather than overlapping with attitude_error (15 deg)
+- `config.py`: attitude_abs constraint budget 0.10 -> 0.01 (1% violation tolerance for safety constraint)
+- `agents/rsl_rl_ppo_cfg.py`: attitude_abs budget in constraint_budgets tuple updated 0.10 -> 0.01
 - `runners/constraint_encoder_runner.py`: Logging uses constraint names instead of numeric indices (e.g., `cost_return_joint_vel` not `cost_return_0`)
 
 ### Removed

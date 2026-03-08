@@ -165,15 +165,16 @@ def joint_oscillation_cost(
 def attitude_absolute_cost(
     _robot: Articulation,
     env: HeroAgentEnv,
-    limit: float = 0.436,
+    limit: float = 1.396,
 ) -> torch.Tensor:
     """Binary cost: 1 if absolute roll or pitch exceeds limit (rad).
 
     Safety constraint to prevent capsizing. Uses absolute body orientation.
+    Acts as a warning zone before episode termination (90 deg).
 
     Args:
         env: Environment instance.
-        limit: Maximum absolute roll/pitch in radians (~25 deg default).
+        limit: Maximum absolute roll/pitch in radians (~80 deg default).
 
     Returns:
         (num_envs,) binary tensor.
