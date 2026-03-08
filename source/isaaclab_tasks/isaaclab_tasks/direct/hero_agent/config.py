@@ -591,7 +591,7 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
             ConstraintTermCfg(
                 func=joint_velocity_cost,
                 params={},
-                budget=1.5,
+                budget=1.0,
                 cost_type="average",
                 name="joint_vel",
             ),
@@ -624,7 +624,7 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
             ConstraintTermCfg(
                 func=singularity_cost,
                 params={"sin_g2_limit": 0.15},
-                budget=0.10,
+                budget=0.15,
                 name="singularity",
             ),
         ],

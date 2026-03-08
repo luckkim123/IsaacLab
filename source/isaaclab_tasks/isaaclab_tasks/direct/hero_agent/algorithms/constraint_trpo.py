@@ -553,7 +553,11 @@ class ConstraintTRPO:
         num_value_updates = 0
 
         # Mean cost returns for barrier (computed once, full batch)
-        mean_cost_returns = cost_returns_flat.mean(dim=0)  # (K,)
+        # Clamp to non-negative: all cost functions return >= 0, so the true
+        # return is always non-negative.  Cost value function errors can make
+        # the GAE-based return negative, which would inflate the barrier margin
+        # to d_k - (-X) = d_k + X, effectively disabling the constraint.
+        mean_cost_returns = cost_returns_flat.mean(dim=0).clamp(min=0.0)  # (K,)
 
         for _epoch in range(self.num_learning_epochs):
             indices = torch.randperm(batch_size, device=self.device)
