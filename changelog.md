@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-08] ConstraintTRPO gradient balance fix + barrier schedule refactor
+
+### Context
+WandB analysis of ConstraintTRPO training showed `rate_mean`, `joint_vel_abs_max`, and
+`effort_saturation_frac` dropping rapidly in early iterations. Root cause: IPO cost
+surrogate amplification factor `1/((1-gamma) * barrier_t * margin_k)` with `barrier_t=1.0`
+produced 100-1000x gradient amplification across 6 constraints (sum ~193x), overwhelming
+the 1x reward gradient. Policy collapsed to "minimize all activity" (trivially safe).
+
+Fix: raised `barrier_t` initial value from 1.0 to 10.0, reducing initial amplification
+to ~19x (manageable). Also changed `barrier_t_schedule_iters` from absolute iteration
+count (1000) to fraction-based (`barrier_t_schedule_frac=0.4`), so the schedule adapts
+to any `max_iterations` value. Previously, `max_iterations=1000` would schedule the
+entire training, and `max_iterations=500` would never complete the schedule.
+
+Secondary fix: `value_lr` 3e-4 -> 1e-3. The 3e-4 value was inherited from PPO shared
+optimizer. In TRPO, value function has a separate Adam optimizer where 1e-3 is standard.
+
+### Changed
+- `algorithms/constraint_trpo.py`: `barrier_t` default 1.0 -> 10.0, `value_lr` default 3e-4 -> 1e-3
+- `algorithms/constraint_trpo.py`: `barrier_t_schedule_iters` param replaced with `barrier_t_schedule_frac: float = 0.4`
+- `algorithms/constraint_trpo.py`: Store `barrier_t_init` in `__init__` for schedule interpolation
+- `algorithms/constraint_trpo.py`: `update_barrier_schedule()` uses `self.barrier_t_init` instead of hardcoded `1.0`
+- `agents/rsl_rl_ppo_cfg.py`: `barrier_t` 1.0 -> 10.0, `value_lr` 3e-4 -> 1e-3, `barrier_t_schedule_iters` -> `barrier_t_schedule_frac: float = 0.4`
+- `mdp/constraints.py`: `barrier_t_schedule_iters` -> `barrier_t_schedule_frac: float = 0.4` in ALBCConstraintCfg
+- `runners/base_runner.py`: Call `alg.set_max_iterations(num_learning_iterations)` in `learn()` to resolve fraction to absolute iters
+
+### Added
+- `algorithms/constraint_trpo.py`: `set_max_iterations()` method -- resolves `barrier_t_schedule_iters` from `frac * max_iterations`
+
+### Notes
+- Barrier schedule (max_iterations=2500): iter 0 -> barrier_t=10.0, iter 500 -> 30.0, iter 1000 -> 50.0
+- 6-constraint sum amplification: ~19x at barrier_t=10 (was ~193x at barrier_t=1). Reward gradient no longer dominated.
+- barrier_t_final=50.0 unchanged: late-training constraint enforcement still tight
+
 ## [2026-03-08] Constraint system expansion + registry pattern + logging cleanup
 
 ### Context

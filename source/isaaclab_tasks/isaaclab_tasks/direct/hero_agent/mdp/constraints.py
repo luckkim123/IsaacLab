@@ -75,7 +75,7 @@ class ALBCConstraintCfg:
     # IPO barrier parameters
     barrier_t: float = 1.0
     barrier_t_final: float = 50.0
-    barrier_t_schedule_iters: int = 1000
+    barrier_t_schedule_frac: float = 0.4
 
     # Adaptive threshold: d_k^i = max(d_k, J_C_k + alpha * d_k)
     adaptive_threshold_alpha: float = 0.1

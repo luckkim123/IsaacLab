@@ -59,7 +59,7 @@ class ConstraintTRPO:
         num_mini_batches: int = 4,
         value_loss_coef: float = 1.0,
         cost_value_loss_coef: float = 1.0,
-        value_lr: float = 3e-4,
+        value_lr: float = 1e-3,
         max_grad_norm: float = 1.0,
         # GAE parameters
         gamma: float = 0.99,
@@ -69,9 +69,9 @@ class ConstraintTRPO:
         constraint_budgets: tuple[float, ...] = (0.15, 0.02, 0.15),
         cost_gamma: float = 0.99,
         cost_lam: float = 0.95,
-        barrier_t: float = 1.0,
+        barrier_t: float = 10.0,
         barrier_t_final: float = 50.0,
-        barrier_t_schedule_iters: int = 1000,
+        barrier_t_schedule_frac: float = 0.4,
         adaptive_threshold_alpha: float = 0.1,
         adaptive_ema_alpha: float | None = None,
         # Line search acceptance thresholds
@@ -119,8 +119,10 @@ class ConstraintTRPO:
         self.cost_gamma = cost_gamma
         self.cost_lam = cost_lam
         self.barrier_t = barrier_t
+        self.barrier_t_init = barrier_t
         self.barrier_t_final = barrier_t_final
-        self.barrier_t_schedule_iters = barrier_t_schedule_iters
+        self.barrier_t_schedule_frac = barrier_t_schedule_frac
+        self.barrier_t_schedule_iters = 0  # resolved by set_max_iterations()
         self.adaptive_threshold_scale = adaptive_threshold_alpha
         self.adaptive_ema_alpha = adaptive_ema_alpha if adaptive_ema_alpha is not None else adaptive_threshold_alpha
         self.line_search_kl_margin = line_search_kl_margin
@@ -844,11 +846,15 @@ class ConstraintTRPO:
     # Barrier Schedule
     # ==================================================================
 
+    def set_max_iterations(self, max_iterations: int) -> None:
+        """Resolve barrier schedule iterations from fraction and total iterations."""
+        self.barrier_t_schedule_iters = int(max_iterations * self.barrier_t_schedule_frac)
+
     def update_barrier_schedule(self, iteration: int) -> None:
         """Update barrier steepness t based on training progress."""
         if self.barrier_t_schedule_iters <= 0:
             return
         progress = min(1.0, iteration / self.barrier_t_schedule_iters)
         self.barrier_t = (
-            self.barrier_t_final * progress + (1.0 - progress) * 1.0  # initial t=1.0
+            self.barrier_t_final * progress + (1.0 - progress) * self.barrier_t_init
         )

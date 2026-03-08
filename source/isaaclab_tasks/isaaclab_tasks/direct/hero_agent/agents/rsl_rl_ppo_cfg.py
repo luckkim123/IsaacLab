@@ -299,7 +299,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
     num_mini_batches: int = 4
     value_loss_coef: float = 1.0
     cost_value_loss_coef: float = 1.0
-    value_lr: float = 3e-4
+    value_lr: float = 1e-3
     max_grad_norm: float = 1.0
 
     # GAE
@@ -311,9 +311,9 @@ class RslRlConstraintTRPOAlgorithmCfg:
     constraint_budgets: tuple[float, ...] = (0.15, 0.02, 0.15, 0.01, 0.05, 0.10)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
-    barrier_t: float = 1.0
+    barrier_t: float = 10.0
     barrier_t_final: float = 50.0
-    barrier_t_schedule_iters: int = 1000
+    barrier_t_schedule_frac: float = 0.4
     adaptive_threshold_alpha: float = 0.1
     adaptive_ema_alpha: float | None = None
     line_search_kl_margin: float = 1.5

@@ -41,6 +41,8 @@ class BaseRunner(OnPolicyRunner):
         """Reset environments before training so initial DR samples come from DORAEMON."""
         raw_env = unwrap_env(self.env)
         raw_env._reward_manager.set_max_iterations(num_learning_iterations)
+        if hasattr(self.alg, "set_max_iterations"):
+            self.alg.set_max_iterations(num_learning_iterations)
         self.env.reset()
         super().learn(num_learning_iterations, init_at_random_ep_len)
 
