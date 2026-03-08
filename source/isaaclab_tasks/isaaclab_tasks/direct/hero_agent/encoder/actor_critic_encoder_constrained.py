@@ -78,7 +78,7 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
         return self.cost_critic(critic_obs)
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
-        """Load with backward compatibility for checkpoints without cost_critic."""
+        """Load with backward compatibility for checkpoints without cost_critic or K mismatch."""
         cost_prefix = "cost_critic."
         has_cost_keys = any(k.startswith(cost_prefix) for k in state_dict)
 
@@ -86,5 +86,23 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
             logger.info("Checkpoint lacks cost_critic keys; using random initialization.")
             for k, v in self.cost_critic.state_dict().items():
                 state_dict[cost_prefix + k] = v
+        else:
+            # Detect K mismatch (e.g. K=3 checkpoint loaded into K=6 model).
+            # MLP (nn.Sequential) keys: "0.weight", "2.weight", ..., last is output layer.
+            weight_keys = sorted(
+                [k for k in state_dict if k.startswith(cost_prefix) and k.endswith(".weight")],
+                key=lambda k: int(k.removeprefix(cost_prefix).split(".")[0]),
+            )
+            if weight_keys:
+                output_key = weight_keys[-1]
+                if state_dict[output_key].shape[0] != self.num_constraints:
+                    old_k = state_dict[output_key].shape[0]
+                    logger.warning(
+                        "Cost critic K mismatch (%d -> %d), reinitializing cost_critic.",
+                        old_k,
+                        self.num_constraints,
+                    )
+                    for k, v in self.cost_critic.state_dict().items():
+                        state_dict[cost_prefix + k] = v
 
         return super().load_state_dict(state_dict, strict=strict)

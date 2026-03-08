@@ -41,7 +41,17 @@ from isaaclab_assets.robots.uuv import (
 
 from .controllers import TDCControllerCfg
 from .doraemon import DoraemonCfg
-from .mdp import ALBCConstraintCfg, ALBCRewardCfg
+from .mdp import (
+    ALBCConstraintCfg,
+    ALBCRewardCfg,
+    ConstraintTermCfg,
+    accumulated_rotation_cost,
+    attitude_absolute_cost,
+    attitude_error_cost,
+    joint_oscillation_cost,
+    joint_velocity_cost,
+    singularity_cost,
+)
 
 
 @configclass
@@ -576,7 +586,46 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
     are zeroed to avoid double-counting.
     """
 
-    constraints: ALBCConstraintCfg = ALBCConstraintCfg()
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg(
+        terms=[
+            ConstraintTermCfg(
+                func=joint_velocity_cost,
+                params={"limit": 3.0},
+                budget=0.15,
+                name="joint_vel",
+            ),
+            ConstraintTermCfg(
+                func=accumulated_rotation_cost,
+                params={"max_rotations": 2.0},
+                budget=0.02,
+                name="accum_rot",
+            ),
+            ConstraintTermCfg(
+                func=joint_oscillation_cost,
+                params={"limit": 0.6},
+                budget=0.15,
+                name="oscillation",
+            ),
+            ConstraintTermCfg(
+                func=attitude_absolute_cost,
+                params={"limit": 0.436},
+                budget=0.10,
+                name="attitude_abs",
+            ),
+            ConstraintTermCfg(
+                func=attitude_error_cost,
+                params={"limit": 0.262},
+                budget=0.05,
+                name="attitude_err",
+            ),
+            ConstraintTermCfg(
+                func=singularity_cost,
+                params={"sin_g2_limit": 0.15},
+                budget=0.10,
+                name="singularity",
+            ),
+        ],
+    )
 
     # Zero out reward weights for terms moved to constraints
     reward: ALBCRewardCfg = ALBCRewardCfg(

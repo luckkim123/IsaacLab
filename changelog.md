@@ -4,6 +4,57 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-08] Constraint system expansion + registry pattern + logging cleanup
+
+### Context
+WandB analysis of ConstraintTRPO runs showed 2 of 3 constraints (accumulated_rotation,
+joint_oscillation) were "dead" -- feasibility_rate always 1.0, cost_return ~0. Only
+joint_velocity (C0) showed intermittent violations. Root cause: thresholds too lenient
+(4pi accumulated rotation, 1.5 rad/s oscillation vs observed 0.3-0.5 range).
+
+Refactored the constraint system from hardcoded individual fields to a registry pattern
+(ConstraintTermCfg list), added 3 new constraint types (attitude_absolute, attitude_error,
+singularity), adjusted dead constraint thresholds, and reduced WandB metric count from
+33 to 14 by removing redundant metrics (d_k static values, cost_return_std, feasibility_rate,
+barrier_schedule_progress).
+
+joint_position_cost was replaced with singularity_cost after review: ALBC joints have
++-360 deg limits (effectively no limit), so the real danger is kinematic singularity
+where |sin(g2)| -> 0 (full extension or folded configuration).
+
+accumulated_rotation threshold set to 2.0 rotations (4pi rad) -- physical hardware allows
+up to 2 rotations per direction as safety margin.
+
+### Added
+- `mdp/constraints.py`: `ConstraintTermCfg` dataclass for registry pattern (func, params, budget, cost_type, name)
+- `mdp/constraints.py`: `attitude_absolute_cost` -- binary, 1 if |roll| or |pitch| > 25 deg (capsizing prevention)
+- `mdp/constraints.py`: `attitude_error_cost` -- binary, 1 if tracking error > 15 deg (control quality)
+- `mdp/constraints.py`: `singularity_cost` -- binary, 1 if |sin(g2)| < 0.15 (~8.6 deg from singularity)
+- `mdp/constraints.py`: `action_smoothness_cost` -- continuous, L2 action rate (Phase 2 reserve, not in default config)
+- `mdp/constraints.py`: `angular_velocity_cost` -- continuous, L2 roll/pitch angular velocity (Phase 2 reserve)
+- `encoder/actor_critic_encoder_constrained.py`: K mismatch detection in load_state_dict (dynamic output layer key lookup)
+- `runners/constraint_encoder_runner.py`: Auto-sync num_constraints from env config to algorithm/policy config in __init__
+
+### Changed
+- `mdp/constraints.py`: `ALBCConstraintCfg` refactored from individual fields to `terms: list[ConstraintTermCfg]` with derived properties (num_constraints, constraint_budgets, constraint_names)
+- `mdp/constraints.py`: `compute_all_costs()` now iterates over cfg.terms registry instead of hardcoded function calls
+- `mdp/constraints.py`: `accumulated_rotation_cost` default threshold 2.0 -> 2.0 rotations (4pi rad, matches hardware limit)
+- `mdp/constraints.py`: `joint_oscillation_cost` default threshold 1.5 -> 0.6 rad/s (based on WandB observed range)
+- `config.py`: `HeroAgentConstrainedEncoderEnvCfg.constraints` now uses 6-term list (was 3 hardcoded)
+- `agents/rsl_rl_ppo_cfg.py`: num_constraints 3 -> 6, constraint_budgets updated to match 6 terms
+- `runners/constraint_encoder_runner.py`: Logging uses constraint names instead of numeric indices (e.g., `cost_return_joint_vel` not `cost_return_0`)
+
+### Removed
+- `mdp/constraints.py`: `joint_position_cost` replaced by `singularity_cost` (joint limits +-360 deg are irrelevant)
+- `runners/constraint_encoder_runner.py`: Removed 19 redundant WandB metrics: `d_k_{name}` x6 (static), `cost_return_std_{name}` x6, `feasibility_rate_{name}` x6, `barrier_schedule_progress` x1
+- `algorithms/constraint_trpo.py`: Removed `_last_cost_return_stds` and `_last_feasibility_rates` computation (logging-only, no longer logged)
+
+### Notes
+- Phase 2 (K=8 with continuous constraints) ready: action_smoothness_cost and angular_velocity_cost implemented, just need config registration
+- Remaining WandB constraint metrics (14): barrier_t (1) + d_k_adaptive (6) + cost_return (6) + line_search_success (1)
+- K=3 checkpoint backward compatibility: cost_critic auto-reinitializes on K mismatch with warning log
+- All Pyright `reportCallIssue`/`reportMissingImports` errors are expected Isaac Lab false positives (@configclass + non-pip-installed modules)
+
 ## [2026-03-06] Config tuning + training analysis
 
 ### Context

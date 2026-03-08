@@ -307,8 +307,8 @@ class RslRlConstraintTRPOAlgorithmCfg:
     lam: float = 0.95
 
     # Constraint / IPO
-    num_constraints: int = 3
-    constraint_budgets: tuple[float, ...] = (0.15, 0.02, 0.15)
+    num_constraints: int = 6
+    constraint_budgets: tuple[float, ...] = (0.15, 0.02, 0.15, 0.10, 0.05, 0.10)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
     barrier_t: float = 1.0
@@ -337,7 +337,7 @@ class RslRlPpoActorCriticEncoderConstrainedCfg(_RslRlPpoEncoderBaseCfg):
     """Policy config for ActorCriticEncoderConstrained (encoder + cost critic)."""
 
     class_name: str = "ActorCriticEncoderConstrained"
-    num_constraints: int = 3
+    num_constraints: int = 6
     cost_critic_hidden_dims: list[int] = [256, 128, 64]
 
 

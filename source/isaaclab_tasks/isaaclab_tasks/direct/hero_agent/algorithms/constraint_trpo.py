@@ -812,10 +812,6 @@ class ConstraintTRPO:
         #     (read by ConstraintEncoderRunner._log_constraint_metrics)
         # ------------------------------------------------------------------
         self._last_cost_returns = [mean_cost_returns[k].item() for k in range(self.num_constraints)]
-        self._last_cost_return_stds = [cost_returns_flat[:, k].std().item() for k in range(self.num_constraints)]
-        self._last_feasibility_rates = [
-            (cost_returns_flat[:, k] < self.d_k[k]).float().mean().item() for k in range(self.num_constraints)
-        ]
         self._last_line_search_success = float(ls_success)
 
         # Clear storage
