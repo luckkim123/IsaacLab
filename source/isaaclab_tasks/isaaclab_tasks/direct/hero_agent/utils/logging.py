@@ -477,3 +477,71 @@ def log_tdc_controller_metrics(
 
     if flush_after:
         flush_metrics(writer, metrics, iteration, logger_type)
+
+
+# =============================================================================
+# DR Infeasibility Logging
+# =============================================================================
+
+_dr_infeasibility_logger: logging.Logger | None = None
+
+
+def _get_dr_infeasibility_logger() -> logging.Logger:
+    """Get or create DR infeasibility logger (singleton).
+
+    The logger writes to "hero_agent.dr_infeasibility". Runners can attach
+    a FileHandler to this logger to persist infeasibility records to disk.
+    """
+    global _dr_infeasibility_logger
+    if _dr_infeasibility_logger is None:
+        _dr_infeasibility_logger = logging.getLogger("hero_agent.dr_infeasibility")
+        _dr_infeasibility_logger.setLevel(logging.INFO)
+        if not _dr_infeasibility_logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter("[DR-Infeasible] %(message)s"))
+            _dr_infeasibility_logger.addHandler(handler)
+            _dr_infeasibility_logger.propagate = False
+    return _dr_infeasibility_logger
+
+
+def log_dr_infeasibility(
+    env_ids: torch.Tensor,
+    mean_errors_deg: torch.Tensor,
+    hydro: object,
+    buoy_hydro: object,
+    payload_mass: torch.Tensor | None,
+    robot: object,
+    albc_joint_ids: list[int],
+) -> None:
+    """Log DR parameters for physically infeasible environments.
+
+    Called when an environment has high error despite correct arm direction,
+    suggesting the DR parameter combination is physically unachievable.
+
+    Args:
+        env_ids: Global environment indices flagged as infeasible.
+        mean_errors_deg: Mean roll/pitch error in degrees for each env.
+        hydro: Main body HydrodynamicsModel.
+        buoy_hydro: Buoy HydrodynamicsModel.
+        payload_mass: Per-env payload mass tensor or None.
+        robot: Robot articulation (for joint positions).
+        albc_joint_ids: ALBC joint indices.
+    """
+    dr_log = _get_dr_infeasibility_logger()
+    for i, eid in enumerate(env_ids):
+        e = eid.item()
+        params = {
+            "env_id": e,
+            "mean_error_deg": round(mean_errors_deg[i].item(), 2),
+            "buoyancy_force": round(hydro.buoyancy_force[e].item(), 3),
+            "inertia_rp": [round(v, 4) for v in hydro.rigid_body_inertia[e, :2].tolist()],
+            "cob_main": [round(v, 4) for v in hydro.center_of_buoyancy[e].tolist()],
+            "cog_main": [round(v, 4) for v in hydro.center_of_gravity[e].tolist()],
+            "volume_main": round(hydro.volume[e].item(), 5),
+            "volume_buoy": round(buoy_hydro.volume[e].item(), 5),
+        }
+        if payload_mass is not None:
+            params["payload_mass"] = round(payload_mass[e].item(), 3)
+        joint_pos = robot.data.joint_pos[e, albc_joint_ids]  # type: ignore[union-attr]
+        params["joint_pos"] = [round(v, 3) for v in joint_pos.tolist()]
+        dr_log.info("Infeasible DR: %s", params)

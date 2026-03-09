@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-09] Constraint system redesign: 8-term architecture
+
+### Context
+Redesigned constraint system from 6 terms to 8 terms, aligned with NORBC paper design.
+Removed 3 constraints that overlapped with reward terms (attitude_error_cost covered by
+command_reward, action_smoothness_cost covered by smoothness reward, angular_velocity_cost
+removed by user choice). Added 3 new physically-motivated constraints: effort_limit (real
+motor limit vs inflated PhysX limit), yaw_velocity (buoyancy control cannot generate yaw
+torque), cob_cog_alignment (lateral CoB-CoG offset creates persistent bias).
+
+Also added DR infeasibility logging: detects DR parameter combinations that are physically
+unachievable (high error + arm at singularity + correct direction + timed-out episode).
+Initial deployment showed excessive logging; fixed by adding timeout-only filter and
+rate-limited sampling (100 calls per detailed log, max 3 samples).
+
+Theoretical review confirmed IPO algorithm (barrier schedule, adaptive threshold, cost GAE
+non-normalization, multi-head cost critic) is correct for 8-term architecture -- all
+components are K-generic with auto-sync.
+
+### Added
+- `mdp/constraints.py`: `effort_limit_cost()` -- binary, 1 if computed_torque > URDF default (PhysX allows 1.3-1.5x via DR)
+- `mdp/constraints.py`: `yaw_velocity_cost()` -- average, absolute yaw angular velocity (rad/s)
+- `mdp/constraints.py`: `cob_cog_alignment_cost()` -- average, lateral XY CoB-CoG offset (meters), mass+volume weighted system calculation including payload
+- `utils/logging.py`: `log_dr_infeasibility()` -- singleton logger for physically infeasible DR combinations
+- `base_env.py`: `_check_dr_infeasibility()` -- timeout-only filter, rate-limited sampling (100 calls / max 3 samples), count always logged to WandB
+
+### Changed
+- `config.py`: `HeroAgentConstrainedEncoderEnvCfg` constraint terms 6 -> 8, reordered (binary first, average second)
+- `config.py`: `HeroAgentConstrainedEncoderEnvCfg` DR override `joint_effort_limit_range=(1.3, 1.5)` -- PhysX allows higher torque so constraint teaches real limit
+- `config.py`: `attitude_abs` limit 1.047 rad (60 deg) -> 1.396 rad (80 deg)
+- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 6 -> 8, `constraint_budgets` updated to 8-tuple matching new term order
+- `mdp/__init__.py`: Exports updated (removed 3, added 3)
+- `utils/__init__.py`: Added `log_dr_infeasibility` export
+
+### Removed
+- `mdp/constraints.py`: `attitude_error_cost` (command_reward covers tracking)
+- `mdp/constraints.py`: `action_smoothness_cost` (smoothness reward covers this)
+- `mdp/constraints.py`: `angular_velocity_cost` (user choice to remove)
+
+### Notes
+- Budgets: accum_rot=0.02, attitude_abs=0.01, singularity=0.15, effort_limit=0.05, joint_vel=2.0, oscillation=0.3, yaw_vel=0.15, cob_cog=0.02
+- ConstraintTRPO / ActorCriticEncoderConstrained are K-generic; ConstraintEncoderRunner auto-syncs K from env config
+- DR infeasibility: `DR/infeasible_count` logged every reset batch; detailed params every 100 calls, max 3 samples
+
 ## [2026-03-09] Unified actuator DR ranges based on XW540-T260-R datasheet
 
 ### Context

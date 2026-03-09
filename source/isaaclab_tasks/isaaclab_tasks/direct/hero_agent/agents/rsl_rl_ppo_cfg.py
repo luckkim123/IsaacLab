@@ -307,8 +307,8 @@ class RslRlConstraintTRPOAlgorithmCfg:
     lam: float = 0.95
 
     # Constraint / IPO
-    num_constraints: int = 6
-    constraint_budgets: tuple[float, ...] = (1.0, 0.02, 0.3, 0.01, 0.087, 0.15)
+    num_constraints: int = 8
+    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15, 0.05, 2.0, 0.3, 0.15, 0.02)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
     barrier_t: float = 10.0
@@ -319,7 +319,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
     line_search_cost_margin: float = 0.5
 
     # Entropy
-    entropy_coef: float = 0.005
+    entropy_coef: float = 0.02
 
     # Encoder z bounds
     z_bounds_coef: float = 0.3
@@ -333,7 +333,7 @@ class RslRlPpoActorCriticEncoderConstrainedCfg(_RslRlPpoEncoderBaseCfg):
     """
 
     class_name: str = "ActorCriticEncoderConstrained"
-    num_constraints: int = 6
+    num_constraints: int = 8
     cost_critic_hidden_dims: list[int] = [256, 128, 64]
     asymmetric_critic: bool = True
 

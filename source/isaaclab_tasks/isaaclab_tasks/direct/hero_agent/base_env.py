@@ -36,16 +36,13 @@ from .config import HeroAgentEnvCfg
 from .mdp import (
     RewardManager,
     RewardTermCfg,
+    action_smoothness_penalty,
+    command_reward,
     compute_all_costs,
     compute_policy_obs,
     compute_privileged_obs,
-    joint_oscillation_penalty,
-    joint_velocity_penalty,
-    linear_error_penalty,
-    progress_reward,
-    progress_reward_pbrs,
-    settling_bonus,
-    tracking_reward,
+    energy_penalty,
+    settling_reward,
 )
 from .mdp.events import (
     compute_equilibrium_joint_positions,
@@ -61,7 +58,7 @@ from .mdp.events import (
     reset_joint_positions_default,
     reset_robot_pose_default,
 )
-from .utils import DebugVisualization, log_dr_metrics, log_tdc_diagnostics
+from .utils import DebugVisualization, log_dr_infeasibility, log_dr_metrics, log_tdc_diagnostics
 
 
 class HeroAgentEnv(DirectRLEnv):
@@ -286,55 +283,39 @@ class HeroAgentEnv(DirectRLEnv):
     def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
         """Build the reward terms dict. Override in subclasses to add/modify terms.
 
-        Base terms (dt-scaled via RewardTermCfg.scale_by_dt, default True):
-            1. tracking: Laplacian kernel exp(-||e||/sigma)
-            2. linear_error: -min(||err||, max)/max (constant gradient tail)
-            3. joint_oscillation: EMA high-pass joint vel^2
-            4. joint_velocity: quadratic joint velocity penalty
-            5. progress: PBRS (scale_by_dt=False, per-transition not per-time)
+        4-term architecture (all dt-scaled):
+            1. command: composite Laplacian + linear ramp [0,1]
+            2. settling: binary threshold bonus {0,1}
+            3. energy: mean(joint_vel^2)
+            4. smoothness: mean(da^2) + mean(d2a^2)
         """
         rcfg = self.cfg.reward
         terms = {
-            "tracking": RewardTermCfg(
-                func=tracking_reward,
-                weight=rcfg.tracking_weight,
-                params={"sigma": rcfg.tracking_sigma},
+            "command": RewardTermCfg(
+                func=command_reward,
+                weight=rcfg.command_weight,
+                params={
+                    "sigma": rcfg.command_sigma,
+                    "e_max": rcfg.command_e_max,
+                    "alpha": rcfg.command_alpha,
+                },
             ),
         }
-        if rcfg.linear_error_weight != 0.0:
-            terms["linear_error"] = RewardTermCfg(
-                func=linear_error_penalty,
-                weight=rcfg.linear_error_weight,
-                params={"max_err": rcfg.linear_error_max},
-            )
-        if rcfg.joint_oscillation_weight != 0.0:
-            terms["joint_oscillation"] = RewardTermCfg(
-                func=joint_oscillation_penalty,
-                weight=rcfg.joint_oscillation_weight,
-            )
-        if rcfg.joint_velocity_weight != 0.0:
-            terms["joint_velocity"] = RewardTermCfg(
-                func=joint_velocity_penalty,
-                weight=rcfg.joint_velocity_weight,
-            )
-        if rcfg.progress_weight != 0.0:
-            if rcfg.progress_mode == "pbrs":
-                func = progress_reward_pbrs
-                params = {"gamma": rcfg.progress_gamma}
-            else:
-                func = progress_reward
-                params = {"scale": rcfg.progress_scale}
-            terms["progress"] = RewardTermCfg(
-                func=func,
-                weight=rcfg.progress_weight,
-                params=params,
-                scale_by_dt=False,  # PBRS is per-transition, not a rate
-            )
         if rcfg.settling_weight != 0.0:
             terms["settling"] = RewardTermCfg(
-                func=settling_bonus,
+                func=settling_reward,
                 weight=rcfg.settling_weight,
                 params={"threshold": rcfg.settling_threshold},
+            )
+        if rcfg.energy_weight != 0.0:
+            terms["energy"] = RewardTermCfg(
+                func=energy_penalty,
+                weight=rcfg.energy_weight,
+            )
+        if rcfg.smoothness_weight != 0.0:
+            terms["smoothness"] = RewardTermCfg(
+                func=action_smoothness_penalty,
+                weight=rcfg.smoothness_weight,
             )
         return terms
 
@@ -363,9 +344,10 @@ class HeroAgentEnv(DirectRLEnv):
 
     def _init_state_buffers(self) -> None:
         """Initialize action and force/torque buffers."""
-        # Action buffers
+        # Action buffers (3-deep history for smoothness penalty)
         self._actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
         self._prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
+        self._prev_prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
         self._prev_actions_obs = torch.zeros(self.num_envs, 2, device=self.device)
 
         # Accumulated rotation tracking (for IPO constraint)
@@ -374,7 +356,7 @@ class HeroAgentEnv(DirectRLEnv):
 
         # EMA joint velocity (for high-pass oscillation penalty)
         self._ema_joint_vel = torch.zeros(self.num_envs, 2, device=self.device)
-        self._ema_joint_vel_alpha = self.cfg.reward.joint_oscillation_alpha
+        self._ema_joint_vel_alpha = self.cfg.reward.ema_joint_vel_alpha
         self._joint_pos_targets = torch.zeros(self.num_envs, 2, device=self.device)
         # Global step counter (not per-env). With control_decimation=1 (default),
         # this modulo always passes. If control_decimation > 1, all envs share
@@ -508,6 +490,7 @@ class HeroAgentEnv(DirectRLEnv):
             actions: Raw actions from RL. Shape: (num_envs, action_space).
             obs_action_slice: Slice for _prev_actions_obs. None = full clone.
         """
+        self._prev_prev_actions = self._prev_actions.clone()
         self._prev_actions = self._actions.clone()
         self._actions = actions.clone().clamp(-1.0, 1.0)
         if obs_action_slice is not None:
@@ -968,7 +951,75 @@ class HeroAgentEnv(DirectRLEnv):
             extras_wrapper: dict = {"log": log}
             log_dr_metrics(extras_wrapper, self)
 
+        # DR infeasibility check (only for constrained envs with DR enabled)
+        self._check_dr_infeasibility(env_ids)
+
         return log
+
+    _dr_infeasibility_call_count: int = 0
+    _dr_infeasibility_log_interval: int = 100  # Log details every N calls
+    _dr_infeasibility_max_samples: int = 3  # Max detailed logs per interval
+
+    def _check_dr_infeasibility(self, env_ids: torch.Tensor) -> None:
+        """Detect DR combinations where correct control cannot reduce error.
+
+        Only checks timed-out episodes (had full episode length to converge).
+        Flags environments that have: (1) high error (> 10 deg), (2) arm near
+        singularity, and (3) arm pointing in the correct direction.
+
+        Logs infeasible count to extras["log"] every call (for WandB).
+        Logs detailed params at most max_samples per log_interval calls.
+        """
+        if len(env_ids) == 0 or getattr(self.cfg, "constraints", None) is None:
+            return
+
+        # Only check timed-out episodes (early termination != infeasibility)
+        timed_out_mask = self.reset_time_outs[env_ids]
+        timed_out_ids = env_ids[timed_out_mask]
+        if len(timed_out_ids) == 0:
+            return
+
+        err = self._attitude_error[timed_out_ids, :2]  # (N, 2) roll/pitch error
+        mean_err_deg = torch.rad2deg(err.abs().mean(dim=-1))
+
+        # Condition 1: high error (> 10 degrees)
+        high_error = mean_err_deg > 10.0
+
+        # Condition 2: arm near singularity (fully extended)
+        g2 = self._robot.data.joint_pos[timed_out_ids][:, self._albc_joint_ids[1]]
+        near_singularity = g2.sin().abs() < 0.15
+
+        # Condition 3: arm pointing in the correct direction
+        g1 = self._robot.data.joint_pos[timed_out_ids][:, self._albc_joint_ids[0]]
+        desired_g1 = torch.atan2(err[:, 0], err[:, 1])
+        direction_aligned = torch.cos(g1 - desired_g1) > 0.5  # within ~60 deg
+
+        infeasible = high_error & near_singularity & direction_aligned
+        n_infeasible = infeasible.sum().item()
+
+        # Always record count for WandB (lightweight)
+        if hasattr(self, "extras") and "log" in self.extras:
+            self.extras["log"]["DR/infeasible_count"] = n_infeasible
+
+        # Detailed logging: sample at most N envs every M calls
+        self._dr_infeasibility_call_count += 1
+        if n_infeasible > 0 and (self._dr_infeasibility_call_count % self._dr_infeasibility_log_interval == 0):
+            inf_ids = timed_out_ids[infeasible]
+            inf_errs = mean_err_deg[infeasible]
+            # Random sample if too many
+            if len(inf_ids) > self._dr_infeasibility_max_samples:
+                perm = torch.randperm(len(inf_ids), device=inf_ids.device)[: self._dr_infeasibility_max_samples]
+                inf_ids = inf_ids[perm]
+                inf_errs = inf_errs[perm]
+            log_dr_infeasibility(
+                env_ids=inf_ids,
+                mean_errors_deg=inf_errs,
+                hydro=self._hydro,
+                buoy_hydro=self._buoy_hydro,
+                payload_mass=self._payload_mass,
+                robot=self._robot,
+                albc_joint_ids=self._albc_joint_ids,
+            )
 
     def get_eval_snapshot(self) -> dict[str, float]:
         """Return current evaluation metrics for play-mode diagnostics.
@@ -1093,7 +1144,7 @@ class HeroAgentEnv(DirectRLEnv):
             max_jitter = max(1, int(self.max_episode_length * 0.1))
             self.episode_length_buf[env_ids] = torch.randint_like(self.episode_length_buf[env_ids], high=max_jitter)
 
-        for buf in (self._actions, self._prev_actions, self._prev_actions_obs):
+        for buf in (self._actions, self._prev_actions, self._prev_prev_actions, self._prev_actions_obs):
             buf[env_ids] = 0.0
         # Reset EMA to zero (velocity is reset to 0 in _reset_task_and_state after this)
         self._ema_joint_vel[env_ids] = 0.0

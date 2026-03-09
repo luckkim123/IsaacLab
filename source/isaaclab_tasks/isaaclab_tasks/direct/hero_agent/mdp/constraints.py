@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from isaaclab.utils import configclass
-from isaaclab.utils.math import euler_xyz_from_quat
+from isaaclab.utils.math import euler_xyz_from_quat, quat_apply, quat_apply_inverse
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation
@@ -181,25 +181,6 @@ def attitude_absolute_cost(
     return (torch.max(roll.abs(), pitch.abs()) > limit).float()
 
 
-def attitude_error_cost(
-    _robot: Articulation,
-    env: HeroAgentEnv,
-) -> torch.Tensor:
-    """Continuous cost: max absolute attitude tracking error (rad).
-
-    Average constraint -- budget D_k is the target mean error.
-    Uses env._attitude_error (target-relative).
-
-    Args:
-        env: Environment instance.
-
-    Returns:
-        (num_envs,) non-negative tensor in rad.
-    """
-    err = env._attitude_error[:, :2]
-    return err.abs().max(dim=-1).values
-
-
 def singularity_cost(
     _robot: Articulation,
     env: HeroAgentEnv,
@@ -229,35 +210,101 @@ def singularity_cost(
 # =============================================================================
 
 
-def action_smoothness_cost(
+def effort_limit_cost(
     _robot: Articulation,
     env: HeroAgentEnv,
+    real_limit_scale: float = 1.0,
 ) -> torch.Tensor:
-    """Continuous cost: L2 norm of action rate |a(t) - a(t-1)|.
+    """Binary cost: 1 if any ALBC joint computed torque exceeds real motor limit.
+
+    PhysX effort_limit is set higher than the real motor limit (via DR scale 1.3-1.5x),
+    allowing the simulation to produce torques that exceed real hardware capability.
+    This constraint teaches the policy to stay within the actual motor limit.
 
     Args:
         env: Environment instance.
+        real_limit_scale: Scale applied to URDF default effort limit (1.0 = stall torque).
 
     Returns:
-        (num_envs,) non-negative tensor.
+        (num_envs,) binary tensor.
     """
-    return torch.linalg.norm(env._actions - env._prev_actions, dim=-1)
+    computed = _robot.data.computed_torque[:, env._albc_joint_ids]
+    real_limit = env._default_effort_limit * real_limit_scale
+    return (computed.abs().max(dim=-1).values > real_limit).float()
 
 
-def angular_velocity_cost(
+def yaw_velocity_cost(
     _robot: Articulation,
     env: HeroAgentEnv,
 ) -> torch.Tensor:
-    """Continuous cost: L2 norm of roll/pitch angular velocity.
+    """Continuous cost: absolute yaw angular velocity (rad/s).
 
-    Args:
-        env: Environment instance.
+    Average constraint -- budget D_k is the target mean yaw rate.
+    Buoyancy control cannot generate Z-axis torque, so yaw velocity
+    is purely from disturbances and coupling. Constraining it
+    prevents policies from exploiting yaw-coupled motions.
 
     Returns:
-        (num_envs,) non-negative tensor.
+        (num_envs,) non-negative tensor in rad/s.
     """
-    ang_vel_rp = _robot.data.root_ang_vel_b[:, :2]
-    return ang_vel_rp.pow(2).sum(dim=-1).sqrt()
+    return _robot.data.root_ang_vel_b[:, 2].abs()
+
+
+def cob_cog_alignment_cost(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+) -> torch.Tensor:
+    """Continuous cost: lateral XY offset between system CoB and CoG (meters).
+
+    Average constraint -- budget D_k is the target mean offset.
+    Large lateral CoB-CoG separation creates a persistent roll/pitch bias
+    that the controller must fight against, wasting actuator authority.
+
+    System CoG: mass-weighted (main + buoy + payload).
+    System CoB: volume-weighted (main + buoy).
+
+    Returns:
+        (num_envs,) non-negative tensor in meters.
+    """
+    hydro = env._hydro
+    buoy_hydro = env._buoy_hydro
+    root_quat = _robot.data.root_quat_w
+    root_pos = _robot.data.root_pos_w
+
+    # Buoy offset in body frame
+    buoy_pos_w = _robot.data.body_pos_w[:, env._buoy_body_id[0]]
+    buoy_offset_b = quat_apply_inverse(root_quat, buoy_pos_w - root_pos)
+
+    # Mass-weighted CoG
+    m_main = hydro.body_mass  # (num_envs,)
+    m_buoy = buoy_hydro.body_mass  # (num_envs,)
+    r_cg = m_main.unsqueeze(-1) * hydro.center_of_gravity + m_buoy.unsqueeze(-1) * (
+        buoy_offset_b + buoy_hydro.center_of_gravity
+    )
+
+    m_total = m_main + m_buoy
+    if env._payload_mass is not None:
+        gripper_pos_w = _robot.data.body_pos_w[:, env._gripper_body_id[0]]
+        gripper_quat = _robot.data.body_quat_w[:, env._gripper_body_id[0]]
+        payload_cog_w = gripper_pos_w + quat_apply(
+            gripper_quat,
+            env._payload_attachment_offset + env._payload_cog_offset,
+        )
+        payload_cog_b = quat_apply_inverse(root_quat, payload_cog_w - root_pos)
+        p_mass = env._payload_mass.squeeze(-1)  # (num_envs,)
+        r_cg = r_cg + p_mass.unsqueeze(-1) * payload_cog_b
+        m_total = m_total + p_mass
+    r_cg = r_cg / m_total.unsqueeze(-1)
+
+    # Volume-weighted CoB
+    V_main = hydro.volume  # (num_envs,)
+    V_buoy = buoy_hydro.volume
+    r_cb = (
+        V_main.unsqueeze(-1) * hydro.center_of_buoyancy
+        + V_buoy.unsqueeze(-1) * (buoy_offset_b + buoy_hydro.center_of_buoyancy)
+    ) / (V_main + V_buoy).unsqueeze(-1)
+
+    return torch.linalg.norm(r_cb[:, :2] - r_cg[:, :2], dim=-1)
 
 
 # =============================================================================

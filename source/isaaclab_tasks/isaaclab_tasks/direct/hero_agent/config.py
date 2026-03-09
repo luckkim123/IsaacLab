@@ -47,10 +47,12 @@ from .mdp import (
     ConstraintTermCfg,
     accumulated_rotation_cost,
     attitude_absolute_cost,
-    attitude_error_cost,
+    cob_cog_alignment_cost,
+    effort_limit_cost,
     joint_oscillation_cost,
     joint_velocity_cost,
     singularity_cost,
+    yaw_velocity_cost,
 )
 
 
@@ -583,13 +585,7 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
 
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(
         terms=[
-            ConstraintTermCfg(
-                func=joint_velocity_cost,
-                params={},
-                budget=2.0,
-                cost_type="average",
-                name="joint_vel",
-            ),
+            # Binary constraints
             ConstraintTermCfg(
                 func=accumulated_rotation_cost,
                 params={"max_rotations": 2.0},
@@ -597,24 +593,10 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
                 name="accum_rot",
             ),
             ConstraintTermCfg(
-                func=joint_oscillation_cost,
-                params={},
-                budget=0.3,
-                cost_type="average",
-                name="oscillation",
-            ),
-            ConstraintTermCfg(
                 func=attitude_absolute_cost,
-                params={"limit": 1.047},
+                params={"limit": 1.396},
                 budget=0.01,
                 name="attitude_abs",
-            ),
-            ConstraintTermCfg(
-                func=attitude_error_cost,
-                params={},
-                budget=0.087,
-                cost_type="average",
-                name="attitude_err",
             ),
             ConstraintTermCfg(
                 func=singularity_cost,
@@ -622,7 +604,44 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
                 budget=0.15,
                 name="singularity",
             ),
+            ConstraintTermCfg(
+                func=effort_limit_cost,
+                params={},
+                budget=0.05,
+                name="effort_limit",
+            ),
+            # Average constraints
+            ConstraintTermCfg(
+                func=joint_velocity_cost,
+                budget=2.0,
+                cost_type="average",
+                name="joint_vel",
+            ),
+            ConstraintTermCfg(
+                func=joint_oscillation_cost,
+                budget=0.3,
+                cost_type="average",
+                name="oscillation",
+            ),
+            ConstraintTermCfg(
+                func=yaw_velocity_cost,
+                budget=0.15,
+                cost_type="average",
+                name="yaw_vel",
+            ),
+            ConstraintTermCfg(
+                func=cob_cog_alignment_cost,
+                budget=0.02,
+                cost_type="average",
+                name="cob_cog",
+            ),
         ],
+    )
+
+    # PhysX allows 1.3-1.5x stall torque; constraint teaches real limit (1.0x)
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg(
+        enable=True,
+        joint_effort_limit_range=(1.3, 1.5),
     )
 
     # All 4 reward terms are independent of constraints -- use defaults
