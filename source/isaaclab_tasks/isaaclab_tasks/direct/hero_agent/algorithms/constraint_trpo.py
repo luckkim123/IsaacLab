@@ -308,11 +308,15 @@ class ConstraintTRPO:
                 self.storage.cost_returns[:, :, k : k + 1] - self.storage.cost_values[:, :, k : k + 1]
             )
 
-        # NOTE: Cost advantages are NOT normalized (unlike reward advantages).
-        # The barrier weighting 1/(t * margin * (1-gamma)) handles cost-vs-reward
-        # scaling automatically: tight constraints get large gradients, satisfied
-        # constraints get small gradients. Normalizing would destroy this mechanism
-        # by amplifying noise when costs are near zero.
+        # Per-constraint cost advantage standardization (NORBC Sec IV-B).
+        # Zero-mean ensures the policy can always find "relatively better" actions
+        # even when all actions violate a constraint. Per-constraint normalization
+        # equalizes gradient contribution across constraints with different physical
+        # scales (e.g., rad/s vs binary 0/1), letting the barrier margin alone
+        # determine relative priority.
+        for k in range(self.num_constraints):
+            adv_k = self.storage.cost_advantages[:, :, k]
+            self.storage.cost_advantages[:, :, k] = (adv_k - adv_k.mean()) / (adv_k.std() + 1e-8)
 
     # ==================================================================
     # TRPO Core

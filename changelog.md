@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-09] Per-constraint cost advantage normalization
+
+### Context
+Constrained-Encoder-Base training converged to a local optimum where the arm stopped
+moving (action_mean 1.0->0.2 at step 30, entropy 3.0->0). Root cause: 8 constraints
+include 5 that directly penalize arm movement (joint_vel, oscillation, effort_limit,
+singularity, accum_rot). Continuous constraints produce raw cost advantages with much
+larger magnitude than binary constraints, so movement-suppression gradients dominated.
+
+NORBC Section IV-B specifies per-constraint cost advantage standardization, which the
+implementation had omitted. Added `(adv - mean) / (std + 1e-8)` per constraint k after
+GAE computation. This equalizes gradient contribution across constraints with different
+physical scales, letting the barrier margin alone determine relative priority.
+
+Also conducted a thorough review of all 3 deviations from the NORBC paper:
+1. Barrier t schedule (10->50 vs paper's fixed 100): direction correct (standard
+   interior-point annealing), but final value 50 may be too low vs paper nominal 100.
+2. Min noise floor (log_std clamp at log(0.1)): necessary -- TRPO KL constraint is
+   asymmetric for sigma reductions, and cost surrogate gradient favors determinism.
+3. Encoder update gating on TRPO line search success: correct (prevents actor-encoder
+   distribution shift), but may starve encoder early when line search fails often.
+
+Discovered 2 additional issues: (a) `line_search_cost_margin` is configured but never
+used in `_line_search()` -- the cost feasibility check documented in THEORETICAL_ANALYSIS.md
+is not implemented. (b) `ALBCConstraintCfg.barrier_t=1.0` is a dead field never read by
+the runner.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Added per-constraint cost advantage standardization
+  in `_compute_cost_returns()` after GAE computation (NORBC Sec IV-B). Replaced the old
+  comment that said cost advantages should NOT be normalized.
+
+### Notes
+- `barrier_t_final` (currently 50) may need increase to 100 to match paper nominal
+- `line_search_cost_margin=0.5` is stored but unused in `_line_search()` -- needs implementation or removal
+- `ALBCConstraintCfg.barrier_t=1.0` is a dead field (runner reads from algorithm cfg instead)
+- Encoder starvation risk when line search fails repeatedly in early training -- monitor `Policy/line_search_success`
+
 ## [2026-03-09] Reward 4-term redesign + Constraint 8-term redesign + Encoder update fixes
 
 ### Context
