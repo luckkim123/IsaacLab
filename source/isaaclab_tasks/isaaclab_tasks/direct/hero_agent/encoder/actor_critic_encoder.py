@@ -8,18 +8,24 @@
 This module provides the encoder-based actor-critic network:
     - ActorCriticEncoder: Base encoder network (Phase 1 teacher training)
 
-Architecture (symmetric critic):
+Architecture (symmetric critic, default for PPO):
     Encoder: privileged (19D) -> MLP [256, 128, 64] -> tanh -> z (13D) in [-1, 1]
     Actor:   cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> actions
     Critic:  cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> value (1D)
 
-Both actor and critic see z from the encoder (symmetric design, HORA/RMA standard).
-The encoder receives gradient from both actor loss and critic loss, ensuring
-the encoder learns meaningful representations even early in training.
+Architecture (asymmetric critic, for constrained RL / NORBC):
+    Encoder: privileged (19D) -> MLP -> tanh -> z (13D)
+    Actor:   cat([policy_obs, z]) = 26D -> MLP -> actions
+    Critic:  cat([policy_obs, privileged_raw]) = 32D -> MLP -> value (1D)
+
+In symmetric mode, both actor and critic see z from the encoder.
+In asymmetric mode, the critic sees raw privileged obs directly,
+decoupling the encoder from value loss gradients (NORBC design).
 
 Reference:
     - HORA: Heuristic-Free Online Robust Adaptation (Qi et al., 2023)
     - RMA: Rapid Motor Adaptation (Kumar et al., 2021)
+    - NORBC: Neural Online Robust Boundary Controller (Kim et al., 2024)
 """
 
 from __future__ import annotations
@@ -43,11 +49,12 @@ class ActorCriticEncoder(nn.Module):
 
     The encoder compresses privileged information into a bounded latent vector z.
 
-    Symmetric critic design (HORA/RMA standard):
-        Actor:  cat([policy_obs, z]) -- encoder must compress privileged into z
-        Critic: cat([policy_obs, z]) -- also sees z, encoder gets gradient from both
-
-    The encoder receives gradient from both actor loss and critic value loss.
+    Critic modes:
+        - Symmetric (default, HORA/RMA): Actor and Critic both see cat([policy_obs, z]).
+          Encoder receives gradient from both actor loss and critic value loss.
+        - Asymmetric (NORBC): Actor sees cat([policy_obs, z]), Critic sees
+          cat([policy_obs, privileged_raw]). Encoder gradient comes only from
+          actor (policy) loss, decoupling it from value estimation.
 
     Activation modes:
         - "tanh": z = tanh(raw) in [-1, 1]. Built into MLP last layer (matches HORA original). Default.
@@ -80,6 +87,8 @@ class ActorCriticEncoder(nn.Module):
         critic_hidden_dims: list[int] | tuple[int, ...] = (256, 128, 64),
         activation: str = "elu",
         init_noise_std: float = 1.0,
+        # Asymmetric critic (NORBC): critic sees raw privileged instead of encoder z
+        asymmetric_critic: bool = False,
         **kwargs: Any,
     ) -> None:
         if kwargs:
@@ -94,6 +103,7 @@ class ActorCriticEncoder(nn.Module):
         self.policy_obs_dim = policy_obs_dim
         self.privileged_dim = privileged_dim
         self.encoder_latent_dim = encoder_latent_dim
+        self.asymmetric_critic = asymmetric_critic
         self.encoder_output_activation = encoder_output_activation
         self.z_min = z_min
         self.z_max = z_max
@@ -167,10 +177,15 @@ class ActorCriticEncoder(nn.Module):
         self.actor_obs_normalization = actor_obs_normalization
         self.actor_obs_normalizer = EmpiricalNormalization(num_actor_obs) if actor_obs_normalization else nn.Identity()
 
-        # Critic input: policy_obs + z (symmetric, shares encoder with actor)
-        num_critic_obs = policy_obs_dim + encoder_latent_dim
+        # Critic input: asymmetric (raw privileged) or symmetric (encoder z)
+        if asymmetric_critic:
+            num_critic_obs = policy_obs_dim + privileged_dim
+        else:
+            num_critic_obs = policy_obs_dim + encoder_latent_dim
+        self.num_critic_obs = num_critic_obs
         self.critic = MLP(num_critic_obs, 1, list(critic_hidden_dims), activation)
-        logger.info("Critic MLP (symmetric, %dD input): %s", num_critic_obs, self.critic)
+        mode_str = "asymmetric" if asymmetric_critic else "symmetric"
+        logger.info("Critic MLP (%s, %dD input): %s", mode_str, num_critic_obs, self.critic)
 
         # Critic observation normalization
         self.critic_obs_normalization = critic_obs_normalization
@@ -263,9 +278,7 @@ class ActorCriticEncoder(nn.Module):
         return self.z_bounds_coef * excess.pow(2).sum(dim=-1).mean()
 
     def _get_combined_obs(self, obs: TensorDict, *, store_z: bool = False) -> torch.Tensor:
-        """Combined observation: cat([policy_obs, z_from_encoder]).
-
-        Symmetric design: both actor and critic see the same encoder z.
+        """Combined observation for actor: cat([policy_obs, z_from_encoder]).
 
         Args:
             obs: TensorDict with policy and privileged observations.
@@ -275,6 +288,20 @@ class ActorCriticEncoder(nn.Module):
         policy_obs = obs[self._policy_obs_key]
         z = self._encode(obs[self._privileged_key], store_z=store_z)
         return torch.cat([policy_obs, z], dim=-1)
+
+    def _get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
+        """Critic observation for asymmetric mode: cat([policy_obs, privileged_raw]).
+
+        Bypasses the encoder entirely so critic value loss does not flow
+        through the encoder parameters (NORBC design).
+
+        In symmetric mode, falls back to _get_combined_obs().
+        """
+        if not self.asymmetric_critic:
+            return self._get_combined_obs(obs)
+        policy_obs = obs[self._policy_obs_key]
+        privileged_raw = obs[self._privileged_key]
+        return torch.cat([policy_obs, privileged_raw], dim=-1)
 
     # --- Action distribution ---
 
@@ -318,8 +345,12 @@ class ActorCriticEncoder(nn.Module):
         return self.actor(actor_obs).clamp(-1.0, 1.0)
 
     def evaluate(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
-        """Evaluate the value function for given observations (symmetric, uses encoder z)."""
-        critic_obs = self.critic_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
+        """Evaluate the value function for given observations.
+
+        Asymmetric: critic sees raw privileged (no encoder gradient).
+        Symmetric: critic sees encoder z (encoder gets value gradient).
+        """
+        critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))  # type: ignore[operator]
         return self.critic(critic_obs)
 
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
@@ -335,10 +366,16 @@ class ActorCriticEncoder(nn.Module):
         if self.actor_obs_normalization and hasattr(self.actor_obs_normalizer, "update"):
             self.actor_obs_normalizer.update(combined)  # type: ignore[union-attr]
         if self.critic_obs_normalization and hasattr(self.critic_obs_normalizer, "update"):
-            self.critic_obs_normalizer.update(combined)  # type: ignore[union-attr]
+            critic_input = self._get_critic_obs(obs)
+            self.critic_obs_normalizer.update(critic_input)  # type: ignore[union-attr]
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
         """Load model parameters with backward compatibility.
+
+        Handles:
+        - Missing encoder_obs_normalizer keys (old checkpoints)
+        - Critic input dimension mismatch (symmetric -> asymmetric or vice versa)
+        - Unknown keys from old checkpoints
 
         Returns True to indicate resumed training (RSL-RL API contract).
         """
@@ -348,6 +385,9 @@ class ActorCriticEncoder(nn.Module):
                 logger.info("Old checkpoint: injecting default encoder_obs_normalizer state.")
                 for k, v in self.encoder_obs_normalizer.state_dict().items():
                     state_dict[prefix + k] = v
+
+        # Detect critic input dimension mismatch (symmetric <-> asymmetric checkpoint)
+        self._handle_critic_dim_mismatch(state_dict, "critic.")
 
         # Filter out unknown keys from old checkpoints (state_dependent_std, noise_std_type, etc.)
         current_keys = set(self.state_dict().keys())
@@ -365,3 +405,39 @@ class ActorCriticEncoder(nn.Module):
 
         super().load_state_dict(filtered, strict=False)
         return True
+
+    def _handle_critic_dim_mismatch(self, state_dict: dict, prefix: str) -> None:
+        """Reinitialize critic if checkpoint input dimension doesn't match current model.
+
+        This happens when loading a symmetric checkpoint into an asymmetric model
+        (or vice versa). The first layer weight shape reveals the input dimension.
+        """
+        # Find the first linear layer weight in the critic
+        weight_keys = sorted(
+            [k for k in state_dict if k.startswith(prefix) and k.endswith(".weight")],
+            key=lambda k: int(k.removeprefix(prefix).split(".")[0]),
+        )
+        if not weight_keys:
+            return
+        first_key = weight_keys[0]
+        ckpt_input_dim = state_dict[first_key].shape[1]
+
+        # Get current model's critic module by prefix
+        if prefix == "critic.":
+            current_module = self.critic
+            expected_dim = self.num_critic_obs
+        elif prefix == "cost_critic." and hasattr(self, "cost_critic"):
+            current_module = self.cost_critic
+            expected_dim = self.num_critic_obs
+        else:
+            return
+
+        if ckpt_input_dim != expected_dim:
+            logger.warning(
+                "%s input dim mismatch (checkpoint %dD vs model %dD), reinitializing.",
+                prefix.rstrip("."),
+                ckpt_input_dim,
+                expected_dim,
+            )
+            for k, v in current_module.state_dict().items():
+                state_dict[prefix + k] = v

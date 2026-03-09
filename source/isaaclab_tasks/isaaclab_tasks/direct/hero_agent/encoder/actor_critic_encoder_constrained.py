@@ -7,13 +7,13 @@
 
 Extends ActorCriticEncoder with a cost critic head that predicts per-constraint
 cost values V_C_k(s) for K constraints. The cost critic shares the same input
-(policy_obs + encoder z) as the reward critic.
+path as the reward critic (symmetric or asymmetric).
 
-Architecture:
+Architecture (asymmetric critic, default for constrained RL / NORBC):
     Encoder:     privileged (19D) -> MLP -> tanh -> z (13D)
     Actor:       cat([policy_obs, z]) = 26D -> MLP -> actions
-    Critic:      cat([policy_obs, z]) = 26D -> MLP -> value (1D)
-    Cost Critic: cat([policy_obs, z]) = 26D -> MLP -> cost values (K)
+    Critic:      cat([policy_obs, privileged_raw]) = 32D -> MLP -> value (1D)
+    Cost Critic: cat([policy_obs, privileged_raw]) = 32D -> MLP -> cost values (K)
 """
 
 from __future__ import annotations
@@ -51,16 +51,18 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
 
         self.num_constraints = num_constraints
 
-        # Cost critic: same input as reward critic (policy_obs + z), K outputs
-        num_critic_obs = self.policy_obs_dim + self.encoder_latent_dim
+        # Cost critic: same input dimension as reward critic
+        num_critic_obs = self.num_critic_obs
         self.cost_critic = MLP(
             num_critic_obs,
             num_constraints,
             list(cost_critic_hidden_dims),
             "elu",
         )
+        mode_str = "asymmetric" if self.asymmetric_critic else "symmetric"
         logger.info(
-            "Cost critic MLP (%dD input, %d outputs): %s",
+            "Cost critic MLP (%s, %dD input, %d outputs): %s",
+            mode_str,
             num_critic_obs,
             num_constraints,
             self.cost_critic,
@@ -69,17 +71,20 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
     def evaluate_costs(self, obs: TensorDict) -> torch.Tensor:
         """Evaluate cost value function for all K constraints.
 
+        Uses the same critic observation path as the reward critic:
+        asymmetric (raw privileged) or symmetric (encoder z).
+
         Args:
             obs: TensorDict with policy and privileged observations.
 
         Returns:
             Cost values. Shape: (batch, K).
         """
-        critic_obs = self.critic_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
+        critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))  # type: ignore[operator]
         return F.softplus(self.cost_critic(critic_obs))
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
-        """Load with backward compatibility for checkpoints without cost_critic or K mismatch."""
+        """Load with backward compatibility for checkpoints without cost_critic or K/dim mismatch."""
         cost_prefix = "cost_critic."
         has_cost_keys = any(k.startswith(cost_prefix) for k in state_dict)
 
@@ -105,5 +110,8 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
                     )
                     for k, v in self.cost_critic.state_dict().items():
                         state_dict[cost_prefix + k] = v
+
+            # Detect input dimension mismatch (symmetric <-> asymmetric)
+            self._handle_critic_dim_mismatch(state_dict, cost_prefix)
 
         return super().load_state_dict(state_dict, strict=strict)

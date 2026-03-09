@@ -5,11 +5,13 @@
 
 """Constraint TRPO with Interior-point Policy Optimization (IPO).
 
-Implements the NORBC-style constrained RL algorithm:
-    - TRPO natural gradient for policy update (exact KL constraint)
-    - Log-barrier penalty on constraint margins for value function
-    - Line search with feasibility check (KL + constraint satisfaction)
-    - Separate cost value heads with per-constraint GAE
+Implements the NORBC-style constrained RL algorithm (Algorithm 1):
+    1. Adaptive threshold update (instantaneous, Eq 11)
+    2. TRPO natural gradient for policy update (exact KL constraint)
+    3. Value function update (pure MSE, no barrier)
+
+The log-barrier appears only in the policy objective (Eq 10), not in
+the value loss. Separate cost value heads with per-constraint GAE.
 
 The algorithm maintains the same interface as RSL-RL PPO (init_storage, act,
 process_env_step, compute_returns, update) so it can be used as a drop-in
@@ -36,13 +38,14 @@ logger = logging.getLogger(__name__)
 
 
 class ConstraintTRPO:
-    """TRPO + IPO for constrained policy optimization.
+    """TRPO + IPO for constrained policy optimization (NORBC Algorithm 1).
 
     Key differences from PPO:
         - Policy update: natural gradient via conjugate gradient (full-batch)
-        - Value update: mini-batch Adam with cost value loss + barrier
+        - Value update: pure MSE (no barrier, barrier is policy-only)
         - Line search: verifies KL constraint AND constraint feasibility
         - No clipped surrogate; uses exact KL constraint
+        - Update order: threshold -> policy -> value (NORBC conformance)
     """
 
     def __init__(
@@ -73,7 +76,6 @@ class ConstraintTRPO:
         barrier_t_final: float = 50.0,
         barrier_t_schedule_frac: float = 0.4,
         adaptive_threshold_alpha: float = 0.1,
-        adaptive_ema_alpha: float | None = None,
         # Line search acceptance thresholds
         line_search_kl_margin: float = 1.5,
         line_search_cost_margin: float = 0.5,
@@ -81,8 +83,6 @@ class ConstraintTRPO:
         entropy_coef: float = 0.005,
         # Encoder z bounds
         z_bounds_coef: float = 0.3,
-        # Encoder value gradient scale (0.0 = disabled, baseline behavior)
-        encoder_value_grad_scale: float = 0.0,
         # Device
         device: str = "cpu",
         # Unused kwargs from RSL-RL config forwarding
@@ -124,11 +124,9 @@ class ConstraintTRPO:
         self.barrier_t_schedule_frac = barrier_t_schedule_frac
         self.barrier_t_schedule_iters = 0  # resolved by set_max_iterations()
         self.adaptive_threshold_scale = adaptive_threshold_alpha
-        self.adaptive_ema_alpha = adaptive_ema_alpha if adaptive_ema_alpha is not None else adaptive_threshold_alpha
         self.line_search_kl_margin = line_search_kl_margin
         self.line_search_cost_margin = line_search_cost_margin
         self.z_bounds_coef = z_bounds_coef
-        self.encoder_value_grad_scale = encoder_value_grad_scale
 
         if cost_gamma >= 1.0:
             raise ValueError(f"cost_gamma must be < 1.0, got {cost_gamma}")
@@ -492,44 +490,23 @@ class ConstraintTRPO:
         return False
 
     # ==================================================================
-    # Barrier Loss
-    # ==================================================================
-
-    def _compute_barrier_loss(self, mean_cost_returns: torch.Tensor) -> torch.Tensor:
-        """Log-barrier loss on constraint margins.
-
-        Args:
-            mean_cost_returns: Mean discounted cost return per constraint. Shape: (K,).
-
-        Returns:
-            Scalar barrier loss.
-        """
-        barrier = torch.tensor(0.0, device=self.device)
-        for k in range(self.num_constraints):
-            margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=0.1 * self.d_k[k].item())
-            barrier += -torch.log(margin) / self.barrier_t
-        return barrier
-
-    # ==================================================================
     # Main Update
     # ==================================================================
 
     def update(self) -> dict[str, float]:
-        """Execute one iteration of ConstraintTRPO update.
+        """Execute one iteration of ConstraintTRPO update (NORBC Algorithm 1).
 
-        Steps:
-            1. Value function update (mini-batch Adam, includes cost critic + barrier)
+        Update order follows NORBC:
+            1. Adaptive threshold update (instantaneous, Eq 11)
             2. TRPO policy update (full-batch natural gradient + line search)
-            3. Update adaptive thresholds and clear storage
+            3. Value function update (pure MSE, no barrier)
         """
         # Update barrier schedule before this iteration's update
         self.update_barrier_schedule(self._iteration)
         self._iteration += 1
 
-        # Flatten storage for value update (clone to escape inference_mode)
+        # Flatten storage (clone to escape inference_mode)
         obs_flat = self.storage.observations.flatten(0, 1).clone()
-        # Clone all storage tensors -- they are inference tensors (collected under
-        # torch.inference_mode) and cannot be used directly in autograd.
         actions_flat = self.storage.actions.flatten(0, 1).clone()
         returns_flat = self.storage.returns.flatten(0, 1).clone()
         advantages_flat = self.storage.advantages.flatten(0, 1).clone()
@@ -539,128 +516,26 @@ class ConstraintTRPO:
 
         # Cost storage flatten
         cost_returns_flat = self.storage.cost_returns.flatten(0, 1).clone()  # (B, K)
+        cost_advantages_flat = self.storage.cost_advantages.flatten(0, 1).clone()  # (B, K)
 
         batch_size = obs_flat.batch_size[0]
 
-        # ------------------------------------------------------------------
-        # 1. Value function update (mini-batch, multiple epochs)
-        # ------------------------------------------------------------------
-        mean_value_loss = 0.0
-        mean_cost_value_loss = 0.0
-        mean_barrier_loss = 0.0
-        mean_entropy = 0.0
-        mean_z_bounds_loss = 0.0
-        num_value_updates = 0
-
-        # Mean cost returns for barrier (computed once, full batch)
-        # Clamp to non-negative: all cost functions return >= 0, so the true
-        # return is always non-negative.  Cost value function errors can make
-        # the GAE-based return negative, which would inflate the barrier margin
-        # to d_k - (-X) = d_k + X, effectively disabling the constraint.
+        # Mean cost returns (computed once, needed by threshold + policy)
+        # Clamp to non-negative: cost value errors can make GAE return negative,
+        # which would inflate barrier margin (d_k - (-X) = d_k + X).
         mean_cost_returns = cost_returns_flat.mean(dim=0).clamp(min=0.0)  # (K,)
 
-        for _epoch in range(self.num_learning_epochs):
-            indices = torch.randperm(batch_size, device=self.device)
-            mini_batch_size = batch_size // self.num_mini_batches
-
-            for mb in range(self.num_mini_batches):
-                start = mb * mini_batch_size
-                end = (mb + 1) * mini_batch_size
-                idx = indices[start:end]
-
-                obs_mb = obs_flat[idx]
-                returns_mb = returns_flat[idx]
-                cost_returns_mb = cost_returns_flat[idx]
-
-                # Reward value loss
-                value_pred = self.policy.evaluate(obs_mb)
-                value_loss = (returns_mb - value_pred).pow(2).mean()
-
-                # Cost value loss (per constraint, averaged)
-                cost_value_loss = torch.tensor(0.0, device=self.device)
-                if hasattr(self.policy, "evaluate_costs"):
-                    cost_value_pred = self.policy.evaluate_costs(obs_mb)
-                    cost_value_loss = (cost_returns_mb - cost_value_pred).pow(2).mean()
-
-                # Barrier loss: use mini-batch cost predictions (differentiable) for gradient path
-                num_total_updates = self.num_learning_epochs * self.num_mini_batches
-                if hasattr(self.policy, "evaluate_costs"):
-                    # cost_value_pred has gradient to cost_critic params
-                    mb_mean_cost_pred = cost_value_pred.mean(dim=0)  # (K,)
-                    barrier_loss = self._compute_barrier_loss(mb_mean_cost_pred) / num_total_updates
-                else:
-                    barrier_loss = torch.tensor(0.0, device=self.device)
-
-                # Combined value update (value + cost_value + barrier only)
-                total_value_loss = (
-                    self.value_loss_coef * value_loss + self.cost_value_loss_coef * cost_value_loss + barrier_loss
-                )
-
-                self.value_optimizer.zero_grad()
-                # Also zero encoder grads to avoid stale accumulation from previous backward()
-                if self._has_encoder_params:
-                    for p in self._encoder_params:
-                        if p.grad is not None:
-                            p.grad = None
-                total_value_loss.backward()
-
-                nn.utils.clip_grad_norm_(self._value_params, self.max_grad_norm)
-                self.value_optimizer.step()
-
-                # Z bounds loss: log only (no encoder update here to avoid shifting
-                # actor distribution before TRPO step -- see RC2 fix)
-                z_b_loss = torch.tensor(0.0, device=self.device)
-                if hasattr(self.policy, "z_bounds_loss") and self.encoder_optimizer is not None:
-                    with torch.no_grad():
-                        self.policy.act(obs_mb)
-                        z_b_loss = self.z_bounds_coef * self.policy.z_bounds_loss()
-
-                mean_value_loss += value_loss.item()
-                mean_cost_value_loss += cost_value_loss.item()
-                mean_barrier_loss += barrier_loss.item()
-                mean_z_bounds_loss += z_b_loss.item()
-                num_value_updates += 1
-
-        if num_value_updates > 0:
-            mean_value_loss /= num_value_updates
-            mean_cost_value_loss /= num_value_updates
-            mean_barrier_loss /= num_value_updates
-            mean_z_bounds_loss /= num_value_updates
-
         # ------------------------------------------------------------------
-        # 1b. Full-batch value loss for encoder gradient (deferred step)
+        # 1. Update adaptive thresholds (NORBC Eq 11, instantaneous)
         # ------------------------------------------------------------------
-        _encoder_value_grads_cache: list[torch.Tensor | None] = []
-        encoder_value_loss_fb = 0.0
-        if self._has_encoder_params and self.encoder_value_grad_scale > 0:
-            value_pred_fb = self.policy.evaluate(obs_flat)
-            value_loss_fb = (returns_flat - value_pred_fb).pow(2).mean()
-
-            cost_value_loss_fb = torch.tensor(0.0, device=self.device)
-            if hasattr(self.policy, "evaluate_costs"):
-                cost_value_pred_fb = self.policy.evaluate_costs(obs_flat)
-                cost_value_loss_fb = (cost_returns_flat - cost_value_pred_fb).pow(2).mean()
-
-            total_encoder_value_loss = (
-                self.value_loss_coef * value_loss_fb + self.cost_value_loss_coef * cost_value_loss_fb
-            )
-            encoder_value_loss_fb = total_encoder_value_loss.item()
-
-            _encoder_value_grads_cache = list(
-                torch.autograd.grad(
-                    total_encoder_value_loss,
-                    self._encoder_params,
-                    retain_graph=False,
-                    allow_unused=True,
-                )
-            )
+        for k in range(self.num_constraints):
+            j_c_k = mean_cost_returns[k].item()
+            # Instantaneous: directly set to target (no EMA smoothing)
+            self.d_k_adaptive[k] = max(self.d_k[k].item(), j_c_k + self.adaptive_threshold_scale * self.d_k[k].item())
 
         # ------------------------------------------------------------------
         # 2. TRPO policy update (full-batch, single step)
         # ------------------------------------------------------------------
-        # Cost advantages for IPO policy gradient (flatten: (T*N, K))
-        cost_advantages_flat = self.storage.cost_advantages.flatten(0, 1).clone()  # (B, K)
-
         # Compute policy gradient
         self.policy.act(obs_flat)
         log_prob = self.policy.get_actions_log_prob(actions_flat)
@@ -670,7 +545,6 @@ class ConstraintTRPO:
         reward_surrogate = -(advantages_flat.squeeze(-1) * ratio).mean()
 
         # IPO: barrier-weighted cost surrogate
-        # For each constraint k, add (1/t) * E[ratio * cost_advantage_k] / margin_k
         cost_surrogate = torch.tensor(0.0, device=self.device)
         for k in range(self.num_constraints):
             margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=0.1 * self.d_k[k].item())
@@ -682,7 +556,7 @@ class ConstraintTRPO:
 
         mean_entropy = entropy.mean().item()
 
-        # Compute encoder gradients now (but defer step until after TRPO line search)
+        # Compute encoder gradients now (defer step until after TRPO line search)
         _encoder_grads_cache: list[torch.Tensor | None] = []
         if self.encoder_optimizer is not None:
             encoder_grads = torch.autograd.grad(
@@ -703,19 +577,16 @@ class ConstraintTRPO:
         shs = 0.5 * nat_grad.dot(g)  # 0.5 * x^T F x approximation
 
         if shs <= 0 or not torch.isfinite(shs):
-            # CG approximation broke positive-definiteness -- skip TRPO step
             logger.warning("TRPO: shs=%.6e non-positive or non-finite, skipping policy step", shs.item())
             ls_success = False
         else:
             step_scale = torch.sqrt(self.max_kl / shs)
-            # Negate: g is gradient of loss to MINIMIZE, so descent = -F^{-1}g
             step_dir = -step_scale * nat_grad
 
             if not torch.isfinite(step_dir).all():
                 logger.warning("TRPO: step_dir contains NaN/Inf, skipping policy step")
                 ls_success = False
             else:
-                # Evaluate old loss using the same linearized surrogate as the gradient
                 with torch.no_grad():
                     old_loss = self._linearized_surrogate(
                         obs_flat,
@@ -749,85 +620,89 @@ class ConstraintTRPO:
             kl_after_trpo = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
 
         # Apply deferred encoder Adam step (after TRPO line search).
-        # Gradient sources:
-        #   1. Policy loss (reward + cost surrogate) -- always applied
-        #   2. Value loss path -- only when encoder_value_grad_scale > 0
-        has_value_grads = len(_encoder_value_grads_cache) > 0 and any(g is not None for g in _encoder_value_grads_cache)
-        if self.encoder_optimizer is not None and (_encoder_grads_cache or has_value_grads):
+        # Gradient source: policy loss only (asymmetric critic decouples encoder from value loss).
+        if self.encoder_optimizer is not None and _encoder_grads_cache:
             self.encoder_optimizer.zero_grad()
             for i, p in enumerate(self._encoder_params):
-                total_grad = None
-                # Policy-loss gradient
                 if i < len(_encoder_grads_cache) and _encoder_grads_cache[i] is not None:
-                    total_grad = _encoder_grads_cache[i]
-                # Value-loss gradient (single full-batch pass, scaled)
-                if (
-                    has_value_grads
-                    and i < len(_encoder_value_grads_cache)
-                    and _encoder_value_grads_cache[i] is not None
-                ):
-                    scaled_value_grad = _encoder_value_grads_cache[i] * self.encoder_value_grad_scale
-                    if total_grad is None:
-                        total_grad = scaled_value_grad
-                    else:
-                        total_grad = total_grad + scaled_value_grad
-                if total_grad is not None:
-                    p.grad = total_grad
+                    p.grad = _encoder_grads_cache[i]
             nn.utils.clip_grad_norm_(self._encoder_params, self.max_grad_norm)
             self.encoder_optimizer.step()
 
-        # Single z_bounds encoder update (replaces 20 per-minibatch updates)
+        # Single z_bounds encoder update
+        mean_z_bounds_loss = 0.0
         if hasattr(self.policy, "z_bounds_loss") and self.encoder_optimizer is not None:
             self.policy.act(obs_flat)
             z_b_loss_post = self.z_bounds_coef * self.policy.z_bounds_loss()
+            mean_z_bounds_loss = z_b_loss_post.item()
             if z_b_loss_post.requires_grad:
                 self.encoder_optimizer.zero_grad()
                 z_b_loss_post.backward()
                 nn.utils.clip_grad_norm_(self._encoder_params, self.max_grad_norm)
                 self.encoder_optimizer.step()
 
-        # Compute KL after update for logging
+        # Compute KL after full update for logging
         with torch.no_grad():
             mean_kl = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
 
         # ------------------------------------------------------------------
-        # 3. Update adaptive thresholds
+        # 3. Value function update (pure MSE, no barrier -- NORBC conformance)
         # ------------------------------------------------------------------
-        for k in range(self.num_constraints):
-            j_c_k = mean_cost_returns[k].item()
-            # Threshold target: at least d_k, or current cost + scale * d_k
-            target = max(self.d_k[k].item(), j_c_k + self.adaptive_threshold_scale * self.d_k[k].item())
-            # EMA toward target: allows tightening when cost decreases
-            self.d_k_adaptive[k] = (1.0 - self.adaptive_ema_alpha) * self.d_k_adaptive[
-                k
-            ] + self.adaptive_ema_alpha * target
-            # Diagnostic: d_k_adaptive should never drop below d_k
-            if self.d_k_adaptive[k] < self.d_k[k].item() - 1e-6:
-                logger.warning(
-                    "d_k_adaptive[%d]=%.4f < d_k[%d]=%.4f (target=%.4f, j_c=%.4f)",
-                    k,
-                    self.d_k_adaptive[k],
-                    k,
-                    self.d_k[k].item(),
-                    target,
-                    j_c_k,
-                )
+        mean_value_loss = 0.0
+        mean_cost_value_loss = 0.0
+        num_value_updates = 0
+
+        for _epoch in range(self.num_learning_epochs):
+            indices = torch.randperm(batch_size, device=self.device)
+            mini_batch_size = batch_size // self.num_mini_batches
+
+            for mb in range(self.num_mini_batches):
+                start = mb * mini_batch_size
+                end = (mb + 1) * mini_batch_size
+                idx = indices[start:end]
+
+                obs_mb = obs_flat[idx]
+                returns_mb = returns_flat[idx]
+                cost_returns_mb = cost_returns_flat[idx]
+
+                # Reward value loss (MSE)
+                value_pred = self.policy.evaluate(obs_mb)
+                value_loss = (returns_mb - value_pred).pow(2).mean()
+
+                # Cost value loss (MSE, per constraint, averaged)
+                cost_value_loss = torch.tensor(0.0, device=self.device)
+                if hasattr(self.policy, "evaluate_costs"):
+                    cost_value_pred = self.policy.evaluate_costs(obs_mb)
+                    cost_value_loss = (cost_returns_mb - cost_value_pred).pow(2).mean()
+
+                # Pure MSE: no barrier in value update (barrier is policy-only in NORBC)
+                total_value_loss = self.value_loss_coef * value_loss + self.cost_value_loss_coef * cost_value_loss
+
+                self.value_optimizer.zero_grad()
+                total_value_loss.backward()
+                nn.utils.clip_grad_norm_(self._value_params, self.max_grad_norm)
+                self.value_optimizer.step()
+
+                mean_value_loss += value_loss.item()
+                mean_cost_value_loss += cost_value_loss.item()
+                num_value_updates += 1
+
+        if num_value_updates > 0:
+            mean_value_loss /= num_value_updates
+            mean_cost_value_loss /= num_value_updates
 
         # ------------------------------------------------------------------
-        # 3b. Store constraint monitoring metrics as instance attributes
-        #     (read by ConstraintEncoderRunner._log_constraint_metrics)
+        # Store constraint monitoring metrics
+        # (read by ConstraintEncoderRunner._log_constraint_metrics)
         # ------------------------------------------------------------------
         self._last_cost_returns = [mean_cost_returns[k].item() for k in range(self.num_constraints)]
         self._last_line_search_success = float(ls_success)
 
         # Clear storage
         self.storage.clear()
-        # Reset cost storage step counter
-        # (RolloutStorage.clear() only resets self.step, our cost tensors
-        # are indexed by the same step counter via add_transitions)
 
         # ------------------------------------------------------------------
-        # Return loss dict (only actual optimization losses)
+        # Return loss dict
         # ------------------------------------------------------------------
         loss_dict: dict[str, float] = {
             "value_function": mean_value_loss,
@@ -837,12 +712,9 @@ class ConstraintTRPO:
             "kl": mean_kl,
             "kl_trpo": kl_after_trpo,
             "cost_value": mean_cost_value_loss,
-            "barrier": mean_barrier_loss,
         }
         if hasattr(self.policy, "z_bounds_loss"):
             loss_dict["z_bounds"] = mean_z_bounds_loss
-        if self._has_encoder_params and self.encoder_value_grad_scale > 0:
-            loss_dict["encoder_value_loss_fb"] = encoder_value_loss_fb
 
         return loss_dict
 
@@ -859,6 +731,4 @@ class ConstraintTRPO:
         if self.barrier_t_schedule_iters <= 0:
             return
         progress = min(1.0, iteration / self.barrier_t_schedule_iters)
-        self.barrier_t = (
-            self.barrier_t_final * progress + (1.0 - progress) * self.barrier_t_init
-        )
+        self.barrier_t = self.barrier_t_final * progress + (1.0 - progress) * self.barrier_t_init

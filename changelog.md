@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-09] NORBC conformance: asymmetric critic + algorithm fixes
+
+### Context
+Systematic equation-by-equation comparison of NORBC paper (Figure 2 / Algorithm 1)
+against our ConstraintTRPO implementation revealed 1 structural + 3 algorithmic
+differences.
+
+HIGH impact: Critic input path was symmetric (encoder z 13D) instead of asymmetric
+(raw privileged 19D). This caused: (1) critics estimated values through a 13D
+bottleneck, losing information; (2) value loss gradient flowed through encoder,
+potentially accelerating tanh saturation.
+
+MEDIUM: Barrier loss was added to value update (NORBC has barrier only in policy
+objective). encoder_value_grad_scale code was now incompatible with asymmetric
+critic (value loss no longer touches encoder).
+
+LOW: Adaptive threshold used EMA smoothing instead of NORBC Eq 11's instantaneous
+assignment. Update order was value->policy->threshold instead of NORBC's
+threshold->policy->value.
+
+Theoretical review confirmed: discounted budget conversion D_k/(1-gamma), IPO
+gradient 1/((1-gamma)*t*margin), cost GAE, Fisher/CG are all mathematically correct.
+
+### Changed
+- `encoder/actor_critic_encoder.py`: Added `asymmetric_critic` flag (default False for PPO compat), `_get_critic_obs()` method bypassing encoder, critic MLP input 32D when asymmetric, `_handle_critic_dim_mismatch()` for checkpoint compat
+- `encoder/actor_critic_encoder_constrained.py`: Cost critic uses `num_critic_obs` (32D asymmetric), `evaluate_costs()` routes through `_get_critic_obs()`, `load_state_dict()` handles cost_critic dim mismatch
+- `agents/rsl_rl_ppo_cfg.py`: `RslRlPpoActorCriticEncoderConstrainedCfg` now has `asymmetric_critic=True` (NORBC default)
+- `algorithms/constraint_trpo.py`: Update order changed to threshold->policy->value (NORBC Algorithm 1), adaptive threshold now instantaneous (no EMA, Eq 11 exact), value update is pure MSE (no barrier)
+
+### Removed
+- `algorithms/constraint_trpo.py`: `encoder_value_grad_scale` parameter and all related code (1b full-batch block, grad merge block, return dict entry) -- incompatible with asymmetric critic
+- `algorithms/constraint_trpo.py`: `adaptive_ema_alpha` parameter -- replaced by instantaneous threshold
+- `algorithms/constraint_trpo.py`: `_compute_barrier_loss()` method -- was only called from value update barrier (now removed), dead code
+- `algorithms/constraint_trpo.py`: `barrier` key from loss_dict return -- barrier no longer in value update
+- `agents/rsl_rl_ppo_cfg.py`: `encoder_value_grad_scale` and `adaptive_ema_alpha` fields from `RslRlConstraintTRPOAlgorithmCfg`
+
+### Notes
+- PPO encoder (non-constrained) retains symmetric critic (asymmetric_critic=False default) -- HORA/RMA standard
+- Existing symmetric checkpoints will trigger graceful reinit of critic layers on load (dimension mismatch detection)
+- Cost critic softplus activation retained (V_cost >= 0, independent of this change)
+- z_bounds_loss retained (HORA regularization, unrelated to NORBC changes)
+- `_compute_barrier_loss()` computed barrier loss (log), while inline code computes barrier-weighted cost surrogate (gradient) -- not a DRY candidate, just dead code
+
 ## [2026-03-08] Cost critic softplus fix + budget tuning (post-750-iter crash analysis)
 
 ### Context

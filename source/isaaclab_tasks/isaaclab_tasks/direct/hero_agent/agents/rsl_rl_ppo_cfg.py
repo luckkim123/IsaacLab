@@ -315,7 +315,6 @@ class RslRlConstraintTRPOAlgorithmCfg:
     barrier_t_final: float = 50.0
     barrier_t_schedule_frac: float = 0.4
     adaptive_threshold_alpha: float = 0.1
-    adaptive_ema_alpha: float | None = None
     line_search_kl_margin: float = 1.5
     line_search_cost_margin: float = 0.5
 
@@ -325,20 +324,18 @@ class RslRlConstraintTRPOAlgorithmCfg:
     # Encoder z bounds
     z_bounds_coef: float = 0.3
 
-    # Encoder value gradient scale (0.0 = disabled, baseline behavior)
-    # When > 0, value loss gradients are scaled by this factor before merging
-    # with policy gradients for the encoder update. Use with caution:
-    # scale=1.0 caused z collapse in run 16-46-07.
-    encoder_value_grad_scale: float = 0.01
-
 
 @configclass
 class RslRlPpoActorCriticEncoderConstrainedCfg(_RslRlPpoEncoderBaseCfg):
-    """Policy config for ActorCriticEncoderConstrained (encoder + cost critic)."""
+    """Policy config for ActorCriticEncoderConstrained (encoder + cost critic).
+
+    asymmetric_critic=True (default): critics see raw privileged obs (NORBC design).
+    """
 
     class_name: str = "ActorCriticEncoderConstrained"
     num_constraints: int = 6
     cost_critic_hidden_dims: list[int] = [256, 128, 64]
+    asymmetric_critic: bool = True
 
 
 @configclass
