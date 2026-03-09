@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-09] Unified actuator DR ranges based on XW540-T260-R datasheet
+
+### Context
+Compared Hero Agent simulation actuator parameters against Dynamixel XW540-T260-R
+datasheet. Found several discrepancies:
+
+1. `velocity_limit_sim=6.28 rad/s` (60 rpm) but real no-load speed is 40 rpm (4.19 rad/s)
+   -- simulation allowed 50% higher speed than physical hardware.
+2. TDC envs used separate `_tdc_randomization()` with Kp=160-240, Kd=8-12, far beyond
+   what the motor can physically produce (Kd=10 saturates at 0.95 rad/s, only 23% of
+   no-load speed). Same physical motor should have same DR range regardless of controller.
+3. `joint_effort_limit_range=(0.5, 1.5)` -- upper bound 1.5x stall torque is impossible.
+4. Base RL Kp range (80-120) was narrow; real motor with payload/seals/cables has lower
+   effective stiffness that should be covered by DR.
+
+Unified all environments to use one physically-grounded DR range. TDC controller stability
+with lower actuator gains is now the responsibility of TDC internal gains (TDCControllerCfg),
+not inflated actuator DR.
+
+### Changed
+- `hero_agent.py`: `velocity_limit_sim` 6.28 -> 4.19 rad/s (Dynamixel XW540-T260-R no-load 40 rpm)
+- `config.py`: `joint_stiffness_range` (80, 120) -> (40, 120) -- lower bound accounts for payload/seal friction
+- `config.py`: `joint_damping_range` (1.5, 4.0) -> (0.5, 5.0) -- wider range, upper bound keeps saturation at 1.9 rad/s (~45% of no-load speed)
+- `config.py`: `joint_effort_limit_range` (0.5, 1.5) -> (0.7, 1.0) -- stall torque is physical max, lower bound for thermal derating
+- `config.py`: `half_strength()` updated to match new ranges at 50%
+- `config.py`: `_tdc_randomization()` removed joint gain overrides (uses unified defaults)
+- `config.py`: `HeroAgentTDCEnvCfg` removed DORAEMON param_overrides for joint gains
+
+### Notes
+- TDC controller may need internal gain retuning since actuator Kp can now be as low as 40 (previously guaranteed >= 160)
+- Asset default stiffness=100 and damping=3 unchanged (center of DR range)
+- `fixed_pose()` DR-off defaults unchanged (100.0, 3.0)
+
 ## [2026-03-09] NORBC conformance: asymmetric critic + algorithm fixes
 
 ### Context

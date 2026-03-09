@@ -100,16 +100,21 @@ class DomainRandomizationCfg:
     # -- Water Density (kg/m^3) --
     water_density_range: tuple[float, float] = (995.0, 1025.0)
 
-    # -- Joint Actuator Gains (absolute values) --
-    # Asset defaults: stiffness=100.0, damping=3.0 (ImplicitActuatorCfg)
-    joint_stiffness_range: tuple[float, float] = (80.0, 120.0)
-    joint_damping_range: tuple[float, float] = (1.5, 4.0)
+    # -- Joint Actuator Gains (absolute values, Nm/rad and Nm*s/rad) --
+    # Dynamixel XW540-T260-R: stall torque 9.5Nm, no-load 40rpm (4.19 rad/s)
+    # Lower bound accounts for payload/seal friction reducing effective stiffness.
+    # Upper bound = asset default (100.0 Kp saturates at ~5.4 deg error).
+    # Unified across all envs (same physical motor regardless of control algorithm).
+    joint_stiffness_range: tuple[float, float] = (40.0, 120.0)
+    joint_damping_range: tuple[float, float] = (0.5, 5.0)
 
     # -- Yaw-specific quadratic damping scale (independent of general quad_damping) --
     yaw_damping_scale: tuple[float, float] = (0.5, 1.5)
 
-    # -- Joint Effort Limit (scale applied to asset default effort_limit) --
-    joint_effort_limit_range: tuple[float, float] = (0.5, 1.5)
+    # -- Joint Effort Limit (scale applied to asset default 9.5 Nm) --
+    # Upper bound 1.0: stall torque is the physical maximum, cannot exceed.
+    # Lower bound 0.7: payload/friction/thermal derating reduces usable torque.
+    joint_effort_limit_range: tuple[float, float] = (0.7, 1.0)
 
     # -- Joint Friction --
     joint_static_friction_range: tuple[float, float] = (0.0, 0.03)
@@ -177,13 +182,13 @@ class DomainRandomizationCfg:
             body_mass_scale=(0.92, 1.08),
             cob_offset_z=(-0.01, 0.01),
             cog_offset_z=(-0.01, 0.01),
-            joint_stiffness_range=(90.0, 110.0),
-            joint_damping_range=(2.7, 3.3),
+            joint_stiffness_range=(70.0, 110.0),
+            joint_damping_range=(1.75, 4.0),
             joint_static_friction_range=(0.0, 0.025),
             joint_viscous_friction_range=(0.0, 0.15),
             water_density_range=(997.0, 1003.0),
             yaw_damping_scale=(0.8, 1.2),
-            joint_effort_limit_range=(0.75, 1.25),
+            joint_effort_limit_range=(0.85, 1.0),
             payload_mass_range=(0.0, 0.5),
             payload_cog_offset_xy_radius=0.05,
             payload_cog_offset_z=(-0.015, 0.0),
@@ -464,9 +469,9 @@ class HeroAgentTDEBaseDebugEnvCfg(HeroAgentTDEBaseEnvCfg):
 
 
 def _tdc_randomization(action_latency: bool = False) -> DomainRandomizationCfg:
-    """Create DomainRandomizationCfg with TDC-specific overrides.
+    """Create DomainRandomizationCfg for TDC environments.
 
-    TDC envs need higher joint gains (centered at Kp=200, Kd=10).
+    Uses the same unified joint gain ranges as all other envs (same physical motor).
     Pure TDC (no RL) disables action latency; encoder-based TDC envs enable it
     because RL inference latency exists in real deployment.
 
@@ -476,8 +481,6 @@ def _tdc_randomization(action_latency: bool = False) -> DomainRandomizationCfg:
     """
     return DomainRandomizationCfg(
         enable=True,
-        joint_stiffness_range=(160.0, 240.0),
-        joint_damping_range=(8.0, 12.0),
         action_latency_range=(0, 4) if action_latency else (0, 0),
     )
 
@@ -493,8 +496,9 @@ class HeroAgentTDCEnvCfg(HeroAgentTrainEnvCfg):
         - decimation=1: step_dt = physics_dt = 0.005s (200Hz step)
         - control_decimation=4: TDC runs every 4th step = 0.02s (50Hz)
 
-    Joint gains are centered at TDC-optimal values (Kp=200, Kd=10) with
-    +/-20% randomization, unlike the base RL config (Kp=100, Kd=3).
+    Joint gains use the unified DR range (same physical motor: XW540-T260-R).
+    TDC controller's internal PD gains (TDCControllerCfg) compensate for
+    lower actuator stiffness when needed.
     """
 
     tdc: TDCControllerCfg = TDCControllerCfg()
@@ -505,17 +509,8 @@ class HeroAgentTDCEnvCfg(HeroAgentTrainEnvCfg):
     # No privileged obs for pure TDC (classical control, no encoder)
     state_space: int = 0
 
-    # TDC-specific DR: higher joint gains (Kp=200, Kd=10), no action latency
+    # Unified DR: same physical motor gains as all other envs
     randomization: DomainRandomizationCfg = _tdc_randomization()
-
-    # TDC needs higher stiffness for stability. Override DORAEMON bounds
-    # to prevent sampling low stiffness values that cause TDC instability.
-    doraemon: DoraemonCfg = DoraemonCfg(
-        param_overrides={
-            "joint_stiffness": (120.0, 300.0),
-            "joint_damping": (6.0, 15.0),
-        },
-    )
 
 
 @configclass
@@ -535,7 +530,7 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
     action_space: int = 6  # m_hat(2) + Kp(2) + Kd(2)
     state_space: int = 19  # privileged obs for encoder (19D requires payload, inherited from TrainEnvCfg)
 
-    # Override TDC DR: enable action latency (RL inference delay exists in real deployment)
+    # Unified DR with action latency (RL inference delay exists in real deployment)
     randomization: DomainRandomizationCfg = _tdc_randomization(action_latency=True)
 
     # Linear scaling ranges: action in [-1, 1] -> physical range
@@ -591,7 +586,7 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
             ConstraintTermCfg(
                 func=joint_velocity_cost,
                 params={},
-                budget=1.0,
+                budget=2.0,
                 cost_type="average",
                 name="joint_vel",
             ),
@@ -630,9 +625,5 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
         ],
     )
 
-    # Zero out reward weights for terms moved to constraints
-    reward: ALBCRewardCfg = ALBCRewardCfg(
-        joint_velocity_weight=0.0,
-        joint_oscillation_weight=0.0,
-        linear_error_weight=0.0,
-    )
+    # All 4 reward terms are independent of constraints -- use defaults
+    reward: ALBCRewardCfg = ALBCRewardCfg()
