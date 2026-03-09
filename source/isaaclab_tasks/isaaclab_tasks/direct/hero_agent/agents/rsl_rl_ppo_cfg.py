@@ -311,8 +311,8 @@ class RslRlConstraintTRPOAlgorithmCfg:
     constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15, 0.05, 2.0, 0.3, 0.15, 0.02)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
-    barrier_t: float = 10.0
-    barrier_t_final: float = 50.0
+    barrier_t: float = 50.0
+    barrier_t_final: float = 100.0
     barrier_t_schedule_frac: float = 0.4
     adaptive_threshold_alpha: float = 0.1
     line_search_kl_margin: float = 1.5

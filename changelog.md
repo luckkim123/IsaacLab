@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-09] barrier_t fix: 10->50 initial, 50->100 final
+
+### Context
+Constrained-Encoder-Base training (320 iterations) converged to a local optimum where
+the arm stopped moving entirely. Full root cause chain: low barrier_t (10-20) caused
+cost gradient to dominate policy_loss -> line search failed 80% of the time (success=0
+from step ~80) -> actor params reverted every iteration (no learning) -> encoder gated
+out (no policy-loss gradient) -> z saturated to [-1, +1] (z_bounds_loss too weak alone)
+-> encoder grad_norm -> 0 (dead) -> entropy collapsed (2.0 -> 0 by step 75) ->
+noise_std hit floor (0.15) -> arm froze.
+
+NORBC paper nominal barrier_t=100. Paper ablation (Table II): t=10 caused constraint
+violations. Our schedule was 10->50. Increasing to 50->100 reduces cost gradient
+amplification 5x at initialization, allowing reward gradient to compete and line search
+to succeed.
+
+Also synced the dead field `ALBCConstraintCfg.barrier_t` (was 1.0, never read by runner)
+to 50.0 for code consistency.
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `barrier_t` 10.0 -> 50.0, `barrier_t_final` 50.0 -> 100.0 in `RslRlConstraintTRPOAlgorithmCfg`
+- `mdp/constraints.py`: `ALBCConstraintCfg.barrier_t` 1.0 -> 50.0, `barrier_t_final` 50.0 -> 100.0 (dead field, synced for consistency)
+
+### Notes
+- `barrier_t_schedule_frac=0.4` unchanged -- annealing completes at 40% of max_iterations
+- Next run key metrics: line_search_success > 50%, entropy > 0.5 past step 100, encoder/grad_norm > 0, joint_vel_abs_max > 1.0
+- Follow-up issues identified: (1) line_search_cost_margin configured but unused, (2) ALBCConstraintCfg dead fields cleanup, (3) encoder KL guard if spike persists
+
 ## [2026-03-09] Per-constraint cost advantage normalization
 
 ### Context
