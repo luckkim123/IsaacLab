@@ -8,15 +8,14 @@
 Provides reward configuration, a lightweight reward manager, and reward
 functions for ALBC (joint-based attitude control) training.
 
-Reward design principles:
-    - Gaussian kernel tracking + settling bonus dominate the positive signal
-      ([0,1] dense gradient). Penalties (joint_oscillation, joint_velocity)
-      provide directional regularization, ramped via penalty curriculum.
-    - dt-scaling: state-quality terms (tracking, settling, joint_oscillation,
-      joint_velocity, angular_velocity) are dt-scaled.
-    - PBRS progress shaping (Ng 1999): preserves optimal policy guarantee.
-    - Joint oscillation: EMA high-pass filter isolates high-frequency
-      joint velocity oscillation while allowing smooth movement.
+4-term reward architecture:
+    1. command  (+): composite Laplacian + linear ramp [0,1], dt-scaled
+    2. settling (+): binary threshold bonus {0,1}, dt-scaled
+    3. energy   (-): mean(joint_vel^2), dt-scaled
+    4. smoothness (-): mean(da^2) + mean(d2a^2), dt-scaled
+
+Plus: termination_penalty (one-time, NOT dt-scaled).
+TDC-specific terms (mhat_accuracy, tdc_torque) disabled by default.
 """
 
 from __future__ import annotations
@@ -44,78 +43,47 @@ if TYPE_CHECKING:
 
 @configclass
 class ALBCRewardCfg:
-    """ALBC reward configuration with Laplacian tracking + regularization penalties.
+    """ALBC reward configuration: 4-term architecture.
 
-    Active terms (dt-scaled via RewardTermCfg.scale_by_dt=True, except PBRS):
-        tracking          * w_t   (Laplacian kernel, positive)
-        settling          * w_s   (binary near-target bonus, positive)
-        joint_oscillation * w_jo  (EMA high-pass filtered, negative)
-        joint_velocity    * w_jv  (joint speed penalty, negative)
-        progress          * w_p   (PBRS, scale_by_dt=False)
-
-    Design: tracking + settling dominate the positive signal. Two
-    penalties (joint_oscillation, joint_velocity) provide directional
-    regularization. dt-scaling ensures time-invariant reward accumulation
-    across different simulation timesteps.
+    Active terms (all dt-scaled):
+        command    (+5.0): composite Laplacian + linear ramp [0,1]
+        settling   (+3.0): binary threshold bonus {0,1}
+        energy     (-0.3): mean(joint_vel^2) kinetic energy proxy
+        smoothness (-0.5): mean(da^2) + mean(d2a^2) action smoothness
     """
 
-    # Tracking (Laplacian kernel): exp(-||e|| / sigma)
-    # Gradient = 1/sigma at all errors (maximum at e=0, unlike Gaussian which is 0 at e=0).
-    tracking_weight: float = 5.0
-    tracking_sigma: float = 0.35  # 20.1 deg 1/e point
+    # Command: composite Laplacian + linear ramp
+    # Laplacian (alpha fraction): exp(-||e||/sigma), max gradient at e=0
+    # Linear ramp (1-alpha fraction): max(0, 1-||e||/e_max), constant gradient
+    command_weight: float = 5.0
+    command_sigma: float = 0.35  # Laplacian 1/e point (rad)
+    command_e_max: float = 1.0  # Linear ramp saturation (rad)
+    command_alpha: float = 0.6  # Laplacian fraction
 
-    # Joint oscillation penalty (EMA high-pass filtered joint velocity).
-    # Penalizes high-frequency oscillation while allowing smooth movement.
-    # dt-scaled. Use with negative weight.
-    joint_oscillation_weight: float = -1.0
-    joint_oscillation_alpha: float = 0.2  # EMA smoothing factor (cutoff ~1.6Hz at 50Hz)
-
-    # Joint velocity penalty: mean(joint_vel^2). Penalizes fast joint movement,
-    # improving control stability and energy efficiency.
-    # dt-scaled. Use with negative weight.
-    joint_velocity_weight: float = -0.2
-
-    # Linear error penalty: -min(||err||, max_err) / max_err.
-    # Provides constant gradient at ALL error levels (unlike Gaussian which
-    # vanishes at large errors). Clamped to [-1, 0]. dt-scaled.
-    linear_error_weight: float = -3.0
-    linear_error_max: float = 1.0  # clamp at ~57 degrees
-
-    # Progress (potential-based shaping): PBRS (Ng 1999) preserves optimal policy.
-    # NOT dt-scaled. Provides immediate reward for error reduction at all levels.
-    progress_weight: float = 0.3
-    progress_scale: float = 0.01
-    progress_mode: str = "pbrs"  # "tanh" or "pbrs" (SAC-safe, policy-preserving)
-    progress_gamma: float = 0.99  # discount factor for PBRS (match PPO gamma)
-
-    # Settling bonus: binary per-step (1 if error < threshold, 0 otherwise).
-    # Incentivizes fast response time: sooner you enter threshold, more steps
-    # you accumulate reward. dt-scaled episode sum = weight * dt * (steps inside).
+    # Settling: binary threshold bonus (1 if ||e|| < threshold, 0 otherwise)
     settling_weight: float = 3.0
-    settling_threshold: float = 0.087  # radians (~5 deg)
+    settling_threshold: float = 0.087  # ~5 deg
 
-    # Termination penalty: one-time large negative reward on early termination.
-    # Discourages policies that trigger too_fast/bad_state terminations.
-    # NOT dt-scaled (one-time event, not a rate).
+    # Energy: joint velocity squared (kinetic energy proxy)
+    energy_weight: float = -0.3
+
+    # Action smoothness: first + second order action difference
+    smoothness_weight: float = -0.5
+
+    # -- Meta fields (not reward terms) --
     termination_penalty: float = -10.0
-
-    # Penalty curriculum: linearly ramp penalty scale from 0 to 1 over this
-    # ratio of max_iterations. 0 = disabled (penalties always at full weight).
-    # Applies to all terms with negative weight.
     penalty_curriculum_ratio: float = 0.0
 
-    # TDC stability gate: multiply total reward by 0 when |1 - M_hat/M_true| >= 1
-    # Only effective in TDC envs. Based on Baek et al. (ACC 2022).
+    # EMA alpha for constraint system (not used by rewards directly)
+    ema_joint_vel_alpha: float = 0.2
+
+    # -- TDC-specific (disabled by default) --
     stability_gate_enable: bool = False
 
-    # -- TDC-specific rewards (defaults 0.0: inactive in base RL envs) --
-
-    # M_hat accuracy reward (Cauchy/Gaussian kernel on relative error, dt-scaled)
     mhat_accuracy_weight: float = 0.0
     mhat_accuracy_sigma: float = 0.5
     mhat_accuracy_kernel: str = "cauchy"
 
-    # TDC torque penalty: ||tau_desired||^2 (actual control effort, dt-scaled)
     tdc_torque_weight: float = 0.0
 
 
@@ -254,151 +222,86 @@ class RewardManager:
 
 
 # =============================================================================
-# Shared Reward Functions
+# Reward Functions (4-term architecture)
 # =============================================================================
 
 
-def tracking_reward(
+def command_reward(
     _robot: Articulation,
     env: HeroAgentEnv,
-    sigma: float = 1.0,
+    sigma: float = 0.35,
+    e_max: float = 1.0,
+    alpha: float = 0.6,
     **_kwargs,
 ) -> torch.Tensor:
-    """Laplacian kernel tracking reward: exp(-||e|| / sigma).
+    """Composite Laplacian + linear ramp command tracking reward.
 
-    Output in [0, 1]. error=0 -> 1.0, error=sigma -> 1/e (~0.37).
-    Gradient = (1/sigma) * exp(-||e||/sigma), maximum at error=0.
-    Unlike Gaussian (gradient=0 at target), Laplacian provides the strongest
-    corrective signal exactly at the target, eliminating steady-state error.
+    Laplacian (alpha fraction): exp(-||e||/sigma) -- max gradient at e=0,
+    strong near-target signal. Linear ramp (1-alpha): max(0, 1-||e||/e_max)
+    -- constant gradient for large-error recovery.
+
+    Output in [0, 1]. dt-scaled.
 
     Args:
         env: Environment instance (provides _potentials = ||[roll_err, pitch_err]||).
-        sigma: Kernel width in radians. Default 1.0 rad (~57.3 deg).
+        sigma: Laplacian 1/e width in radians.
+        e_max: Linear ramp saturation in radians.
+        alpha: Laplacian fraction [0, 1].
     """
-    return torch.exp(-env._potentials / sigma)
+    e = env._potentials
+    laplacian = torch.exp(-e / sigma)
+    linear = torch.clamp(1.0 - e / e_max, min=0.0)
+    return alpha * laplacian + (1.0 - alpha) * linear
 
 
-def joint_oscillation_penalty(
+def settling_reward(
     _robot: Articulation,
     env: HeroAgentEnv,
-    **_kwargs,
-) -> torch.Tensor:
-    """EMA high-pass filtered joint velocity penalty.
-
-    Penalizes high-frequency oscillation while allowing smooth movement.
-    The EMA tracks the low-frequency component; the difference is the
-    high-frequency residual that gets penalized.
-
-    dt-scaled. Use with negative weight.
-
-    Requires: env._ema_joint_vel (updated before reward computation each step).
-    """
-    joint_vel = _robot.data.joint_vel[:, env._albc_joint_ids]
-    hf = joint_vel - env._ema_joint_vel
-    return torch.mean(hf**2, dim=-1)
-
-
-def joint_velocity_penalty(
-    _robot: Articulation,
-    env: HeroAgentEnv,
-    **_kwargs,
-) -> torch.Tensor:
-    """Quadratic joint velocity penalty: mean(joint_vel^2).
-
-    Penalizes fast joint movement, improving control stability and energy
-    efficiency. Unlike joint_oscillation (EMA high-pass, high-freq only),
-    this penalizes all joint velocity magnitudes.
-
-    dt-scaled. Use with negative weight.
-    """
-    joint_vel = _robot.data.joint_vel[:, env._albc_joint_ids]
-    return torch.mean(joint_vel**2, dim=-1)
-
-
-def linear_error_penalty(
-    _robot: Articulation,
-    env: HeroAgentEnv,
-    max_err: float = 1.0,
-    **_kwargs,
-) -> torch.Tensor:
-    """Linear error penalty: min(||err||, max_err) / max_err.
-
-    Provides constant gradient at all error levels (unlike Gaussian which
-    vanishes at large errors). Output in [0, 1], clamped at max_err.
-    dt-scaled. Use with negative weight.
-
-    Args:
-        env: Environment instance (provides _potentials = ||[roll_err, pitch_err]||).
-        max_err: Clamp threshold in radians. Default 1.0 rad (~57 deg).
-    """
-    return torch.clamp(env._potentials / max_err, max=1.0)
-
-
-def progress_reward(
-    _robot: Articulation,
-    env: HeroAgentEnv,
-    scale: float = 0.01,
-    **_kwargs,
-) -> torch.Tensor:
-    """Tanh-wrapped progress reward: tanh((prev - curr) / scale).
-
-    tanh breaks the telescoping property of raw delta (which sums to ~0 over
-    an episode as positive/negative steps cancel). With tanh, each convergence
-    step contributes ~0.3-0.5 regardless of cancellation.
-
-    NOT dt-scaled. Use weight to control relative importance vs tracking.
-
-    Args:
-        env: Environment instance (provides _prev_potentials, _potentials).
-        scale: Normalization scale for tanh input.
-    """
-    delta = env._prev_potentials - env._potentials
-    return torch.tanh(delta / scale)
-
-
-def progress_reward_pbrs(
-    _robot: Articulation,
-    env: HeroAgentEnv,
-    gamma: float = 0.99,
-    **_kwargs,
-) -> torch.Tensor:
-    """Proper PBRS: Phi(s) - gamma * Phi(s').
-
-    Preserves optimal policy (Ng et al. 1999).
-    Safe for off-policy (SAC) replay buffer.
-    NOT dt-scaled.
-
-    Args:
-        env: Environment instance (provides _prev_potentials, _potentials).
-        gamma: Discount factor matching the RL algorithm (e.g. SAC gamma).
-    """
-    return env._prev_potentials - gamma * env._potentials
-
-
-def settling_bonus(
-    _robot: Articulation,
-    env: HeroAgentEnv,
-    threshold: float = 0.10,
+    threshold: float = 0.087,
     **_kwargs,
 ) -> torch.Tensor:
     """Binary per-step settling bonus: 1.0 if error < threshold, 0.0 otherwise.
 
-    Incentivizes fast response time: the sooner the agent enters the threshold
-    zone, the more steps it accumulates reward for. With dt-scaling, episode sum
-    equals weight * dt * (number of steps within threshold).
-
-    Role separation from tracking/linear_error:
-        - tracking/linear_error: "reduce error magnitude" (continuous gradient)
-        - settling: "reach threshold quickly and stay there" (time-based)
-
-    Markov-safe: depends only on current state. Compatible with SAC replay buffer.
-    dt-scaled. Use with positive weight.
+    Incentivizes fast settling: episode sum = weight * dt * (steps inside threshold).
+    dt-scaled.
 
     Args:
-        env: Environment instance (provides _potentials = ||[roll_err, pitch_err]||).
-        threshold: Settling zone boundary in radians. Default 0.10 rad (~5.7 deg).
+        env: Environment instance (provides _potentials).
+        threshold: Settling zone boundary in radians.
     """
     return (env._potentials < threshold).float()
+
+
+def energy_penalty(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+    **_kwargs,
+) -> torch.Tensor:
+    """Joint kinetic energy proxy: mean(joint_vel^2).
+
+    Zero at equilibrium, penalizes fast joint motion. Provides soft preference
+    for energy-efficient control within hard velocity bounds (constraint system).
+    dt-scaled. Use with negative weight.
+    """
+    return torch.mean(_robot.data.joint_vel[:, env._albc_joint_ids] ** 2, dim=-1)
+
+
+def action_smoothness_penalty(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+    **_kwargs,
+) -> torch.Tensor:
+    """First-order + second-order action difference penalty.
+
+    da = a_t - a_{t-1} (jerk), d2a = a_t - 2*a_{t-1} + a_{t-2} (oscillation).
+    Penalizes rapid action changes and action-space acceleration.
+    dt-scaled. Use with negative weight.
+
+    Requires: env._prev_prev_actions buffer.
+    """
+    da = env._actions - env._prev_actions
+    d2a = env._actions - 2.0 * env._prev_actions + env._prev_prev_actions
+    return torch.mean(da**2, dim=-1) + torch.mean(d2a**2, dim=-1)
 
 
 def tdc_torque_penalty(

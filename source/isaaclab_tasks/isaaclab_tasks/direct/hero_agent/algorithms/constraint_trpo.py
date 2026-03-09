@@ -164,7 +164,7 @@ class ConstraintTRPO:
         self.encoder_lr = 3e-3
         if self._has_encoder_params:
             self._encoder_params = encoder_params
-            self.encoder_optimizer = optim.Adam(encoder_params, lr=self.encoder_lr)
+            self.encoder_optimizer = optim.Adam(encoder_params, lr=self.encoder_lr, weight_decay=1e-5)
         else:
             self._encoder_params = []
             self.encoder_optimizer = None
@@ -619,25 +619,42 @@ class ConstraintTRPO:
         with torch.no_grad():
             kl_after_trpo = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
 
-        # Apply deferred encoder Adam step (after TRPO line search).
-        # Gradient source: policy loss only (asymmetric critic decouples encoder from value loss).
-        if self.encoder_optimizer is not None and _encoder_grads_cache:
-            self.encoder_optimizer.zero_grad()
-            for i, p in enumerate(self._encoder_params):
-                if i < len(_encoder_grads_cache) and _encoder_grads_cache[i] is not None:
-                    p.grad = _encoder_grads_cache[i]
-            nn.utils.clip_grad_norm_(self._encoder_params, self.max_grad_norm)
-            self.encoder_optimizer.step()
-
-        # Single z_bounds encoder update
+        # Unified encoder update: policy-loss grads (gated by ls_success) + z_bounds grads.
+        # BUG 3 fix: only apply policy-loss grads when TRPO succeeded (prevent actor-encoder desync).
+        # BUG 1 fix: z_bounds_loss() already includes coef, do NOT multiply again.
+        # Merged into single optimizer step to avoid conflicting update directions.
         mean_z_bounds_loss = 0.0
-        if hasattr(self.policy, "z_bounds_loss") and self.encoder_optimizer is not None:
-            self.policy.act(obs_flat)
-            z_b_loss_post = self.z_bounds_coef * self.policy.z_bounds_loss()
-            mean_z_bounds_loss = z_b_loss_post.item()
-            if z_b_loss_post.requires_grad:
-                self.encoder_optimizer.zero_grad()
-                z_b_loss_post.backward()
+        if self.encoder_optimizer is not None:
+            self.encoder_optimizer.zero_grad()
+            has_grads = False
+
+            # (1) Apply cached policy-loss gradients (only if TRPO succeeded)
+            if ls_success and _encoder_grads_cache:
+                for i, p in enumerate(self._encoder_params):
+                    if i < len(_encoder_grads_cache) and _encoder_grads_cache[i] is not None:
+                        p.grad = _encoder_grads_cache[i].clone()
+                        has_grads = True
+
+            # (2) Accumulate z_bounds gradients (always applied: safe regularization)
+            if hasattr(self.policy, "z_bounds_loss"):
+                self.policy.act(obs_flat)
+                z_b_loss = self.policy.z_bounds_loss()
+                mean_z_bounds_loss = z_b_loss.item()
+                if z_b_loss.requires_grad:
+                    z_bounds_grads = torch.autograd.grad(
+                        z_b_loss,
+                        self._encoder_params,
+                        allow_unused=True,
+                    )
+                    for i, p in enumerate(self._encoder_params):
+                        if i < len(z_bounds_grads) and z_bounds_grads[i] is not None:
+                            if p.grad is not None:
+                                p.grad = p.grad + z_bounds_grads[i]
+                            else:
+                                p.grad = z_bounds_grads[i]
+                            has_grads = True
+
+            if has_grads:
                 nn.utils.clip_grad_norm_(self._encoder_params, self.max_grad_norm)
                 self.encoder_optimizer.step()
 

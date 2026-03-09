@@ -4,49 +4,70 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [2026-03-09] Constraint system redesign: 8-term architecture
+## [2026-03-09] Reward 4-term redesign + Constraint 8-term redesign + Encoder update fixes
 
 ### Context
-Redesigned constraint system from 6 terms to 8 terms, aligned with NORBC paper design.
-Removed 3 constraints that overlapped with reward terms (attitude_error_cost covered by
-command_reward, action_smoothness_cost covered by smoothness reward, angular_velocity_cost
-removed by user choice). Added 3 new physically-motivated constraints: effort_limit (real
-motor limit vs inflated PhysX limit), yaw_velocity (buoyancy control cannot generate yaw
-torque), cob_cog_alignment (lateral CoB-CoG offset creates persistent bias).
+Complete reward + constraint redesign session. Three parallel workstreams:
 
-Also added DR infeasibility logging: detects DR parameter combinations that are physically
-unachievable (high error + arm at singularity + correct direction + timed-out episode).
-Initial deployment showed excessive logging; fixed by adding timeout-only filter and
-rate-limited sampling (100 calls per detailed log, max 3 samples).
+1. **Reward 4-term architecture**: Replaced 7+ reward terms with 4 clean terms (command,
+settling, energy, smoothness). Old terms (tracking, linear_error, progress/PBRS,
+joint_oscillation, joint_velocity) removed or merged. command_reward uses composite
+Laplacian+linear ramp for both near-target precision and large-error recovery.
+action_smoothness_penalty now includes second-order (d2a) term for oscillation.
 
-Theoretical review confirmed IPO algorithm (barrier schedule, adaptive threshold, cost GAE
-non-normalization, multi-head cost critic) is correct for 8-term architecture -- all
-components are K-generic with auto-sync.
+2. **Constraint 8-term architecture**: Replaced 6 constraint terms with 8. Removed 3
+overlapping (attitude_error covered by command_reward, action_smoothness covered by
+smoothness reward, angular_velocity removed by choice). Added 3 new: effort_limit (real
+motor limit vs inflated PhysX), yaw_velocity (buoyancy cannot generate yaw torque),
+cob_cog_alignment (lateral CoB-CoG offset bias). Added DR infeasibility logging with
+timeout-only filter and rate-limited sampling.
+
+3. **Encoder update bug fixes**: Fixed 3 bugs in ConstraintTRPO encoder update path:
+(a) policy-loss grads applied even when TRPO line search failed (actor-encoder desync),
+(b) z_bounds_loss multiplied by coef twice (coef already inside z_bounds_loss()),
+(c) separate optimizer steps for policy grads and z_bounds caused conflicting directions.
+All three merged into single unified encoder update with conditional gating.
+
+Theoretical review confirmed: cost advantage non-normalization is correct (barrier weighting
+handles scaling), IPO gradient formula matches NORBC paper, 8-term architecture is K-generic.
 
 ### Added
-- `mdp/constraints.py`: `effort_limit_cost()` -- binary, 1 if computed_torque > URDF default (PhysX allows 1.3-1.5x via DR)
-- `mdp/constraints.py`: `yaw_velocity_cost()` -- average, absolute yaw angular velocity (rad/s)
-- `mdp/constraints.py`: `cob_cog_alignment_cost()` -- average, lateral XY CoB-CoG offset (meters), mass+volume weighted system calculation including payload
-- `utils/logging.py`: `log_dr_infeasibility()` -- singleton logger for physically infeasible DR combinations
-- `base_env.py`: `_check_dr_infeasibility()` -- timeout-only filter, rate-limited sampling (100 calls / max 3 samples), count always logged to WandB
+- `mdp/constraints.py`: `effort_limit_cost()` -- binary, computed_torque > URDF default
+- `mdp/constraints.py`: `yaw_velocity_cost()` -- average, absolute yaw angular velocity
+- `mdp/constraints.py`: `cob_cog_alignment_cost()` -- average, lateral XY CoB-CoG offset (mass+volume weighted, includes payload)
+- `utils/logging.py`: `log_dr_infeasibility()` -- singleton logger for infeasible DR combinations
+- `base_env.py`: `_check_dr_infeasibility()` -- timeout-only filter, rate-limited sampling (100 calls / max 3 samples), WandB count always logged
 
 ### Changed
+- `mdp/rewards.py`: Replaced 7-term reward with 4-term architecture (command, settling, energy, smoothness)
+- `mdp/rewards.py`: `ALBCRewardCfg` simplified -- removed tracking/linear_error/progress/joint_oscillation/joint_velocity fields, added command_alpha/command_e_max/energy_weight/smoothness_weight
+- `mdp/rewards.py`: `command_reward()` composite Laplacian(alpha) + linear ramp(1-alpha), replaces separate tracking + linear_error
+- `mdp/rewards.py`: `energy_penalty()` replaces `joint_velocity_penalty()`, same formula (mean joint_vel^2)
+- `mdp/rewards.py`: `action_smoothness_penalty()` now includes second-order d2a term, requires `_prev_prev_actions` buffer
+- `mdp/rewards.py`: `settling_reward()` renamed from `settling_bonus()`, same logic
 - `config.py`: `HeroAgentConstrainedEncoderEnvCfg` constraint terms 6 -> 8, reordered (binary first, average second)
-- `config.py`: `HeroAgentConstrainedEncoderEnvCfg` DR override `joint_effort_limit_range=(1.3, 1.5)` -- PhysX allows higher torque so constraint teaches real limit
+- `config.py`: `HeroAgentConstrainedEncoderEnvCfg` DR override `joint_effort_limit_range=(1.3, 1.5)`
 - `config.py`: `attitude_abs` limit 1.047 rad (60 deg) -> 1.396 rad (80 deg)
-- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 6 -> 8, `constraint_budgets` updated to 8-tuple matching new term order
-- `mdp/__init__.py`: Exports updated (removed 3, added 3)
+- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 6 -> 8, `constraint_budgets` 8-tuple
+- `algorithms/constraint_trpo.py`: Encoder optimizer now has `weight_decay=1e-5` (was 0)
+- `algorithms/constraint_trpo.py`: Unified encoder update -- policy-loss grads gated by `ls_success`, z_bounds grads always applied, single optimizer step
+- `mdp/__init__.py`: Constraint exports updated (removed 3, added 3)
 - `utils/__init__.py`: Added `log_dr_infeasibility` export
 
 ### Removed
-- `mdp/constraints.py`: `attitude_error_cost` (command_reward covers tracking)
-- `mdp/constraints.py`: `action_smoothness_cost` (smoothness reward covers this)
-- `mdp/constraints.py`: `angular_velocity_cost` (user choice to remove)
+- `mdp/constraints.py`: `attitude_error_cost`, `action_smoothness_cost`, `angular_velocity_cost`
+- `mdp/rewards.py`: `tracking_reward()`, `linear_error_penalty()`, `progress_reward()`, `progress_reward_pbrs()`, `joint_oscillation_penalty()`, `joint_velocity_penalty()`
+
+### Fixed
+- `algorithms/constraint_trpo.py`: Encoder policy-loss grads now only applied when TRPO line search succeeds (was always applied, causing actor-encoder desync)
+- `algorithms/constraint_trpo.py`: `z_bounds_loss()` no longer multiplied by `z_bounds_coef` (already included in the loss function)
+- `algorithms/constraint_trpo.py`: Policy-loss and z_bounds encoder grads merged into single optimizer step (was two separate steps with conflicting directions)
 
 ### Notes
-- Budgets: accum_rot=0.02, attitude_abs=0.01, singularity=0.15, effort_limit=0.05, joint_vel=2.0, oscillation=0.3, yaw_vel=0.15, cob_cog=0.02
-- ConstraintTRPO / ActorCriticEncoderConstrained are K-generic; ConstraintEncoderRunner auto-syncs K from env config
-- DR infeasibility: `DR/infeasible_count` logged every reset batch; detailed params every 100 calls, max 3 samples
+- Constraint budgets: accum_rot=0.02, attitude_abs=0.01, singularity=0.15, effort_limit=0.05, joint_vel=2.0, oscillation=0.3, yaw_vel=0.15, cob_cog=0.02
+- ConstraintTRPO/ActorCriticEncoderConstrained are K-generic; ConstraintEncoderRunner auto-syncs K from env config
+- Cost advantage non-normalization is intentional: barrier weighting 1/(t*margin*(1-gamma)) provides automatic per-constraint scaling
+- `_prev_prev_actions` buffer must be initialized in base_env for smoothness d2a term
 
 ## [2026-03-09] Unified actuator DR ranges based on XW540-T260-R datasheet
 
