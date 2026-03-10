@@ -615,7 +615,8 @@ class ConstraintTRPO:
                 )
 
         # Enforce minimum noise floor (prevent entropy collapse)
-        min_log_std = math.log(0.1)
+        # std=0.25 -> 95% of samples within +-0.5 of mean for [-1,1] actions
+        min_log_std = math.log(0.25)
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=min_log_std)
 

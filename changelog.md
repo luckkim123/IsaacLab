@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-10] Entropy collapse fix: raise noise floor + remove effort_limit DR conflict
+
+### Context
+Analysis of constrained_encoder_base run `klmm0hqj` (372 steps, barrier_t=50/100) showed
+policy learning reward (0 -> 1.5, attitude error 30 -> 15 deg) but arm freezing at singularity.
+
+Previous diagnosis was wrong: line_search_success was 99.4% (333/335), NOT 80% failure.
+Barrier_t=50/100 is fine. The actual root cause chain:
+1. Entropy collapsed by step 50 (2.84 -> -0.69), noise_std hit floor (0.98 -> 0.15)
+2. Two inconsistent noise floors existed: constraint_trpo.py (0.1) vs base_runner.py (0.15)
+3. std=0.15 -> 95% of actions within +-0.3 of mean -> exploration dies
+4. "Don't move arm" is rational under low exploration (avoids 5 arm-related constraint costs)
+5. Arm drifts to singularity (joint_pos_mean: 1.6 -> 5.4), costs explode
+6. Narrow signal -> encoder z saturates (+-0.98 by step 50)
+
+Additionally, `HeroAgentConstrainedEncoderEnvCfg` overrode `joint_effort_limit_range=(1.3, 1.5)`,
+allowing PhysX 130-150% stall torque while `effort_limit_cost` checks against 100% -- a permanent
+training conflict where normal actuator behavior always violates the constraint.
+
+Barrier_t reverted from 50/100 back to 10/50 (both values produce >99% ls_success; lower
+barrier gives tighter constraint enforcement from the start).
+
+### Changed
+- `algorithms/constraint_trpo.py`: `min_log_std` from `log(0.1)` to `log(0.25)` -- unified with base_runner floor
+- `runners/base_runner.py`: `min_std` from 0.15 to 0.25 -- at std=0.25, entropy ~0.07 (vs -0.95 at 0.15)
+- `config.py`: Removed `joint_effort_limit_range=(1.3, 1.5)` override from `HeroAgentConstrainedEncoderEnvCfg`, restoring unified default (0.7, 1.0)
+- `agents/rsl_rl_ppo_cfg.py`: `barrier_t` 50.0 -> 10.0, `barrier_t_final` 100.0 -> 50.0 (revert to original)
+- `mdp/constraints.py`: `ALBCConstraintCfg.barrier_t` 50.0 -> 1.0, `barrier_t_final` 100.0 -> 50.0 (dead field, synced with revert)
+
+### Notes
+- std=0.25 gives 95% of samples within +-0.5 of mean for [-1,1] actions -- wider exploration without excessive noise
+- Two noise floors now unified at 0.25 (constraint_trpo.py post-step + base_runner.py per-iteration)
+- If arm still freezes at step 200: next step is relax singularity budget 0.15 -> 0.3
+- Follow-up: make noise floor a config field instead of hardcoded
+
 ## [2026-03-09] barrier_t fix: 10->50 initial, 50->100 final
 
 ### Context

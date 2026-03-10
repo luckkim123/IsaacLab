@@ -638,10 +638,9 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
         ],
     )
 
-    # PhysX allows 1.3-1.5x stall torque; constraint teaches real limit (1.0x)
+    # Restore unified DR default (0.7-1.0x effort limit)
     randomization: DomainRandomizationCfg = DomainRandomizationCfg(
         enable=True,
-        joint_effort_limit_range=(1.3, 1.5),
     )
 
     # All 4 reward terms are independent of constraints -- use defaults

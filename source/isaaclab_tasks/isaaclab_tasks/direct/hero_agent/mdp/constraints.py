@@ -73,8 +73,8 @@ class ALBCConstraintCfg:
     terms: list[ConstraintTermCfg] = []
 
     # IPO barrier parameters
-    barrier_t: float = 50.0
-    barrier_t_final: float = 100.0
+    barrier_t: float = 1.0
+    barrier_t_final: float = 50.0
     barrier_t_schedule_frac: float = 0.4
 
     # Adaptive threshold: d_k^i = max(d_k, J_C_k + alpha * d_k)
