@@ -217,19 +217,19 @@ def effort_limit_cost(
 ) -> torch.Tensor:
     """Binary cost: 1 if any ALBC joint computed torque exceeds real motor limit.
 
-    PhysX effort_limit is set higher than the real motor limit (via DR scale 1.3-1.5x),
-    allowing the simulation to produce torques that exceed real hardware capability.
-    This constraint teaches the policy to stay within the actual motor limit.
+    Uses per-env current effort limits (after DR), not a cached scalar.
+    This correctly handles envs whose DR'd limit is lower than the default.
 
     Args:
         env: Environment instance.
-        real_limit_scale: Scale applied to URDF default effort limit (1.0 = stall torque).
+        real_limit_scale: Scale applied to per-env effort limit (1.0 = current DR'd limit).
 
     Returns:
         (num_envs,) binary tensor.
     """
     computed = _robot.data.computed_torque[:, env._albc_joint_ids]
-    real_limit = env._default_effort_limit * real_limit_scale
+    # Per-env DR'd effort limits: (num_envs, num_joints) -> max across joints -> (num_envs,)
+    real_limit = _robot.data.joint_effort_limits[:, env._albc_joint_ids].max(dim=-1).values * real_limit_scale
     return (computed.abs().max(dim=-1).values > real_limit).float()
 
 

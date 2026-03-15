@@ -643,5 +643,7 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
         enable=True,
     )
 
-    # All 4 reward terms are independent of constraints -- use defaults
-    reward: ALBCRewardCfg = ALBCRewardCfg()
+    # Zero energy/smoothness reward weights to avoid double-counting with
+    # joint_vel and oscillation constraints. command and settling are retained
+    # as they have no constraint overlap.
+    reward: ALBCRewardCfg = ALBCRewardCfg(energy_weight=0.0, smoothness_weight=0.0)

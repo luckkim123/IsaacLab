@@ -43,7 +43,7 @@ class ConstraintTRPO:
     Key differences from PPO:
         - Policy update: natural gradient via conjugate gradient (full-batch)
         - Value update: pure MSE (no barrier, barrier is policy-only)
-        - Line search: verifies KL constraint AND constraint feasibility
+        - Line search: verifies KL constraint and surrogate improvement
         - No clipped surrogate; uses exact KL constraint
         - Update order: threshold -> policy -> value (NORBC conformance)
     """
@@ -76,9 +76,8 @@ class ConstraintTRPO:
         barrier_t_final: float = 50.0,
         barrier_t_schedule_frac: float = 0.4,
         adaptive_threshold_alpha: float = 0.1,
-        # Line search acceptance thresholds
+        # Line search acceptance threshold
         line_search_kl_margin: float = 1.5,
-        line_search_cost_margin: float = 0.5,
         # Entropy
         entropy_coef: float = 0.005,
         # Encoder z bounds
@@ -125,7 +124,6 @@ class ConstraintTRPO:
         self.barrier_t_schedule_iters = 0  # resolved by set_max_iterations()
         self.adaptive_threshold_scale = adaptive_threshold_alpha
         self.line_search_kl_margin = line_search_kl_margin
-        self.line_search_cost_margin = line_search_cost_margin
         self.z_bounds_coef = z_bounds_coef
 
         if cost_gamma >= 1.0:
@@ -316,7 +314,11 @@ class ConstraintTRPO:
         # determine relative priority.
         for k in range(self.num_constraints):
             adv_k = self.storage.cost_advantages[:, :, k]
-            self.storage.cost_advantages[:, :, k] = (adv_k - adv_k.mean()) / (adv_k.std() + 1e-8)
+            if not torch.isfinite(adv_k).all():
+                logger.warning("Non-finite cost advantages for constraint %d, zeroing.", k)
+                self.storage.cost_advantages[:, :, k] = 0.0
+            else:
+                self.storage.cost_advantages[:, :, k] = (adv_k - adv_k.mean()) / (adv_k.std() + 1e-8)
 
     # ==================================================================
     # TRPO Core
@@ -614,13 +616,14 @@ class ConstraintTRPO:
                     mean_cost_returns,
                 )
 
-        # Enforce minimum noise floor (prevent entropy collapse)
-        # std=0.25 -> 95% of samples within +-0.5 of mean for [-1,1] actions
+        # Enforce minimum noise floor BEFORE KL measurement (prevent entropy collapse).
+        # std=0.25 -> 95% of samples within +-0.5 of mean for [-1,1] actions.
+        # Must clamp before KL so the logged metric reflects the actual policy state.
         min_log_std = math.log(0.25)
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=min_log_std)
 
-        # Measure KL right after TRPO step (before encoder update shifts z)
+        # Measure KL right after TRPO step + clamp (before encoder update shifts z)
         with torch.no_grad():
             kl_after_trpo = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
 
@@ -691,11 +694,15 @@ class ConstraintTRPO:
                 value_pred = self.policy.evaluate(obs_mb)
                 value_loss = (returns_mb - value_pred).pow(2).mean()
 
-                # Cost value loss (MSE, per constraint, averaged)
+                # Cost value loss (MSE, per constraint, averaged).
+                # Clamp targets to >=0: cost returns are theoretically non-negative
+                # (J_C = E[sum gamma^t C_k] >= 0), but GAE can produce negative values
+                # when the cost critic overestimates. Without clamping, softplus-bounded
+                # predictions (>=0) can never match negative targets, causing systematic bias.
                 cost_value_loss = torch.tensor(0.0, device=self.device)
                 if hasattr(self.policy, "evaluate_costs"):
                     cost_value_pred = self.policy.evaluate_costs(obs_mb)
-                    cost_value_loss = (cost_returns_mb - cost_value_pred).pow(2).mean()
+                    cost_value_loss = (cost_returns_mb.clamp(min=0.0) - cost_value_pred).pow(2).mean()
 
                 # Pure MSE: no barrier in value update (barrier is policy-only in NORBC)
                 total_value_loss = self.value_loss_coef * value_loss + self.cost_value_loss_coef * cost_value_loss

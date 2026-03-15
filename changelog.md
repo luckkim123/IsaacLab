@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-16] Code review: fix 6 bugs in ConstraintTRPO pipeline
+
+### Context
+Thorough analysis of ConstraintTRPO algorithm (constraint_trpo.py, config.py,
+constraints.py, rsl_rl_ppo_cfg.py) while a pre-fix training run was executing.
+Identified 6 issues ranging from correctness bugs to theoretical inconsistencies.
+
+Training log analysis of run `2026-03-16_03-27-02` (548/600 iters, pre-fix) confirmed:
+- Entropy collapsed to 0.07, noise_std hit 0.25 floor by mid-training
+- Singularity cost increasing (8.5 -> 12.6), arm drifting toward singularity
+- 3 constraints at 88-92% of budget (oscillation, singularity, yaw_vel)
+- Roll/pitch error plateaued at 16-19 deg (same pattern as previous runs)
+- Energy/smoothness double-counting identified as primary entropy collapse driver
+
+### Fixed
+- `algorithms/constraint_trpo.py`: Cost value loss now clamps targets to >=0 -- softplus-bounded V_cost (>=0) could never match negative GAE targets, causing systematic estimation bias
+- `algorithms/constraint_trpo.py`: Added NaN guard to per-constraint cost advantage normalization -- non-finite advantages now zeroed with warning instead of propagating
+- `algorithms/constraint_trpo.py`: Clarified log_std clamp comment -- clamp happens BEFORE KL measurement so logged metric reflects actual policy state
+- `mdp/constraints.py`: `effort_limit_cost` now uses per-env DR'd limits (`_robot.data.joint_effort_limits`) instead of cached scalar `env._default_effort_limit` -- envs with weaker DR'd motors (0.7x) were not properly constrained
+- `config.py`: `HeroAgentConstrainedEncoderEnvCfg.reward` set `energy_weight=0.0, smoothness_weight=0.0` -- energy penalty overlapped with joint_vel constraint, smoothness penalty overlapped with oscillation constraint, creating double gradient pressure that killed exploration
+
+### Removed
+- `algorithms/constraint_trpo.py`: Removed unused `line_search_cost_margin` parameter from `__init__` and `self` storage (dead code from early prototype)
+- `agents/rsl_rl_ppo_cfg.py`: Removed matching `line_search_cost_margin` field from `RslRlConstraintTRPOAlgorithmCfg`
+
+### Notes
+- Highest-impact fix: energy/smoothness removal (#5) -- directly addresses the entropy collapse that plagued all previous runs
+- Next step: retrain with these fixes and monitor whether noise_std stays above floor
+- If entropy still collapses: consider raising entropy_coef (0.02 -> 0.03) or noise floor (0.25 -> 0.3)
+
 ## [2026-03-10] Entropy collapse fix: raise noise floor + remove effort_limit DR conflict
 
 ### Context
