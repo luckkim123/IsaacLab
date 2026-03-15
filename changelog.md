@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-16] Entropy overcorrection fix: revert entropy_coef + add noise ceiling
+
+### Context
+Run `2026-03-16_04-17-31` (130 iter) with previous session's fixes showed entropy
+EXPLOSION instead of collapse: noise_std=1678, entropy=17.55. The combined effect of
+barrier_t 5x reduction + n_active normalization ~3x + entropy_coef 2x created ~30x
+swing, overshooting from barrier-dominated to entropy-dominated.
+
+Root cause: Gaussian entropy gradient is always positive (d(entropy)/d(log_std) = 1),
+so without sufficient counterbalance from barrier or reward, noise_std grows without
+bound. The existing noise floor (min_std=0.25) had no symmetric ceiling.
+
+Fix: reverted entropy_coef 0.04->0.02 (barrier_t + n_active alone provide sufficient
+collapse prevention), added max_std=2.0 ceiling in both constraint_trpo.py and
+base_runner.py (symmetric counterpart to existing floor).
+
+Run `2026-03-16_04-27-48` (276 iter) with this fix shows best results to date:
+reward 42.07, roll_err 11.59 deg, pitch_err 13.40 deg, noise_std=0.48 (natural
+equilibrium, neither floor nor ceiling), ls_success 100%, z_range [-0.94, 0.91].
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `entropy_coef` 0.04 -> 0.02 (reverted -- barrier_t + n_active fixes are sufficient)
+- `algorithms/constraint_trpo.py`: Added `max_log_std = math.log(2.0)` ceiling alongside existing `min_log_std = math.log(0.25)` floor
+- `runners/base_runner.py`: Added `max_std = 2.0` ceiling alongside existing `min_std = 0.25` floor in `_apply_noise_floor()`
+
+### Notes
+- Three training runs today: (1) collapse (barrier_t=10, entropy=0.02), (2) explosion (barrier_t=50, entropy=0.04), (3) balanced (barrier_t=50, entropy=0.02, noise ceiling)
+- noise_std=0.48 at iter 276 confirms natural equilibrium exists between entropy bonus and barrier pressure
+- Noise ceiling (2.0) was NOT hit -- it's a safety net, not the balancing mechanism
+- The effective fix chain: barrier_t 10->50 (5x weaker barriers) + n_active normalization (~3x when 3 active) = ~15x reduction in barrier dominance, sufficient to prevent collapse without inflating entropy_coef
+
 ## [2026-03-16] Entropy collapse: parameter + structural fix (active constraint normalization)
 
 ### Context
