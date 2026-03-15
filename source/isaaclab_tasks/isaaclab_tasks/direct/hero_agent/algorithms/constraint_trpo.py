@@ -357,10 +357,18 @@ class ConstraintTRPO:
         reward_surr = -(advantages * ratio).mean()
 
         cost_surr = torch.tensor(0.0, device=self.device)
+        n_active = 0
         for k in range(self.num_constraints):
-            margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=0.1 * self.d_k[k].item())
+            margin_floor = 0.1 * self.d_k[k].item()
+            raw_margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).item()
+            margin = max(raw_margin, margin_floor)
+            if raw_margin <= 2.0 * margin_floor:
+                n_active += 1
             cost_adv_k = (ratio * cost_advantages[:, k]).mean()
             cost_surr += cost_adv_k / ((1.0 - self.cost_gamma) * self.barrier_t * margin)
+        # Normalize by active constraint count to prevent combined barrier dominance
+        if n_active > 1:
+            cost_surr = cost_surr / n_active
 
         entropy = self.policy.entropy
         return reward_surr + cost_surr - self.entropy_coef * entropy.mean()
@@ -552,10 +560,18 @@ class ConstraintTRPO:
 
         # IPO: barrier-weighted cost surrogate
         cost_surrogate = torch.tensor(0.0, device=self.device)
+        n_active = 0
         for k in range(self.num_constraints):
-            margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).clamp(min=0.1 * self.d_k[k].item())
+            margin_floor = 0.1 * self.d_k[k].item()
+            raw_margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).item()
+            margin = max(raw_margin, margin_floor)
+            if raw_margin <= 2.0 * margin_floor:
+                n_active += 1
             cost_adv_k = (ratio * cost_advantages_flat[:, k]).mean()
             cost_surrogate += cost_adv_k / ((1.0 - self.cost_gamma) * self.barrier_t * margin)
+        # Normalize by active constraint count to prevent combined barrier dominance
+        if n_active > 1:
+            cost_surrogate = cost_surrogate / n_active
 
         # Combined: reward surrogate + cost barrier surrogate - entropy
         policy_loss = reward_surrogate + cost_surrogate - self.entropy_coef * entropy.mean()

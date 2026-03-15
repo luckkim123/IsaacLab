@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-16] Entropy collapse: parameter + structural fix (active constraint normalization)
+
+### Context
+Post-fix training run `2026-03-16_03-51-07` (261 iter) confirmed that 6 bug fixes
+from earlier session improved reward (+5, 30.96 vs 26.04) and encoder gradients (3.6x),
+but entropy STILL collapsed (noise_std=0.25 floor, entropy=0.07).
+
+Root cause analysis of the IPO barrier gradient math:
+- 3 constraints (oscillation, singularity, yaw_vel) at ~91% budget simultaneously
+- Each has margin ~0.09*d_k, producing barrier gradient scale ~200 per constraint
+- Combined scale ~500+, vs entropy_coef=0.02: a ~25,000x gradient imbalance
+- Also discovered barrier_t fix from 2026-03-09 was never applied (still 10/50, not 50/100)
+
+Decision: parameter fixes (barrier_t, entropy_coef) + lightweight structural fix
+(normalize cost_surrogate by number of simultaneously active constraints).
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `barrier_t` 10.0 -> 50.0, `barrier_t_final` 50.0 -> 100.0 (planned fix from 2026-03-09 finally applied)
+- `agents/rsl_rl_ppo_cfg.py`: `entropy_coef` 0.02 -> 0.04 (2x increase to counterbalance residual constraint pressure)
+- `mdp/constraints.py`: `barrier_t` 1.0 -> 50.0, `barrier_t_final` 50.0 -> 100.0 (dead field synced for consistency)
+- `algorithms/constraint_trpo.py`: Added active constraint normalization in both `_linearized_surrogate()` and `update()` cost_surr loops -- when multiple constraints have margin within 2x of floor (0.1*d_k), divide cost_surrogate by n_active to prevent combined barrier gradient from overwhelming entropy
+
+### Notes
+- Expected effect: barrier gradient pressure reduced ~6x (barrier_t 2x + n_active ~3x) + entropy 2x = ~12x relative improvement
+- "Active" threshold: raw_margin <= 2.0 * margin_floor. With 0-1 active constraints, behavior is identical to before
+- Noise floor (0.25) intentionally NOT changed -- structural fixes should prevent hitting it
+- Previous session's 6 fixes remain: energy/smoothness=0, per-env effort limits, cost value clamp, NaN guard, line_search_cost_margin removal
+
 ## [2026-03-16] Code review: fix 6 bugs in ConstraintTRPO pipeline
 
 ### Context
