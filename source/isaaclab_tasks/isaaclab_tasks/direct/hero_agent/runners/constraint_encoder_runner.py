@@ -123,7 +123,10 @@ class ConstraintEncoderRunner(EncoderRunner):
         """Save checkpoint with lambda_k state."""
         super().save(path, infos)
         lambda_path = os.path.join(os.path.dirname(path), "lambda_state.pt")
-        torch.save({"lambda_k": self.alg.lambda_k}, lambda_path)
+        state = {"lambda_k": self.alg.lambda_k}
+        if hasattr(self.alg, "log_alpha"):
+            state["log_alpha"] = self.alg.log_alpha.detach()
+        torch.save(state, lambda_path)
 
     def load(self, path, load_optimizer=True, map_location=None):
         """Load checkpoint and restore lambda_k if available."""
@@ -132,5 +135,9 @@ class ConstraintEncoderRunner(EncoderRunner):
         if os.path.exists(lambda_path):
             state = torch.load(lambda_path, map_location=self.device, weights_only=False)
             self.alg.lambda_k = state["lambda_k"].to(self.device)
+            if "log_alpha" in state and hasattr(self.alg, "log_alpha"):
+                self.alg.log_alpha.data.copy_(state["log_alpha"].to(self.device))
+                alpha_val = self.alg.log_alpha.exp().item()
+                logger.info("Restored log_alpha=%.4f (alpha=%.6f)", self.alg.log_alpha.item(), alpha_val)
             logger.info("Restored lambda_k from %s", lambda_path)
         return infos

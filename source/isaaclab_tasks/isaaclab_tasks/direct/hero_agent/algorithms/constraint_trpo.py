@@ -17,6 +17,13 @@ Key design decisions:
       mean only. This prevents constraint pressure from collapsing variance
       (the structural root cause of entropy collapse in constrained Gaussian
       policies). Variance is controlled purely by reward-entropy balance.
+    - Target entropy (SAC-style): Learned entropy coefficient alpha replaces
+      fixed entropy_coef. A separate optimizer adjusts log_alpha to maintain
+      entropy near a target H_target. This prevents both entropy collapse
+      (alpha increases) and entropy explosion (alpha decreases). Fixed
+      entropy_coef causes explosion when TRPO step size is large (low cost
+      pressure during lambda warmup amplifies the entropy bonus on log_std
+      via the shared step size alpha = sqrt(max_kl/shs)).
     - d_k-normalized dual update: Violation (J_C_k - d_k) is divided by d_k
       before scaling lambda, so constraints with different budget scales
       contribute equally to multiplier growth.
@@ -105,8 +112,10 @@ class ConstraintTRPO:
         lambda_init: float = 0.0,
         # Line search acceptance threshold
         line_search_kl_margin: float = 1.5,
-        # Entropy
-        entropy_coef: float = 0.005,
+        # Target entropy (SAC-style automatic temperature)
+        target_entropy: float = 2.0,
+        alpha_entropy_lr: float = 3e-4,
+        alpha_entropy_init: float = 0.005,
         # Encoder z bounds
         z_bounds_coef: float = 0.3,
         # Lambda warmup
@@ -136,7 +145,12 @@ class ConstraintTRPO:
         self.value_loss_coef = value_loss_coef
         self.cost_value_loss_coef = cost_value_loss_coef
         self.max_grad_norm = max_grad_norm
-        self.entropy_coef = entropy_coef
+
+        # Target entropy: learned alpha replaces fixed entropy_coef.
+        # SAC dual update: alpha adjusts to maintain entropy near target.
+        self.target_entropy = target_entropy
+        self.log_alpha = torch.tensor(math.log(alpha_entropy_init), device=device, requires_grad=True)
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=alpha_entropy_lr)
 
         # GAE parameters
         self.gamma = gamma
@@ -406,7 +420,8 @@ class ConstraintTRPO:
             cost_surr += self.lambda_k[k] * cost_adv_k
 
         entropy = self.policy.entropy
-        return reward_surr + cost_surr - self.entropy_coef * entropy.mean()
+        alpha = self.log_alpha.exp().detach()
+        return reward_surr + cost_surr - alpha * entropy.mean()
 
     def _kl_divergence(self, obs: TensorDict, old_mu: torch.Tensor, old_sigma: torch.Tensor) -> torch.Tensor:
         """Compute mean KL(pi_old || pi_new) analytically for Gaussian."""
@@ -609,7 +624,8 @@ class ConstraintTRPO:
             cost_surrogate += self.lambda_k[k] * cost_adv_k
 
         # Combined: reward surrogate + Lagrangian cost surrogate - entropy
-        policy_loss = reward_surrogate + cost_surrogate - self.entropy_coef * entropy.mean()
+        alpha = self.log_alpha.exp().detach()
+        policy_loss = reward_surrogate + cost_surrogate - alpha * entropy.mean()
 
         mean_entropy = entropy.mean().item()
 
@@ -670,9 +686,9 @@ class ConstraintTRPO:
                     old_loss,
                 )
 
-        # Noise floor only: numerical safety net to prevent log_prob divergence
-        # when std -> 0. No ceiling needed (entropy_coef=0 + detached cost gradient
-        # means no upward pressure on std; reward gradient alone controls variance).
+        # Noise floor: numerical safety net to prevent log_prob divergence
+        # when std -> 0. No ceiling needed: target entropy auto-regulates
+        # alpha (entropy coefficient) to prevent std from growing unbounded.
         min_log_std = math.log(0.1)
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=min_log_std)
@@ -801,6 +817,19 @@ class ConstraintTRPO:
                     ).clamp(min=0.0, max=self.lambda_max)
 
         # ------------------------------------------------------------------
+        # 5. Alpha (entropy temperature) update -- SAC-style dual
+        # ------------------------------------------------------------------
+        # Always update (not LS-gated): entropy is an observable property of
+        # the current policy regardless of whether the actor step succeeded.
+        # min_alpha J(alpha) = log_alpha * (H(pi) - H_target)
+        #   H > H_target -> alpha decreases -> less entropy bonus
+        #   H < H_target -> alpha increases -> more entropy bonus
+        alpha_loss = self.log_alpha * (mean_entropy - self.target_entropy)
+        self.alpha_optimizer.zero_grad()
+        alpha_loss.backward()
+        self.alpha_optimizer.step()
+
+        # ------------------------------------------------------------------
         # Store constraint monitoring metrics
         # (read by ConstraintEncoderRunner._log_constraint_metrics)
         # ------------------------------------------------------------------
@@ -828,6 +857,7 @@ class ConstraintTRPO:
             "grad_norm_reward": reward_grad_norm,
             "grad_norm_cost": cost_grad_norm,
             "adv_raw_std": adv_raw_std.item(),
+            "alpha_entropy": self.log_alpha.exp().item(),
         }
         if hasattr(self.policy, "z_bounds_loss"):
             loss_dict["z_bounds"] = mean_z_bounds_loss

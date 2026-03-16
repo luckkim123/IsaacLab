@@ -317,11 +317,13 @@ class RslRlConstraintTRPOAlgorithmCfg:
     lambda_warmup_frac: float = 0.3
     line_search_kl_margin: float = 1.5
 
-    # Entropy regularization: small positive value to maintain exploration.
-    # Cost gradient is detached from std (no constraint-driven collapse), but
-    # the reward gradient itself pushes std down (deterministic = higher reward).
-    # Without entropy bonus, std collapses by ~iter 200, killing exploration.
-    entropy_coef: float = 0.005
+    # Target entropy (SAC-style automatic temperature tuning).
+    # Learned alpha replaces fixed entropy_coef. Prevents both entropy collapse
+    # (alpha increases) and entropy explosion (alpha decreases via dual update).
+    # H_target=2.0 corresponds to std~0.66 for 2D actions.
+    target_entropy: float = 2.0
+    alpha_entropy_lr: float = 3e-4
+    alpha_entropy_init: float = 0.005
 
     # Encoder z bounds
     z_bounds_coef: float = 0.3

@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-16] Target entropy: replace fixed entropy_coef with SAC-style auto-tuning
+
+### Context
+Run `2026-03-16_12-29-05` (178 iters) with all previous fixes (reward normalization,
+LS-gated updates, entropy_coef=0.005) revealed entropy/noise_std explosion:
+- noise_std grew continuously: 1.0 -> 1.24 (iter30) -> 1.40 (iter60) -> 1.59 (iter177)
+- entropy grew: 2.84 -> 3.25 -> 3.51 -> 3.72
+- Roll error improved to 7deg (iter70) then degraded to 20deg as noise overwhelmed control
+- Reward peaked at 48.4 (iter86) then fell to 23.7
+
+**Root cause analysis**: Same entropy_coef=0.005 was stable in the previous run
+(`2026-03-16_11-20-25`: std decreased 1.0 -> 0.78). The difference: lambda warmup + LS
+gating reduced cost gradient magnitude, which increased the TRPO step size alpha
+(alpha = sqrt(max_kl / shs), where shs is dominated by cost gradient on mu params).
+Larger step size amplified the constant entropy bonus (+0.005) on log_std, causing
+the positive feedback loop: more noise -> reward gradient on std weakens (random
+actions decorrelate advantages from noise direction) -> only entropy pushes up -> more noise.
+
+Comparison: old run lambda_mean=0.93 at iter30, new run=0.05. TRPO step size was ~5x
+larger in new run, amplifying entropy bonus equally.
+
+**Solution**: Fixed entropy_coef is fundamentally fragile -- it either causes collapse
+(entropy_coef=0) or explosion (0.005 with large step size). Replaced with SAC-style
+target entropy: learned alpha via dual variable update. Alpha decreases when entropy
+exceeds target, increases when below. Self-correcting regardless of TRPO step dynamics.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Replaced fixed `entropy_coef` parameter with learned `log_alpha` (nn.Parameter) + separate Adam optimizer. SAC dual update: `alpha_loss = log_alpha * (H - H_target)`. Policy loss uses `alpha.detach()` to prevent policy gradient from affecting alpha. Alpha update is NOT LS-gated (entropy is observable regardless of LS outcome).
+- `agents/rsl_rl_ppo_cfg.py`: Replaced `entropy_coef: 0.005` with `target_entropy: 2.0` (sigma~0.66 for 2D actions), `alpha_entropy_lr: 3e-4`, `alpha_entropy_init: 0.005`
+- `runners/constraint_encoder_runner.py`: Checkpoint save/load includes `log_alpha` state for training resume
+
+### Notes
+- H_target=2.0 corresponds to std~0.66 for 2D actions (initial H=2.84 at std=1.0). Chosen as moderate: below the old stable point (2.34/std=0.78) for better control precision, well above collapse zone (H<0).
+- Alpha update always runs (not LS-gated): entropy is a property of the current policy, well-defined even when LS fails and policy doesn't change.
+- The TRPO shared step size coupling is a known issue: mu and log_std parameters share the KL budget. When cost gradient is large, it "soaks up" the budget, leaving little room for std changes. When cost pressure is reduced (warmup), more budget goes to std -> entropy bonus amplified.
+
 ## [2026-03-16] Fix gradient scale imbalance + LS death spiral + entropy collapse
 
 ### Context
