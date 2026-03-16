@@ -9,12 +9,19 @@ Implements constrained RL with dual variable ascent:
     1. Lagrangian cost surrogate: sum_k lambda_k * cost_adv_k
     2. TRPO natural gradient for policy update (exact KL constraint)
     3. Value function update (pure MSE)
-    4. Dual variable update: lambda_k = clamp(lambda_k + lr*(J_C_k - d_k), 0, max)
+    4. Dual variable update: lambda_k = clamp(lambda_k + lr*(J_C_k - d_k)/d_k, 0, max)
 
-Key advantage over IPO log-barrier: lambda_k starts at 0 so there is no
-constraint pressure initially, allowing the random policy to explore freely.
-Pressure grows linearly with constraint violation, pushing the action *mean*
-toward constraint-satisfying directions rather than collapsing variance.
+Key design decisions:
+    - Detached-std cost ratio: The cost surrogate uses an importance sampling
+      ratio where std is detached, so constraint gradient flows through action
+      mean only. This prevents constraint pressure from collapsing variance
+      (the structural root cause of entropy collapse in constrained Gaussian
+      policies). Variance is controlled purely by reward-entropy balance.
+    - d_k-normalized dual update: Violation (J_C_k - d_k) is divided by d_k
+      before scaling lambda, so constraints with different budget scales
+      contribute equally to multiplier growth.
+    - lambda_k starts at 0: no constraint pressure initially, allowing the
+      random policy to explore freely.
 
 The algorithm maintains the same interface as RSL-RL PPO (init_storage, act,
 process_env_step, compute_returns, update) so it can be used as a drop-in
@@ -49,6 +56,8 @@ class ConstraintTRPO:
         - Line search: verifies KL constraint and surrogate improvement
         - No clipped surrogate; uses exact KL constraint
         - Lagrangian dual variables: lambda_k updated via subgradient ascent
+        - Cost surrogate uses mean-only gradient (std detached) to prevent
+          constraint-driven entropy collapse
     """
 
     def __init__(
@@ -335,6 +344,17 @@ class ConstraintTRPO:
             p.data.copy_(flat_params[offset : offset + numel].view_as(p))
             offset += numel
 
+    def _log_prob_mean_only(self, actions: torch.Tensor) -> torch.Tensor:
+        """Log probability with std detached -- gradient flows only through mean.
+
+        Used for cost surrogate to prevent constraint gradient from collapsing
+        variance. The Gaussian log_prob formula is identical to the standard one,
+        but std is detached so d(log_prob)/d(log_std) = 0.
+        """
+        mu = self.policy.action_mean
+        std = self.policy.action_std.detach()
+        return (-0.5 * (((actions - mu) / std).pow(2) + 2.0 * std.log() + math.log(2.0 * math.pi))).sum(dim=-1)
+
     def _linearized_surrogate(
         self,
         obs: TensorDict,
@@ -354,9 +374,13 @@ class ConstraintTRPO:
         ratio = torch.exp(log_prob - old_log_prob)
         reward_surr = -(advantages * ratio).mean()
 
+        # Cost ratio with detached std: constraint gradient guides mean, not variance
+        log_prob_cost = self._log_prob_mean_only(actions)
+        ratio_cost = torch.exp(log_prob_cost - old_log_prob)
+
         cost_surr = torch.tensor(0.0, device=self.device)
         for k in range(self.num_constraints):
-            cost_adv_k = (ratio * cost_advantages[:, k]).mean()
+            cost_adv_k = (ratio_cost * cost_advantages[:, k]).mean()
             cost_surr += self.lambda_k[k] * cost_adv_k
 
         entropy = self.policy.entropy
@@ -541,10 +565,15 @@ class ConstraintTRPO:
         ratio = torch.exp(log_prob - old_log_prob_flat.squeeze(-1))
         reward_surrogate = -(advantages_flat.squeeze(-1) * ratio).mean()
 
-        # Lagrangian-weighted cost surrogate
+        # Lagrangian-weighted cost surrogate (detached std: gradient to mean only)
+        # This prevents constraint pressure from collapsing variance -- the root
+        # cause of entropy collapse in constrained Gaussian policies.
+        log_prob_cost = self._log_prob_mean_only(actions_flat)
+        ratio_cost = torch.exp(log_prob_cost - old_log_prob_flat.squeeze(-1))
+
         cost_surrogate = torch.tensor(0.0, device=self.device)
         for k in range(self.num_constraints):
-            cost_adv_k = (ratio * cost_advantages_flat[:, k]).mean()
+            cost_adv_k = (ratio_cost * cost_advantages_flat[:, k]).mean()
             cost_surrogate += self.lambda_k[k] * cost_adv_k
 
         # Combined: reward surrogate + Lagrangian cost surrogate - entropy
@@ -713,11 +742,13 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         # 4. Dual variable update (Lagrangian multiplier ascent)
         # ------------------------------------------------------------------
+        # d_k-normalized dual update: violation is expressed as fraction of budget,
+        # so constraints with d_k=1 and d_k=200 contribute equally to lambda growth.
         with torch.no_grad():
             for k in range(self.num_constraints):
-                self.lambda_k[k] = (self.lambda_k[k] + self.lr_lambda * (mean_cost_returns[k] - self.d_k[k])).clamp(
-                    min=0.0, max=self.lambda_max
-                )
+                self.lambda_k[k] = (
+                    self.lambda_k[k] + self.lr_lambda * (mean_cost_returns[k] - self.d_k[k]) / self.d_k[k]
+                ).clamp(min=0.0, max=self.lambda_max)
 
         # ------------------------------------------------------------------
         # Store constraint monitoring metrics
