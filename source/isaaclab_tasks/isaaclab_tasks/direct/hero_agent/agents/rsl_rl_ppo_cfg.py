@@ -317,12 +317,12 @@ class RslRlConstraintTRPOAlgorithmCfg:
     lambda_warmup_frac: float = 0.3
     line_search_kl_margin: float = 1.5
 
-    # Entropy coefficient: fixed alpha (SAC alpha_lr=0 freezes the dual variable).
-    # 0.005 matches the 3/6 baseline that achieved <5 deg attitude error.
-    # Set alpha_entropy_lr > 0 to enable SAC-style target entropy auto-tuning.
+    # Entropy coefficient: disabled for TRPO (KL constraint provides exploration).
+    # TRPO takes max-KL steps every iteration; any alpha > 0 causes unbounded
+    # noise_std growth because there is no PPO-style clip/adaptive-LR to resist it.
     target_entropy: float = 2.0
     alpha_entropy_lr: float = 0.0
-    alpha_entropy_init: float = 0.005
+    alpha_entropy_init: float = 0.0
 
     # Encoder z bounds
     z_bounds_coef: float = 0.3

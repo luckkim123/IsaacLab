@@ -4,6 +4,62 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-17] 3-constraint Lagrangian baseline + disable entropy bonus for TRPO
+
+### Context
+Previous run `2026-03-16_15-09-42` (999 iters, Lagrangian, 8 constraints, target_entropy=2.0)
+failed with 17-20 deg attitude error, noise_std stuck at 1.0. Compared with successful run
+`2026-03-06_18-26-36` (IPO, 3 constraints, entropy_coef=0.005): 3.7 deg error, noise_std 0.2.
+
+**Root cause 1 (8→3 constraints)**: 5 continuous constraints (joint_vel, oscillation, yaw_vel,
+cob_cog, effort_limit) produce costs proportional to noise_std. As noise increased, continuous
+costs grew, lambda grew, cost gradient dominated reward gradient, creating a vicious cycle.
+The 3/6 run used only 3 binary constraints (noise-insensitive).
+
+**Root cause 2 (target_entropy)**: SAC-style alpha kept noise_std at 1.0, preventing the
+natural reward-driven noise reduction that the 3/6 run exhibited (converged to 0.2).
+
+**Fix applied**: Reduced to 3 binary constraints (accum_rot, attitude_abs, singularity) +
+fixed alpha_entropy_init=0.005. Restored velocity_limit_sim=6.28 (was 4.19).
+
+**Run `2026-03-17_07-15-39` (227 iters)**: Error improved to 5-8 deg (good!), reward peaked
+at 69.2 (iter 150). BUT noise_std grew unboundedly: 1.02→4.45, entropy 2.84→5.75. Reward
+started declining after iter 150.
+
+**Root cause 3 (entropy bonus in TRPO)**: With all constraints satisfied (lambda=0), the
+fixed alpha=0.005 entropy bonus has no counterbalancing force. PPO has clip ratio + adaptive
+LR to resist noise growth; TRPO takes max-KL steps every iteration, so any alpha > 0
+consistently pushes noise_std up. TRPO's KL constraint alone provides sufficient exploration.
+
+**Fix**: Set alpha_entropy_init=0.0. Also fixed math.log(0) crash in constraint_trpo.py
+(added guard: log(max(init, 1e-8))).
+
+### Changed
+- `config.py`: Reduced `HeroAgentConstrainedEncoderEnvCfg.constraints.terms` from 8 to 3
+  (kept: accum_rot budget=0.02, attitude_abs budget=0.01, singularity budget=0.15;
+  removed: effort_limit, joint_vel, oscillation, yaw_vel, cob_cog)
+- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 8→3, `constraint_budgets` updated to
+  (0.02, 0.01, 0.15), `alpha_entropy_lr` 0.01→0.0, `alpha_entropy_init` 0.005→0.0
+  (TRPO KL constraint provides exploration; entropy bonus causes unbounded noise growth)
+- `agents/rsl_rl_ppo_cfg.py`: `RslRlPpoActorCriticEncoderConstrainedCfg.num_constraints` 8→3
+- `hero_agent.py`: `velocity_limit_sim` 4.19→6.28 rad/s (restored 3/6 value)
+
+### Fixed
+- `algorithms/constraint_trpo.py`: `math.log(alpha_entropy_init)` crashes when init=0.0.
+  Added guard: `log(max(init, 1e-8))` so alpha initializes to ~1e-8 (effectively zero).
+
+### Added
+- `docs/plans/2026-03-17-lagrangian-baseline-3constraint.md`: Design document for experiment
+
+### Notes
+- All Lagrangian code improvements retained: std detach, reward adv normalization,
+  lambda warmup, d_k normalization, LS-gated updates, asymmetric critic, z detach from cost
+- Key insight: entropy bonus interacts fundamentally differently with TRPO vs PPO. In PPO,
+  clip + adaptive LR naturally resist noise growth. In TRPO, max_kl step has no such mechanism.
+- Next run should show noise_std naturally decreasing (reward gradient pushes toward
+  deterministic actions, TRPO KL constraint limits descent rate = natural annealing)
+- Success criteria: noise_std < 1.0 by iter 200, attitude error < 10 deg by iter 500
+
 ## [2026-03-16] Encoder z detach + effort_limit budget + lr_lambda reduction
 
 ### Context

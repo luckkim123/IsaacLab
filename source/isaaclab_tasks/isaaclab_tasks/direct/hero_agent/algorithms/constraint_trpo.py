@@ -149,7 +149,8 @@ class ConstraintTRPO:
         # Target entropy: learned alpha replaces fixed entropy_coef.
         # SAC dual update: alpha adjusts to maintain entropy near target.
         self.target_entropy = target_entropy
-        self.log_alpha = torch.tensor(math.log(alpha_entropy_init), device=device, requires_grad=True)
+        _safe_init = alpha_entropy_init if alpha_entropy_init > 0 else 1e-8
+        self.log_alpha = torch.tensor(math.log(_safe_init), device=device, requires_grad=True)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=alpha_entropy_lr)
 
         # GAE parameters
