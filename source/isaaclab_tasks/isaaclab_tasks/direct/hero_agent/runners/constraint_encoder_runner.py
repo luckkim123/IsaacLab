@@ -3,18 +3,21 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""EncoderRunner with constraint metrics logging, barrier schedule, and auto-sync for IPO.
+"""EncoderRunner with constraint metrics logging, lambda persistence, and auto-sync.
 
 Extends EncoderRunner to:
-    - Log per-constraint cost returns, barrier margins, and barrier_t
+    - Log per-constraint cost returns, violations, and Lagrangian dual variables
     - Use constraint names from env config instead of numeric indices
     - Auto-sync num_constraints from env config to algorithm/policy config
-    (Barrier schedule is updated internally in ConstraintTRPO.update())
+    - Save/load lambda_k state for checkpoint persistence
 """
 
 from __future__ import annotations
 
 import logging
+import os
+
+import torch
 
 from ..utils.logging import flush_metrics
 from .encoder_runner import EncoderRunner
@@ -23,10 +26,10 @@ logger = logging.getLogger(__name__)
 
 
 class ConstraintEncoderRunner(EncoderRunner):
-    """EncoderRunner with IPO constraint support.
+    """EncoderRunner with Lagrangian constraint support.
 
     Inherits encoder metrics and DORAEMON DR scheduling from EncoderRunner.
-    Adds barrier schedule update and constraint-specific WandB/TB logging.
+    Adds Lagrangian dual variable persistence and constraint-specific WandB/TB logging.
     Auto-syncs num_constraints from env config.
     """
 
@@ -84,7 +87,7 @@ class ConstraintEncoderRunner(EncoderRunner):
     def _log_constraint_metrics(self, _locs: dict, iteration: int) -> None:
         """Log constraint metrics to TensorBoard/WandB.
 
-        Logs per-constraint: cost_return (mean J_C_k) and barrier margin.
+        Logs per-constraint: cost_return, violation, lambda, and d_k (budget).
         """
         alg = self.alg
         if not hasattr(alg, "num_constraints"):
@@ -93,22 +96,41 @@ class ConstraintEncoderRunner(EncoderRunner):
         K = alg.num_constraints
         metrics: dict[str, float] = {}
 
-        # Barrier steepness
-        if hasattr(alg, "barrier_t"):
-            metrics["Constraint/barrier_t"] = alg.barrier_t
-
-        # Per-constraint: cost_return, margin, d_k (budget)
+        # Per-constraint: cost_return, violation, lambda, d_k (budget)
         for k in range(K):
             suffix = self._constraint_names[k] if k < len(self._constraint_names) else str(k)
-            if hasattr(alg, "_last_margins"):
-                metrics[f"Constraint/margin_{suffix}"] = alg._last_margins[k]
+            if hasattr(alg, "_last_lambdas"):
+                metrics[f"Constraint/lambda_{suffix}"] = alg._last_lambdas[k]
+            if hasattr(alg, "_last_violations"):
+                metrics[f"Constraint/violation_{suffix}"] = alg._last_violations[k]
             if hasattr(alg, "_last_cost_returns"):
                 metrics[f"Constraint/cost_return_{suffix}"] = alg._last_cost_returns[k]
             if hasattr(alg, "d_k"):
                 metrics[f"Constraint/d_k_{suffix}"] = alg.d_k[k].item()
+
+        # Aggregate lambda stats
+        if hasattr(alg, "lambda_k"):
+            metrics["Constraint/lambda_mean"] = alg.lambda_k.mean().item()
+            metrics["Constraint/lambda_max"] = alg.lambda_k.max().item()
 
         # Line search (policy update metric)
         if hasattr(alg, "_last_line_search_success"):
             metrics["Policy/line_search_success"] = alg._last_line_search_success
 
         flush_metrics(self.writer, metrics, iteration, self.logger_type)
+
+    def save(self, path, infos=None):
+        """Save checkpoint with lambda_k state."""
+        super().save(path, infos)
+        lambda_path = os.path.join(os.path.dirname(path), "lambda_state.pt")
+        torch.save({"lambda_k": self.alg.lambda_k}, lambda_path)
+
+    def load(self, path, load_optimizer=True, map_location=None):
+        """Load checkpoint and restore lambda_k if available."""
+        infos = super().load(path, load_optimizer, map_location)
+        lambda_path = os.path.join(os.path.dirname(path), "lambda_state.pt")
+        if os.path.exists(lambda_path):
+            state = torch.load(lambda_path, map_location=self.device, weights_only=False)
+            self.alg.lambda_k = state["lambda_k"].to(self.device)
+            logger.info("Restored lambda_k from %s", lambda_path)
+        return infos

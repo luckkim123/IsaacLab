@@ -279,7 +279,7 @@ class HeroAgentAdaptBaseRunnerCfg(_HeroAgentBaseRunnerCfg):
 
 @configclass
 class RslRlConstraintTRPOAlgorithmCfg:
-    """Algorithm configuration for ConstraintTRPO (IPO).
+    """Algorithm configuration for ConstraintTRPO (Lagrangian primal-dual).
 
     These fields are forwarded as kwargs to ConstraintTRPO.__init__().
     The class_name tells the runner to instantiate ConstraintTRPO instead of PPO.
@@ -306,14 +306,14 @@ class RslRlConstraintTRPOAlgorithmCfg:
     gamma: float = 0.99
     lam: float = 0.95
 
-    # Constraint / IPO
+    # Constraint / Lagrangian
     num_constraints: int = 8
     constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15, 0.05, 2.0, 0.3, 0.15, 0.02)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
-    barrier_t: float = 50.0
-    barrier_t_final: float = 100.0
-    barrier_t_schedule_frac: float = 0.4
+    lr_lambda: float = 0.035
+    lambda_max: float = 20.0
+    lambda_init: float = 0.0
     line_search_kl_margin: float = 1.5
 
     # Entropy
@@ -338,10 +338,10 @@ class RslRlPpoActorCriticEncoderConstrainedCfg(_RslRlPpoEncoderBaseCfg):
 
 @configclass
 class HeroAgentConstrainedEncoderRunnerCfg(_HeroAgentBaseRunnerCfg):
-    """Runner configuration for constrained encoder training (IPO + TRPO).
+    """Runner configuration for constrained encoder training (Lagrangian + TRPO).
 
     Uses ConstraintEncoderRunner which inherits EncoderRunner and adds
-    barrier schedule + constraint metrics logging.
+    Lagrangian dual variable persistence + constraint metrics logging.
     """
 
     class_name: str = "ConstraintEncoderRunner"

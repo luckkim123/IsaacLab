@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Constraint cost functions for IPO (Interior-point Policy Optimization).
+"""Constraint cost functions for Lagrangian constrained RL.
 
 Provides cost functions (binary indicator or continuous) for the constrained
 RL pipeline. Each constraint has a per-step budget D_k and a cost_type.
@@ -71,14 +71,6 @@ class ALBCConstraintCfg:
     """
 
     terms: list[ConstraintTermCfg] = []
-
-    # IPO barrier parameters
-    barrier_t: float = 50.0
-    barrier_t_final: float = 100.0
-    barrier_t_schedule_frac: float = 0.4
-
-    # Adaptive threshold: d_k^i = max(d_k, J_C_k + alpha * d_k)
-    adaptive_threshold_alpha: float = 0.1
 
     # Cost GAE parameters
     cost_gamma: float = 0.99

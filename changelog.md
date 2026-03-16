@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-16] Replace IPO log-barrier with Lagrangian (primal-dual) constraint enforcement
+
+### Context
+Previous session identified the root cause of entropy collapse: IPO log-barrier assumes
+a feasible start (all constraints satisfied), but our random policy starts infeasible.
+The barrier gradient `1/(t * margin)` at maximum from iter 0 drives the easiest
+optimization path -- reducing action variance (which reduces ALL constraint costs
+simultaneously). noise_std collapsed to 0.25 floor by iter 50, staying there for 550
+iterations. Reward plateaued at ~30, attitude error 17-18 deg.
+
+Previous fixes (barrier_t tuning, noise floors, n_active normalization, adaptive threshold,
+entropy_coef) were all band-aids that delayed but couldn't prevent this structural problem.
+
+Solution: replace log-barrier with Lagrangian primal-dual constraint enforcement.
+`lambda_k` starts at 0 (no initial constraint pressure), grows linearly with violation
+via dual ascent `lambda_k = clamp(lambda_k + lr*(J_C_k - d_k), 0, max)`. This pushes
+action *mean* toward constraint-satisfying directions rather than collapsing variance.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Replaced barrier params (`barrier_t`, `barrier_t_final`, `barrier_t_schedule_frac`) with Lagrangian params (`lr_lambda=0.035`, `lambda_max=20.0`, `lambda_init=0.0`). Added `self.lambda_k` tensor (one per constraint).
+- `algorithms/constraint_trpo.py`: Cost surrogate changed from `cost_adv_k / ((1-gamma) * barrier_t * margin)` to `lambda_k[k] * cost_adv_k` in both `_linearized_surrogate()` and `update()`
+- `algorithms/constraint_trpo.py`: Added dual variable update (step 4) after value update: `lambda_k = clamp(lambda_k + lr_lambda * (J_C_k - d_k), 0, lambda_max)`
+- `algorithms/constraint_trpo.py`: `_linearized_surrogate()` and `_line_search()` signatures simplified (removed `mean_cost_returns` parameter)
+- `algorithms/constraint_trpo.py`: Monitoring metrics changed from `_last_margins` to `_last_violations` + `_last_lambdas`. Added `lambda_mean` to loss_dict.
+- `agents/rsl_rl_ppo_cfg.py`: `RslRlConstraintTRPOAlgorithmCfg` replaced `barrier_t`/`barrier_t_final`/`barrier_t_schedule_frac` with `lr_lambda`/`lambda_max`/`lambda_init`
+- `runners/constraint_encoder_runner.py`: Logging replaced `barrier_t`/`margin_*` metrics with `lambda_*`/`violation_*` metrics. Added `lambda_mean`/`lambda_max` aggregate stats.
+- `runners/constraint_encoder_runner.py`: Added `save()`/`load()` overrides for `lambda_k` checkpoint persistence (`lambda_state.pt` alongside model checkpoint)
+
+### Removed
+- `algorithms/constraint_trpo.py`: `update_barrier_schedule()` method, barrier schedule instance vars. `set_max_iterations()` kept as no-op stub (called by BaseRunner.learn).
+- `mdp/constraints.py`: Dead fields from `ALBCConstraintCfg`: `barrier_t`, `barrier_t_final`, `barrier_t_schedule_frac`, `adaptive_threshold_alpha`
+
+### Notes
+- TRPO core unchanged: CG solver, Fisher-vector product, line search, KL divergence
+- Cost GAE unchanged: per-constraint standardization preserved
+- Noise floor/ceiling kept as safety net (should rarely be hit with Lagrangian)
+- Hyperparameter rationale: lr_lambda=0.035 gives ~0.28/iter growth for fully violated binary constraint (d_k=2), reaching lambda=5 in ~18 iters. lambda_max=20.0 is a conservative cap.
+- Dual update ordering: policy -> value -> dual. lambda_k updated on current rollout, takes effect next iteration (standard primal-dual one-step lag).
+
 ## [2026-03-16] Replace adaptive threshold with pure barrier + root cause analysis
 
 ### Context
