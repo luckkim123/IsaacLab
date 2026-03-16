@@ -633,14 +633,12 @@ class ConstraintTRPO:
                     old_loss,
                 )
 
-        # Enforce noise floor and ceiling BEFORE KL measurement.
-        # Floor (std=0.25): prevents entropy collapse under strong constraint pressure.
-        # Ceiling (std=2.0): prevents entropy explosion when constraint pressure is weak.
-        # Must clamp before KL so the logged metric reflects the actual policy state.
-        min_log_std = math.log(0.25)
-        max_log_std = math.log(1.0)
+        # Noise floor only: numerical safety net to prevent log_prob divergence
+        # when std -> 0. No ceiling needed (entropy_coef=0 + detached cost gradient
+        # means no upward pressure on std; reward gradient alone controls variance).
+        min_log_std = math.log(0.1)
         with torch.no_grad():
-            self.policy.log_std.data.clamp_(min=min_log_std, max=max_log_std)
+            self.policy.log_std.data.clamp_(min=min_log_std)
 
         # Measure KL right after TRPO step + clamp (before encoder update shifts z)
         with torch.no_grad():

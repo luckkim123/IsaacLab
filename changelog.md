@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-16] Remove entropy_coef + noise ceiling (post detach-std analysis)
+
+### Context
+Training run `2026-03-16_11-05-17` (315 iters) with detached-std cost gradient showed
+entropy and noise_std LOCKED at ceiling (entropy=2.838, std=1.0) for ALL 315 iterations.
+The detach fix successfully blocked cost gradient from collapsing std, but with entropy_coef
+still active (0.02), the only remaining force on std was upward (entropy bonus). Reward
+gradient at std=1.0 is too weak to push down (actions are effectively random with ~32%
+probability mass outside [-1,1]).
+
+Result: policy learned ~20 reward (vs potential ~80), attitude error 25-30 deg, 5/8
+constraints over budget, effort_limit and yaw_vel lambdas saturated to 20.0 (max).
+
+Decision: entropy_coef was originally needed to counteract cost-gradient-driven collapse.
+With cost gradient detached from std, there is no collapse pressure to counteract.
+Setting entropy_coef=0 lets reward gradient alone control variance (natural equilibrium).
+Noise ceiling also removed (no upward pressure without entropy bonus). Floor lowered
+to 0.1 (numerical safety only, not behavior-modifying).
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `entropy_coef` 0.02 -> 0.0 in `RslRlConstraintTRPOAlgorithmCfg` (cost gradient detached from std, no collapse to counteract)
+- `algorithms/constraint_trpo.py`: Removed noise ceiling (`max_log_std`), lowered floor from `log(0.25)` to `log(0.1)` (numerical safety only)
+- `runners/base_runner.py`: `_apply_noise_floor()` removed ceiling (`max_std`), lowered floor from 0.25 to 0.1
+
+### Notes
+- With entropy_coef=0 and detached cost: only reward gradient controls std
+- Initial std=1.0 (from init_noise_std=1.0 in policy config); reward gradient should push it down naturally
+- TRPO KL constraint limits rate of std change, providing natural annealing
+- Floor 0.1 is purely numerical: prevents log_prob divergence when std -> 0
+- Unconstrained Encoder-Base also has entropy_coef=0.005 but noise naturally converges -- reward alone is sufficient
+
 ## [2026-03-16] Fix entropy collapse: detach std from cost gradient + d_k normalization
 
 ### Context

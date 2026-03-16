@@ -316,8 +316,9 @@ class RslRlConstraintTRPOAlgorithmCfg:
     lambda_init: float = 0.0
     line_search_kl_margin: float = 1.5
 
-    # Entropy
-    entropy_coef: float = 0.02
+    # Entropy (0.0: cost gradient is detached from std, so no collapse pressure
+    # to counteract -- reward gradient alone controls variance)
+    entropy_coef: float = 0.0
 
     # Encoder z bounds
     z_bounds_coef: float = 0.3

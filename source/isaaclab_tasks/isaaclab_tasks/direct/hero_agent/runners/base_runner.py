@@ -102,16 +102,14 @@ class BaseRunner(OnPolicyRunner):
         return infos
 
     def _apply_noise_floor(self) -> None:
-        """Clamp action noise std to [min, max] range.
+        """Clamp action noise std to minimum for numerical safety.
 
-        Floor prevents exploration collapse under domain randomization.
-        Ceiling prevents entropy explosion when constraint pressure is weak.
-        Always active regardless of other settings.
+        Floor prevents log_prob divergence when std approaches zero.
+        No ceiling: reward gradient alone controls variance (cost gradient
+        is detached from std in ConstraintTRPO, and entropy_coef=0).
         """
-        min_std = 0.25
-        max_std = 1.0
+        min_std = 0.1
         if hasattr(self.alg.policy, "log_std"):
             if not hasattr(self, "_cached_min_log_std"):
                 self._cached_min_log_std = torch.log(torch.tensor(min_std, device=self.device))
-                self._cached_max_log_std = torch.log(torch.tensor(max_std, device=self.device))
-            self.alg.policy.log_std.data.clamp_(min=self._cached_min_log_std, max=self._cached_max_log_std)
+            self.alg.policy.log_std.data.clamp_(min=self._cached_min_log_std)
