@@ -4,6 +4,56 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-16] Run analysis: encoder z instability root cause identified
+
+### Context
+Run `2026-03-16_13-02-33` (1000 iters) completed with alpha_entropy tuning (lr=0.01,
+init=0.001). Target entropy mechanism worked correctly: alpha self-corrected
+(0.001 -> 0.0006 -> 0.005 -> 0.0), entropy stabilized at 2.33, noise_std at 0.85.
+
+Training was healthy until iter 777: reward 25-30, roll_err 15-20 deg, pitch_err 13-18 deg,
+line search 100% success. Then catastrophic collapse: 112/123 LS failures (iter 777-899),
+reward crashed to 10, pitch_err spiked to 52 deg, encoder z saturated to [-1.0, 1.0].
+
+**Root cause analysis** (iter-by-iter data from iter 740-810):
+
+The LS failure cascade was NOT caused by grad_cost being too large:
+- iter 774: kl=7.38, grad_cost=1.13 (normal range)
+- iter 775: kl=36.08, grad_cost=2.21 (normal range)
+- iter 776: kl=82.11, grad_cost=11.49 (grad_cost spiked AFTER kl already exploded)
+
+The actual cause: **encoder update shifts z after line search KL check**.
+Line search verifies kl < 0.015 for actor params only (line 541). Then encoder
+update (line 706-738) changes z -> actor's input changes -> actual KL = 30-82.
+
+Encoder gradient grew with lambda (cost component of policy_loss dominates):
+- lambda_mean=0.0: eg=0.02 (stable)
+- lambda_mean=2.2: eg=0.06
+- lambda_mean=4.4: eg=0.13
+- lambda_mean=4.9: eg=0.05-1.0 (oscillating, increasingly unstable)
+
+Pre-catastrophe z oscillation pattern visible from iter 740:
+z_bounds_loss oscillated (0.002 -> 0.0 -> 0.006 -> 0.0) as encoder pushed z toward
+boundaries and z_bounds pulled it back. Oscillation amplitude grew until instability
+at iter 764 (kl=0.44 -> 2.05 -> 7.38 -> 36 -> 82).
+
+During LS failures (iter 777+): encoder/lambda correctly gated (not updated),
+but occasional LS successes (786, 802, 820) each caused massive kl jumps
+(51, 30, 2) and pushed z further toward saturation. By iter 802: z=[-1.0, 1.0].
+
+**Identified fix**: Detach z from cost_surrogate in encoder gradient computation.
+Encoder would only receive reward gradient (eg ~0.02-0.06), eliminating the
+cost-driven z instability. Cost critic already uses asymmetric privileged obs,
+so encoder z is not needed for cost estimation.
+
+### Notes
+- Target entropy (SAC-style alpha) works correctly -- not the issue in this run
+- Lambda warmup works correctly -- lambdas grow gradually, no early explosion
+- effort_limit lambda hit max (20.0) at iter 555, but training continued fine until iter 777
+- The 4 constraints over budget at end: effort_limit (cr=12.5/dk=5), oscillation (44/40), cob_cog (2.0/2.0), singularity (6.6/15 -- resolved late)
+- yaw_vel successfully constrained (cr=28.9 < dk=40, lambda dropped to 0)
+- Pending fix: detach encoder z from cost surrogate gradient path
+
 ## [2026-03-16] Tune alpha entropy hyperparameters for faster response
 
 ### Context
