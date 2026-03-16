@@ -225,6 +225,72 @@ def effort_limit_cost(
     return (computed.abs().max(dim=-1).values > real_limit).float()
 
 
+# Alias: same logic, clearer name for config readability
+joint_torque_cost = effort_limit_cost
+
+
+def joint_velocity_limit_cost(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+    limit_rad_per_s: float = 4.189,
+) -> torch.Tensor:
+    """Binary cost: 1 if any ALBC joint velocity exceeds limit.
+
+    Hard velocity limit based on motor specs. 4.189 rad/s = 40 RPM.
+
+    Args:
+        env: Environment instance.
+        limit_rad_per_s: Maximum joint velocity in rad/s.
+
+    Returns:
+        (num_envs,) binary tensor.
+    """
+    joint_vel = _robot.data.joint_vel[:, env._albc_joint_ids]
+    return (joint_vel.abs().max(dim=-1).values > limit_rad_per_s).float()
+
+
+def overshoot_cost(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+    threshold: float = 0.035,
+) -> torch.Tensor:
+    """Binary cost: 1 if attitude error sign flips with magnitude > threshold.
+
+    Detects overshoot: the error crosses zero (sign change on any axis)
+    while the current error exceeds threshold. Uses per-axis signed error
+    from env._prev_attitude_error_rp (roll/pitch).
+
+    Args:
+        env: Environment instance.
+        threshold: Minimum error magnitude (rad) to count as overshoot (~2 deg).
+
+    Returns:
+        (num_envs,) binary tensor.
+    """
+    curr = env._attitude_error[:, :2]
+    prev = env._prev_attitude_error_rp
+    # Sign change on any axis AND current magnitude exceeds threshold
+    sign_flip = (curr * prev < 0).any(dim=-1)
+    magnitude = curr.abs().max(dim=-1).values > threshold
+    return (sign_flip & magnitude).float()
+
+
+def attitude_error_cost(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+) -> torch.Tensor:
+    """Continuous cost: L2 norm of roll/pitch attitude error (rad).
+
+    Average constraint -- budget D_k is the target mean error.
+    Replaces settling reward with adaptive Lagrangian weighting.
+    Reuses env._potentials (already computed L2 norm).
+
+    Returns:
+        (num_envs,) non-negative tensor in radians.
+    """
+    return env._potentials
+
+
 def yaw_velocity_cost(
     _robot: Articulation,
     env: HeroAgentEnv,

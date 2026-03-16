@@ -77,6 +77,10 @@ class ALBCRewardCfg:
     # EMA alpha for constraint system (not used by rewards directly)
     ema_joint_vel_alpha: float = 0.2
 
+    # -- PBRS progress reward --
+    progress_weight: float = 0.0
+    progress_gamma: float = 0.99
+
     # -- TDC-specific (disabled by default) --
     stability_gate_enable: bool = False
 
@@ -270,6 +274,27 @@ def settling_reward(
         threshold: Settling zone boundary in radians.
     """
     return (env._potentials < threshold).float()
+
+
+def progress_reward(
+    _robot: Articulation,
+    env: HeroAgentEnv,
+    gamma: float = 0.99,
+    **_kwargs,
+) -> torch.Tensor:
+    """PBRS (Potential-Based Reward Shaping) progress reward.
+
+    Returns prev_potential - gamma * potential. Positive when error decreases
+    (making progress), negative when error increases (regressing).
+    Theoretically safe: does not change the optimal policy (Ng et al. 1999).
+
+    NOT dt-scaled: the temporal difference already reflects per-step change.
+
+    Args:
+        env: Environment instance (provides _prev_potentials, _potentials).
+        gamma: Discount factor for shaping (should match training gamma).
+    """
+    return env._prev_potentials - gamma * env._potentials
 
 
 def energy_penalty(

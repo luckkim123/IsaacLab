@@ -47,10 +47,11 @@ from .mdp import (
     ConstraintTermCfg,
     accumulated_rotation_cost,
     attitude_absolute_cost,
-    cob_cog_alignment_cost,
-    effort_limit_cost,
+    attitude_error_cost,
     joint_oscillation_cost,
-    joint_velocity_cost,
+    joint_torque_cost,
+    joint_velocity_limit_cost,
+    overshoot_cost,
     singularity_cost,
     yaw_velocity_cost,
 )
@@ -585,7 +586,7 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
 
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(
         terms=[
-            # Binary constraints (3 terms, matching 3/6 baseline)
+            # --- Binary constraints (6 terms) ---
             ConstraintTermCfg(
                 func=accumulated_rotation_cost,
                 params={"max_rotations": 2.0},
@@ -604,6 +605,42 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
                 budget=0.15,
                 name="singularity",
             ),
+            ConstraintTermCfg(
+                func=joint_torque_cost,
+                budget=0.05,
+                name="joint_torque",
+            ),
+            ConstraintTermCfg(
+                func=joint_velocity_limit_cost,
+                params={"limit_rad_per_s": 4.189},
+                budget=0.05,
+                name="joint_vel_limit",
+            ),
+            ConstraintTermCfg(
+                func=overshoot_cost,
+                params={"threshold": 0.035},
+                budget=0.10,
+                name="overshoot",
+            ),
+            # --- Continuous constraints (3 terms) ---
+            ConstraintTermCfg(
+                func=attitude_error_cost,
+                budget=0.122,
+                cost_type="average",
+                name="attitude_err",
+            ),
+            ConstraintTermCfg(
+                func=joint_oscillation_cost,
+                budget=0.30,
+                cost_type="average",
+                name="joint_osc",
+            ),
+            ConstraintTermCfg(
+                func=yaw_velocity_cost,
+                budget=0.15,
+                cost_type="average",
+                name="yaw_vel",
+            ),
         ],
     )
 
@@ -612,7 +649,12 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
         enable=True,
     )
 
-    # Zero energy/smoothness reward weights to avoid double-counting with
-    # joint_vel and oscillation constraints. command and settling are retained
-    # as they have no constraint overlap.
-    reward: ALBCRewardCfg = ALBCRewardCfg(energy_weight=0.0, smoothness_weight=0.0)
+    # settling replaced by attitude_err constraint (adaptive lambda vs fixed weight).
+    # energy/smoothness handled by constraint system. PBRS progress for rise time.
+    reward: ALBCRewardCfg = ALBCRewardCfg(
+        settling_weight=0.0,
+        energy_weight=0.0,
+        smoothness_weight=0.0,
+        progress_weight=2.0,
+        progress_gamma=0.99,
+    )

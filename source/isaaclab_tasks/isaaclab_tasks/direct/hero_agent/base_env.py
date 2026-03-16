@@ -42,6 +42,7 @@ from .mdp import (
     compute_policy_obs,
     compute_privileged_obs,
     energy_penalty,
+    progress_reward,
     settling_reward,
 )
 from .mdp.events import (
@@ -317,6 +318,13 @@ class HeroAgentEnv(DirectRLEnv):
                 func=action_smoothness_penalty,
                 weight=rcfg.smoothness_weight,
             )
+        if rcfg.progress_weight != 0.0:
+            terms["progress"] = RewardTermCfg(
+                func=progress_reward,
+                weight=rcfg.progress_weight,
+                params={"gamma": rcfg.progress_gamma},
+                scale_by_dt=False,
+            )
         return terms
 
     def _init_doraemon(self) -> None:
@@ -353,6 +361,9 @@ class HeroAgentEnv(DirectRLEnv):
         # Accumulated rotation tracking (for IPO constraint)
         self._accumulated_rotation = torch.zeros(self.num_envs, 2, device=self.device)
         self._prev_joint_pos = torch.zeros(self.num_envs, 2, device=self.device)
+
+        # Overshoot detection buffer (per-axis signed roll/pitch error from prev step)
+        self._prev_attitude_error_rp = torch.zeros(self.num_envs, 2, device=self.device)
 
         # EMA joint velocity (for high-pass oscillation penalty)
         self._ema_joint_vel = torch.zeros(self.num_envs, 2, device=self.device)
@@ -855,6 +866,9 @@ class HeroAgentEnv(DirectRLEnv):
         if constraints_cfg is not None:
             self.extras["costs"] = compute_all_costs(self._robot, self, constraints_cfg)
 
+        # Update overshoot buffer AFTER constraint computation (so overshoot_cost reads prev step)
+        self._prev_attitude_error_rp[:] = self._attitude_error[:, :2]
+
         return reward
 
     def _collect_episode_metrics(
@@ -1151,6 +1165,8 @@ class HeroAgentEnv(DirectRLEnv):
         # Reset accumulated rotation tracking (IPO constraint)
         self._accumulated_rotation[env_ids] = 0.0
         self._prev_joint_pos[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
+        # Reset overshoot detection buffer (set to 0; overwritten in _reset_task_and_state)
+        self._prev_attitude_error_rp[env_ids] = 0.0
 
         # Reset perturbation state: randomize timer phase to decorrelate envs
         rand_cfg = self.cfg.randomization
@@ -1265,6 +1281,8 @@ class HeroAgentEnv(DirectRLEnv):
         initial_potential = torch.linalg.norm(attitude_error[:, :2], dim=-1)
         self._potentials[env_ids] = initial_potential
         self._prev_potentials[env_ids] = initial_potential
+        # Initialize overshoot buffer to initial error (prevents false positive on first step)
+        self._prev_attitude_error_rp[env_ids] = attitude_error[:, :2]
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Setup or toggle visibility of debug visualization markers."""
