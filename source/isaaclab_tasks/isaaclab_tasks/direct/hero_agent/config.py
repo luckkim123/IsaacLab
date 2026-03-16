@@ -585,7 +585,7 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
 
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(
         terms=[
-            # Binary constraints
+            # Binary constraints (3 terms, matching 3/6 baseline)
             ConstraintTermCfg(
                 func=accumulated_rotation_cost,
                 params={"max_rotations": 2.0},
@@ -603,37 +603,6 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
                 params={"sin_g2_limit": 0.15},
                 budget=0.15,
                 name="singularity",
-            ),
-            ConstraintTermCfg(
-                func=effort_limit_cost,
-                params={},
-                budget=0.25,
-                name="effort_limit",
-            ),
-            # Average constraints
-            ConstraintTermCfg(
-                func=joint_velocity_cost,
-                budget=2.0,
-                cost_type="average",
-                name="joint_vel",
-            ),
-            ConstraintTermCfg(
-                func=joint_oscillation_cost,
-                budget=0.4,
-                cost_type="average",
-                name="oscillation",
-            ),
-            ConstraintTermCfg(
-                func=yaw_velocity_cost,
-                budget=0.4,
-                cost_type="average",
-                name="yaw_vel",
-            ),
-            ConstraintTermCfg(
-                func=cob_cog_alignment_cost,
-                budget=0.02,
-                cost_type="average",
-                name="cob_cog",
             ),
         ],
     )

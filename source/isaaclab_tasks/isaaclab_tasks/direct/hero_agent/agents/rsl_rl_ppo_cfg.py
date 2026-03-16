@@ -307,8 +307,8 @@ class RslRlConstraintTRPOAlgorithmCfg:
     lam: float = 0.95
 
     # Constraint / Lagrangian
-    num_constraints: int = 8
-    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15, 0.25, 2.0, 0.4, 0.4, 0.02)
+    num_constraints: int = 3
+    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
     lr_lambda: float = 0.01
@@ -317,13 +317,12 @@ class RslRlConstraintTRPOAlgorithmCfg:
     lambda_warmup_frac: float = 0.3
     line_search_kl_margin: float = 1.5
 
-    # Target entropy (SAC-style automatic temperature tuning).
-    # Learned alpha replaces fixed entropy_coef. Prevents both entropy collapse
-    # (alpha increases) and entropy explosion (alpha decreases via dual update).
-    # H_target=2.0 corresponds to std~0.66 for 2D actions.
+    # Entropy coefficient: fixed alpha (SAC alpha_lr=0 freezes the dual variable).
+    # 0.005 matches the 3/6 baseline that achieved <5 deg attitude error.
+    # Set alpha_entropy_lr > 0 to enable SAC-style target entropy auto-tuning.
     target_entropy: float = 2.0
-    alpha_entropy_lr: float = 0.01
-    alpha_entropy_init: float = 0.001
+    alpha_entropy_lr: float = 0.0
+    alpha_entropy_init: float = 0.005
 
     # Encoder z bounds
     z_bounds_coef: float = 0.3
@@ -337,7 +336,7 @@ class RslRlPpoActorCriticEncoderConstrainedCfg(_RslRlPpoEncoderBaseCfg):
     """
 
     class_name: str = "ActorCriticEncoderConstrained"
-    num_constraints: int = 8
+    num_constraints: int = 3
     cost_critic_hidden_dims: list[int] = [256, 128, 64]
     asymmetric_critic: bool = True
 

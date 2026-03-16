@@ -198,7 +198,7 @@ HERO_AGENT_CFG = ArticulationCfg(
             stiffness=100.0,  # Kp: w_n=57.7 rad/s with J~0.15 kg*m^2
             damping=3.0,  # Kd: damping ratio ~0.7 (near critically damped)
             effort_limit_sim=9.5,  # Nm, Dynamixel XW540-T260-R stall torque @ 12V
-            velocity_limit_sim=4.19,  # rad/s, Dynamixel XW540-T260-R no-load speed (40rpm)
+            velocity_limit_sim=6.28,  # rad/s, 2*pi (restored for Lagrangian baseline experiment)
         ),
     },
 )
