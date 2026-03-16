@@ -32,9 +32,16 @@ matching unconstrained encoder-base noise at convergence (0.17).
 - `config.py`: Removed joint_osc constraint from terms list (9->8 constraints)
 - `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 9->8, `constraint_budgets` updated
   to 8-tuple (removed joint_osc budget=0.30)
-- `runners/base_runner.py`: `min_std` 0.20 -> 0.15 (noise floor lowered for finer control)
-- `algorithms/constraint_trpo.py`: `min_log_std` log(0.2) -> log(0.15) (unified with
-  base_runner floor)
+- `runners/base_runner.py`: `min_std` 0.20 -> 0.15 -> **0.20** (reverted, see below)
+- `algorithms/constraint_trpo.py`: `min_log_std` log(0.2) -> log(0.15) -> **log(0.2)** (reverted)
+
+### Fixed
+- `runners/base_runner.py`, `algorithms/constraint_trpo.py`: Reverted noise floor 0.15 -> 0.20.
+  Run `2026-03-17_08-48-06` (269 iters) showed entropy collapse to -0.96 (from 0.17) and
+  noise_std pinned at 0.15 floor. Error worsened: roll 8.5->15.2 deg (+80%), pitch 11.5->17.5 deg
+  (+52%). Root cause: noise floor 0.15 too aggressive -- combined with tightened command_sigma=0.20,
+  policy lost exploration capacity entirely. Floor 0.20 keeps sigma=0.20 gradient benefit while
+  maintaining viable exploration.
 
 ### Notes
 - Quadratic command reward was evaluated but rejected: gradient goes to zero near e=0
@@ -43,6 +50,8 @@ matching unconstrained encoder-base noise at convergence (0.17).
   joint_torque(0.05), joint_vel_limit(0.05), overshoot(0.10), attitude_err(0.122),
   yaw_vel(0.15)
 - Target: 3 deg mean error (unconstrained encoder-base achieved min 2.7/2.9 deg)
+- Noise floor 0.15 is NOT viable with constrained TRPO -- entropy collapses within 269 iters.
+  0.20 is the minimum safe floor (tested range: 0.10, 0.15, 0.20)
 
 ## [2026-03-17] Constraint expansion 3→9 + PBRS progress reward
 
