@@ -314,6 +314,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
     lr_lambda: float = 0.035
     lambda_max: float = 20.0
     lambda_init: float = 0.0
+    lambda_warmup_frac: float = 0.15
     line_search_kl_margin: float = 1.5
 
     # Entropy (0.0: cost gradient is detached from std, so no collapse pressure

@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-16] Lambda LR warmup + d_k^2-normalized cost value loss
+
+### Context
+Run `2026-03-16_11-20-25` (179 iters) confirmed entropy fix works: entropy stable at
+2.33 (was 0.07), noise_std 0.78 (was 0.25), arm actually moving (act_size=0.92 vs 0.36),
+line search 100% success, reward growing (23.8 at iter 179).
+
+New problem: lambda grows too fast, constraint pressure dominates before policy learns.
+effort_limit lambda=15.6, yaw_vel=14.7 at iter 179 (near lambda_max=20). Total constraint
+gradient ~42x reward gradient. Attitude error stuck at 27-29 deg. Encoder-Base (no
+constraints) achieves <10 deg -- reward structure IS sufficient, constraints are suppressing
+learning.
+
+Root cause: lr_lambda=0.035 with violations of 2-4x budget causes lambda to reach ~5 by
+iter 60, before the policy has learned basic attitude control. Secondary issue: cost value
+loss=19.0 (vs value loss=0.01) because joint_vel MSE~27000 dominates accum_rot MSE~1e-7
+within cost_critic's shared hidden layers.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Added `lambda_warmup_frac` parameter (default 0.15) -- linearly ramps lr_lambda from 0 to target over warmup period (15% of max_iterations = 375 iters for max_iter=2500)
+- `algorithms/constraint_trpo.py`: `set_max_iterations()` activated from no-op -- now computes `_lambda_warmup_end` from `lambda_warmup_frac * max_iterations`
+- `algorithms/constraint_trpo.py`: Dual update uses `effective_lr = lr_lambda * min(1.0, iteration / warmup_end)` instead of fixed `lr_lambda`
+- `algorithms/constraint_trpo.py`: Cost value loss changed from `MSE.mean()` to `(per_k_mse / d_k^2).mean()` -- equalizes gradient across constraints with different cost return scales (joint_vel MSE 27000 -> 0.68, oscillation 4290 -> 4.77, effort_limit 335 -> 13.4; 80:1 range compressed to ~20:1)
+- `algorithms/constraint_trpo.py`: Added `lambda_lr_eff` to loss dict for WandB monitoring
+- `algorithms/constraint_trpo.py`: Updated module docstring with lambda warmup and cost value normalization design decisions
+- `agents/rsl_rl_ppo_cfg.py`: Added `lambda_warmup_frac: float = 0.15` to `RslRlConstraintTRPOAlgorithmCfg`
+
+### Notes
+- Warmup timeline (2500 iters): iter 0-375 lambda LR ramps 0 -> 0.035 (reward learning dominant), iter 375+ full lambda LR (constraint enforcement)
+- d_k^2 normalization affects cost_critic training only; dual update (already d_k-normalized) and cost surrogate (already per-constraint standardized) are unchanged
+- Lambda checkpoint save/load, TRPO core, detached-std cost ratio all unchanged
+- Expected: attitude error <15 deg during warmup phase (iter 0-90), lambda stays near 0 initially, cost_value_loss significantly lower than 19.0
+
 ## [2026-03-16] Remove entropy_coef + noise ceiling (post detach-std analysis)
 
 ### Context
@@ -303,142 +336,6 @@ to 50.0 for code consistency.
 - `barrier_t_schedule_frac=0.4` unchanged -- annealing completes at 40% of max_iterations
 - Next run key metrics: line_search_success > 50%, entropy > 0.5 past step 100, encoder/grad_norm > 0, joint_vel_abs_max > 1.0
 - Follow-up issues identified: (1) line_search_cost_margin configured but unused, (2) ALBCConstraintCfg dead fields cleanup, (3) encoder KL guard if spike persists
-
-## [2026-03-09] Per-constraint cost advantage normalization
-
-### Context
-Constrained-Encoder-Base training converged to a local optimum where the arm stopped
-moving (action_mean 1.0->0.2 at step 30, entropy 3.0->0). Root cause: 8 constraints
-include 5 that directly penalize arm movement (joint_vel, oscillation, effort_limit,
-singularity, accum_rot). Continuous constraints produce raw cost advantages with much
-larger magnitude than binary constraints, so movement-suppression gradients dominated.
-
-NORBC Section IV-B specifies per-constraint cost advantage standardization, which the
-implementation had omitted. Added `(adv - mean) / (std + 1e-8)` per constraint k after
-GAE computation. This equalizes gradient contribution across constraints with different
-physical scales, letting the barrier margin alone determine relative priority.
-
-Also conducted a thorough review of all 3 deviations from the NORBC paper:
-1. Barrier t schedule (10->50 vs paper's fixed 100): direction correct (standard
-   interior-point annealing), but final value 50 may be too low vs paper nominal 100.
-2. Min noise floor (log_std clamp at log(0.1)): necessary -- TRPO KL constraint is
-   asymmetric for sigma reductions, and cost surrogate gradient favors determinism.
-3. Encoder update gating on TRPO line search success: correct (prevents actor-encoder
-   distribution shift), but may starve encoder early when line search fails often.
-
-Discovered 2 additional issues: (a) `line_search_cost_margin` is configured but never
-used in `_line_search()` -- the cost feasibility check documented in THEORETICAL_ANALYSIS.md
-is not implemented. (b) `ALBCConstraintCfg.barrier_t=1.0` is a dead field never read by
-the runner.
-
-### Changed
-- `algorithms/constraint_trpo.py`: Added per-constraint cost advantage standardization
-  in `_compute_cost_returns()` after GAE computation (NORBC Sec IV-B). Replaced the old
-  comment that said cost advantages should NOT be normalized.
-
-### Notes
-- `barrier_t_final` (currently 50) may need increase to 100 to match paper nominal
-- `line_search_cost_margin=0.5` is stored but unused in `_line_search()` -- needs implementation or removal
-- `ALBCConstraintCfg.barrier_t=1.0` is a dead field (runner reads from algorithm cfg instead)
-- Encoder starvation risk when line search fails repeatedly in early training -- monitor `Policy/line_search_success`
-
-## [2026-03-09] Reward 4-term redesign + Constraint 8-term redesign + Encoder update fixes
-
-### Context
-Complete reward + constraint redesign session. Three parallel workstreams:
-
-1. **Reward 4-term architecture**: Replaced 7+ reward terms with 4 clean terms (command,
-settling, energy, smoothness). Old terms (tracking, linear_error, progress/PBRS,
-joint_oscillation, joint_velocity) removed or merged. command_reward uses composite
-Laplacian+linear ramp for both near-target precision and large-error recovery.
-action_smoothness_penalty now includes second-order (d2a) term for oscillation.
-
-2. **Constraint 8-term architecture**: Replaced 6 constraint terms with 8. Removed 3
-overlapping (attitude_error covered by command_reward, action_smoothness covered by
-smoothness reward, angular_velocity removed by choice). Added 3 new: effort_limit (real
-motor limit vs inflated PhysX), yaw_velocity (buoyancy cannot generate yaw torque),
-cob_cog_alignment (lateral CoB-CoG offset bias). Added DR infeasibility logging with
-timeout-only filter and rate-limited sampling.
-
-3. **Encoder update bug fixes**: Fixed 3 bugs in ConstraintTRPO encoder update path:
-(a) policy-loss grads applied even when TRPO line search failed (actor-encoder desync),
-(b) z_bounds_loss multiplied by coef twice (coef already inside z_bounds_loss()),
-(c) separate optimizer steps for policy grads and z_bounds caused conflicting directions.
-All three merged into single unified encoder update with conditional gating.
-
-Theoretical review confirmed: cost advantage non-normalization is correct (barrier weighting
-handles scaling), IPO gradient formula matches NORBC paper, 8-term architecture is K-generic.
-
-### Added
-- `mdp/constraints.py`: `effort_limit_cost()` -- binary, computed_torque > URDF default
-- `mdp/constraints.py`: `yaw_velocity_cost()` -- average, absolute yaw angular velocity
-- `mdp/constraints.py`: `cob_cog_alignment_cost()` -- average, lateral XY CoB-CoG offset (mass+volume weighted, includes payload)
-- `utils/logging.py`: `log_dr_infeasibility()` -- singleton logger for infeasible DR combinations
-- `base_env.py`: `_check_dr_infeasibility()` -- timeout-only filter, rate-limited sampling (100 calls / max 3 samples), WandB count always logged
-
-### Changed
-- `mdp/rewards.py`: Replaced 7-term reward with 4-term architecture (command, settling, energy, smoothness)
-- `mdp/rewards.py`: `ALBCRewardCfg` simplified -- removed tracking/linear_error/progress/joint_oscillation/joint_velocity fields, added command_alpha/command_e_max/energy_weight/smoothness_weight
-- `mdp/rewards.py`: `command_reward()` composite Laplacian(alpha) + linear ramp(1-alpha), replaces separate tracking + linear_error
-- `mdp/rewards.py`: `energy_penalty()` replaces `joint_velocity_penalty()`, same formula (mean joint_vel^2)
-- `mdp/rewards.py`: `action_smoothness_penalty()` now includes second-order d2a term, requires `_prev_prev_actions` buffer
-- `mdp/rewards.py`: `settling_reward()` renamed from `settling_bonus()`, same logic
-- `config.py`: `HeroAgentConstrainedEncoderEnvCfg` constraint terms 6 -> 8, reordered (binary first, average second)
-- `config.py`: `HeroAgentConstrainedEncoderEnvCfg` DR override `joint_effort_limit_range=(1.3, 1.5)`
-- `config.py`: `attitude_abs` limit 1.047 rad (60 deg) -> 1.396 rad (80 deg)
-- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 6 -> 8, `constraint_budgets` 8-tuple
-- `algorithms/constraint_trpo.py`: Encoder optimizer now has `weight_decay=1e-5` (was 0)
-- `algorithms/constraint_trpo.py`: Unified encoder update -- policy-loss grads gated by `ls_success`, z_bounds grads always applied, single optimizer step
-- `mdp/__init__.py`: Constraint exports updated (removed 3, added 3)
-- `utils/__init__.py`: Added `log_dr_infeasibility` export
-
-### Removed
-- `mdp/constraints.py`: `attitude_error_cost`, `action_smoothness_cost`, `angular_velocity_cost`
-- `mdp/rewards.py`: `tracking_reward()`, `linear_error_penalty()`, `progress_reward()`, `progress_reward_pbrs()`, `joint_oscillation_penalty()`, `joint_velocity_penalty()`
-
-### Fixed
-- `algorithms/constraint_trpo.py`: Encoder policy-loss grads now only applied when TRPO line search succeeds (was always applied, causing actor-encoder desync)
-- `algorithms/constraint_trpo.py`: `z_bounds_loss()` no longer multiplied by `z_bounds_coef` (already included in the loss function)
-- `algorithms/constraint_trpo.py`: Policy-loss and z_bounds encoder grads merged into single optimizer step (was two separate steps with conflicting directions)
-
-### Notes
-- Constraint budgets: accum_rot=0.02, attitude_abs=0.01, singularity=0.15, effort_limit=0.05, joint_vel=2.0, oscillation=0.3, yaw_vel=0.15, cob_cog=0.02
-- ConstraintTRPO/ActorCriticEncoderConstrained are K-generic; ConstraintEncoderRunner auto-syncs K from env config
-- Cost advantage non-normalization is intentional: barrier weighting 1/(t*margin*(1-gamma)) provides automatic per-constraint scaling
-- `_prev_prev_actions` buffer must be initialized in base_env for smoothness d2a term
-
-## [2026-03-09] Unified actuator DR ranges based on XW540-T260-R datasheet
-
-### Context
-Compared Hero Agent simulation actuator parameters against Dynamixel XW540-T260-R
-datasheet. Found several discrepancies:
-
-1. `velocity_limit_sim=6.28 rad/s` (60 rpm) but real no-load speed is 40 rpm (4.19 rad/s)
-   -- simulation allowed 50% higher speed than physical hardware.
-2. TDC envs used separate `_tdc_randomization()` with Kp=160-240, Kd=8-12, far beyond
-   what the motor can physically produce (Kd=10 saturates at 0.95 rad/s, only 23% of
-   no-load speed). Same physical motor should have same DR range regardless of controller.
-3. `joint_effort_limit_range=(0.5, 1.5)` -- upper bound 1.5x stall torque is impossible.
-4. Base RL Kp range (80-120) was narrow; real motor with payload/seals/cables has lower
-   effective stiffness that should be covered by DR.
-
-Unified all environments to use one physically-grounded DR range. TDC controller stability
-with lower actuator gains is now the responsibility of TDC internal gains (TDCControllerCfg),
-not inflated actuator DR.
-
-### Changed
-- `hero_agent.py`: `velocity_limit_sim` 6.28 -> 4.19 rad/s (Dynamixel XW540-T260-R no-load 40 rpm)
-- `config.py`: `joint_stiffness_range` (80, 120) -> (40, 120) -- lower bound accounts for payload/seal friction
-- `config.py`: `joint_damping_range` (1.5, 4.0) -> (0.5, 5.0) -- wider range, upper bound keeps saturation at 1.9 rad/s (~45% of no-load speed)
-- `config.py`: `joint_effort_limit_range` (0.5, 1.5) -> (0.7, 1.0) -- stall torque is physical max, lower bound for thermal derating
-- `config.py`: `half_strength()` updated to match new ranges at 50%
-- `config.py`: `_tdc_randomization()` removed joint gain overrides (uses unified defaults)
-- `config.py`: `HeroAgentTDCEnvCfg` removed DORAEMON param_overrides for joint gains
-
-### Notes
-- TDC controller may need internal gain retuning since actuator Kp can now be as low as 40 (previously guaranteed >= 160)
-- Asset default stiffness=100 and damping=3 unchanged (center of DR range)
-- `fixed_pose()` DR-off defaults unchanged (100.0, 3.0)
 
 ---
 

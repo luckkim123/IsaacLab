@@ -22,6 +22,12 @@ Key design decisions:
       contribute equally to multiplier growth.
     - lambda_k starts at 0: no constraint pressure initially, allowing the
       random policy to explore freely.
+    - Lambda LR warmup: lr_lambda linearly ramps from 0 to target over a
+      warmup period (default 15% of max_iterations). This gives the policy
+      a reward-dominant learning phase before constraint pressure kicks in.
+    - d_k^2-normalized cost value loss: Per-constraint MSE is divided by d_k^2,
+      equalizing gradient contribution across constraints with different cost
+      return scales (e.g., joint_vel MSE~27000 vs effort_limit MSE~335).
 
 The algorithm maintains the same interface as RSL-RL PPO (init_storage, act,
 process_env_step, compute_returns, update) so it can be used as a drop-in
@@ -93,6 +99,8 @@ class ConstraintTRPO:
         entropy_coef: float = 0.005,
         # Encoder z bounds
         z_bounds_coef: float = 0.3,
+        # Lambda warmup
+        lambda_warmup_frac: float = 0.15,
         # Device
         device: str = "cpu",
         # Unused kwargs from RSL-RL config forwarding
@@ -132,6 +140,10 @@ class ConstraintTRPO:
         self.lambda_max = lambda_max
         self.line_search_kl_margin = line_search_kl_margin
         self.z_bounds_coef = z_bounds_coef
+
+        # Lambda warmup: ramp lr_lambda from 0 to target over warmup period
+        self.lambda_warmup_frac = lambda_warmup_frac
+        self._lambda_warmup_end = 1  # Updated by set_max_iterations()
 
         if cost_gamma >= 1.0:
             raise ValueError(f"cost_gamma must be < 1.0, got {cost_gamma}")
@@ -719,7 +731,10 @@ class ConstraintTRPO:
                 cost_value_loss = torch.tensor(0.0, device=self.device)
                 if hasattr(self.policy, "evaluate_costs"):
                     cost_value_pred = self.policy.evaluate_costs(obs_mb)
-                    cost_value_loss = (cost_returns_mb.clamp(min=0.0) - cost_value_pred).pow(2).mean()
+                    target = cost_returns_mb.clamp(min=0.0)
+                    # d_k^2-normalized: equalize gradient across constraints with different scales
+                    per_k_mse = (target - cost_value_pred).pow(2).mean(dim=0)  # (K,)
+                    cost_value_loss = (per_k_mse / self.d_k.pow(2).clamp(min=0.01)).mean()
 
                 # Pure MSE: no barrier in value update (barrier is policy-only in NORBC)
                 total_value_loss = self.value_loss_coef * value_loss + self.cost_value_loss_coef * cost_value_loss
@@ -742,10 +757,14 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         # d_k-normalized dual update: violation is expressed as fraction of budget,
         # so constraints with d_k=1 and d_k=200 contribute equally to lambda growth.
+        # Lambda LR warmup: linear ramp from 0 to lr_lambda over warmup period.
         with torch.no_grad():
+            warmup_progress = min(1.0, self._iteration / self._lambda_warmup_end)
+            effective_lr = self.lr_lambda * warmup_progress
+
             for k in range(self.num_constraints):
                 self.lambda_k[k] = (
-                    self.lambda_k[k] + self.lr_lambda * (mean_cost_returns[k] - self.d_k[k]) / self.d_k[k]
+                    self.lambda_k[k] + effective_lr * (mean_cost_returns[k] - self.d_k[k]) / self.d_k[k]
                 ).clamp(min=0.0, max=self.lambda_max)
 
         # ------------------------------------------------------------------
@@ -772,6 +791,7 @@ class ConstraintTRPO:
             "kl_trpo": kl_after_trpo,
             "cost_value": mean_cost_value_loss,
             "lambda_mean": self.lambda_k.mean().item(),
+            "lambda_lr_eff": effective_lr,
         }
         if hasattr(self.policy, "z_bounds_loss"):
             loss_dict["z_bounds"] = mean_z_bounds_loss
@@ -783,4 +803,11 @@ class ConstraintTRPO:
     # ==================================================================
 
     def set_max_iterations(self, max_iterations: int) -> None:
-        """No-op stub. Called by BaseRunner.learn() for schedule resolution."""
+        """Configure iteration-based schedules (lambda warmup)."""
+        self._lambda_warmup_end = max(1, int(self.lambda_warmup_frac * max_iterations))
+        logger.info(
+            "[ConstraintTRPO] Lambda warmup: %d iterations (%.0f%% of %d)",
+            self._lambda_warmup_end,
+            self.lambda_warmup_frac * 100,
+            max_iterations,
+        )
