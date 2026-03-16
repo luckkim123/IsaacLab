@@ -629,11 +629,18 @@ class ConstraintTRPO:
 
         mean_entropy = entropy.mean().item()
 
-        # Compute encoder gradients now (defer step until after TRPO line search)
+        # Compute encoder gradients from reward signal only (no cost surrogate).
+        # Cost gradient through encoder causes z instability: as lambdas grow,
+        # cost-dominated encoder updates shift z after line search KL check,
+        # causing actual KL to explode (observed: kl=82 at iter 776 in run
+        # 2026-03-16_13-02-33) and triggering LS failure cascades.
+        # Cost critic uses asymmetric privileged obs, so encoder z is not
+        # needed for cost estimation.
         _encoder_grads_cache: list[torch.Tensor | None] = []
         if self.encoder_optimizer is not None:
+            encoder_loss = reward_surrogate - alpha * entropy.mean()
             encoder_grads = torch.autograd.grad(
-                policy_loss,
+                encoder_loss,
                 self._encoder_params,
                 retain_graph=True,
                 allow_unused=True,

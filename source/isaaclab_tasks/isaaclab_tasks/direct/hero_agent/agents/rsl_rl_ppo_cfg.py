@@ -308,10 +308,10 @@ class RslRlConstraintTRPOAlgorithmCfg:
 
     # Constraint / Lagrangian
     num_constraints: int = 8
-    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15, 0.05, 2.0, 0.4, 0.4, 0.02)
+    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15, 0.25, 2.0, 0.4, 0.4, 0.02)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
-    lr_lambda: float = 0.035
+    lr_lambda: float = 0.01
     lambda_max: float = 20.0
     lambda_init: float = 0.0
     lambda_warmup_frac: float = 0.3

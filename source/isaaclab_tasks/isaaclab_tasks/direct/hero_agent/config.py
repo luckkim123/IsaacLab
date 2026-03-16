@@ -607,7 +607,7 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
             ConstraintTermCfg(
                 func=effort_limit_cost,
                 params={},
-                budget=0.05,
+                budget=0.25,
                 name="effort_limit",
             ),
             # Average constraints

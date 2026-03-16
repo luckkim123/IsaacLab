@@ -4,6 +4,63 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-16] Encoder z detach + effort_limit budget + lr_lambda reduction
+
+### Context
+Run `2026-03-16_14-36-36` (937 iters) was the first run with z detach already in
+the code (uncommitted). Key results:
+
+**z detach validated**: LS success 100% throughout (vs catastrophic cascade at iter 777
+in previous run 13-02-33). No collapse. Reward stable at 28-30.
+
+**But attitude error stuck at 17-20 deg** despite healthy entropy (2.44), noise (0.91),
+and encoder (z_std=0.48, grad_norm=0.01).
+
+**Root cause analysis** (data-backed):
+
+1. DR was confirmed constant across all iterations (buoy_F=89.1, payload=0.50,
+   no curriculum ramp). DR is NOT a confounding factor in error degradation.
+
+2. Error trajectory correlates precisely with lambda growth:
+   - iter 50: error 6-10 deg, lambda_mean=0.14, grad_cost/reward=1.1x
+   - iter 200: error 12 deg, lambda_mean=0.44, ratio=6.8x
+   - iter 400: error 18 deg, lambda_mean=2.51, ratio=10x
+   - iter 580: error 19 deg, lambda_mean=4.33, ratio=24x
+
+3. Critical finding: at iter 50 (best error 6 deg), effort_limit cost_return=24.4
+   vs budget d_k=5.0 (violation=+19.4, WORST of all constraints). At iter 200,
+   lambda pressure reduced effort cr to 7.1 but error degraded to 12 deg.
+   This proves effort_limit budget is fundamentally incompatible with good tracking:
+   policy needs cr~24 of torque to achieve 6 deg error, but budget only allows 5.
+
+4. lr_lambda=0.035 causes delta_lambda~0.075/iter for effort_limit, hitting
+   lambda_max=20 by iter ~400. Even with warmup (already implemented, warmup_frac=0.3),
+   lambda grows too fast after warmup ends.
+
+**Fixes applied (data-justified)**:
+- Encoder z detach: prevents LS cascade (verified in this run)
+- effort_limit budget 0.05->0.25: d_k=25, iter 50 cr=24.4 now within budget
+- lr_lambda 0.035->0.01: 3.5x slower growth, more time for reward learning
+
+### Changed
+- `algorithms/constraint_trpo.py`: Detach encoder gradient from cost_surrogate. Encoder
+  now receives only reward + entropy gradient. Cost critic uses asymmetric privileged obs,
+  so encoder z is not needed for cost estimation. Prevents the lambda-driven encoder
+  gradient growth that caused LS failure cascades.
+- `config.py`: effort_limit budget 0.05 -> 0.25 (d_k: 5 -> 25). At iter 50 (6 deg error),
+  cost_return=24.4 < 25, so budget is achievable during good tracking.
+- `agents/rsl_rl_ppo_cfg.py`: lr_lambda 0.035 -> 0.01 (3.5x reduction). Slows lambda
+  growth so reward gradient dominates longer. Also synced effort_limit budget in
+  constraint_budgets tuple default.
+
+### Notes
+- Lambda warmup (warmup_frac=0.3) was already implemented and active in this run.
+  Warmup ended at iter 291. After warmup, lambda grew at full lr and dominated.
+- oscillation (cr=43-65, dk=40) and singularity (cr=18-21, dk=15) also persistently
+  over budget. May need budget adjustment in future runs if they cause similar issues.
+- Key metric to watch in next run: grad_cost/grad_reward ratio. Should stay < 5x
+  for at least 400+ iterations to allow attitude learning.
+
 ## [2026-03-16] Run analysis: encoder z instability root cause identified
 
 ### Context
