@@ -307,8 +307,8 @@ class RslRlConstraintTRPOAlgorithmCfg:
     lam: float = 0.95
 
     # Constraint / Lagrangian
-    num_constraints: int = 9
-    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15, 0.05, 0.05, 0.10, 0.122, 0.30, 0.15)
+    num_constraints: int = 8
+    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15, 0.05, 0.05, 0.10, 0.122, 0.15)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
     lr_lambda: float = 0.01
@@ -336,7 +336,7 @@ class RslRlPpoActorCriticEncoderConstrainedCfg(_RslRlPpoEncoderBaseCfg):
     """
 
     class_name: str = "ActorCriticEncoderConstrained"
-    num_constraints: int = 9
+    num_constraints: int = 8
     cost_critic_hidden_dims: list[int] = [256, 128, 64]
     asymmetric_critic: bool = True
 

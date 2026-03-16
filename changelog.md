@@ -4,6 +4,46 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-17] Reward restructure: remove PBRS, tighten sigma, lower noise floor
+
+### Context
+Analysis of 9-constraint run `2026-03-17_08-21-47` (762 iters) showed plateau at roll 8 deg,
+pitch 10 deg. Four constraints OVER budget (attitude_err, singularity, yaw_vel, joint_osc).
+Key finding: attitude_err, singularity, joint_osc cost_returns plateau because they reflect
+steady-state performance limits, not independently optimizable behaviors. Lambda pressure on
+these creates multi-objective conflict without reducing the costs.
+
+joint_osc (continuous, budget=0.30) was the weakest constraint: cost_return=32 plateaued,
+lambda=0.71 creating competing gradient with no improvement. Replaced with fixed-weight
+action smoothness reward (proven formula from reference: da^2 + d2a^2). This avoids lambda
+escalation while still incentivizing smooth actions.
+
+PBRS progress reward removed: cost_return showed stable ~1.0 with no differentiation,
+not clearly contributing to error reduction. command_sigma tightened 0.35->0.20 to increase
+gradient at 7->3 deg range (+38% at 7 deg, +48% at 3 deg). Noise floor lowered 0.20->0.15
+matching unconstrained encoder-base noise at convergence (0.17).
+
+### Changed
+- `config.py`: `command_sigma` 0.35 -> 0.20 (stronger gradient at small errors,
+  Laplacian grad@7deg: 1.61->2.23, grad@3deg: 1.88->2.78)
+- `config.py`: `smoothness_weight` 0.0 -> -0.5 (replaces joint_osc constraint with
+  fixed-weight reward, formula: da^2 + d2a^2)
+- `config.py`: `progress_weight` 2.0 -> 0.0 (PBRS removed, not clearly helping)
+- `config.py`: Removed joint_osc constraint from terms list (9->8 constraints)
+- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 9->8, `constraint_budgets` updated
+  to 8-tuple (removed joint_osc budget=0.30)
+- `runners/base_runner.py`: `min_std` 0.20 -> 0.15 (noise floor lowered for finer control)
+- `algorithms/constraint_trpo.py`: `min_log_std` log(0.2) -> log(0.15) (unified with
+  base_runner floor)
+
+### Notes
+- Quadratic command reward was evaluated but rejected: gradient goes to zero near e=0
+  (grad@3deg=0.38 vs Laplacian 2.78). Laplacian is structurally better for fine control.
+- Remaining 8 constraints: accum_rot(0.02), attitude_abs(0.01), singularity(0.15),
+  joint_torque(0.05), joint_vel_limit(0.05), overshoot(0.10), attitude_err(0.122),
+  yaw_vel(0.15)
+- Target: 3 deg mean error (unconstrained encoder-base achieved min 2.7/2.9 deg)
+
 ## [2026-03-17] Constraint expansion 3→9 + PBRS progress reward
 
 ### Context

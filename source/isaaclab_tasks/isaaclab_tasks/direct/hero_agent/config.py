@@ -48,7 +48,6 @@ from .mdp import (
     accumulated_rotation_cost,
     attitude_absolute_cost,
     attitude_error_cost,
-    joint_oscillation_cost,
     joint_torque_cost,
     joint_velocity_limit_cost,
     overshoot_cost,
@@ -622,18 +621,12 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
                 budget=0.10,
                 name="overshoot",
             ),
-            # --- Continuous constraints (3 terms) ---
+            # --- Continuous constraints (2 terms) ---
             ConstraintTermCfg(
                 func=attitude_error_cost,
                 budget=0.122,
                 cost_type="average",
                 name="attitude_err",
-            ),
-            ConstraintTermCfg(
-                func=joint_oscillation_cost,
-                budget=0.30,
-                cost_type="average",
-                name="joint_osc",
             ),
             ConstraintTermCfg(
                 func=yaw_velocity_cost,
@@ -650,11 +643,12 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
     )
 
     # settling replaced by attitude_err constraint (adaptive lambda vs fixed weight).
-    # energy/smoothness handled by constraint system. PBRS progress for rise time.
+    # smoothness replaces joint_osc constraint (fixed weight avoids lambda competition).
+    # progress removed (PBRS not clearly helping, adds complexity).
     reward: ALBCRewardCfg = ALBCRewardCfg(
+        command_sigma=0.20,
         settling_weight=0.0,
         energy_weight=0.0,
-        smoothness_weight=0.0,
-        progress_weight=2.0,
-        progress_gamma=0.99,
+        smoothness_weight=-0.5,
+        progress_weight=0.0,
     )
