@@ -697,7 +697,7 @@ class ConstraintTRPO:
         # Noise floor: numerical safety net to prevent log_prob divergence
         # when std -> 0. No ceiling needed: target entropy auto-regulates
         # alpha (entropy coefficient) to prevent std from growing unbounded.
-        min_log_std = math.log(0.1)
+        min_log_std = math.log(0.2)
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=min_log_std)
 

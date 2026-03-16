@@ -60,6 +60,42 @@ consistently pushes noise_std up. TRPO's KL constraint alone provides sufficient
   deterministic actions, TRPO KL constraint limits descent rate = natural annealing)
 - Success criteria: noise_std < 1.0 by iter 200, attitude error < 10 deg by iter 500
 
+## [2026-03-17] Raise noise floor 0.1 -> 0.2 + alpha=0 run analysis
+
+### Context
+Run `2026-03-17_07-25-13` (alpha=0, 3 constraints, 454 iters) confirmed noise_std fix works:
+noise decreased naturally 1.0 -> 0.17, reward 60-66, roll 4-7 deg, pitch 5-9 deg.
+All constraints satisfied (lambda=0), line search 100%.
+
+**However, noise_std kept falling without bound** (0.17 at iter 454, still declining).
+Entropy went negative (-0.73) -- exploration effectively dead. Reward plateaued at 60-66
+(vs 74.6 in 3/6 run) because policy stopped exploring for better strategies.
+
+Root cause: alpha=0 means zero upward pressure on noise. Reward gradient always pushes
+noise down (more deterministic = higher expected reward). TRPO has no natural equilibrium
+without some form of exploration incentive.
+
+TRPO entropy bonus dilemma:
+- alpha=0.005: noise grows unboundedly (1.0 -> 7.44 in 316 iters)
+- alpha=0.0: noise shrinks to floor (1.0 -> 0.17 in 454 iters)
+
+Simplest fix: raise noise floor from 0.1 to 0.2. This matches the 3/6 run's converged
+noise_std (0.20-0.24) and guarantees minimum exploration without any entropy bonus tuning.
+The floor is a hard clamp -- no interaction with TRPO step dynamics.
+
+### Changed
+- `runners/base_runner.py`: `min_std` 0.1 -> 0.2 in `_apply_noise_floor()` -- ensures
+  exploration persists at convergence, matching 3/6 run's natural noise level
+- `algorithms/constraint_trpo.py`: `min_log_std` from `log(0.1)` to `log(0.2)` -- unified
+  with base_runner floor
+
+### Notes
+- Next step: verify noise stabilizes at 0.2, then add constraints (effort_limit, joint_vel,
+  yaw_vel, oscillation) as continuous -- with alpha=0 + lambda warmup, noise stabilizes early
+  so continuous costs should be stable by the time lambda activates
+- The 3/6 run (IPO, entropy_coef=0.005) had implicit exploration from barrier pressure;
+  Lagrangian with lambda=0 has no equivalent, so the floor is essential
+
 ## [2026-03-16] Encoder z detach + effort_limit budget + lr_lambda reduction
 
 ### Context
