@@ -114,8 +114,8 @@ class ConstraintTRPO:
         line_search_kl_margin: float = 1.5,
         # Target entropy (SAC-style automatic temperature)
         target_entropy: float = 2.0,
-        alpha_entropy_lr: float = 3e-4,
-        alpha_entropy_init: float = 0.005,
+        alpha_entropy_lr: float = 0.01,
+        alpha_entropy_init: float = 0.001,
         # Encoder z bounds
         z_bounds_coef: float = 0.3,
         # Lambda warmup

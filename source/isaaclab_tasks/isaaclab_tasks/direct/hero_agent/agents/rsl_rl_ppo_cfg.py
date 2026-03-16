@@ -322,8 +322,8 @@ class RslRlConstraintTRPOAlgorithmCfg:
     # (alpha increases) and entropy explosion (alpha decreases via dual update).
     # H_target=2.0 corresponds to std~0.66 for 2D actions.
     target_entropy: float = 2.0
-    alpha_entropy_lr: float = 3e-4
-    alpha_entropy_init: float = 0.005
+    alpha_entropy_lr: float = 0.01
+    alpha_entropy_init: float = 0.001
 
     # Encoder z bounds
     z_bounds_coef: float = 0.3

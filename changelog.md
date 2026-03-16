@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-16] Tune alpha entropy hyperparameters for faster response
+
+### Context
+Run `2026-03-16_12-53-25` (222 iters) was the first run with SAC-style target entropy.
+Alpha barely moved: 0.005000 -> 0.004626 (7.5% decrease in 200 iters) despite entropy
+being 2x above target (4.22 vs H_target=2.0). noise_std grew to 2.03 (ceiling).
+
+**Root cause**: alpha_entropy_lr=3e-4 was far too slow. With gradient=(H-H_target)=2.2,
+per-iter delta_log_alpha = -6.6e-4. Over 200 iters, log_alpha moved only -0.13,
+reducing alpha from 0.005 to 0.0046. Meanwhile, TRPO amplification made even
+alpha=0.005 sufficient to drive entropy explosion.
+
+**Fix**: Increase alpha_lr 33x (3e-4 -> 0.01) so alpha responds within ~50 iters.
+Lower alpha_init 5x (0.005 -> 0.001) to reduce initial entropy pressure while
+TRPO step size is large from lambda warmup.
+
+### Changed
+- `algorithms/constraint_trpo.py`: `alpha_entropy_lr` default 3e-4 -> 0.01, `alpha_entropy_init` default 0.005 -> 0.001
+- `agents/rsl_rl_ppo_cfg.py`: Same parameter changes in `RslRlConstraintTRPOAlgorithmCfg`
+
 ## [2026-03-16] Target entropy: replace fixed entropy_coef with SAC-style auto-tuning
 
 ### Context
