@@ -5,13 +5,17 @@
 
 """Constraint TRPO with Interior-point Policy Optimization (IPO).
 
-Implements the NORBC-style constrained RL algorithm (Algorithm 1):
-    1. Adaptive threshold update (instantaneous, Eq 11)
+Implements constrained RL with pure log-barrier (no adaptive threshold):
+    1. Compute barrier margins: max(d_k - J_C_k, 0.01 * d_k) per constraint
     2. TRPO natural gradient for policy update (exact KL constraint)
     3. Value function update (pure MSE, no barrier)
 
-The log-barrier appears only in the policy objective (Eq 10), not in
-the value loss. Separate cost value heads with per-constraint GAE.
+The log-barrier appears only in the policy objective, not in the value loss.
+Separate cost value heads with per-constraint GAE.
+
+Barrier margin = d_k - J_C_k creates increasing pressure as cost approaches
+budget. Floor at 0.01 * d_k prevents division by zero when cost exceeds budget
+while maintaining strong (10x vs previous) enforcement pressure.
 
 The algorithm maintains the same interface as RSL-RL PPO (init_storage, act,
 process_env_step, compute_returns, update) so it can be used as a drop-in
@@ -38,14 +42,14 @@ logger = logging.getLogger(__name__)
 
 
 class ConstraintTRPO:
-    """TRPO + IPO for constrained policy optimization (NORBC Algorithm 1).
+    """TRPO + IPO for constrained policy optimization.
 
     Key differences from PPO:
         - Policy update: natural gradient via conjugate gradient (full-batch)
         - Value update: pure MSE (no barrier, barrier is policy-only)
         - Line search: verifies KL constraint and surrogate improvement
         - No clipped surrogate; uses exact KL constraint
-        - Update order: threshold -> policy -> value (NORBC conformance)
+        - Pure log-barrier: margin = d_k - J_C (no adaptive threshold)
     """
 
     def __init__(
@@ -75,7 +79,6 @@ class ConstraintTRPO:
         barrier_t: float = 10.0,
         barrier_t_final: float = 50.0,
         barrier_t_schedule_frac: float = 0.4,
-        adaptive_threshold_alpha: float = 0.1,
         # Line search acceptance threshold
         line_search_kl_margin: float = 1.5,
         # Entropy
@@ -122,7 +125,6 @@ class ConstraintTRPO:
         self.barrier_t_final = barrier_t_final
         self.barrier_t_schedule_frac = barrier_t_schedule_frac
         self.barrier_t_schedule_iters = 0  # resolved by set_max_iterations()
-        self.adaptive_threshold_scale = adaptive_threshold_alpha
         self.line_search_kl_margin = line_search_kl_margin
         self.z_bounds_coef = z_bounds_coef
 
@@ -135,8 +137,6 @@ class ConstraintTRPO:
             device=device,
             dtype=torch.float32,
         )
-        # Adaptive thresholds (initialized to d_k)
-        self.d_k_adaptive = self.d_k.clone()
 
         # Separate parameter groups:
         # - Actor params: TRPO natural gradient (no optimizer)
@@ -357,18 +357,10 @@ class ConstraintTRPO:
         reward_surr = -(advantages * ratio).mean()
 
         cost_surr = torch.tensor(0.0, device=self.device)
-        n_active = 0
         for k in range(self.num_constraints):
-            margin_floor = 0.1 * self.d_k[k].item()
-            raw_margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).item()
-            margin = max(raw_margin, margin_floor)
-            if raw_margin <= 2.0 * margin_floor:
-                n_active += 1
+            margin = max((self.d_k[k] - mean_cost_returns[k]).item(), 0.01 * self.d_k[k].item())
             cost_adv_k = (ratio * cost_advantages[:, k]).mean()
             cost_surr += cost_adv_k / ((1.0 - self.cost_gamma) * self.barrier_t * margin)
-        # Normalize by active constraint count to prevent combined barrier dominance
-        if n_active > 1:
-            cost_surr = cost_surr / n_active
 
         entropy = self.policy.entropy
         return reward_surr + cost_surr - self.entropy_coef * entropy.mean()
@@ -508,10 +500,10 @@ class ConstraintTRPO:
     # ==================================================================
 
     def update(self) -> dict[str, float]:
-        """Execute one iteration of ConstraintTRPO update (NORBC Algorithm 1).
+        """Execute one iteration of ConstraintTRPO update.
 
-        Update order follows NORBC:
-            1. Adaptive threshold update (instantaneous, Eq 11)
+        Update order:
+            1. Compute barrier margins (pure barrier, no adaptive threshold)
             2. TRPO policy update (full-batch natural gradient + line search)
             3. Value function update (pure MSE, no barrier)
         """
@@ -540,12 +532,12 @@ class ConstraintTRPO:
         mean_cost_returns = cost_returns_flat.mean(dim=0).clamp(min=0.0)  # (K,)
 
         # ------------------------------------------------------------------
-        # 1. Update adaptive thresholds (NORBC Eq 11, instantaneous)
+        # 1. Compute barrier margins (pure barrier, no adaptive threshold)
         # ------------------------------------------------------------------
+        margins = []
         for k in range(self.num_constraints):
-            j_c_k = mean_cost_returns[k].item()
-            # Instantaneous: directly set to target (no EMA smoothing)
-            self.d_k_adaptive[k] = max(self.d_k[k].item(), j_c_k + self.adaptive_threshold_scale * self.d_k[k].item())
+            margin = max((self.d_k[k] - mean_cost_returns[k]).item(), 0.01 * self.d_k[k].item())
+            margins.append(margin)
 
         # ------------------------------------------------------------------
         # 2. TRPO policy update (full-batch, single step)
@@ -560,18 +552,9 @@ class ConstraintTRPO:
 
         # IPO: barrier-weighted cost surrogate
         cost_surrogate = torch.tensor(0.0, device=self.device)
-        n_active = 0
         for k in range(self.num_constraints):
-            margin_floor = 0.1 * self.d_k[k].item()
-            raw_margin = (self.d_k_adaptive[k] - mean_cost_returns[k]).item()
-            margin = max(raw_margin, margin_floor)
-            if raw_margin <= 2.0 * margin_floor:
-                n_active += 1
             cost_adv_k = (ratio * cost_advantages_flat[:, k]).mean()
-            cost_surrogate += cost_adv_k / ((1.0 - self.cost_gamma) * self.barrier_t * margin)
-        # Normalize by active constraint count to prevent combined barrier dominance
-        if n_active > 1:
-            cost_surrogate = cost_surrogate / n_active
+            cost_surrogate += cost_adv_k / ((1.0 - self.cost_gamma) * self.barrier_t * margins[k])
 
         # Combined: reward surrogate + cost barrier surrogate - entropy
         policy_loss = reward_surrogate + cost_surrogate - self.entropy_coef * entropy.mean()
@@ -637,7 +620,7 @@ class ConstraintTRPO:
         # Ceiling (std=2.0): prevents entropy explosion when constraint pressure is weak.
         # Must clamp before KL so the logged metric reflects the actual policy state.
         min_log_std = math.log(0.25)
-        max_log_std = math.log(2.0)
+        max_log_std = math.log(1.0)
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=min_log_std, max=max_log_std)
 
@@ -743,6 +726,7 @@ class ConstraintTRPO:
         # (read by ConstraintEncoderRunner._log_constraint_metrics)
         # ------------------------------------------------------------------
         self._last_cost_returns = [mean_cost_returns[k].item() for k in range(self.num_constraints)]
+        self._last_margins = margins
         self._last_line_search_success = float(ls_success)
 
         # Clear storage

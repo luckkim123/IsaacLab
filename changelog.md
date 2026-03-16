@@ -4,6 +4,51 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-16] Replace adaptive threshold with pure barrier + root cause analysis
+
+### Context
+Analyzed why constraint cost_returns diverge and never decrease. Identified the adaptive
+threshold mechanism `d_k_adaptive = max(d_k, J_C + alpha*d_k)` as a "moving goalpost":
+when costs exceed budget, the threshold follows costs upward, keeping barrier margin
+fixed at `0.1*d_k` regardless of how far over budget. This prevents increasing pressure
+to push costs back toward budget. Also removed n_active normalization (was diluting
+enforcement, introduced as a workaround for the adaptive threshold problem).
+
+Replaced with pure barrier: `margin = max(d_k - J_C, 0.01*d_k)`. Creates increasing
+pressure as cost approaches budget. Floor at 0.01*d_k (10x tighter than previous 0.1*d_k)
+for over-budget constraints.
+
+Training run `2026-03-16_09-21-04` (600 iter): constraints came closer to budget than
+any previous run (yaw_vel from 29% over to 0.1% over, singularity 0.5% over, effort_limit
+well under). However, **entropy collapsed at iter 50** (noise_std hit 0.25 floor and stayed
+for 550 iterations). Reward plateaued at ~30 from iter 200. Attitude error 17-18 degrees.
+
+Root cause analysis: IPO log-barrier is structurally incompatible with infeasible start.
+The barrier gradient's easiest optimization path is to reduce action variance (reducing
+noise reduces all constraint costs simultaneously). This is mathematically correct but
+kills exploration. Budget warmup, noise floors, and barrier_t tuning are all band-aids
+that delay but don't prevent this outcome -- once constraints approach budget, the same
+dynamic recurs. Fundamental fix requires switching constraint enforcement from log-barrier
+to Lagrangian (primal-dual) method, where lambda starts at 0 and grows gradually.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Replaced adaptive threshold with pure barrier margin `max(d_k - J_C, 0.01*d_k)` in both `_linearized_surrogate()` and `update()`. Removed `adaptive_threshold_scale`, `d_k_adaptive`. Added `_last_margins` storage for logging.
+- `algorithms/constraint_trpo.py`: Removed n_active normalization from both cost surrogate loops (was dividing by count of active constraints)
+- `algorithms/constraint_trpo.py`: Noise ceiling `max_log_std` reduced from `log(2.0)` to `log(1.0)`
+- `runners/constraint_encoder_runner.py`: Logging changed from `d_k_adaptive` to `margin` and `d_k` per constraint
+- `agents/rsl_rl_ppo_cfg.py`: Removed `adaptive_threshold_alpha` field from `RslRlConstraintTRPOAlgorithmCfg`
+- `runners/base_runner.py`: Noise ceiling `max_std` reduced from 2.0 to 1.0
+
+### Removed
+- `algorithms/constraint_trpo.py`: `adaptive_threshold_alpha` parameter, `self.adaptive_threshold_scale`, `self.d_k_adaptive` tensor, n_active counting/normalization logic
+
+### Notes
+- Pure barrier improved constraint enforcement vs adaptive threshold, but did NOT fix the fundamental entropy collapse problem
+- IPO log-barrier assumes feasible start (all constraints satisfied); we start infeasible (random policy violates multiple constraints)
+- All previous fixes (barrier_t tuning, noise floor/ceiling, entropy_coef, n_active normalization) were treating symptoms, not root cause
+- Next step: replace IPO log-barrier with Lagrangian (primal-dual) constraint enforcement -- lambda starts at 0, grows linearly with violations, naturally handles infeasible start without crushing exploration
+- The analyze_training.py script was also updated (replaced `_dk_expanding` with `_margin_at_floor`, FLOOR/OVER alerts) but is not git-tracked
+
 ## [2026-03-16] Entropy overcorrection fix: revert entropy_coef + add noise ceiling
 
 ### Context

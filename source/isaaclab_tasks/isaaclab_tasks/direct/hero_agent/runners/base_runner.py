@@ -109,7 +109,7 @@ class BaseRunner(OnPolicyRunner):
         Always active regardless of other settings.
         """
         min_std = 0.25
-        max_std = 2.0
+        max_std = 1.0
         if hasattr(self.alg.policy, "log_std"):
             if not hasattr(self, "_cached_min_log_std"):
                 self._cached_min_log_std = torch.log(torch.tensor(min_std, device=self.device))

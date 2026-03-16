@@ -6,7 +6,7 @@
 """EncoderRunner with constraint metrics logging, barrier schedule, and auto-sync for IPO.
 
 Extends EncoderRunner to:
-    - Log per-constraint cost returns, adaptive thresholds, and barrier_t
+    - Log per-constraint cost returns, barrier margins, and barrier_t
     - Use constraint names from env config instead of numeric indices
     - Auto-sync num_constraints from env config to algorithm/policy config
     (Barrier schedule is updated internally in ConstraintTRPO.update())
@@ -84,8 +84,7 @@ class ConstraintEncoderRunner(EncoderRunner):
     def _log_constraint_metrics(self, _locs: dict, iteration: int) -> None:
         """Log constraint metrics to TensorBoard/WandB.
 
-        Logs per-constraint: cost_return (mean J_C_k) and d_k_adaptive (barrier threshold).
-        Removed (redundant): d_k (static), cost_return_std, feasibility_rate, barrier_schedule_progress.
+        Logs per-constraint: cost_return (mean J_C_k) and barrier margin.
         """
         alg = self.alg
         if not hasattr(alg, "num_constraints"):
@@ -98,13 +97,15 @@ class ConstraintEncoderRunner(EncoderRunner):
         if hasattr(alg, "barrier_t"):
             metrics["Constraint/barrier_t"] = alg.barrier_t
 
-        # Per-constraint: cost_return + d_k_adaptive only
+        # Per-constraint: cost_return, margin, d_k (budget)
         for k in range(K):
             suffix = self._constraint_names[k] if k < len(self._constraint_names) else str(k)
-            if hasattr(alg, "d_k_adaptive"):
-                metrics[f"Constraint/d_k_adaptive_{suffix}"] = alg.d_k_adaptive[k].item()
+            if hasattr(alg, "_last_margins"):
+                metrics[f"Constraint/margin_{suffix}"] = alg._last_margins[k]
             if hasattr(alg, "_last_cost_returns"):
                 metrics[f"Constraint/cost_return_{suffix}"] = alg._last_cost_returns[k]
+            if hasattr(alg, "d_k"):
+                metrics[f"Constraint/d_k_{suffix}"] = alg.d_k[k].item()
 
         # Line search (policy update metric)
         if hasattr(alg, "_last_line_search_success"):
