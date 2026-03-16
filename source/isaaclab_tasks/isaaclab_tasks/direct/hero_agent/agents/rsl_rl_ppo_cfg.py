@@ -317,9 +317,11 @@ class RslRlConstraintTRPOAlgorithmCfg:
     lambda_warmup_frac: float = 0.3
     line_search_kl_margin: float = 1.5
 
-    # Entropy (0.0: cost gradient is detached from std, so no collapse pressure
-    # to counteract -- reward gradient alone controls variance)
-    entropy_coef: float = 0.0
+    # Entropy regularization: small positive value to maintain exploration.
+    # Cost gradient is detached from std (no constraint-driven collapse), but
+    # the reward gradient itself pushes std down (deterministic = higher reward).
+    # Without entropy bonus, std collapses by ~iter 200, killing exploration.
+    entropy_coef: float = 0.005
 
     # Encoder z bounds
     z_bounds_coef: float = 0.3

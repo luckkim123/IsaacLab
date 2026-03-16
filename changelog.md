@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-16] Fix gradient scale imbalance + LS death spiral + entropy collapse
+
+### Context
+Analysis of run `2026-03-16_11-57-34` (448 iters) with lambda warmup + recalibrated budgets
+revealed three compounding issues:
+
+**Problem 1 -- gradient scale imbalance**: Reward advantages are raw GAE values O(0.01)
+while cost advantages are per-constraint standardized O(1.0). Even with lambda~0.3 during
+warmup, the combined TRPO natural gradient was cost-dominated. This caused 33 consecutive
+line search failures (iter 212-248) where the cost-direction step worsened reward surrogate.
+
+**Problem 2 -- LS failure death spiral**: When line search fails, actor params are reverted
+(frozen), but lambda dual vars and encoder z_bounds continued updating. Over 33 LS failures:
+lambda grew from 0.91 to 2.46, encoder z drifted via z_bounds loss, causing actor-encoder
+desync. Roll error spiked from 7deg to 27deg despite actor being "frozen".
+
+**Problem 3 -- entropy collapse (reward-driven)**: With entropy_coef=0.0 (set in previous
+session to prevent cost-driven collapse), the reward gradient itself pushes std down
+(deterministic actions = higher reward). Entropy collapsed from 1.74 to -0.08 by iter 350,
+killing exploration and making recovery from LS failure episodes extremely slow.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Reward advantages standardized to zero-mean unit-variance before TRPO gradient computation -- equalizes scale with per-constraint-standardized cost advantages O(1.0), preventing cost-dominated natural gradient direction
+- `algorithms/constraint_trpo.py`: Lambda dual update gated on `ls_success` -- when line search fails (policy frozen), lambda no longer grows, preventing death spiral
+- `algorithms/constraint_trpo.py`: Encoder update (policy grads + z_bounds) fully gated on `ls_success` -- prevents actor-encoder desync when actor is frozen. z_bounds_loss still computed for logging but optimizer does not step.
+- `algorithms/constraint_trpo.py`: Added `grad_norm_reward`, `grad_norm_cost`, `adv_raw_std` to loss dict for gradient balance diagnostics
+- `agents/rsl_rl_ppo_cfg.py`: `entropy_coef` 0.0 -> 0.005 -- small entropy bonus counterbalances reward gradient's natural tendency to reduce std, maintaining exploration
+
+### Notes
+- Reward advantage O(0.01) came from: reward~41 / ~2859 steps = 0.014/step -> GAE advantage on same scale
+- The 33 LS failures (iter 212-248) were the critical event: without gating, lambda grew 2.7x and encoder drifted, creating the iter 250 crash (reward 41 -> 23, pitch 12 -> 31 deg)
+- entropy_coef was set to 0.0 in previous session because cost gradient was detached from std. Correct insight (no cost-driven collapse), but missed that reward gradient also drives std down
+- Gradient norm logging enables future diagnosis: if grad_norm_cost >> grad_norm_reward, advantage normalization may need revisiting
+
 ## [2026-03-16] Lambda LR warmup + d_k^2 cost value norm + budget recalibration
 
 ### Context

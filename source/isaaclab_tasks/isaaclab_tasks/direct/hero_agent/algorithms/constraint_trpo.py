@@ -23,11 +23,21 @@ Key design decisions:
     - lambda_k starts at 0: no constraint pressure initially, allowing the
       random policy to explore freely.
     - Lambda LR warmup: lr_lambda linearly ramps from 0 to target over a
-      warmup period (default 15% of max_iterations). This gives the policy
+      warmup period (default 30% of max_iterations). This gives the policy
       a reward-dominant learning phase before constraint pressure kicks in.
     - d_k^2-normalized cost value loss: Per-constraint MSE is divided by d_k^2,
       equalizing gradient contribution across constraints with different cost
       return scales (e.g., joint_vel MSE~27000 vs effort_limit MSE~335).
+    - Reward advantage normalization: Standardizes reward advantages to
+      zero-mean unit-variance before gradient computation. Cost advantages
+      are per-constraint standardized to O(1). Without normalizing reward
+      advantages (O(0.01)), the combined gradient is cost-dominated even
+      when lambda is small, causing line search failures.
+    - LS-gated updates: Lambda dual update, encoder policy grads, and
+      encoder z_bounds are all gated on line search success. When LS fails,
+      the actor is frozen (params reverted). Updating lambda/encoder on a
+      frozen actor creates a death spiral (lambda grows unchecked) and
+      actor-encoder desync (encoder z drifts while actor can't adapt).
 
 The algorithm maintains the same interface as RSL-RL PPO (init_storage, act,
 process_env_step, compute_returns, update) so it can be used as a drop-in
@@ -544,6 +554,16 @@ class ConstraintTRPO:
         actions_flat = self.storage.actions.flatten(0, 1).clone()
         returns_flat = self.storage.returns.flatten(0, 1).clone()
         advantages_flat = self.storage.advantages.flatten(0, 1).clone()
+
+        # Standardize reward advantages to O(1) scale.
+        # Cost advantages are per-constraint standardized in _compute_cost_returns (std=1).
+        # Without this, reward advantages O(0.01) << cost advantages O(1.0),
+        # causing the combined natural gradient to be cost-dominated even when
+        # lambda_k is small, which triggers line search failures.
+        adv_raw_std = advantages_flat.std()
+        if adv_raw_std > 1e-8:
+            advantages_flat = (advantages_flat - advantages_flat.mean()) / adv_raw_std
+
         old_log_prob_flat = self.storage.actions_log_prob.flatten(0, 1).clone()
         old_mu_flat = self.storage.mu.flatten(0, 1).clone()
         old_sigma_flat = self.storage.sigma.flatten(0, 1).clone()
@@ -604,8 +624,13 @@ class ConstraintTRPO:
             )
             _encoder_grads_cache = list(encoder_grads)
 
-        # Gradient of surrogate loss w.r.t. actor params (TRPO)
+        # Separate reward gradient norm for diagnostics (detects scale imbalance)
+        g_reward = self._flat_grad(reward_surrogate, self._policy_params, retain_graph=True)
+        reward_grad_norm = g_reward.norm().item()
+
+        # Combined gradient of surrogate loss w.r.t. actor params (TRPO)
         g = self._flat_grad(policy_loss, self._policy_params, retain_graph=True)
+        cost_grad_norm = (g - g_reward).norm().item()
 
         # Natural gradient via conjugate gradient: x = F^{-1} g
         nat_grad = self._conjugate_gradient(obs_flat, old_mu_flat, old_sigma_flat, g)
@@ -656,23 +681,24 @@ class ConstraintTRPO:
         with torch.no_grad():
             kl_after_trpo = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
 
-        # Unified encoder update: policy-loss grads (gated by ls_success) + z_bounds grads.
-        # BUG 3 fix: only apply policy-loss grads when TRPO succeeded (prevent actor-encoder desync).
-        # BUG 1 fix: z_bounds_loss() already includes coef, do NOT multiply again.
-        # Merged into single optimizer step to avoid conflicting update directions.
+        # Unified encoder update: policy-loss grads + z_bounds grads.
+        # Both gated on ls_success to prevent actor-encoder desync: when the actor
+        # is frozen (LS fail), encoder updates shift z-space causing the frozen actor
+        # to produce mismatched actions. In the observed run, 33 consecutive LS failures
+        # with ungated z_bounds caused roll error to spike from 7deg to 27deg.
         mean_z_bounds_loss = 0.0
-        if self.encoder_optimizer is not None:
+        if self.encoder_optimizer is not None and ls_success:
             self.encoder_optimizer.zero_grad()
             has_grads = False
 
-            # (1) Apply cached policy-loss gradients (only if TRPO succeeded)
-            if ls_success and _encoder_grads_cache:
+            # (1) Apply cached policy-loss gradients
+            if _encoder_grads_cache:
                 for i, p in enumerate(self._encoder_params):
                     if i < len(_encoder_grads_cache) and _encoder_grads_cache[i] is not None:
                         p.grad = _encoder_grads_cache[i].clone()
                         has_grads = True
 
-            # (2) Accumulate z_bounds gradients (always applied: safe regularization)
+            # (2) Accumulate z_bounds gradients
             if hasattr(self.policy, "z_bounds_loss"):
                 self.policy.act(obs_flat)
                 z_b_loss = self.policy.z_bounds_loss()
@@ -694,6 +720,11 @@ class ConstraintTRPO:
             if has_grads:
                 nn.utils.clip_grad_norm_(self._encoder_params, self.max_grad_norm)
                 self.encoder_optimizer.step()
+        elif self.encoder_optimizer is not None and hasattr(self.policy, "z_bounds_loss"):
+            # Still compute z_bounds_loss for logging, but don't step
+            with torch.no_grad():
+                self.policy.act(obs_flat)
+                mean_z_bounds_loss = self.policy.z_bounds_loss().item()
 
         # Compute KL after full update for logging
         with torch.no_grad():
@@ -755,17 +786,19 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         # 4. Dual variable update (Lagrangian multiplier ascent)
         # ------------------------------------------------------------------
-        # d_k-normalized dual update: violation is expressed as fraction of budget,
-        # so constraints with d_k=1 and d_k=200 contribute equally to lambda growth.
+        # Gated on ls_success: when line search fails, policy is frozen (params reverted).
+        # Growing lambda on a frozen policy creates a death spiral: more cost pressure
+        # -> more LS failures -> more lambda growth -> unrecoverable.
         # Lambda LR warmup: linear ramp from 0 to lr_lambda over warmup period.
         with torch.no_grad():
             warmup_progress = min(1.0, self._iteration / self._lambda_warmup_end)
             effective_lr = self.lr_lambda * warmup_progress
 
-            for k in range(self.num_constraints):
-                self.lambda_k[k] = (
-                    self.lambda_k[k] + effective_lr * (mean_cost_returns[k] - self.d_k[k]) / self.d_k[k]
-                ).clamp(min=0.0, max=self.lambda_max)
+            if ls_success:
+                for k in range(self.num_constraints):
+                    self.lambda_k[k] = (
+                        self.lambda_k[k] + effective_lr * (mean_cost_returns[k] - self.d_k[k]) / self.d_k[k]
+                    ).clamp(min=0.0, max=self.lambda_max)
 
         # ------------------------------------------------------------------
         # Store constraint monitoring metrics
@@ -792,6 +825,9 @@ class ConstraintTRPO:
             "cost_value": mean_cost_value_loss,
             "lambda_mean": self.lambda_k.mean().item(),
             "lambda_lr_eff": effective_lr,
+            "grad_norm_reward": reward_grad_norm,
+            "grad_norm_cost": cost_grad_norm,
+            "adv_raw_std": adv_raw_std.item(),
         }
         if hasattr(self.policy, "z_bounds_loss"):
             loss_dict["z_bounds"] = mean_z_bounds_loss
