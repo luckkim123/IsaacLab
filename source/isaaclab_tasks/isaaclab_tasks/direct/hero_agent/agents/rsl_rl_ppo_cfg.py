@@ -308,13 +308,13 @@ class RslRlConstraintTRPOAlgorithmCfg:
 
     # Constraint / Lagrangian
     num_constraints: int = 8
-    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15, 0.05, 2.0, 0.3, 0.15, 0.02)
+    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15, 0.05, 2.0, 0.4, 0.4, 0.02)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
     lr_lambda: float = 0.035
     lambda_max: float = 20.0
     lambda_init: float = 0.0
-    lambda_warmup_frac: float = 0.15
+    lambda_warmup_frac: float = 0.3
     line_search_kl_margin: float = 1.5
 
     # Entropy (0.0: cost gradient is detached from std, so no collapse pressure

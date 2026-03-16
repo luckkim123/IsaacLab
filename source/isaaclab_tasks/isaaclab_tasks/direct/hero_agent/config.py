@@ -619,13 +619,13 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
             ),
             ConstraintTermCfg(
                 func=joint_oscillation_cost,
-                budget=0.3,
+                budget=0.4,
                 cost_type="average",
                 name="oscillation",
             ),
             ConstraintTermCfg(
                 func=yaw_velocity_cost,
-                budget=0.15,
+                budget=0.4,
                 cost_type="average",
                 name="yaw_vel",
             ),

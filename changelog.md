@@ -4,38 +4,48 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [2026-03-16] Lambda LR warmup + d_k^2-normalized cost value loss
+## [2026-03-16] Lambda LR warmup + d_k^2 cost value norm + budget recalibration
 
 ### Context
 Run `2026-03-16_11-20-25` (179 iters) confirmed entropy fix works: entropy stable at
 2.33 (was 0.07), noise_std 0.78 (was 0.25), arm actually moving (act_size=0.92 vs 0.36),
 line search 100% success, reward growing (23.8 at iter 179).
 
-New problem: lambda grows too fast, constraint pressure dominates before policy learns.
-effort_limit lambda=15.6, yaw_vel=14.7 at iter 179 (near lambda_max=20). Total constraint
-gradient ~42x reward gradient. Attitude error stuck at 27-29 deg. Encoder-Base (no
-constraints) achieves <10 deg -- reward structure IS sufficient, constraints are suppressing
-learning.
+**Problem 1 -- lambda too fast**: lambda grows too fast, constraint pressure dominates
+before policy learns. effort_limit lambda=15.6, yaw_vel=14.7 at iter 179 (near
+lambda_max=20). Total constraint gradient ~42x reward gradient. Attitude error stuck
+at 27-29 deg. Solution: lambda LR warmup (linear ramp from 0).
 
-Root cause: lr_lambda=0.035 with violations of 2-4x budget causes lambda to reach ~5 by
-iter 60, before the policy has learned basic attitude control. Secondary issue: cost value
-loss=19.0 (vs value loss=0.01) because joint_vel MSE~27000 dominates accum_rot MSE~1e-7
-within cost_critic's shared hidden layers.
+**Problem 2 -- cost value scale**: cost_value_loss=19.0 (vs value_loss=0.01) because
+joint_vel MSE~27000 dominates accum_rot MSE~1e-7 within cost_critic's shared hidden
+layers. Solution: d_k^2-normalized cost value loss.
+
+**Problem 3 -- budgets had no empirical basis**: Run `2026-03-16_11-40-48` (212 iters,
+with warmup) showed warmup working (roll=8.3 deg at step 50) but 5/8 constraints still
+OVER budget after warmup ends. Measured natural cost levels from unconstrained
+Encoder-Base (`2026-03-05_11-41-18`, 2000 iters, roll=5.7, pitch=6.3 deg):
+- oscillation: budget was 1.14x natural (almost no room for exploration)
+- yaw_vel: budget was 0.58x natural (IMPOSSIBLE to satisfy while controlling attitude)
+- effort_limit: budget was 16.7x natural (generous, no change needed)
+- joint_vel: budget was 2.0x natural (fine, no change needed)
+Recalibrated to ~1.5x natural. Also increased warmup from 15% to 30%.
 
 ### Changed
-- `algorithms/constraint_trpo.py`: Added `lambda_warmup_frac` parameter (default 0.15) -- linearly ramps lr_lambda from 0 to target over warmup period (15% of max_iterations = 375 iters for max_iter=2500)
+- `algorithms/constraint_trpo.py`: Added `lambda_warmup_frac` parameter (default 0.30) -- linearly ramps lr_lambda from 0 to target over warmup period (30% of max_iterations = 750 iters for max_iter=2500)
 - `algorithms/constraint_trpo.py`: `set_max_iterations()` activated from no-op -- now computes `_lambda_warmup_end` from `lambda_warmup_frac * max_iterations`
 - `algorithms/constraint_trpo.py`: Dual update uses `effective_lr = lr_lambda * min(1.0, iteration / warmup_end)` instead of fixed `lr_lambda`
-- `algorithms/constraint_trpo.py`: Cost value loss changed from `MSE.mean()` to `(per_k_mse / d_k^2).mean()` -- equalizes gradient across constraints with different cost return scales (joint_vel MSE 27000 -> 0.68, oscillation 4290 -> 4.77, effort_limit 335 -> 13.4; 80:1 range compressed to ~20:1)
+- `algorithms/constraint_trpo.py`: Cost value loss changed from `MSE.mean()` to `(per_k_mse / d_k^2).mean()` -- equalizes gradient across constraints with different cost return scales (joint_vel MSE 27000 -> 0.68, oscillation 4290 -> 4.77; 80:1 range compressed to ~20:1)
 - `algorithms/constraint_trpo.py`: Added `lambda_lr_eff` to loss dict for WandB monitoring
 - `algorithms/constraint_trpo.py`: Updated module docstring with lambda warmup and cost value normalization design decisions
-- `agents/rsl_rl_ppo_cfg.py`: Added `lambda_warmup_frac: float = 0.15` to `RslRlConstraintTRPOAlgorithmCfg`
+- `agents/rsl_rl_ppo_cfg.py`: Added `lambda_warmup_frac: float = 0.30`, updated `constraint_budgets` oscillation 0.3->0.4, yaw_vel 0.15->0.4
+- `config.py`: Constraint budgets recalibrated based on unconstrained Encoder-Base natural cost levels: oscillation D_k 0.3->0.4 (1.52x natural), yaw_vel D_k 0.15->0.4 (1.55x natural)
 
 ### Notes
-- Warmup timeline (2500 iters): iter 0-375 lambda LR ramps 0 -> 0.035 (reward learning dominant), iter 375+ full lambda LR (constraint enforcement)
-- d_k^2 normalization affects cost_critic training only; dual update (already d_k-normalized) and cost surrogate (already per-constraint standardized) are unchanged
-- Lambda checkpoint save/load, TRPO core, detached-std cost ratio all unchanged
-- Expected: attitude error <15 deg during warmup phase (iter 0-90), lambda stays near 0 initially, cost_value_loss significantly lower than 19.0
+- Warmup timeline (2500 iters): iter 0-750 lambda LR ramps 0 -> 0.035 (reward learning dominant), iter 750+ full lambda LR
+- Budget calibration method: run unconstrained Encoder-Base to convergence, measure mean per-step cost for each constraint, set budget to 1.5x that level
+- Natural per-step costs (Encoder-Base converged): effort_limit=0.003, joint_vel=0.978, oscillation=0.263, yaw_vel=0.258
+- yaw_vel was the most egregious: budget 0.15 was BELOW the natural 0.258 -- policy could never satisfy it while maintaining attitude control
+- cost_value_loss dropped from 19.0 to 0.06 with d_k^2 normalization
 
 ## [2026-03-16] Remove entropy_coef + noise ceiling (post detach-std analysis)
 

@@ -100,7 +100,7 @@ class ConstraintTRPO:
         # Encoder z bounds
         z_bounds_coef: float = 0.3,
         # Lambda warmup
-        lambda_warmup_frac: float = 0.15,
+        lambda_warmup_frac: float = 0.3,
         # Device
         device: str = "cpu",
         # Unused kwargs from RSL-RL config forwarding
