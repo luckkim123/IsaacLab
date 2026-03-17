@@ -93,6 +93,34 @@ structurally drives noise to floor regardless of smoothness weight. Floor is the
 - With 2 fewer constraints, total constraint pressure reduced -- remaining OVER
   constraints should converge faster
 
+## [2026-03-17] Lambda warmup extension + lr reduction
+
+### Context
+Analysis of run `2026-03-17_09-20-21` (6 constraints, post-reduction) revealed that
+cost gradient overtakes reward gradient by iter 150+ (ratio cost/reward > 1.0). Direct
+comparison of `Loss/grad_norm_reward` vs `Loss/grad_norm_cost` from TensorBoard confirmed:
+  - iter 0-30: reward dominates (ratio 0.01), error drops rapidly
+  - iter 60-120: gradients equalize (ratio 0.5-1.0), error plateaus
+  - iter 150+: cost dominates (ratio 1.0-2.0), policy minimizes movement instead of error
+
+Root cause: lambda warmup uses a linear ramp (not hard cutoff), so lambda grows from
+iter 0. With `lambda_warmup_frac=0.3` (warmup_end=300) and `lr_lambda=0.01`, effective
+lr at iter 150 was already 0.005 (50% of full). Combined with OVER-budget constraints
+(joint_torque 1.29x, yaw_vel 1.11x), lambda grew fast enough to dominate by mid-training.
+
+Applied both: longer warmup (more reward-dominant iterations) and slower lambda growth
+(reduced ceiling on cost gradient pressure).
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `lr_lambda` 0.01 -> 0.005 (halve lambda growth rate)
+- `agents/rsl_rl_ppo_cfg.py`: `lambda_warmup_frac` 0.3 -> 0.5 (warmup 300 -> 500 iters)
+
+### Notes
+- At iter 150 now: eff_lr = 0.005 * (150/500) = 0.0015 (was 0.005, 3.3x reduction)
+- Full lr reached at iter 500 instead of 300, giving 200 more reward-dominant iters
+- Lambda values at iter 236 in previous run: joint_torque=0.59, joint_vel_limit=0.35,
+  yaw_vel=0.27. These should grow ~3x slower with new settings.
+
 ## [2026-03-17] Constraint expansion 3→9 + PBRS progress reward
 
 ### Context

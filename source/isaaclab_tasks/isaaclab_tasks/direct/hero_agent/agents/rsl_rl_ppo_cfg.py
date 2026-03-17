@@ -311,10 +311,10 @@ class RslRlConstraintTRPOAlgorithmCfg:
     constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.10, 0.05, 0.10, 0.35)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
-    lr_lambda: float = 0.01
+    lr_lambda: float = 0.005
     lambda_max: float = 20.0
     lambda_init: float = 0.0
-    lambda_warmup_frac: float = 0.3
+    lambda_warmup_frac: float = 0.5
     line_search_kl_margin: float = 1.5
 
     # Entropy coefficient: disabled for TRPO (KL constraint provides exploration).
