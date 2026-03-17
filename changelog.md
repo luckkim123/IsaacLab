@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-17] Disable alpha_entropy (noise_std rising, pitch plateau)
+
+### Context
+Analyzed run `2026-03-17_15-00-27` at iter 484 (budget=0.15, progress_weight=2.0,
+alpha_entropy=0.005, noise_floor=0.25). Constraints converging well: joint_vel_limit
+under budget (2.9 < 5.0, lambda decreasing), joint_torque approaching budget (19.4 vs
+15.0), yaw_vel near budget (36.4 vs 35.0). Encoder healthy: z_std=0.61, grad_norm=0.018.
+
+BUT noise_std was RISING: 0.554 (iter 100) -> 0.626 (iter 483). This is abnormal --
+should decrease as policy learns precision. Root cause: alpha_entropy=0.005 provides
+constant upward gradient on log_std (+0.005/sample). Early training, reward gradient
+was strong enough to overcome it (std dropped 1.0->0.55). But after iter 100, reward
+gradient weakened (policy already decent), and alpha_entropy dominated.
+
+Direct consequence: pitch error plateaued at 10.4 +- 1.7 deg for 300 iterations
+(iter 200-483). Roll converged to 4.6 deg (less sensitive to noise because of arm
+geometry), but pitch couldn't learn fine adjustments with std=0.63 (63% of action range).
+
+Fix: set alpha_entropy_init=0.0. noise_floor=0.25 in BaseRunner provides hard collapse
+protection (entropy floor ~0.07). alpha_entropy was a redundant safety net that became
+counterproductive when reward pressure weakened.
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `alpha_entropy_init` 0.005 -> 0.0. Noise floor=0.25
+  remains as sole collapse protection. Comment updated with rationale.
+
+### Notes
+- noise_std trajectory: i50=0.60, i100=0.55, i200=0.61, i300=0.63, i483=0.63 (rising!)
+- pitch mean error 10.4 +- 1.7 deg (iter 200-483) vs roll 5.7 +- 1.1 deg
+- Entropy evolution history: alpha=0.005 caused unbounded noise growth in early experiments
+  (std->4.45 when lambda=0). Later, with active constraints, it prevented natural convergence.
+  Full cycle: 0.005 (explosion) -> 0.0 (collapse) -> 0.005 (plateau) -> 0.0 (with floor)
+- At noise_floor=0.25: entropy ~0.07, which is near-zero but std=0.25 allows +-0.5 actions
+  (95% range). Previous collapse was at floor=0.1 or 0.2 (too restrictive).
+
 ## [2026-03-17] Relax joint_torque budget + PBRS progress analysis
 
 ### Context

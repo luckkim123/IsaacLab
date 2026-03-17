@@ -321,13 +321,12 @@ class RslRlConstraintTRPOAlgorithmCfg:
     lambda_warmup_frac: float = 0.5
     line_search_kl_margin: float = 1.5
 
-    # Fixed entropy bonus: alpha=0.005 provides constant upward pressure on entropy,
-    # preventing irreversible exploration collapse from constraint gradient pressure.
-    # alpha_entropy_lr=0.0 keeps alpha fixed (no SAC-style adaptive -- that caused
-    # instability with continuous constraints in earlier experiments).
+    # Entropy bonus disabled: noise_floor=0.25 in BaseRunner provides hard collapse
+    # protection. alpha=0.005 was causing noise_std to RISE (0.55→0.63) after iter 100,
+    # blocking pitch convergence (10.4 +- 1.7 deg plateau for 300 iters).
     target_entropy: float = 2.0
     alpha_entropy_lr: float = 0.0
-    alpha_entropy_init: float = 0.005
+    alpha_entropy_init: float = 0.0
 
     # Encoder z bounds
     z_bounds_coef: float = 0.3
