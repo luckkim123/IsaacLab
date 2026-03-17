@@ -4,6 +4,46 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-17] Encoder z sweep analysis + history-augmented encoder design
+
+### Context
+Final constrained encoder run `2026-03-17_10-01-14` (2500 iters) achieved roll=5.46 deg,
+pitch=6.74 deg -- a plateau comparable to TDC baseline (6 deg avg under hard DR). Gradient
+ratio healthy (0.08-0.15), constraints mostly satisfied, training stable. But encoder z
+analysis revealed the encoder is NOT learning useful DR representations.
+
+Encoder z sweep analysis across 8 DR conditions:
+- 10/13 z dimensions near-constant (std < 0.12)
+- Cosine similarity = 0.9482 (z vectors nearly identical regardless of DR)
+- Max Pearson correlation with physics params: |r| = 0.239 (very weak)
+- added_mass_surge: no z dimension had |r| > 0.1
+
+Root cause: privileged info alone (static hydrodynamic parameters) does not reveal dynamic
+response characteristics. The encoder cannot distinguish DR conditions without observing
+how the system responds to commands. The same physical parameters produce different
+dynamics depending on operating point, coupling, and transient behavior.
+
+Designed a new history-augmented encoder architecture that adds shared proprioception
+history (TCN) to all modules. Key principle: proprioception history provides command-response
+relationship (same action + different physics -> different angular velocity) that the encoder
+needs to produce informative z.
+
+### Added
+- `docs/plans/2026-03-17-history-encoder-architecture.md`: Implementation plan for
+  history-augmented encoder architecture. 13 tasks across 4 chunks.
+
+### Notes
+- New architecture:
+  - Proprio History (30, 8D) -> shared HistoryTCN -> h_embed (32D)
+  - Encoder: [policy(13D), h_embed(32D), privileged(19D)] -> z(13D)
+  - Actor: [policy(13D), h_embed(32D), z(13D)] -> actions(2D) (no privileged)
+  - Critics: [policy(13D), h_embed(32D), privileged(19D)] -> value/cost
+- Actor alone cannot see privileged; accesses DR info only via z
+- Phase 2 simplified: shared_tcn(frozen) + adapt_head(h_embed->z_hat) replaces full TCN
+- No code changes in this session -- design and planning only
+- TDC baseline comparison: classic controller achieves ~6 deg under hard DR, matching
+  current RL+encoder (5.5-6.7 deg). Encoder contributes negligible improvement.
+
 ## [2026-03-17] Reward restructure + quadratic command reward
 
 ### Context
