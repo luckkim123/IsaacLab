@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-17] Fair eval_dr: unified DR conditions for TDC vs Encoder comparison
+
+### Context
+Evaluated latest constrained encoder run (2026-03-17_10-01-14, 2499 iter) and discovered
+three fairness issues when comparing TDC vs Encoder policies via eval_dr.py:
+
+1. **Joint gains**: TDC received fixed high gains (Kp=160-240, Kd=8-12) while Encoder
+   used DR-interpolated gains (Kp=40-120, Kd=0.5-5.0). Higher gains = easier control.
+2. **Action latency**: TDC had `action_latency_range=(0,0)` override while Encoder got 0-4
+   steps. BUT investigation revealed latency was never actually applied to EITHER task
+   because eval_dr creates the env with "none" DR (latency=0), and latency ring buffers
+   are allocated during `__init__` -- switching DR level later doesn't re-allocate them.
+3. **Structural latency**: TDC bypasses RL actions entirely (`_pre_physics_step` ignores
+   actions and runs TDC controller directly), so even with correct buffer allocation,
+   base_env's `_get_delayed_actions()` has no effect on TDC.
+
+### Changed
+- `eval_dr.py`: Removed `is_tdc` parameter from `build_dr_config()` and `apply_dr_config()`.
+  All tasks now receive identical DR interpolation (joint gains, latency, perturbation, etc.)
+- `eval_dr.py`: Pre-allocate action latency buffers at env creation by setting
+  `action_latency_range` to full DR max before `gym.make()`, then letting per-level DR
+  override the config on each reset. Without this, buffers stay None at all DR levels.
+- `eval_dr.py`: Load agent params from run's `params/agent.yaml` via `yaml.full_load()`
+  for correct model architecture (ConstraintEncoderRunner vs EncoderRunner). Falls back
+  to task registry config on YAML parse failure.
+- `eval_dr.py`: Save eval_dr output to `<run_dir>/eval_dr/` instead of separate
+  `logs/eval_dr/` tree, keeping results alongside training logs.
+- `tdc_env.py`: Added TDC output latency buffer (`_tdc_target_history`) that delays
+  `_joint_pos_targets` by N control steps using `base_env._action_latency` values.
+  Anti-windup uses immediate targets (controller's view); delay models actuator comm latency.
+- `tdc_env.py`: Reset latency buffer in `_reset_idx` with current joint positions to
+  prevent stale values on episode reset.
+
+### Notes
+- TDC's TDE partially compensates for lower joint gains (that's TDE's purpose), so gain
+  equalization may not dramatically change results. The key fairness improvement is latency.
+- eval_dr now uses `DomainRandomizationCfg` defaults as SSOT for all tasks. Same class
+  used in training, so hard DR level = training conditions for all policies.
+- hero-agent-analysis skill updated: "evaluate" now defaults to eval_dr + PNG plots.
+  Text metric summaries are not evaluation.
+
 ## [2026-03-17] Disable alpha_entropy (noise_std rising, pitch plateau)
 
 ### Context

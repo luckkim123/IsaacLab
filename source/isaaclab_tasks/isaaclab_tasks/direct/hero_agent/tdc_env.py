@@ -90,6 +90,17 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         # Encoder policy reference (set by runner via set_encoder_policy)
         self._encoder_policy = None
 
+        # TDC output latency buffer (mirrors base_env's RL action latency for fair eval).
+        # Delays joint_pos_targets by N control steps, modeling sensor-to-actuator latency.
+        # Uses the same per-env latency values as base_env._action_latency.
+        if self._max_action_latency > 0:
+            num_joints = len(self._albc_joint_ids)
+            self._tdc_target_history = torch.zeros(
+                self.num_envs, self._max_action_latency + 1, num_joints, device=self.device
+            )
+        else:
+            self._tdc_target_history = None
+
         # Stability gate episode tracking (gate=1 means reward passed through)
         if cfg.reward.stability_gate_enable:
             self._gate_episode_sum = torch.zeros(self.num_envs, device=self.device)
@@ -187,7 +198,9 @@ class HeroAgentTDCEnv(HeroAgentEnv):
         """Override RL actions with TDC control output.
 
         TDC runs every control_decimation steps (50Hz). Between TDC steps,
-        existing joint targets are held.
+        existing joint targets are held. When action latency is enabled,
+        the TDC output is delayed by N control steps (same as RL action latency)
+        to model sensor-to-actuator communication delay.
 
         Args:
             actions: RL actions (ignored). Shape: (num_envs, 2).
@@ -199,6 +212,13 @@ class HeroAgentTDCEnv(HeroAgentEnv):
             return
 
         self._run_tdc_pipeline()
+
+        # Apply output latency: delay joint targets by per-env N steps
+        if self._tdc_target_history is not None and self._action_latency is not None:
+            self._tdc_target_history = torch.roll(self._tdc_target_history, 1, dims=1)
+            self._tdc_target_history[:, 0] = self._joint_pos_targets
+            env_idx = torch.arange(self.num_envs, device=self.device)
+            self._joint_pos_targets = self._tdc_target_history[env_idx, self._action_latency].clone()
 
     def _run_tdc_pipeline(self, **compute_kwargs) -> None:
         """Run the TDC control pipeline: orientation -> TDC -> IK -> rate limit -> anti-windup.
@@ -280,6 +300,13 @@ class HeroAgentTDCEnv(HeroAgentEnv):
 
         # Update buoyancy force for reset envs (may have changed from DR)
         self._tdc.update_controller_params(F_bu=self._buoy_hydro.buoyancy_force[env_ids_], env_ids=env_ids_)
+
+        # Reset TDC output latency buffer: fill with current joint targets
+        # so delayed reads return the initial position, not stale values.
+        if self._tdc_target_history is not None:
+            self._tdc_target_history[env_ids_] = (
+                self._joint_pos_targets[env_ids_].unsqueeze(1).expand_as(self._tdc_target_history[env_ids_])
+            )
 
         # Reset stability gate episode accumulators (logging already happened in super)
         if self.cfg.reward.stability_gate_enable:
