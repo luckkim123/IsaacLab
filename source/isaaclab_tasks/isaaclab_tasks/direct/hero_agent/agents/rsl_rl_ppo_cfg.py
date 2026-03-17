@@ -283,7 +283,13 @@ class HeroAgentAdaptBaseRunnerCfg(_HeroAgentBaseRunnerCfg):
 
 @configclass
 class RslRlConstraintTRPOAlgorithmCfg:
-    """Algorithm configuration for ConstraintTRPO (Lagrangian primal-dual).
+    """Algorithm configuration for ConstraintTRPO (C-TRPO barrier-based trust region).
+
+    Implements C-TRPO (Muller et al., ICML 2025, arXiv:2411.02957):
+        - No Lagrangian dual variables (lambda removed)
+        - Safe mode: barrier-augmented objective + KL-only trust region
+        - Recovery mode: cost minimization with standard TRPO trust region
+        - Option C: barrier curvature in objective gradient only, FVP stays KL-only
 
     These fields are forwarded as kwargs to ConstraintTRPO.__init__().
     The class_name tells the runner to instantiate ConstraintTRPO instead of PPO.
@@ -310,26 +316,31 @@ class RslRlConstraintTRPOAlgorithmCfg:
     gamma: float = 0.99
     lam: float = 0.95
 
-    # Constraint / Lagrangian
+    # Constraint
     num_constraints: int = 6
     constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15, 0.05, 0.10, 0.35)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
-    lr_lambda: float = 0.005
-    lambda_max: float = 20.0
-    lambda_init: float = 0.0
-    lambda_warmup_frac: float = 0.5
     line_search_kl_margin: float = 1.5
 
-    # Entropy bonus disabled: noise_floor=0.25 in BaseRunner provides hard collapse
-    # protection. alpha=0.005 was causing noise_std to RISE (0.55→0.63) after iter 100,
-    # blocking pitch convergence (10.4 +- 1.7 deg plateau for 300 iters).
-    target_entropy: float = 2.0
-    alpha_entropy_lr: float = 0.0
-    alpha_entropy_init: float = 0.0
+    # C-TRPO barrier parameters
+    beta: float = 0.01
+    """Barrier coefficient weighting D_phi relative to D_KL."""
+
+    recovery_threshold_frac: float = 0.8
+    """Fraction of budget: if cost_return < budget * frac, exit recovery mode."""
 
     # Encoder z bounds
     z_bounds_coef: float = 0.3
+
+    # Encoder update (multi-step to compensate for TRPO single policy step)
+    num_encoder_epochs: int = 5
+    """Number of encoder gradient steps per iteration. TRPO does 1 policy step
+    vs PPO's ~20 mini-batch steps. Multi-step encoder update compensates."""
+
+    encoder_lr: float = 1e-3
+    """Encoder Adam learning rate. Higher than PPO's 3e-4 because fewer total
+    steps per iteration (5 vs 20)."""
 
 
 @configclass
@@ -347,10 +358,10 @@ class RslRlPpoActorCriticEncoderConstrainedCfg(_RslRlPpoEncoderBaseCfg):
 
 @configclass
 class HeroAgentConstrainedEncoderRunnerCfg(_HeroAgentBaseRunnerCfg):
-    """Runner configuration for constrained encoder training (Lagrangian + TRPO).
+    """Runner configuration for constrained encoder training (C-TRPO barrier).
 
     Uses ConstraintEncoderRunner which inherits EncoderRunner and adds
-    Lagrangian dual variable persistence + constraint metrics logging.
+    barrier state persistence + constraint metrics logging.
     """
 
     class_name: str = "ConstraintEncoderRunner"

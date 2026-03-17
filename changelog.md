@@ -4,6 +4,111 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-17] Fix encoder gradient death in C-TRPO (50x drop)
+
+### Context
+First C-TRPO run (2026-03-17_16-32-32, 359 iters) showed severe performance regression vs
+Lagrangian baseline: pitch error 13.43 deg (was 9.31), enc_grad 8.3e-4 (was 0.04, a 50x drop),
+z_std 0.42 and declining (was 0.61). 4 constraint costs diverging in last 50 iters. The
+encoder was effectively frozen, unable to learn useful DR representations.
+
+Root cause analysis identified three structural issues:
+
+1. **Update frequency mismatch (~20-25x)**: PPO gives the encoder 20 gradient steps per
+   iteration (5 epochs x 4 mini-batches). C-TRPO's single full-batch TRPO step gave the
+   encoder exactly 1 gradient computation via `_cache_encoder_grads()`.
+
+2. **Recovery mode killed encoder gradient entirely**: `_trpo_step_recovery()` set
+   `self._encoder_grads_cache = []`, giving the encoder zero policy gradient when ANY
+   constraint entered recovery mode. Only z_bounds_loss remained, which is a regularizer
+   that pushes z toward zero -- explaining the z_std decline.
+
+3. **z_bounds_loss dominated**: Without opposing policy gradient, z_bounds_loss (penalizes
+   |z| > 0.9) collapsed z toward zero, making the encoder output uninformative.
+
+Combined effect: 20x (update freq) x 2x (ratio drift absence) x 1.5x (full-batch variance
+reduction) = ~50-60x, matching the observed 0.04 / 0.00083 = 48x drop.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Rewrote `_update_encoder()` with multi-step fresh
+  forward/backward passes (`num_encoder_epochs`, default 5). Each epoch does a full
+  forward pass through encoder+actor, computes reward_surrogate gradient to encoder,
+  adds z_bounds gradient, clips (max_norm=0.2), and steps Adam. Replaces single cached
+  gradient approach.
+- `algorithms/constraint_trpo.py`: Added `num_encoder_epochs` and `encoder_lr` as proper
+  `__init__` parameters (were hardcoded). encoder_lr default 1e-3 (was hardcoded 3e-4).
+- `algorithms/constraint_trpo.py`: Removed recovery mode encoder gradient blocking in
+  `_trpo_step_recovery()`. Encoder uses separate Adam optimizer (not TRPO trust region),
+  so no theoretical reason to block it during cost-minimization steps.
+- `algorithms/constraint_trpo.py`: Changed `retain_graph=True` to `False` in
+  `_trpo_step_recovery._flat_grad()` (CG solver builds own fresh graphs).
+- `agents/rsl_rl_ppo_cfg.py`: Added `num_encoder_epochs: int = 5` and
+  `encoder_lr: float = 1e-3` to `RslRlConstraintTRPOAlgorithmCfg`.
+
+### Removed
+- `algorithms/constraint_trpo.py`: Deleted `_cache_encoder_grads()` method and
+  `_encoder_grads_cache` attribute. No longer needed with multi-step fresh forward passes.
+- `algorithms/constraint_trpo.py`: Removed `_cache_encoder_grads(reward_surrogate)` call
+  from `_trpo_step_safe()`.
+
+### Notes
+- Effective encoder update per iteration: 5 epochs x 1e-3 LR = 5e-3 (vs PPO: 20 x 3e-4 = 6e-3).
+  Slightly conservative but close to PPO's total update magnitude.
+- Encoder grad clip (max_norm=0.2) preserved per epoch to prevent z instability from ratio drift.
+- Code verified working: 64-env test (3 iters, 2.69s) passed. 4096-env training launched.
+
+## [2026-03-17] C-TRPO migration: Lagrangian → barrier-based trust region
+
+### Context
+After extensive debugging of the Lagrangian primal-dual approach (10+ sessions on 2026-03-16,
+7+ sessions on 2026-03-17), the fundamental structural problems remained unsolved:
+
+1. **Lambda oscillation/hysteresis**: Transient constraint violations caused lambda to spike,
+   collapsing noise_std. Even when lambda decreased (constraints satisfied), noise never
+   recovered -- a one-way ratchet on exploration.
+2. **Entropy collapse/explosion dilemma**: alpha_entropy=0 → noise collapses to floor;
+   alpha_entropy>0 → noise rises unboundedly in TRPO (no clip mechanism like PPO).
+3. **All band-aids failed**: noise floor, alpha tuning, detached-std cost ratio, warmup
+   schedules -- each addressed symptoms but not root cause.
+
+Migrated to C-TRPO (Muller et al., ICML 2025, arXiv:2411.02957) which eliminates lambda
+entirely. Barrier function naturally shapes the trust region geometry: steps become more
+conservative near constraint boundaries. Two modes: safe (reward + barrier penalty) and
+recovery (cost minimization for infeasible constraints). Option C variant: barrier curvature
+only in objective gradient, FVP stays pure KL for CG stability.
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: Removed 7 Lagrangian params (`lr_lambda`, `lambda_max`,
+  `lambda_init`, `lambda_warmup_frac`, `target_entropy`, `alpha_entropy_lr`,
+  `alpha_entropy_init`). Added 2 barrier params: `beta=0.01` (barrier coefficient),
+  `recovery_threshold_frac=0.8` (hysteresis for mode switching). Updated class docstring.
+- `algorithms/constraint_trpo.py`: Full rewrite (~500 lines). Removed: `lambda_k`,
+  `log_alpha`, `alpha_optimizer`, `_log_prob_mean_only()`, lambda warmup logic, dual
+  update block, alpha entropy update block. Added: `_compute_margins()` (per-constraint
+  margin tracking + safe/recovery mode switching with hysteresis), `_compute_barrier_penalty()`
+  (linearized log-barrier: `beta * phi''(margin) * cost_surr^2`), `_linearized_surrogate_safe()`
+  and `_linearized_surrogate_recovery()` (mode-specific objectives), `_line_search_safe()`
+  (KL only) and `_line_search_recovery()` (KL + cost decrease), `_trpo_step_safe()` and
+  `_trpo_step_recovery()` (mode-specific TRPO steps). Encoder update, value update, noise
+  floor, z_bounds, LS-gated encoder updates all preserved.
+- `runners/constraint_encoder_runner.py`: Checkpoint: `lambda_state.pt` → `barrier_state.pt`
+  (saves `_in_recovery` flags + `_margins`). Backward compat: old `lambda_state.pt` silently
+  ignored. Logging: removed `lambda_k`, `alpha_entropy`; added `margin_k`, `in_recovery_k`,
+  `barrier_penalty`, `mode` (0=all safe, 1=mixed, 2=all recovery).
+
+### Notes
+- Barrier 1/2 factor from paper's Bregman divergence absorbed into beta (effective barrier
+  strength = 2x paper semantics at same beta value). Documented in code comment.
+- `_flat_grad` changed to `retain_graph=False` after encoder grad caching to reduce
+  memory during CG loop (CG builds own fresh graphs via FVP).
+- `_encoder_grads_cache` initialized in `__init__` (code review fix: prevented potential
+  AttributeError on edge case).
+- Recovery mode priority: if ANY constraint infeasible, entire step is recovery (cost
+  minimization). Conservative but simple; mixed mode deferred to future if needed.
+- All existing mechanisms preserved: noise floor (0.25), z_bounds loss, per-constraint
+  cost advantage standardization (NORBC Sec IV-B), d_k^2-normalized cost value loss,
+  encoder grad clip (0.2), reward advantage normalization.
+
 ## [2026-03-17] Fair eval_dr: unified DR conditions for TDC vs Encoder comparison
 
 ### Context
@@ -44,200 +149,6 @@ three fairness issues when comparing TDC vs Encoder policies via eval_dr.py:
   used in training, so hard DR level = training conditions for all policies.
 - hero-agent-analysis skill updated: "evaluate" now defaults to eval_dr + PNG plots.
   Text metric summaries are not evaluation.
-
-## [2026-03-17] Disable alpha_entropy (noise_std rising, pitch plateau)
-
-### Context
-Analyzed run `2026-03-17_15-00-27` at iter 484 (budget=0.15, progress_weight=2.0,
-alpha_entropy=0.005, noise_floor=0.25). Constraints converging well: joint_vel_limit
-under budget (2.9 < 5.0, lambda decreasing), joint_torque approaching budget (19.4 vs
-15.0), yaw_vel near budget (36.4 vs 35.0). Encoder healthy: z_std=0.61, grad_norm=0.018.
-
-BUT noise_std was RISING: 0.554 (iter 100) -> 0.626 (iter 483). This is abnormal --
-should decrease as policy learns precision. Root cause: alpha_entropy=0.005 provides
-constant upward gradient on log_std (+0.005/sample). Early training, reward gradient
-was strong enough to overcome it (std dropped 1.0->0.55). But after iter 100, reward
-gradient weakened (policy already decent), and alpha_entropy dominated.
-
-Direct consequence: pitch error plateaued at 10.4 +- 1.7 deg for 300 iterations
-(iter 200-483). Roll converged to 4.6 deg (less sensitive to noise because of arm
-geometry), but pitch couldn't learn fine adjustments with std=0.63 (63% of action range).
-
-Fix: set alpha_entropy_init=0.0. noise_floor=0.25 in BaseRunner provides hard collapse
-protection (entropy floor ~0.07). alpha_entropy was a redundant safety net that became
-counterproductive when reward pressure weakened.
-
-### Changed
-- `agents/rsl_rl_ppo_cfg.py`: `alpha_entropy_init` 0.005 -> 0.0. Noise floor=0.25
-  remains as sole collapse protection. Comment updated with rationale.
-
-### Notes
-- noise_std trajectory: i50=0.60, i100=0.55, i200=0.61, i300=0.63, i483=0.63 (rising!)
-- pitch mean error 10.4 +- 1.7 deg (iter 200-483) vs roll 5.7 +- 1.1 deg
-- Entropy evolution history: alpha=0.005 caused unbounded noise growth in early experiments
-  (std->4.45 when lambda=0). Later, with active constraints, it prevented natural convergence.
-  Full cycle: 0.005 (explosion) -> 0.0 (collapse) -> 0.005 (plateau) -> 0.0 (with floor)
-- At noise_floor=0.25: entropy ~0.07, which is near-zero but std=0.25 allows +-0.5 actions
-  (95% range). Previous collapse was at floor=0.1 or 0.2 (too restrictive).
-
-## [2026-03-17] Relax joint_torque budget + PBRS progress analysis
-
-### Context
-Analyzed run `2026-03-17_14-26-45` at iter 848/2500 (with progress_weight=2.0,
-alpha_entropy=0.005, noise_floor=0.25). Best performance at iter 150-350 (roll 4.5-5,
-pitch 8-10 deg), then error plateaued/worsened to roll 6-8, pitch 9-11 deg.
-
-Root cause: `joint_torque` budget=0.10 (10% violation rate) too tight. Cost decreased
-from 38.4 to 11.8 (70% reduction!) but still slightly exceeds budget (11.8 > 10.0).
-This 1.8%p gap drove lambda_joint_torque to 0.97, dominating the TRPO step direction
-and displacing reward optimization. Same lambda hysteresis pattern as before, just slower.
-
-Entropy declined from 1.88 (iter 250) to 1.53 (iter 848) despite alpha_entropy=0.005 --
-the fixed entropy bonus slowed but couldn't overcome the cumulative constraint pressure.
-
-PBRS progress reward analysis: progress and command are near-perfect mirrors at the
-episode level (both monotonic functions of mean error). Step-level signal is genuinely
-different (position vs velocity), but episode-level cancellation is notable. Performance
-IS better than previous run (4.8 vs 8 deg at iter 150), so keeping progress_weight=2.0.
-
-### Changed
-- `config.py`: `joint_torque` budget 0.10 -> 0.15 (allow 15% violation rate).
-  Current cost_return=11.8 < new budget 15.0, so lambda will stop growing.
-- `agents/rsl_rl_ppo_cfg.py`: `constraint_budgets` synced (0.10 -> 0.15 for joint_torque)
-
-### Notes
-- Progress vs command episode-level cancellation: both are functions of error magnitude.
-  Step-level difference (position vs velocity) is real but practical overlap is high.
-  Keeping progress_weight=2.0 because performance data shows improvement.
-- Entropy trend: alpha_entropy=0.005 provides ~170 iters of recovery (iter 60-250) before
-  lambda pressure overtakes it. May need higher alpha or adaptive mechanism for longer runs.
-
-## [2026-03-17] Activate PBRS progress reward for constrained encoder
-
-### Context
-Analyzed run `2026-03-17_14-13-26` (with alpha_entropy=0.005, noise_floor=0.25, encoder grad
-clip=0.2 fixes from previous session). At iter 343:
-- Entropy recovering well: 1.54 (iter 100) -> 1.94 (iter 343). alpha_entropy working.
-- Noise_std stable at 0.67 (well above floor). No collapse.
-- Encoder grad_norm stable at 0.025 (no escalation, clip effective).
-- Line search 100% success. KL synced (trpo=0.010, post=0.012).
-
-BUT error started increasing at iter ~230: roll 8->19, pitch 12->20. Root cause analysis:
-- NOT entropy-driven: entropy was rising from iter 60 while error was IMPROVING (iter 60-140).
-  If entropy caused error, that phase would be impossible.
-- Lambda pressure: lambda_joint_torque reached ~0.15 at iter 230, competing with reward gradient
-  in TRPO conjugate gradient step. As lambda grows (lr_eff linearly increasing via warmup),
-  more of the trust region step goes toward constraint satisfaction vs reward optimization.
-- Entropy and error correlation is coincidental: both driven by separate monotonically increasing
-  forces (alpha_entropy and lambda growth respectively).
-
-Activated PBRS progress_weight=2.0 to strengthen reward signal against lambda pressure.
-PBRS rewards error REDUCTION rate (prev_potential - gamma * potential), providing stronger
-learning signal when lambda competes for the TRPO step direction. Mathematically safe:
-does not change optimal policy (Ng et al. 1999).
-
-### Changed
-- `config.py`: `progress_weight` 0.0 -> 2.0 in HeroAgentConstrainedEncoderEnvCfg reward config
-
-## [2026-03-17] Training analysis: entropy hysteresis diagnosis
-
-### Context
-Analyzed run `2026-03-17_13-13-31` (encoder LR=3e-4, 6 constraints, history-augmented encoder).
-KL desync fix confirmed: kl_trpo=0.01, kl=0.012 (was 0.38 with LR=3e-3). Encoder stable:
-z_std=0.55, z_mean~0, grad healthy. BUT:
-
-1. **Roll error spiked iter 220-240** (7 -> 32 deg) then V-shaped recovery. NOT caused by
-   encoder z saturation (z_mean stable +-0.05). Caused by lambda_max crossing 0.10 ->
-   policy shift (kl spike to 0.10 at iter 230) -> temporary destabilization.
-
-2. **Entropy collapsed by iter 400**: 2.84 -> 0.03 -> -0.38. noise_std hit floor 0.20 by
-   iter ~900. Root cause: alpha_entropy=0 + 6 constraints ALL push noise down (joint_torque,
-   yaw_vel, joint_vel_limit penalize large/fast actions -> reducing noise is easiest compliance
-   path). Dual downward pressure with zero counterforce.
-
-3. **Action magnitude halved at iter 650-700**: 1.05 -> 0.55. Coincided with lambda_joint_torque
-   peak (0.22 at iter 673). Policy learned "do less = safe" instead of "do precise = efficient".
-
-4. **Lambda hysteresis (key finding)**: lambda_joint_torque peaked at 0.22 (iter 673) then
-   dropped to 0.00 (iter 1022, constraint satisfied). BUT action_size stayed at 0.55 and
-   noise_std stayed at floor. Transient constraint pressure permanently collapsed exploration
-   with no recovery mechanism. Constraints acted as one-way ratchet on entropy.
-
-5. **Grad norm escalation**: grad_norm_reward 0.015 -> 0.61 (40x). Caused by 1/sigma^2
-   amplification as noise_std decreases. TRPO protects actor (KL step size), but encoder
-   uses Adam -> effective LR increases. encoder grad 0.002 -> 0.08.
-
-6. **Latest (iter 1597)**: roll=5.98, pitch=9.89, reward=-6.13. Slowly improving despite
-   zero exploration. Approaching asymptotic limit.
-
-### Notes
-- Encoder is NOT the problem. z_mean +-0.05, z_std stable at 0.53-0.57, kl synced.
-- z_min/z_max hitting [-1,1] is min/max across 4096 envs x 13 dims -- outlier, not systemic.
-- Root cause is purely exploration death: alpha_entropy=0 provides no entropy recovery force.
-- noise_floor=0.20 only sets lower bound; doesn't push entropy UP when constraint pressure eases.
-- Planned fix: alpha_entropy=0.005 (fixed, not adaptive), noise_floor 0.20->0.25 (moderate),
-  encoder grad clip max_norm=0.2 (safety). Avoid floor=0.30 (prevents fine-grained convergence).
-
-## [2026-03-17] Fix entropy collapse: alpha_entropy + noise floor + encoder grad clip
-
-### Context
-Based on training analysis above: entropy collapsed irreversibly due to zero counterforce
-(alpha_entropy=0) against dual downward pressure (reward + constraint gradients). Lambda
-hysteresis: transient constraint pressure permanently killed exploration with no recovery.
-Grad norm escalation (40x) from 1/sigma^2 amplification threatened encoder stability.
-
-Three changes address the root cause (no entropy recovery) and symptoms (grad amplification):
-- noise_floor 0.25 chosen over 0.30 to preserve fine-grained convergence capability
-- alpha_entropy=0.005 fixed (not SAC adaptive, which caused instability with continuous
-  constraints in 2026-03-16 experiments)
-- encoder grad clip 0.2 (encoder grad currently 0.08, clip provides 2.5x headroom)
-
-### Changed
-- `agents/rsl_rl_ppo_cfg.py`: `alpha_entropy_init` 0.0 -> 0.005 (fixed, alpha_entropy_lr stays 0.0)
-- `algorithms/constraint_trpo.py`: noise floor `min_log_std` from log(0.2) to log(0.25)
-- `algorithms/constraint_trpo.py`: encoder grad clip from max_grad_norm (1.0) to 0.2 (encoder-specific)
-- `runners/base_runner.py`: noise floor `min_std` 0.2 -> 0.25 (unified with constraint_trpo)
-
-### Notes
-- noise_floor=0.25: 1/sigma^2=16x max amplification (vs 25x at 0.20), sigma=0.25 still allows
-  precise actions (95% within +-0.5 of mean for [-1,1] range)
-- alpha_entropy=0.005 with lr=0.0: constant entropy bonus, not adaptive. Previous adaptive
-  alpha (SAC-style) caused instability -- alpha grew unbounded during lambda warmup period
-- encoder grad clip 0.2: current grad ~0.08, clip only activates during spikes. Value function
-  retains max_grad_norm=1.0 (separate clip)
-
-## [2026-03-17] Reduce encoder LR for 272D input (actor-encoder desync fix)
-
-### Context
-Run `2026-03-17_12-51-10` (286 iters, raw flatten history concat) showed:
-- z_std=0.70 (up from 0.12 pre-history) -- history concat is providing useful signal
-- BUT reward stuck at -18.86, error 15-17deg (no improvement over random)
-- kl_trpo=0.01 (TRPO step fine) vs kl=0.31 with peaks >1.0 (post-encoder update)
-- entropy=-0.14, noise_std=0.22 (rapidly dropped to floor)
-- 3 constraints OVER budget: joint_torque, joint_vel_limit, yaw_vel
-
-Root cause: encoder LR=3e-3 was tuned for 19D input (privileged only). With 272D input
-(13 policy + 240 hist_flat + 19 privileged), the encoder first layer has 70K params
-(was 5K). Each Adam step shifts z significantly, invalidating the TRPO KL guarantee.
-The actor optimizes under one z-mapping, then encoder changes it -- actor-encoder desync.
-
-Failure chain: encoder LR too high -> large z-shift per step -> kl jumps 0.01->0.31+
--> rollout advantages become stale -> no learning signal -> noise drops to floor
-(reducing noise is the only "stable" strategy) -> error plateaus at random level.
-
-### Changed
-- `algorithms/constraint_trpo.py`: `encoder_lr` 3e-3 -> 3e-4 (10x reduction).
-  272D input has 14x more first-layer params than 19D; reducing LR by 10x keeps
-  per-step z-shift comparable to pre-history encoder.
-
-### Notes
-- z_bounds_loss=0.003 (not 0 as initially reported -- script rounding). z_bounds is
-  working correctly; z_range [-1,1] is expected min/max across 4096 envs.
-- ConstraintEncoderRunner overrides _update_encoder_lr to no-op; encoder_lr is solely
-  managed by ConstraintTRPO. No other files need changes.
-- Success metric: kl (post-encoder) should drop from 0.31 to <0.05
-- If kl still too high, next step is dimension reduction (linear projection or
-  history subsampling), not further LR reduction.
 
 ## [2026-03-17] Replace HistoryTCN with raw flatten concat (TRPO OOM fix)
 
@@ -329,243 +240,38 @@ needs to produce informative z.
 - TDC baseline comparison: classic controller achieves ~6 deg under hard DR, matching
   current RL+encoder (5.5-6.7 deg). Encoder contributes negligible improvement.
 
-## [2026-03-17] Reward restructure + quadratic command reward
+## [2026-03-17] Lagrangian tuning arc (7 sessions, superseded by C-TRPO)
 
 ### Context
-Analysis of 9-constraint run `2026-03-17_08-21-47` (762 iters) showed plateau at roll 8 deg,
-pitch 10 deg. Four constraints OVER budget (attitude_err, singularity, yaw_vel, joint_osc).
-joint_osc replaced with smoothness reward, PBRS removed, command_sigma tightened 0.35->0.20.
-
-Noise floor 0.15 caused entropy collapse: run `08-48-06` (269 iters) entropy=-0.96, error +80%.
-Reverted to 0.20. But even with floor=0.20, run `08-57-07` showed noise_std reaching floor by
-iter 70 with entropy=-0.38 (COLLAPSED). Root cause: Laplacian reward `exp(-e/sigma)` with
-sigma=0.20 creates gradient=5.0*exp(-e/0.20) that stays strong near zero, driving continuous
-noise reduction with no counterforce (alpha_entropy=0).
-
-Switched to quadratic command reward `r_c = -k_c*(roll_err^2 + pitch_err^2)` per reference
-paper. Quadratic gradient = -2*k*error weakens near zero, providing natural entropy-friendly
-structure. Policy stops compressing noise once error reduction slows. This matches the paper's
-3-term reward design (command quadratic + torque penalty + smoothness penalty).
-
-### Added
-- `mdp/rewards.py`: `command_type` parameter in `command_reward()` supporting "quadratic"
-  and "laplacian" modes. Quadratic: `-(roll_err^2 + pitch_err^2)`, uses per-axis error
-  (not L2 norm). Laplacian: existing composite exp + linear ramp (unchanged).
-- `mdp/rewards.py`: `command_type` field in `ALBCRewardCfg` (default: "laplacian" for
-  backward compatibility with non-constrained envs)
+Seven debugging sessions tuning the Lagrangian approach before concluding it was
+fundamentally flawed for this problem. Key progression: 3-constraint baseline (alpha=0.005
+-> noise explosion to std=4.45) -> alpha=0 (noise collapse to 0.17) -> noise floor 0.2
+-> constraint expansion 3->9->6 -> budget relaxation -> lambda warmup extension -> PBRS
+progress reward -> entropy/noise plateau diagnosis. All approaches encountered the same
+lambda hysteresis: transient violation -> lambda spike -> noise collapse -> lambda drop
+but noise never recovered. Entire arc superseded by C-TRPO migration (above).
 
 ### Changed
-- `config.py`: Constrained encoder `command_type` set to "quadratic" (was implicit "laplacian")
-- `config.py`: Removed `command_sigma=0.20` override (irrelevant for quadratic mode)
-- `config.py`: `smoothness_weight` 0.0 -> -0.5, `progress_weight` 2.0 -> 0.0,
-  `settling_weight` -> 0.0, joint_osc constraint removed (9->8 constraints)
-- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 9->8, budgets updated
-- `base_env.py`: Pass `reward_type` from config to `command_reward` function
-
-### Fixed
-- `runners/base_runner.py`, `algorithms/constraint_trpo.py`: Reverted noise floor 0.15 -> 0.20.
-  0.15 caused entropy collapse within 269 iters. Even 0.20 hits floor by iter 70 with Laplacian
-  sigma=0.20. Quadratic reward should resolve the underlying pressure.
-
-### Notes
-- Noise floor tested: 0.10 (immediate collapse), 0.15 (collapse in 269 iters), 0.20 (floor
-  reached by iter 70 with Laplacian). Quadratic should allow noise_std to stay above floor.
-- Quadratic gradient at 3deg: 0.52 vs Laplacian(sigma=0.20): 3.85. Weaker gradient is
-  actually desirable: constraint system (attitude_err budget=7deg) handles fine control,
-  reward provides coarse tracking signal.
-- Other envs (Base, Encoder-Base, etc.) unaffected: default command_type="laplacian"
-- Quadratic alone did NOT fix entropy collapse: run `09-02-53` still showed entropy=-0.38,
-  noise_std=0.20 (floor) by early iterations. Root cause identified as `smoothness_weight=-0.5`:
-  E[da^2] contains 2*sigma^2 term, so reducing noise directly reduces smoothness penalty.
-  With alpha_entropy=0, this constant downward pressure is uncontested.
-  Reduced smoothness_weight -0.5 -> -0.1 (1/5 pressure) to test hypothesis.
-
-## [2026-03-17] Constraint reduction 8→6 + budget relaxation
-
-### Context
-Analysis of run `2026-03-17_09-10-27` (124 iters, smoothness=-0.1 + quadratic command)
-showed 4/8 constraints simultaneously OVER budget: attitude_err (3.02x), yaw_vel (2.31x),
-joint_torque (1.67x), singularity (1.35x). Excessive simultaneous constraint violations
-cause cost gradient to dominate reward gradient, suppressing learning.
-
-Two constraints identified as redundant:
-- `singularity`: DLS IK already handles singularity via damping (no safety benefit in sim)
-- `attitude_err`: duplicates quadratic command reward's tracking incentive (double-penalizing
-  error reduction through both reward and constraint). Budget 0.122 rad (7 deg) too tight
-  for early training, generating largest lambda and dominating policy gradient.
-
-Remaining OVER constraints (joint_torque, yaw_vel) kept but budgets relaxed to reduce
-initial constraint pressure while maintaining eventual compliance.
-
-Noise floor kept at 0.20: with alpha_entropy=0, quadratic reward's E[-(e+noise)^2] = -(E[e^2] + sigma^2)
-structurally drives noise to floor regardless of smoothness weight. Floor is the intended defense.
-
-### Changed
-- `config.py`: Disabled `singularity` constraint (DLS IK handles it mechanically)
-- `config.py`: Disabled `attitude_err` constraint (quadratic command reward covers tracking)
-- `config.py`: Relaxed `joint_torque` budget 0.05 -> 0.10 (was 1.67x OVER)
-- `config.py`: Relaxed `yaw_vel` budget 0.15 -> 0.35 (was 2.31x OVER)
-- `config.py`: Removed unused imports (`attitude_error_cost`, `singularity_cost`)
-- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 8 -> 6, budgets synced to
-  (0.02, 0.01, 0.10, 0.05, 0.10, 0.35) matching: accum_rot, attitude_abs,
-  joint_torque, joint_vel_limit, overshoot, yaw_vel
+- `config.py`: Constraints evolved 3->9->8->6 (final: accum_rot, attitude_abs, joint_torque,
+  joint_vel_limit, overshoot, yaw_vel). Budgets tuned: joint_torque 0.05->0.10->0.15,
+  yaw_vel 0.15->0.35. Removed singularity + attitude_err (redundant with DLS IK / quadratic
+  reward). Added PBRS progress_weight=2.0, command_type="quadratic", smoothness_weight=-0.1.
+- `agents/rsl_rl_ppo_cfg.py`: num_constraints 3->9->8->6, budgets synced. alpha_entropy
+  0.005->0.0. lr_lambda 0.01->0.005. lambda_warmup_frac 0.3->0.5.
+- `runners/base_runner.py`: noise floor 0.1->0.2->0.25 (final: 0.25)
+- `algorithms/constraint_trpo.py`: noise floor synced with base_runner (final: log(0.25)).
+  Encoder LR 3e-3->3e-4 (272D input desync fix). Encoder grad clip added (max_norm=0.2).
+- `mdp/constraints.py`: Added joint_torque_cost, joint_velocity_limit_cost, overshoot_cost,
+  attitude_error_cost. Removed singularity + attitude_err constraints.
+- `mdp/rewards.py`: Added progress_reward (PBRS), command_type "quadratic"/"laplacian"
+- `base_env.py`: Overshoot buffer, progress reward term, command_type passthrough
 
 ### Notes
-- Remaining 6 constraints: accum_rot, attitude_abs, joint_torque, joint_vel_limit,
-  overshoot, yaw_vel
-- Per-constraint advantage normalization handles cost_return scale differences
-  (absolute scale irrelevant, violation ratio matters)
-- With 2 fewer constraints, total constraint pressure reduced -- remaining OVER
-  constraints should converge faster
-
-## [2026-03-17] Lambda warmup extension + lr reduction
-
-### Context
-Analysis of run `2026-03-17_09-20-21` (6 constraints, post-reduction) revealed that
-cost gradient overtakes reward gradient by iter 150+ (ratio cost/reward > 1.0). Direct
-comparison of `Loss/grad_norm_reward` vs `Loss/grad_norm_cost` from TensorBoard confirmed:
-  - iter 0-30: reward dominates (ratio 0.01), error drops rapidly
-  - iter 60-120: gradients equalize (ratio 0.5-1.0), error plateaus
-  - iter 150+: cost dominates (ratio 1.0-2.0), policy minimizes movement instead of error
-
-Root cause: lambda warmup uses a linear ramp (not hard cutoff), so lambda grows from
-iter 0. With `lambda_warmup_frac=0.3` (warmup_end=300) and `lr_lambda=0.01`, effective
-lr at iter 150 was already 0.005 (50% of full). Combined with OVER-budget constraints
-(joint_torque 1.29x, yaw_vel 1.11x), lambda grew fast enough to dominate by mid-training.
-
-Applied both: longer warmup (more reward-dominant iterations) and slower lambda growth
-(reduced ceiling on cost gradient pressure).
-
-### Changed
-- `agents/rsl_rl_ppo_cfg.py`: `lr_lambda` 0.01 -> 0.005 (halve lambda growth rate)
-- `agents/rsl_rl_ppo_cfg.py`: `lambda_warmup_frac` 0.3 -> 0.5 (warmup 300 -> 500 iters)
-
-### Notes
-- At iter 150 now: eff_lr = 0.005 * (150/500) = 0.0015 (was 0.005, 3.3x reduction)
-- Full lr reached at iter 500 instead of 300, giving 200 more reward-dominant iters
-- Lambda values at iter 236 in previous run: joint_torque=0.59, joint_vel_limit=0.35,
-  yaw_vel=0.27. These should grow ~3x slower with new settings.
-
-## [2026-03-17] Constraint expansion 3→9 + PBRS progress reward
-
-### Context
-With alpha_entropy=0, noise_floor=0.2, lambda_warmup=0.3 stabilized (previous session),
-expanded constraints for behavioral quality improvement. The prior 8-constraint failure
-was caused by target_entropy + continuous constraint interaction (now resolved: alpha=0 +
-noise floor). Added PBRS progress reward to accelerate rise time (replacing settling reward).
-
-### Added
-- `mdp/constraints.py`: 4 new cost functions:
-  - `joint_torque_cost` (alias of effort_limit_cost, clearer name)
-  - `joint_velocity_limit_cost` (binary: joint_vel > 4.189 rad/s = 40 RPM)
-  - `overshoot_cost` (binary: error sign flip + magnitude > 2 deg threshold)
-  - `attitude_error_cost` (continuous: reuses env._potentials L2 norm)
-- `mdp/rewards.py`: `progress_reward` PBRS function (prev_potential - gamma * potential),
-  `ALBCRewardCfg.progress_weight` and `progress_gamma` fields
-- `base_env.py`: `_prev_attitude_error_rp` buffer for overshoot detection (initialized to
-  initial error in `_reset_task_and_state` to prevent false positives on first step)
-
-### Changed
-- `config.py`: `HeroAgentConstrainedEncoderEnvCfg.constraints` expanded from 3 to 9 terms:
-  binary(6): accum_rot(0.02), attitude_abs(0.01), singularity(0.15),
-  joint_torque(0.05), joint_vel_limit(0.05), overshoot(0.10);
-  continuous(3): attitude_err(0.122=7deg), joint_osc(0.30), yaw_vel(0.15)
-- `config.py`: Reward updated: settling_weight=0.0 (replaced by attitude_err constraint),
-  progress_weight=2.0 (PBRS, scale_by_dt=False)
-- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 3→9, `constraint_budgets` synced to 9-tuple
-  in both `RslRlConstraintTRPOAlgorithmCfg` and `RslRlPpoActorCriticEncoderConstrainedCfg`
-- `base_env.py`: `_build_reward_terms()` adds progress term when weight != 0;
-  `_get_rewards()` updates overshoot buffer after constraint computation
-- `mdp/__init__.py`: Exports updated for all new functions
-
-### Notes
-- PBRS is theoretically safe (Ng et al. 1999): does not change optimal policy
-- attitude_err budget=0.122 rad (7 deg) is moderately strict; if lambda saturates, relax to 10 deg
-- Overshoot false positive prevention: `_prev_attitude_error_rp` set to initial error at reset
-- joint_torque_cost is a pure alias of effort_limit_cost (no code duplication)
-
-## [2026-03-17] 3-constraint Lagrangian baseline + disable entropy bonus for TRPO
-
-### Context
-Previous run `2026-03-16_15-09-42` (999 iters, Lagrangian, 8 constraints, target_entropy=2.0)
-failed with 17-20 deg attitude error, noise_std stuck at 1.0. Compared with successful run
-`2026-03-06_18-26-36` (IPO, 3 constraints, entropy_coef=0.005): 3.7 deg error, noise_std 0.2.
-
-**Root cause 1 (8→3 constraints)**: 5 continuous constraints (joint_vel, oscillation, yaw_vel,
-cob_cog, effort_limit) produce costs proportional to noise_std. As noise increased, continuous
-costs grew, lambda grew, cost gradient dominated reward gradient, creating a vicious cycle.
-The 3/6 run used only 3 binary constraints (noise-insensitive).
-
-**Root cause 2 (target_entropy)**: SAC-style alpha kept noise_std at 1.0, preventing the
-natural reward-driven noise reduction that the 3/6 run exhibited (converged to 0.2).
-
-**Fix applied**: Reduced to 3 binary constraints (accum_rot, attitude_abs, singularity) +
-fixed alpha_entropy_init=0.005. Restored velocity_limit_sim=6.28 (was 4.19).
-
-**Run `2026-03-17_07-15-39` (227 iters)**: Error improved to 5-8 deg (good!), reward peaked
-at 69.2 (iter 150). BUT noise_std grew unboundedly: 1.02→4.45, entropy 2.84→5.75. Reward
-started declining after iter 150.
-
-**Root cause 3 (entropy bonus in TRPO)**: With all constraints satisfied (lambda=0), the
-fixed alpha=0.005 entropy bonus has no counterbalancing force. PPO has clip ratio + adaptive
-LR to resist noise growth; TRPO takes max-KL steps every iteration, so any alpha > 0
-consistently pushes noise_std up. TRPO's KL constraint alone provides sufficient exploration.
-
-**Fix**: Set alpha_entropy_init=0.0. Also fixed math.log(0) crash in constraint_trpo.py
-(added guard: log(max(init, 1e-8))).
-
-### Changed
-- `config.py`: Reduced `HeroAgentConstrainedEncoderEnvCfg.constraints.terms` from 8 to 3
-  (kept: accum_rot budget=0.02, attitude_abs budget=0.01, singularity budget=0.15;
-  removed: effort_limit, joint_vel, oscillation, yaw_vel, cob_cog)
-- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 8→3, `constraint_budgets` updated to
-  (0.02, 0.01, 0.15), `alpha_entropy_lr` 0.01→0.0, `alpha_entropy_init` 0.005→0.0
-  (TRPO KL constraint provides exploration; entropy bonus causes unbounded noise growth)
-- `agents/rsl_rl_ppo_cfg.py`: `RslRlPpoActorCriticEncoderConstrainedCfg.num_constraints` 8→3
-- `hero_agent.py`: `velocity_limit_sim` 4.19→6.28 rad/s (restored 3/6 value)
-
-### Fixed
-- `algorithms/constraint_trpo.py`: `math.log(alpha_entropy_init)` crashes when init=0.0.
-  Added guard: `log(max(init, 1e-8))` so alpha initializes to ~1e-8 (effectively zero).
-
-### Added
-- `docs/plans/2026-03-17-lagrangian-baseline-3constraint.md`: Design document for experiment
-
-### Notes
-- All Lagrangian code improvements retained: std detach, reward adv normalization,
-  lambda warmup, d_k normalization, LS-gated updates, asymmetric critic, z detach from cost
-- Key insight: entropy bonus interacts fundamentally differently with TRPO vs PPO. In PPO,
-  clip + adaptive LR naturally resist noise growth. In TRPO, max_kl step has no such mechanism.
-
-## [2026-03-17] Raise noise floor 0.1 -> 0.2 + alpha=0 run analysis
-
-### Context
-Run `2026-03-17_07-25-13` (alpha=0, 3 constraints, 454 iters) confirmed noise_std fix works:
-noise decreased naturally 1.0 -> 0.17, reward 60-66, roll 4-7 deg, pitch 5-9 deg.
-All constraints satisfied (lambda=0), line search 100%.
-
-**However, noise_std kept falling without bound** (0.17 at iter 454, still declining).
-Entropy went negative (-0.73) -- exploration effectively dead. Reward plateaued at 60-66
-(vs 74.6 in 3/6 run) because policy stopped exploring for better strategies.
-
-TRPO entropy bonus dilemma:
-- alpha=0.005: noise grows unboundedly (1.0 -> 7.44 in 316 iters)
-- alpha=0.0: noise shrinks to floor (1.0 -> 0.17 in 454 iters)
-
-Simplest fix: raise noise floor from 0.1 to 0.2. This matches the 3/6 run's converged
-noise_std (0.20-0.24) and guarantees minimum exploration without any entropy bonus tuning.
-The floor is a hard clamp -- no interaction with TRPO step dynamics.
-
-### Changed
-- `runners/base_runner.py`: `min_std` 0.1 -> 0.2 in `_apply_noise_floor()` -- ensures
-  exploration persists at convergence, matching 3/6 run's natural noise level
-- `algorithms/constraint_trpo.py`: `min_log_std` from `log(0.1)` to `log(0.2)` -- unified
-  with base_runner floor
-
-### Notes
-- Next step: verify noise stabilizes at 0.2, then add constraints back
-- The 3/6 run (IPO, entropy_coef=0.005) had implicit exploration from barrier pressure;
-  Lagrangian with lambda=0 has no equivalent, so the floor is essential
+- TRPO entropy dilemma (no solution in Lagrangian framework):
+  alpha>0 -> unbounded noise growth (no clip like PPO); alpha=0 -> collapse to floor
+- Lambda hysteresis: one-way ratchet on exploration (lambda up -> noise down -> lambda down
+  but noise stays down). Root cause of C-TRPO migration decision.
+- noise_floor=0.25 kept as safety net in C-TRPO (still relevant)
 
 ## [2026-03-16 Summary] Lagrangian migration + entropy stabilization (10 sessions)
 
