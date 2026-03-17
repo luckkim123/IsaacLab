@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-17] Reduce encoder LR for 272D input (actor-encoder desync fix)
+
+### Context
+Run `2026-03-17_12-51-10` (286 iters, raw flatten history concat) showed:
+- z_std=0.70 (up from 0.12 pre-history) -- history concat is providing useful signal
+- BUT reward stuck at -18.86, error 15-17deg (no improvement over random)
+- kl_trpo=0.01 (TRPO step fine) vs kl=0.31 with peaks >1.0 (post-encoder update)
+- entropy=-0.14, noise_std=0.22 (rapidly dropped to floor)
+- 3 constraints OVER budget: joint_torque, joint_vel_limit, yaw_vel
+
+Root cause: encoder LR=3e-3 was tuned for 19D input (privileged only). With 272D input
+(13 policy + 240 hist_flat + 19 privileged), the encoder first layer has 70K params
+(was 5K). Each Adam step shifts z significantly, invalidating the TRPO KL guarantee.
+The actor optimizes under one z-mapping, then encoder changes it -- actor-encoder desync.
+
+Failure chain: encoder LR too high -> large z-shift per step -> kl jumps 0.01->0.31+
+-> rollout advantages become stale -> no learning signal -> noise drops to floor
+(reducing noise is the only "stable" strategy) -> error plateaus at random level.
+
+### Changed
+- `algorithms/constraint_trpo.py`: `encoder_lr` 3e-3 -> 3e-4 (10x reduction).
+  272D input has 14x more first-layer params than 19D; reducing LR by 10x keeps
+  per-step z-shift comparable to pre-history encoder.
+
+### Notes
+- z_bounds_loss=0.003 (not 0 as initially reported -- script rounding). z_bounds is
+  working correctly; z_range [-1,1] is expected min/max across 4096 envs.
+- ConstraintEncoderRunner overrides _update_encoder_lr to no-op; encoder_lr is solely
+  managed by ConstraintTRPO. No other files need changes.
+- Success metric: kl (post-encoder) should drop from 0.31 to <0.05
+- If kl still too high, next step is dimension reduction (linear projection or
+  history subsampling), not further LR reduction.
+
 ## [2026-03-17] Replace HistoryTCN with raw flatten concat (TRPO OOM fix)
 
 ### Context
