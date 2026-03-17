@@ -296,6 +296,7 @@ class HeroAgentEnv(DirectRLEnv):
                 func=command_reward,
                 weight=rcfg.command_weight,
                 params={
+                    "reward_type": rcfg.command_type,
                     "sigma": rcfg.command_sigma,
                     "e_max": rcfg.command_e_max,
                     "alpha": rcfg.command_alpha,

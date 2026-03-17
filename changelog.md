@@ -4,54 +4,51 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [2026-03-17] Reward restructure: remove PBRS, tighten sigma, lower noise floor
+## [2026-03-17] Reward restructure + quadratic command reward
 
 ### Context
 Analysis of 9-constraint run `2026-03-17_08-21-47` (762 iters) showed plateau at roll 8 deg,
 pitch 10 deg. Four constraints OVER budget (attitude_err, singularity, yaw_vel, joint_osc).
-Key finding: attitude_err, singularity, joint_osc cost_returns plateau because they reflect
-steady-state performance limits, not independently optimizable behaviors. Lambda pressure on
-these creates multi-objective conflict without reducing the costs.
+joint_osc replaced with smoothness reward, PBRS removed, command_sigma tightened 0.35->0.20.
 
-joint_osc (continuous, budget=0.30) was the weakest constraint: cost_return=32 plateaued,
-lambda=0.71 creating competing gradient with no improvement. Replaced with fixed-weight
-action smoothness reward (proven formula from reference: da^2 + d2a^2). This avoids lambda
-escalation while still incentivizing smooth actions.
+Noise floor 0.15 caused entropy collapse: run `08-48-06` (269 iters) entropy=-0.96, error +80%.
+Reverted to 0.20. But even with floor=0.20, run `08-57-07` showed noise_std reaching floor by
+iter 70 with entropy=-0.38 (COLLAPSED). Root cause: Laplacian reward `exp(-e/sigma)` with
+sigma=0.20 creates gradient=5.0*exp(-e/0.20) that stays strong near zero, driving continuous
+noise reduction with no counterforce (alpha_entropy=0).
 
-PBRS progress reward removed: cost_return showed stable ~1.0 with no differentiation,
-not clearly contributing to error reduction. command_sigma tightened 0.35->0.20 to increase
-gradient at 7->3 deg range (+38% at 7 deg, +48% at 3 deg). Noise floor lowered 0.20->0.15
-matching unconstrained encoder-base noise at convergence (0.17).
+Switched to quadratic command reward `r_c = -k_c*(roll_err^2 + pitch_err^2)` per reference
+paper. Quadratic gradient = -2*k*error weakens near zero, providing natural entropy-friendly
+structure. Policy stops compressing noise once error reduction slows. This matches the paper's
+3-term reward design (command quadratic + torque penalty + smoothness penalty).
+
+### Added
+- `mdp/rewards.py`: `command_type` parameter in `command_reward()` supporting "quadratic"
+  and "laplacian" modes. Quadratic: `-(roll_err^2 + pitch_err^2)`, uses per-axis error
+  (not L2 norm). Laplacian: existing composite exp + linear ramp (unchanged).
+- `mdp/rewards.py`: `command_type` field in `ALBCRewardCfg` (default: "laplacian" for
+  backward compatibility with non-constrained envs)
 
 ### Changed
-- `config.py`: `command_sigma` 0.35 -> 0.20 (stronger gradient at small errors,
-  Laplacian grad@7deg: 1.61->2.23, grad@3deg: 1.88->2.78)
-- `config.py`: `smoothness_weight` 0.0 -> -0.5 (replaces joint_osc constraint with
-  fixed-weight reward, formula: da^2 + d2a^2)
-- `config.py`: `progress_weight` 2.0 -> 0.0 (PBRS removed, not clearly helping)
-- `config.py`: Removed joint_osc constraint from terms list (9->8 constraints)
-- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 9->8, `constraint_budgets` updated
-  to 8-tuple (removed joint_osc budget=0.30)
-- `runners/base_runner.py`: `min_std` 0.20 -> 0.15 -> **0.20** (reverted, see below)
-- `algorithms/constraint_trpo.py`: `min_log_std` log(0.2) -> log(0.15) -> **log(0.2)** (reverted)
+- `config.py`: Constrained encoder `command_type` set to "quadratic" (was implicit "laplacian")
+- `config.py`: Removed `command_sigma=0.20` override (irrelevant for quadratic mode)
+- `config.py`: `smoothness_weight` 0.0 -> -0.5, `progress_weight` 2.0 -> 0.0,
+  `settling_weight` -> 0.0, joint_osc constraint removed (9->8 constraints)
+- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 9->8, budgets updated
+- `base_env.py`: Pass `reward_type` from config to `command_reward` function
 
 ### Fixed
 - `runners/base_runner.py`, `algorithms/constraint_trpo.py`: Reverted noise floor 0.15 -> 0.20.
-  Run `2026-03-17_08-48-06` (269 iters) showed entropy collapse to -0.96 (from 0.17) and
-  noise_std pinned at 0.15 floor. Error worsened: roll 8.5->15.2 deg (+80%), pitch 11.5->17.5 deg
-  (+52%). Root cause: noise floor 0.15 too aggressive -- combined with tightened command_sigma=0.20,
-  policy lost exploration capacity entirely. Floor 0.20 keeps sigma=0.20 gradient benefit while
-  maintaining viable exploration.
+  0.15 caused entropy collapse within 269 iters. Even 0.20 hits floor by iter 70 with Laplacian
+  sigma=0.20. Quadratic reward should resolve the underlying pressure.
 
 ### Notes
-- Quadratic command reward was evaluated but rejected: gradient goes to zero near e=0
-  (grad@3deg=0.38 vs Laplacian 2.78). Laplacian is structurally better for fine control.
-- Remaining 8 constraints: accum_rot(0.02), attitude_abs(0.01), singularity(0.15),
-  joint_torque(0.05), joint_vel_limit(0.05), overshoot(0.10), attitude_err(0.122),
-  yaw_vel(0.15)
-- Target: 3 deg mean error (unconstrained encoder-base achieved min 2.7/2.9 deg)
-- Noise floor 0.15 is NOT viable with constrained TRPO -- entropy collapses within 269 iters.
-  0.20 is the minimum safe floor (tested range: 0.10, 0.15, 0.20)
+- Noise floor tested: 0.10 (immediate collapse), 0.15 (collapse in 269 iters), 0.20 (floor
+  reached by iter 70 with Laplacian). Quadratic should allow noise_std to stay above floor.
+- Quadratic gradient at 3deg: 0.52 vs Laplacian(sigma=0.20): 3.85. Weaker gradient is
+  actually desirable: constraint system (attitude_err budget=7deg) handles fine control,
+  reward provides coarse tracking signal.
+- Other envs (Base, Encoder-Base, etc.) unaffected: default command_type="laplacian"
 
 ## [2026-03-17] Constraint expansion 3→9 + PBRS progress reward
 

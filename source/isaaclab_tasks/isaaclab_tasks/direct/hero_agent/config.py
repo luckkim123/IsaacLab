@@ -646,7 +646,7 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
     # smoothness replaces joint_osc constraint (fixed weight avoids lambda competition).
     # progress removed (PBRS not clearly helping, adds complexity).
     reward: ALBCRewardCfg = ALBCRewardCfg(
-        command_sigma=0.20,
+        command_type="quadratic",
         settling_weight=0.0,
         energy_weight=0.0,
         smoothness_weight=-0.5,

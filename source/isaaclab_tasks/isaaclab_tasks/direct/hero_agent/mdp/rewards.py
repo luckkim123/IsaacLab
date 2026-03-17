@@ -52,10 +52,11 @@ class ALBCRewardCfg:
         smoothness (-0.5): mean(da^2) + mean(d2a^2) action smoothness
     """
 
-    # Command: composite Laplacian + linear ramp
-    # Laplacian (alpha fraction): exp(-||e||/sigma), max gradient at e=0
-    # Linear ramp (1-alpha fraction): max(0, 1-||e||/e_max), constant gradient
+    # Command tracking reward
+    # "quadratic": -k * (roll_err^2 + pitch_err^2), gradient weakens near zero
+    # "laplacian": composite exp(-e/sigma) + linear ramp, gradient strong near zero
     command_weight: float = 5.0
+    command_type: str = "laplacian"  # "quadratic" or "laplacian"
     command_sigma: float = 0.35  # Laplacian 1/e point (rad)
     command_e_max: float = 1.0  # Linear ramp saturation (rad)
     command_alpha: float = 0.6  # Laplacian fraction
@@ -233,29 +234,36 @@ class RewardManager:
 def command_reward(
     _robot: Articulation,
     env: HeroAgentEnv,
+    reward_type: str = "laplacian",
     sigma: float = 0.35,
     e_max: float = 1.0,
     alpha: float = 0.6,
     **_kwargs,
 ) -> torch.Tensor:
-    """Composite Laplacian + linear ramp command tracking reward.
+    """Command tracking reward with selectable type.
 
-    Laplacian (alpha fraction): exp(-||e||/sigma) -- max gradient at e=0,
-    strong near-target signal. Linear ramp (1-alpha): max(0, 1-||e||/e_max)
-    -- constant gradient for large-error recovery.
+    "quadratic": -(roll_err^2 + pitch_err^2). Gradient = -2*error, weakens near
+    zero -- natural entropy-friendly structure (paper default).
 
-    Output in [0, 1]. dt-scaled.
+    "laplacian": composite exp(-e/sigma) + linear ramp [0,1]. Gradient stays
+    strong near zero -- good for fine control but can cause entropy collapse
+    without entropy bonus.
 
     Args:
-        env: Environment instance (provides _potentials = ||[roll_err, pitch_err]||).
-        sigma: Laplacian 1/e width in radians.
-        e_max: Linear ramp saturation in radians.
-        alpha: Laplacian fraction [0, 1].
+        env: Environment instance (provides _potentials, _attitude_error).
+        reward_type: "quadratic" or "laplacian".
+        sigma: Laplacian 1/e width in radians (laplacian only).
+        e_max: Linear ramp saturation in radians (laplacian only).
+        alpha: Laplacian fraction [0, 1] (laplacian only).
     """
-    e = env._potentials
-    laplacian = torch.exp(-e / sigma)
-    linear = torch.clamp(1.0 - e / e_max, min=0.0)
-    return alpha * laplacian + (1.0 - alpha) * linear
+    if reward_type == "quadratic":
+        err_rp = env._attitude_error[:, :2]
+        return -(err_rp[:, 0] ** 2 + err_rp[:, 1] ** 2)
+    else:
+        e = env._potentials
+        laplacian = torch.exp(-e / sigma)
+        linear = torch.clamp(1.0 - e / e_max, min=0.0)
+        return alpha * laplacian + (1.0 - alpha) * linear
 
 
 def settling_reward(
