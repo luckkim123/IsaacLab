@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-17] Relax joint_torque budget + PBRS progress analysis
+
+### Context
+Analyzed run `2026-03-17_14-26-45` at iter 848/2500 (with progress_weight=2.0,
+alpha_entropy=0.005, noise_floor=0.25). Best performance at iter 150-350 (roll 4.5-5,
+pitch 8-10 deg), then error plateaued/worsened to roll 6-8, pitch 9-11 deg.
+
+Root cause: `joint_torque` budget=0.10 (10% violation rate) too tight. Cost decreased
+from 38.4 to 11.8 (70% reduction!) but still slightly exceeds budget (11.8 > 10.0).
+This 1.8%p gap drove lambda_joint_torque to 0.97, dominating the TRPO step direction
+and displacing reward optimization. Same lambda hysteresis pattern as before, just slower.
+
+Entropy declined from 1.88 (iter 250) to 1.53 (iter 848) despite alpha_entropy=0.005 --
+the fixed entropy bonus slowed but couldn't overcome the cumulative constraint pressure.
+
+PBRS progress reward analysis: progress and command are near-perfect mirrors at the
+episode level (both monotonic functions of mean error). Step-level signal is genuinely
+different (position vs velocity), but episode-level cancellation is notable. Performance
+IS better than previous run (4.8 vs 8 deg at iter 150), so keeping progress_weight=2.0.
+
+### Changed
+- `config.py`: `joint_torque` budget 0.10 -> 0.15 (allow 15% violation rate).
+  Current cost_return=11.8 < new budget 15.0, so lambda will stop growing.
+- `agents/rsl_rl_ppo_cfg.py`: `constraint_budgets` synced (0.10 -> 0.15 for joint_torque)
+
+### Notes
+- Progress vs command episode-level cancellation: both are functions of error magnitude.
+  Step-level difference (position vs velocity) is real but practical overlap is high.
+  Keeping progress_weight=2.0 because performance data shows improvement.
+- Entropy trend: alpha_entropy=0.005 provides ~170 iters of recovery (iter 60-250) before
+  lambda pressure overtakes it. May need higher alpha or adaptive mechanism for longer runs.
+
 ## [2026-03-17] Activate PBRS progress reward for constrained encoder
 
 ### Context

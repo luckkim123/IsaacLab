@@ -312,7 +312,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
 
     # Constraint / Lagrangian
     num_constraints: int = 6
-    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.10, 0.05, 0.10, 0.35)
+    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15, 0.05, 0.10, 0.35)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
     lr_lambda: float = 0.005

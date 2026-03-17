@@ -608,7 +608,7 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
             # attitude_err: disabled -- quadratic command reward covers tracking
             ConstraintTermCfg(
                 func=joint_torque_cost,
-                budget=0.10,
+                budget=0.15,
                 name="joint_torque",
             ),
             ConstraintTermCfg(
