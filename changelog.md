@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-17] Training analysis: entropy hysteresis diagnosis
+
+### Context
+Analyzed run `2026-03-17_13-13-31` (encoder LR=3e-4, 6 constraints, history-augmented encoder).
+KL desync fix confirmed: kl_trpo=0.01, kl=0.012 (was 0.38 with LR=3e-3). Encoder stable:
+z_std=0.55, z_mean~0, grad healthy. BUT:
+
+1. **Roll error spiked iter 220-240** (7 -> 32 deg) then V-shaped recovery. NOT caused by
+   encoder z saturation (z_mean stable +-0.05). Caused by lambda_max crossing 0.10 ->
+   policy shift (kl spike to 0.10 at iter 230) -> temporary destabilization.
+
+2. **Entropy collapsed by iter 400**: 2.84 -> 0.03 -> -0.38. noise_std hit floor 0.20 by
+   iter ~900. Root cause: alpha_entropy=0 + 6 constraints ALL push noise down (joint_torque,
+   yaw_vel, joint_vel_limit penalize large/fast actions -> reducing noise is easiest compliance
+   path). Dual downward pressure with zero counterforce.
+
+3. **Action magnitude halved at iter 650-700**: 1.05 -> 0.55. Coincided with lambda_joint_torque
+   peak (0.22 at iter 673). Policy learned "do less = safe" instead of "do precise = efficient".
+
+4. **Lambda hysteresis (key finding)**: lambda_joint_torque peaked at 0.22 (iter 673) then
+   dropped to 0.00 (iter 1022, constraint satisfied). BUT action_size stayed at 0.55 and
+   noise_std stayed at floor. Transient constraint pressure permanently collapsed exploration
+   with no recovery mechanism. Constraints acted as one-way ratchet on entropy.
+
+5. **Grad norm escalation**: grad_norm_reward 0.015 -> 0.61 (40x). Caused by 1/sigma^2
+   amplification as noise_std decreases. TRPO protects actor (KL step size), but encoder
+   uses Adam -> effective LR increases. encoder grad 0.002 -> 0.08.
+
+6. **Latest (iter 1597)**: roll=5.98, pitch=9.89, reward=-6.13. Slowly improving despite
+   zero exploration. Approaching asymptotic limit.
+
+### Notes
+- Encoder is NOT the problem. z_mean +-0.05, z_std stable at 0.53-0.57, kl synced.
+- z_min/z_max hitting [-1,1] is min/max across 4096 envs x 13 dims -- outlier, not systemic.
+- Root cause is purely exploration death: alpha_entropy=0 provides no entropy recovery force.
+- noise_floor=0.20 only sets lower bound; doesn't push entropy UP when constraint pressure eases.
+- Planned fix: alpha_entropy=0.005 (fixed, not adaptive), noise_floor 0.20->0.25 (moderate),
+  encoder grad clip max_norm=0.1 (safety). Avoid floor=0.30 (prevents fine-grained convergence).
+
 ## [2026-03-17] Reduce encoder LR for 272D input (actor-encoder desync fix)
 
 ### Context
@@ -420,106 +459,22 @@ surrogate -> LS 100% success, BUT error stuck at 17-20 deg (effort_limit budget 
 - Best run of the day: `04-27-48` (reward 42, roll 11.6 deg, pitch 13.4 deg, std=0.48)
   but that used 8 constraints which were later reduced to 3 for stability
 
-## [2026-03-10] Entropy collapse fix: raise noise floor + remove effort_limit DR conflict
+## [2026-03-05/10 Summary] ConstraintTRPO build-out, stabilization, NORBC conformance
 
 ### Context
-Analysis of constrained_encoder_base run `klmm0hqj` (372 steps, barrier_t=50/100) showed
-policy learning reward (0 -> 1.5, attitude error 30 -> 15 deg) but arm freezing at singularity.
-
-Previous diagnosis was wrong: line_search_success was 99.4% (333/335), NOT 80% failure.
-Barrier_t=50/100 is fine. The actual root cause chain:
-1. Entropy collapsed by step 50 (2.84 -> -0.69), noise_std hit floor (0.98 -> 0.15)
-2. Two inconsistent noise floors existed: constraint_trpo.py (0.1) vs base_runner.py (0.15)
-3. std=0.15 -> 95% of actions within +-0.3 of mean -> exploration dies
-4. "Don't move arm" is rational under low exploration (avoids 5 arm-related constraint costs)
-5. Arm drifts to singularity (joint_pos_mean: 1.6 -> 5.4), costs explode
-6. Narrow signal -> encoder z saturates (+-0.98 by step 50)
-
-Additionally, `HeroAgentConstrainedEncoderEnvCfg` overrode `joint_effort_limit_range=(1.3, 1.5)`,
-allowing PhysX 130-150% stall torque while `effort_limit_cost` checks against 100% -- a permanent
-training conflict where normal actuator behavior always violates the constraint.
-
-Barrier_t reverted from 50/100 back to 10/50 (both values produce >99% ls_success; lower
-barrier gives tighter constraint enforcement from the start).
+Built NORBC-style constrained RL (IPO -> Lagrangian TRPO) from scratch. Key milestones:
+initial 3-constraint IPO implementation (3/5-6), constraint expansion to 8 terms with
+cost critic softplus fix (3/8), NORBC conformance audit with asymmetric critic and actuator
+DR unification (3/9), barrier_t fix 10->50/100 for arm freeze (3/9), noise floor unification
+0.1/0.15 -> 0.25 + effort_limit DR conflict removal (3/10).
 
 ### Changed
-- `algorithms/constraint_trpo.py`: `min_log_std` from `log(0.1)` to `log(0.25)` -- unified with base_runner floor
-- `runners/base_runner.py`: `min_std` from 0.15 to 0.25 -- at std=0.25, entropy ~0.07 (vs -0.95 at 0.15)
-- `config.py`: Removed `joint_effort_limit_range=(1.3, 1.5)` override from `HeroAgentConstrainedEncoderEnvCfg`, restoring unified default (0.7, 1.0)
-- `agents/rsl_rl_ppo_cfg.py`: `barrier_t` 50.0 -> 10.0, `barrier_t_final` 100.0 -> 50.0 (revert to original)
-- `mdp/constraints.py`: `ALBCConstraintCfg.barrier_t` 50.0 -> 1.0, `barrier_t_final` 100.0 -> 50.0 (dead field, synced with revert)
-
-### Notes
-- std=0.25 gives 95% of samples within +-0.5 of mean for [-1,1] actions -- wider exploration without excessive noise
-- Two noise floors now unified at 0.25 (constraint_trpo.py post-step + base_runner.py per-iteration)
-
-## [2026-03-09] barrier_t fix: 10->50 initial, 50->100 final
-
-### Context
-Constrained-Encoder-Base training (320 iterations) converged to a local optimum where
-the arm stopped moving entirely. Full root cause chain: low barrier_t (10-20) caused
-cost gradient to dominate policy_loss -> line search failed 80% of the time (success=0
-from step ~80) -> actor params reverted every iteration (no learning) -> encoder gated
-out (no policy-loss gradient) -> z saturated to [-1, +1] (z_bounds_loss too weak alone)
--> encoder grad_norm -> 0 (dead) -> entropy collapsed (2.0 -> 0 by step 75) ->
-noise_std hit floor (0.15) -> arm froze.
-
-### Changed
-- `agents/rsl_rl_ppo_cfg.py`: `barrier_t` 10.0 -> 50.0, `barrier_t_final` 50.0 -> 100.0 in `RslRlConstraintTRPOAlgorithmCfg`
-- `mdp/constraints.py`: `ALBCConstraintCfg.barrier_t` 1.0 -> 50.0, `barrier_t_final` 50.0 -> 100.0 (dead field, synced for consistency)
-
----
-
-## [2026-03-09 Summary] NORBC conformance + actuator DR unification
-
-### Context
-Systematic NORBC paper comparison and actuator parameter audit. Asymmetric critic (raw
-privileged 19D instead of encoder z 13D) was the highest-impact change. Also unified all
-environments to use physically-grounded actuator DR ranges from Dynamixel XW540-T260-R
-datasheet. Per-constraint cost advantage normalization added (NORBC Sec IV-B).
-
-### Changed
-- `encoder/actor_critic_encoder.py`: Asymmetric critic (`_get_critic_obs()` bypassing encoder, 32D input)
-- `encoder/actor_critic_encoder_constrained.py`: Cost critic asymmetric, K mismatch detection
-- `algorithms/constraint_trpo.py`: Update order threshold->policy->value, instantaneous threshold, pure MSE value, per-constraint cost advantage standardization
-- `config.py`: Unified actuator DR (Kp 40-120, Kd 0.5-5.0, effort 0.7-1.0), removed TDC overrides
-- `hero_agent.py`: `velocity_limit_sim` 6.28 -> 4.19 rad/s (datasheet 40 rpm)
-
-### Removed
-- `algorithms/constraint_trpo.py`: `encoder_value_grad_scale`, `adaptive_ema_alpha`, `_compute_barrier_loss()`
-
-## [2026-03-08 Summary] Constraint system build-out and stabilization
-
-### Context
-Built constraint system from 3 to 8 terms, converted 3 binary costs to continuous (NORBC
-average type), added cost critic softplus fix, and tuned barrier schedule. Multiple rounds
-of budget tuning driven by WandB analysis. Key fix: cost critic negative V_cost (softplus
-output activation) caused catastrophic instability at step ~650.
-
-### Changed
-- `mdp/constraints.py`: ConstraintTermCfg registry, 8 cost functions (final: accum_rot, attitude_abs, singularity, effort_limit binary; joint_vel, oscillation, yaw_vel, cob_cog continuous)
-- `algorithms/constraint_trpo.py`: barrier_t 1.0->10.0, value_lr 3e-4->1e-3, barrier_t_schedule_frac, mean_cost_returns clamp
-- `encoder/actor_critic_encoder_constrained.py`: `F.softplus()` on cost critic output, K mismatch detection
-- `config.py`: 8-term constraint list, budgets tuned (joint_vel=1.0, singularity=0.15, attitude_err=0.087, attitude_abs limit 60 deg)
+- `algorithms/constraint_trpo.py`: Full TRPO + IPO (~600 lines). barrier_t tuning (1->10->50->10, tested range). min_log_std unified to log(0.25). Update order, per-constraint cost advantage standardization.
+- `encoder/actor_critic_encoder.py`: Asymmetric critic (raw privileged 32D input)
+- `encoder/actor_critic_encoder_constrained.py`: Multi-head cost critic, F.softplus() output, K mismatch detection
 - `runners/constraint_encoder_runner.py`: Named constraint logging, auto-sync K, lambda checkpoint
-
-## [2026-03-05/06 Summary] ConstraintTRPO initial implementation
-
-### Context
-Full NORBC-style constrained RL (IPO + TRPO) implementation. 6 critical bugs fixed across
-5 debugging rounds. Encoder value gradient experiments (shelved: too aggressive at any scale).
-Entropy_coef finalized at 0.005. Equilibrium joint init implemented then reverted.
-
-### Added
-- `algorithms/constraint_trpo.py`: Full TRPO + IPO (~600 lines)
-- `encoder/actor_critic_encoder_constrained.py`: Multi-head cost critic
-- `runners/constraint_encoder_runner.py`: Constraint metrics logging
-- `mdp/constraints.py`: Initial 3 binary cost functions, `compute_all_costs()`
-- `algorithms/ppo_patch.py`, `docs/THEORETICAL_ANALYSIS.md`, `play.py`, `eval_dr_comparison.py`
-
-### Changed
+- `runners/base_runner.py`: min_std 0.15->0.25 (unified with constraint_trpo floor)
+- `mdp/constraints.py`: 3->8 cost functions, effort_limit uses per-env DR'd limits
+- `config.py`: 8-term constraints, unified actuator DR (Kp 40-120, Kd 0.5-5.0, effort 0.7-1.0). Removed joint_effort_limit_range override.
+- `hero_agent.py`: velocity_limit_sim 6.28->4.19 rad/s (datasheet 40 rpm)
 - `base_env.py`: Accumulated rotation tracking, cost computation, constraint buffers
-- `config.py`: Registered `Isaac-HeroAgent-Constrained-Encoder-Base-v0`
-
-### Notes
-- Baseline run (15-30-39) best overall: mean_reward 80, attitude error 8-10 deg
