@@ -95,6 +95,8 @@ class ConstraintTRPO:
         recovery_threshold_frac: float = 0.8,
         # Encoder z bounds
         z_bounds_coef: float = 0.3,
+        # Entropy bonus (TRPO has no built-in entropy incentive)
+        entropy_coef: float = 0.0,
         # Encoder update
         num_encoder_epochs: int = 5,
         encoder_lr: float = 1e-3,
@@ -134,6 +136,7 @@ class ConstraintTRPO:
         self.cost_lam = cost_lam
         self.line_search_kl_margin = line_search_kl_margin
         self.z_bounds_coef = z_bounds_coef
+        self.entropy_coef = entropy_coef
         self.num_encoder_epochs = num_encoder_epochs
 
         # C-TRPO barrier parameters
@@ -396,16 +399,21 @@ class ConstraintTRPO:
         cost_advantages: torch.Tensor,
         old_log_prob: torch.Tensor,
     ) -> torch.Tensor:
-        """Evaluate safe-mode objective: reward surrogate - barrier penalty.
+        """Evaluate safe-mode objective: reward surrogate - barrier penalty + entropy bonus.
 
         The barrier penalty is computed from per-constraint cost surrogates
         using the linearized log-barrier second derivative (Option C).
-        No entropy term: C-TRPO relies on KL trust region for exploration.
+        Entropy bonus prevents premature exploration collapse.
         """
         self.policy.act(obs)
         log_prob = self.policy.get_actions_log_prob(actions)
         ratio = torch.exp(log_prob - old_log_prob)
         reward_surr = -(advantages * ratio).mean()
+
+        # Entropy bonus: negative because we minimize the surrogate
+        entropy_bonus = torch.tensor(0.0, device=self.device)
+        if self.entropy_coef > 0.0:
+            entropy_bonus = -self.entropy_coef * self.policy.entropy.mean()
 
         # Per-constraint cost surrogates (standard ratio, no detached std needed)
         cost_surrogates = []
@@ -414,7 +422,7 @@ class ConstraintTRPO:
             cost_surrogates.append(cost_surr_k)
 
         barrier_penalty = self._compute_barrier_penalty(cost_surrogates)
-        return reward_surr + barrier_penalty
+        return reward_surr + entropy_bonus + barrier_penalty
 
     def _linearized_surrogate_recovery(
         self,

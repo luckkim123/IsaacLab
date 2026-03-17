@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-18] C-TRPO encoder fix experiments: multi-step caused KL instability
+
+### Context
+The encoder gradient fix (2026-03-17) restored enc_grad from 8.3e-4 to 0.04, but introduced
+new problems. Three experimental runs were conducted:
+
+1. **Post-mod baseline** (5-epoch, lr=1e-3, torque=15, min_std=0.25, 514it): Best error 5.3-5.5 deg
+   at iter 500 but plateaued. kl=0.13~2.87 (vs pre-mod 0.013). Entropy crashed to floor by iter 100.
+2. **entropy_coef=0.005** (178it): Performance degraded (r_cmd=-0.97 vs -0.37). Entropy bonus too
+   strong for TRPO single-step; slowed convergence without preventing collapse. Reduced to 0.001.
+3. **entropy_coef=0.001, torque=20, min_std=0.18** (2500it): Roll 6.2 deg, pitch 6.1 deg. Slower
+   convergence than baseline (~5x). kl still unstable (0.04~5.6). min_std had no effect (noise
+   never reached 0.18 floor). mode oscillation: 146 transitions, yaw_vel in recovery 23% of time.
+
+Root cause identified: **5-epoch encoder update causes uncontrolled distribution shift**. TRPO
+trust region constrains actor KL to 0.01, but encoder changes z (actor input), causing indirect
+distribution shift of kl=0.08~5.6 (up to 560x larger). Pre-mod code had kl=0.013 because encoder
+barely changed (recovery bug suppressed updates + single cached gradient).
+
+barrier_penalty was ~0.0000 throughout all runs -- effectively not constraining anything.
+Mode oscillation (safe/recovery switching) destabilized training without clear benefit.
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: Reverted `num_encoder_epochs: 5 -> 1`. Multi-step encoder
+  update incompatible with TRPO trust region (indirect KL not bounded).
+- `agents/rsl_rl_ppo_cfg.py`: `joint_torque` budget 0.15 -> 0.20 (reduces constraint floor).
+- `config.py`: Synced `joint_torque` budget to 0.20.
+- `runners/base_runner.py`: `min_std` 0.25 -> 0.18 (no observed effect yet).
+- `algorithms/constraint_trpo.py`: Added `entropy_coef` parameter (default 0.0, disabled).
+  Entropy bonus in safe-mode surrogate. Tested at 0.005 and 0.001; both ineffective for TRPO.
+
+### Removed from cfg
+- `entropy_coef` removed from `RslRlConstraintTRPOAlgorithmCfg` (kept in algorithm code,
+  disabled by default).
+
+### Open questions
+- C-TRPO barrier_penalty ~0 throughout: barrier may need higher beta or different formulation.
+- Mode oscillation (146 transitions/2500it) suggests recovery threshold tuning needed.
+- Whether to continue with C-TRPO or revert to Lagrangian approach needs evaluation after
+  conservative restoration (1-epoch + recovery fix only).
+
 ## [2026-03-17] Fix encoder gradient death in C-TRPO (50x drop)
 
 ### Context

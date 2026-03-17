@@ -318,7 +318,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
 
     # Constraint
     num_constraints: int = 6
-    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.15, 0.05, 0.10, 0.35)
+    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.20, 0.05, 0.10, 0.35)
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
     line_search_kl_margin: float = 1.5
@@ -333,14 +333,14 @@ class RslRlConstraintTRPOAlgorithmCfg:
     # Encoder z bounds
     z_bounds_coef: float = 0.3
 
-    # Encoder update (multi-step to compensate for TRPO single policy step)
-    num_encoder_epochs: int = 5
-    """Number of encoder gradient steps per iteration. TRPO does 1 policy step
-    vs PPO's ~20 mini-batch steps. Multi-step encoder update compensates."""
+    # Encoder update
+    num_encoder_epochs: int = 1
+    """Number of encoder gradient steps per iteration. Must stay at 1: multi-step
+    causes uncontrolled KL divergence (encoder changes z -> distribution shift
+    not bounded by TRPO trust region). Recovery mode fix is the real encoder fix."""
 
     encoder_lr: float = 1e-3
-    """Encoder Adam learning rate. Higher than PPO's 3e-4 because fewer total
-    steps per iteration (5 vs 20)."""
+    """Encoder Adam learning rate."""
 
 
 @configclass
