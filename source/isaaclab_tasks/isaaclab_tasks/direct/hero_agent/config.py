@@ -649,6 +649,6 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
         command_type="quadratic",
         settling_weight=0.0,
         energy_weight=0.0,
-        smoothness_weight=-0.5,
+        smoothness_weight=-0.1,
         progress_weight=0.0,
     )

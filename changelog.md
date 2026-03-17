@@ -49,6 +49,11 @@ structure. Policy stops compressing noise once error reduction slows. This match
   actually desirable: constraint system (attitude_err budget=7deg) handles fine control,
   reward provides coarse tracking signal.
 - Other envs (Base, Encoder-Base, etc.) unaffected: default command_type="laplacian"
+- Quadratic alone did NOT fix entropy collapse: run `09-02-53` still showed entropy=-0.38,
+  noise_std=0.20 (floor) by early iterations. Root cause identified as `smoothness_weight=-0.5`:
+  E[da^2] contains 2*sigma^2 term, so reducing noise directly reduces smoothness penalty.
+  With alpha_entropy=0, this constant downward pressure is uncontested.
+  Reduced smoothness_weight -0.5 -> -0.1 (1/5 pressure) to test hypothesis.
 
 ## [2026-03-17] Constraint expansion 3→9 + PBRS progress reward
 
