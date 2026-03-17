@@ -8,19 +8,20 @@
 This module provides the encoder-based actor-critic network:
     - ActorCriticEncoder: Base encoder network (Phase 1 teacher training)
 
-Architecture (symmetric critic, default for PPO):
-    Encoder: privileged (19D) -> MLP [256, 128, 64] -> tanh -> z (13D) in [-1, 1]
-    Actor:   cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> actions
-    Critic:  cat([policy_obs, z]) = 26D -> MLP [256, 128, 64] -> value (1D)
+Architecture (with history, default for encoder training):
+    Encoder: cat([policy_obs, hist_flat, privileged]) = 272D -> MLP -> tanh -> z (13D)
+    Actor:   cat([policy_obs, hist_flat, z]) = 266D -> MLP -> actions
+    Critic:  cat([policy_obs, hist_flat, privileged]) = 272D -> MLP -> value (1D)
 
-Architecture (asymmetric critic, for constrained RL / NORBC):
+    proprio_hist (N, 30, 8) is flattened to (N, 240) and concatenated directly.
+    No embedding module -- the encoder/actor/critic MLPs learn from raw history.
+
+Architecture (without history, legacy / backward compatible):
     Encoder: privileged (19D) -> MLP -> tanh -> z (13D)
     Actor:   cat([policy_obs, z]) = 26D -> MLP -> actions
-    Critic:  cat([policy_obs, privileged_raw]) = 32D -> MLP -> value (1D)
+    Critic:  cat([policy_obs, z]) or cat([policy_obs, privileged_raw]) -> MLP -> value
 
-In symmetric mode, both actor and critic see z from the encoder.
-In asymmetric mode, the critic sees raw privileged obs directly,
-decoupling the encoder from value loss gradients (NORBC design).
+History mode is activated when obs_groups has 3 keys (proprio_hist present).
 
 Reference:
     - HORA: Heuristic-Free Online Robust Adaptation (Qi et al., 2023)
@@ -48,17 +49,18 @@ class ActorCriticEncoder(nn.Module):
     """ActorCritic with extrinsics encoder for HORA Phase 1 teacher policy.
 
     The encoder compresses privileged information into a bounded latent vector z.
+    When history is enabled (obs_groups has 3 keys), flattened proprioception
+    history is concatenated to encoder, actor, and critic inputs.
 
-    Critic modes:
-        - Symmetric (default, HORA/RMA): Actor and Critic both see cat([policy_obs, z]).
-          Encoder receives gradient from both actor loss and critic value loss.
-        - Asymmetric (NORBC): Actor sees cat([policy_obs, z]), Critic sees
-          cat([policy_obs, privileged_raw]). Encoder gradient comes only from
-          actor (policy) loss, decoupling it from value estimation.
+    History mode (obs_groups has 3 keys):
+        - Encoder: cat([policy_obs, hist_flat, privileged]) -> z
+        - Actor: cat([policy_obs, hist_flat, z]) -> actions (no privileged)
+        - Critic: cat([policy_obs, hist_flat, privileged]) -> value (inherently asymmetric)
+        Encoder gradient comes only from actor loss (critic doesn't use z).
 
-    Activation modes:
-        - "tanh": z = tanh(raw) in [-1, 1]. Built into MLP last layer (matches HORA original). Default.
-        - "sigmoid": z = z_min + sigmoid(raw) * (z_max - z_min). Bounded in [z_min, z_max].
+    Legacy mode (obs_groups has 2 keys):
+        - Symmetric: Actor and Critic both see cat([policy_obs, z]).
+        - Asymmetric (NORBC): Actor sees z, Critic sees raw privileged.
     """
 
     is_recurrent: bool = False
@@ -89,6 +91,9 @@ class ActorCriticEncoder(nn.Module):
         init_noise_std: float = 1.0,
         # Asymmetric critic (NORBC): critic sees raw privileged instead of encoder z
         asymmetric_critic: bool = False,
+        # History parameters (kept for ActorCriticEncoderAdapt compatibility)
+        proprio_history_len: int = 30,
+        proprio_feature_dim: int = 8,
         **kwargs: Any,
     ) -> None:
         if kwargs:
@@ -110,26 +115,31 @@ class ActorCriticEncoder(nn.Module):
         self.z_bounds_coef = z_bounds_coef
         self.z_bounds_soft_bound = z_bounds_soft_bound
 
+        # Store for subclass use (ActorCriticEncoderAdapt)
+        self._proprio_history_len = proprio_history_len
+        self._proprio_feature_dim = proprio_feature_dim
+
         # Last encoded z (retained with grad for z_bounds_loss computation in PPO)
         self._last_z: torch.Tensor | None = None
 
-        # Encoder input normalization (Welford's online mean/var)
-        self.encoder_obs_normalization = encoder_obs_normalization
-        self.encoder_obs_normalizer = (
-            EmpiricalNormalization(privileged_dim) if encoder_obs_normalization else nn.Identity()
-        )
-
-        # Extract obs key names from obs_groups for direct TensorDict access
+        # --- Parse obs_groups: extract key names ---
         policy_groups = obs_groups["policy"]
-        if len(policy_groups) != 2:
+        if len(policy_groups) < 2:
             raise ValueError(
-                f"ActorCriticEncoder requires exactly 2 obs groups in 'policy', "
+                f"ActorCriticEncoder requires at least 2 obs groups in 'policy', "
                 f"got {len(policy_groups)}: {policy_groups}"
             )
         self._policy_obs_key = policy_groups[0]
         self._privileged_key = policy_groups[1]
 
-        # Verify obs dimensions match expected
+        # Optional history key (3rd element in obs_groups)
+        self._has_history = len(policy_groups) > 2
+        if self._has_history:
+            self._proprio_hist_key = policy_groups[2]
+        else:
+            self._proprio_hist_key = None
+
+        # --- Verify obs dimensions ---
         policy_obs_shape = obs[self._policy_obs_key].shape
         privileged_shape = obs[self._privileged_key].shape
 
@@ -140,22 +150,47 @@ class ActorCriticEncoder(nn.Module):
         if privileged_shape[-1] != privileged_dim:
             raise ValueError(f"Privileged dim {privileged_shape[-1]} != expected {privileged_dim}")
 
-        # Encoder: privileged -> z
+        # --- Compute history flat dimension ---
+        if self._has_history:
+            proprio_hist_shape = obs[self._proprio_hist_key].shape
+            if len(proprio_hist_shape) != 3:
+                raise ValueError(f"proprio_hist must be 3D (batch, history, features), got shape {proprio_hist_shape}")
+            self._hist_flat_dim = proprio_hist_shape[1] * proprio_hist_shape[2]
+            logger.info(
+                "History: (%d, %d) -> flatten -> %dD (raw concat, no embedding)",
+                proprio_hist_shape[1],
+                proprio_hist_shape[2],
+                self._hist_flat_dim,
+            )
+        else:
+            self._hist_flat_dim = 0
+
+        # --- Encoder MLP ---
+        # With history: encoder sees [policy_obs, hist_flat, privileged]
+        # Without history: encoder sees [privileged] only
+        if self._has_history:
+            encoder_input_dim = policy_obs_dim + self._hist_flat_dim + privileged_dim
+        else:
+            encoder_input_dim = privileged_dim
+
+        # Encoder input normalization (Welford's online mean/var)
+        self.encoder_obs_normalization = encoder_obs_normalization
+        self.encoder_obs_normalizer = (
+            EmpiricalNormalization(encoder_input_dim) if encoder_obs_normalization else nn.Identity()
+        )
+
         if encoder_output_activation == "tanh":
             self.encoder = MLP(
-                privileged_dim,
+                encoder_input_dim,
                 encoder_latent_dim,
                 list(encoder_hidden_dims),
                 encoder_activation,
                 last_activation="tanh",
             )
         else:
-            self.encoder = MLP(privileged_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
+            self.encoder = MLP(encoder_input_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
 
-        # Initialize last encoder layer for sigmoid activation.
-        # bias=0 -> sigmoid(0)=0.5 -> z starts at midpoint of [z_min, z_max].
-        # Small weight std ensures initial z is tightly clustered near midpoint,
-        # allowing the encoder to gradually learn the appropriate z mapping.
+        # Initialize last encoder layer for sigmoid activation
         if encoder_output_activation == "sigmoid":
             last_linear = self.encoder[-1]
             assert isinstance(last_linear, nn.Linear), (
@@ -164,30 +199,42 @@ class ActorCriticEncoder(nn.Module):
             nn.init.constant_(last_linear.bias, 0.0)
             nn.init.normal_(last_linear.weight, std=0.01)
 
-        logger.info("Encoder MLP: %s", self.encoder)
+        logger.info("Encoder MLP (%dD input): %s", encoder_input_dim, self.encoder)
 
-        # Actor input: policy_obs + z (encoder compressed)
-        num_actor_obs = policy_obs_dim + encoder_latent_dim
+        # --- Actor MLP ---
+        # With history: actor sees [policy_obs, hist_flat, z]
+        # Without history: actor sees [policy_obs, z]
+        if self._has_history:
+            num_actor_obs = policy_obs_dim + self._hist_flat_dim + encoder_latent_dim
+        else:
+            num_actor_obs = policy_obs_dim + encoder_latent_dim
 
-        # Actor
         self.actor = MLP(num_actor_obs, num_actions, list(actor_hidden_dims), activation)
-        logger.info("Actor MLP: %s", self.actor)
+        logger.info("Actor MLP (%dD input): %s", num_actor_obs, self.actor)
 
-        # Actor observation normalization
         self.actor_obs_normalization = actor_obs_normalization
         self.actor_obs_normalizer = EmpiricalNormalization(num_actor_obs) if actor_obs_normalization else nn.Identity()
 
-        # Critic input: asymmetric (raw privileged) or symmetric (encoder z)
-        if asymmetric_critic:
+        # --- Critic MLP ---
+        # With history: critic sees [policy_obs, hist_flat, privileged] (inherently asymmetric)
+        # Without history + asymmetric: [policy_obs, privileged]
+        # Without history + symmetric: [policy_obs, z]
+        if self._has_history:
+            num_critic_obs = policy_obs_dim + self._hist_flat_dim + privileged_dim
+        elif asymmetric_critic:
             num_critic_obs = policy_obs_dim + privileged_dim
         else:
             num_critic_obs = policy_obs_dim + encoder_latent_dim
         self.num_critic_obs = num_critic_obs
         self.critic = MLP(num_critic_obs, 1, list(critic_hidden_dims), activation)
-        mode_str = "asymmetric" if asymmetric_critic else "symmetric"
+        if self._has_history:
+            mode_str = "history-asymmetric"
+        elif asymmetric_critic:
+            mode_str = "asymmetric"
+        else:
+            mode_str = "symmetric"
         logger.info("Critic MLP (%s, %dD input): %s", mode_str, num_critic_obs, self.critic)
 
-        # Critic observation normalization
         self.critic_obs_normalization = critic_obs_normalization
         self.critic_obs_normalizer = (
             EmpiricalNormalization(num_critic_obs) if critic_obs_normalization else nn.Identity()
@@ -239,22 +286,36 @@ class ActorCriticEncoder(nn.Module):
             return torch.tanh(raw)
         return self.z_min + torch.sigmoid(raw) * (self.z_max - self.z_min)
 
-    def _encode(self, privileged: torch.Tensor, *, store_z: bool = False) -> torch.Tensor:
-        """Encode privileged info into latent z.
-
-        For tanh mode: z = tanh(raw) in [-1, 1] (built into MLP last layer).
-        For sigmoid mode: z = z_min + sigmoid(raw) * (z_max - z_min). Bounded.
-
-        Privileged obs is normalized before the encoder MLP when
-        encoder_obs_normalization is enabled.
+    def _get_hist_flat(self, obs: TensorDict) -> torch.Tensor:
+        """Get flattened proprioception history from observations.
 
         Args:
-            privileged: Privileged observations to encode.
-            store_z: If True, stores z as _last_z for z_bounds_loss computation.
-                Only the act() path should set this to True, so the bounds loss
-                gradient flows independently of the critic value loss graph.
+            obs: TensorDict containing proprio_hist key.
+
+        Returns:
+            Flattened history. Shape: (N, H*D) e.g. (N, 240).
         """
-        normalized = self.encoder_obs_normalizer(privileged)
+        return obs[self._proprio_hist_key].flatten(start_dim=1)
+
+    def _encode(self, obs: TensorDict, *, store_z: bool = False) -> torch.Tensor:
+        """Encode into latent z.
+
+        With history: encoder(cat([policy_obs, hist_flat, privileged])) -> z
+        Without history: encoder(privileged) -> z
+
+        Args:
+            obs: TensorDict with policy, privileged, and optionally proprio_hist.
+            store_z: If True, stores z as _last_z for z_bounds_loss computation.
+        """
+        privileged = obs[self._privileged_key]
+        if self._has_history:
+            policy_obs = obs[self._policy_obs_key]
+            hist_flat = self._get_hist_flat(obs)
+            encoder_input = torch.cat([policy_obs, hist_flat, privileged], dim=-1)
+        else:
+            encoder_input = privileged
+
+        normalized = self.encoder_obs_normalizer(encoder_input)
         if self.encoder_output_activation == "tanh":
             z = self.encoder(normalized)
         else:
@@ -278,25 +339,30 @@ class ActorCriticEncoder(nn.Module):
         return self.z_bounds_coef * excess.pow(2).sum(dim=-1).mean()
 
     def _get_combined_obs(self, obs: TensorDict, *, store_z: bool = False) -> torch.Tensor:
-        """Combined observation for actor: cat([policy_obs, z_from_encoder]).
+        """Combined observation for actor.
 
-        Args:
-            obs: TensorDict with policy and privileged observations.
-            store_z: If True, stores z as _last_z for z_bounds_loss. Only
-                the act() path should set this to True.
+        With history: cat([policy_obs, hist_flat, z])
+        Without history: cat([policy_obs, z])
         """
         policy_obs = obs[self._policy_obs_key]
-        z = self._encode(obs[self._privileged_key], store_z=store_z)
+        z = self._encode(obs, store_z=store_z)
+        if self._has_history:
+            hist_flat = self._get_hist_flat(obs)
+            return torch.cat([policy_obs, hist_flat, z], dim=-1)
         return torch.cat([policy_obs, z], dim=-1)
 
     def _get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
-        """Critic observation for asymmetric mode: cat([policy_obs, privileged_raw]).
+        """Critic observation.
 
-        Bypasses the encoder entirely so critic value loss does not flow
-        through the encoder parameters (NORBC design).
-
-        In symmetric mode, falls back to _get_combined_obs().
+        With history: cat([policy_obs, hist_flat, privileged]) -- inherently asymmetric.
+        Without history + asymmetric: cat([policy_obs, privileged]).
+        Without history + symmetric: cat([policy_obs, z]).
         """
+        if self._has_history:
+            policy_obs = obs[self._policy_obs_key]
+            hist_flat = self._get_hist_flat(obs)
+            privileged_raw = obs[self._privileged_key]
+            return torch.cat([policy_obs, hist_flat, privileged_raw], dim=-1)
         if not self.asymmetric_critic:
             return self._get_combined_obs(obs)
         policy_obs = obs[self._policy_obs_key]
@@ -329,27 +395,19 @@ class ActorCriticEncoder(nn.Module):
     def act_with_z_hat(self, obs: TensorDict, z_hat: torch.Tensor) -> torch.Tensor:
         """Get deterministic action using a pre-computed z_hat (detached).
 
-        Avoids duplicating actor internals in the AdaptRunner by routing
-        through the same normalizer and actor MLP used by act_inference().
-
-        Args:
-            obs: Observation dict containing policy obs.
-            z_hat: Pre-computed latent estimate (will be detached internally).
-
-        Returns:
-            Clamped deterministic actions. Shape: (N, num_actions).
+        Used by AdaptRunner to generate actions with z_hat from adapt_tconv.
         """
         policy_obs = obs[self._policy_obs_key]
-        combined_obs = torch.cat([policy_obs, z_hat.detach()], dim=-1)
+        if self._has_history:
+            hist_flat = self._get_hist_flat(obs)
+            combined_obs = torch.cat([policy_obs, hist_flat, z_hat.detach()], dim=-1)
+        else:
+            combined_obs = torch.cat([policy_obs, z_hat.detach()], dim=-1)
         actor_obs = self.actor_obs_normalizer(combined_obs)  # type: ignore[operator]
         return self.actor(actor_obs).clamp(-1.0, 1.0)
 
     def evaluate(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
-        """Evaluate the value function for given observations.
-
-        Asymmetric: critic sees raw privileged (no encoder gradient).
-        Symmetric: critic sees encoder z (encoder gets value gradient).
-        """
+        """Evaluate the value function for given observations."""
         critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))  # type: ignore[operator]
         return self.critic(critic_obs)
 
@@ -360,8 +418,17 @@ class ActorCriticEncoder(nn.Module):
 
     def update_normalization(self, obs: TensorDict) -> None:
         """Update observation normalization statistics."""
+        # Encoder input normalizer
         if self.encoder_obs_normalization and hasattr(self.encoder_obs_normalizer, "update"):
-            self.encoder_obs_normalizer.update(obs[self._privileged_key])  # type: ignore[union-attr]
+            if self._has_history:
+                policy_obs = obs[self._policy_obs_key]
+                hist_flat = self._get_hist_flat(obs)
+                privileged = obs[self._privileged_key]
+                encoder_input = torch.cat([policy_obs, hist_flat, privileged], dim=-1)
+            else:
+                encoder_input = obs[self._privileged_key]
+            self.encoder_obs_normalizer.update(encoder_input)  # type: ignore[union-attr]
+
         combined = self._get_combined_obs(obs)
         if self.actor_obs_normalization and hasattr(self.actor_obs_normalizer, "update"):
             self.actor_obs_normalizer.update(combined)  # type: ignore[union-attr]
@@ -372,11 +439,7 @@ class ActorCriticEncoder(nn.Module):
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
         """Load model parameters with backward compatibility.
 
-        Handles:
-        - Missing encoder_obs_normalizer keys (old checkpoints)
-        - Critic input dimension mismatch (symmetric -> asymmetric or vice versa)
-        - Unknown keys from old checkpoints
-
+        Handles missing keys, dimension mismatches, and old checkpoints.
         Returns True to indicate resumed training (RSL-RL API contract).
         """
         if self.encoder_obs_normalization:
@@ -389,14 +452,14 @@ class ActorCriticEncoder(nn.Module):
         # Detect critic input dimension mismatch (symmetric <-> asymmetric checkpoint)
         self._handle_critic_dim_mismatch(state_dict, "critic.")
 
-        # Filter out unknown keys from old checkpoints (state_dependent_std, noise_std_type, etc.)
+        # Filter out unknown keys from old checkpoints
         current_keys = set(self.state_dict().keys())
         filtered = {k: v for k, v in state_dict.items() if k in current_keys}
         if len(filtered) < len(state_dict):
             dropped = set(state_dict.keys()) - current_keys
             logger.info("Dropped %d unknown checkpoint keys: %s", len(dropped), dropped)
 
-        # Warn if essential keys are missing (model would silently use random weights)
+        # Warn if essential keys are missing
         missing = current_keys - set(filtered.keys())
         essential_prefixes = ("encoder.", "actor.", "critic.", "log_std")
         missing_essential = {k for k in missing if any(k.startswith(p) for p in essential_prefixes)}
@@ -407,12 +470,7 @@ class ActorCriticEncoder(nn.Module):
         return True
 
     def _handle_critic_dim_mismatch(self, state_dict: dict, prefix: str) -> None:
-        """Reinitialize critic if checkpoint input dimension doesn't match current model.
-
-        This happens when loading a symmetric checkpoint into an asymmetric model
-        (or vice versa). The first layer weight shape reveals the input dimension.
-        """
-        # Find the first linear layer weight in the critic
+        """Reinitialize critic if checkpoint input dimension doesn't match current model."""
         weight_keys = sorted(
             [k for k in state_dict if k.startswith(prefix) and k.endswith(".weight")],
             key=lambda k: int(k.removeprefix(prefix).split(".")[0]),
@@ -422,7 +480,6 @@ class ActorCriticEncoder(nn.Module):
         first_key = weight_keys[0]
         ckpt_input_dim = state_dict[first_key].shape[1]
 
-        # Get current model's critic module by prefix
         if prefix == "critic.":
             current_module = self.critic
             expected_dim = self.num_critic_obs

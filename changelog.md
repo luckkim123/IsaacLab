@@ -4,6 +4,56 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-17] Replace HistoryTCN with raw flatten concat (TRPO OOM fix)
+
+### Context
+Previous session designed a history-augmented encoder using a shared HistoryTCN
+(temporal convolution) to produce h_embed (32D) from proprioception history (30, 8).
+Three consecutive CUDA OOM errors occurred during constrained encoder training:
+
+1. TCN called 3x per step -> added h_embed caching -> OOM (960MB backward)
+2. Added gradient checkpointing -> OOM (recomputation needs same memory)
+3. Fundamental: Conv1d intermediate activations on TRPO full-batch (4096x64=262K samples
+   x 30 timesteps) require ~960MB, exceeding RTX 4070 available VRAM (~0.6GB free after
+   model + rollout buffer)
+
+User questioned whether TCN and embedding are necessary at all. Decision: eliminate TCN
+entirely, flatten proprio_hist (N, 30, 8) -> (N, 240) and concatenate directly to MLP
+inputs. Adds only ~260MB input tensor (vs ~960MB TCN intermediates). The encoder/actor/
+critic MLPs learn from raw history without any preprocessing.
+
+Phase 2 adaptation (ProprioAdaptTConv) retains its TCN because it runs in PPO minibatch
+mode via AdaptRunner (not TRPO full-batch), so Conv1d memory is manageable.
+
+Post-fix: training crashed with `IndexError: too many indices for tensor of dimension 2`
+in `log_encoder_metrics()` because `_encode()` now expects TensorDict, not raw tensor.
+Fixed by passing full obs TensorDict.
+
+### Changed
+- `encoder/actor_critic_encoder.py`: Complete rewrite. Removed HistoryTCN, h_embed caching,
+  gradient checkpointing, shared_tcn, hist_normalizer, h_embed_dim. Added `_get_hist_flat()`
+  (simple flatten). New dimensions: Encoder 272D, Actor 266D, Critic 272D (with history)
+- `encoder/adaptation.py`: Removed dual-mode (adapt_head vs adapt_tconv). Always uses
+  ProprioAdaptTConv for Phase 2. `_get_combined_obs`/`evaluate` use hist_flat from parent
+- `encoder/__init__.py`: Removed HistoryTCN export and docstring reference
+- `algorithms/constraint_trpo.py`: Removed `shared_tcn`/`hist_normalizer` from
+  `encoder_prefixes`. Removed 2x `clear_h_embed_cache()` calls
+- `agents/rsl_rl_ppo_cfg.py`: Removed `h_embed_dim: int = 32` from `_RslRlPpoEncoderBaseCfg`
+- `adapt_base_env.py`: Updated docstring (shared_tcn/h_embed -> adapt_tconv/hist_flat)
+
+### Fixed
+- `utils/logging.py`: `log_encoder_metrics()` called `policy._encode(privileged)` with raw
+  tensor, but `_encode()` now expects TensorDict. Changed to `policy._encode(obs)`
+
+### Removed
+- `encoder/history_tcn.py`: Deleted (no longer imported by any module)
+
+### Notes
+- Memory budget: TCN backward ~960MB -> raw flatten input ~260MB (fits in RTX 4070)
+- ProprioAdaptTConv (Phase 2) kept: runs in PPO minibatch mode, not TRPO full-batch
+- Architecture now: hist(N,30,8) -> flatten(N,240) -> concat to MLP inputs directly
+- No embedding, no normalization module for history -- MLPs learn from raw data
+
 ## [2026-03-17] Encoder z sweep analysis + history-augmented encoder design
 
 ### Context

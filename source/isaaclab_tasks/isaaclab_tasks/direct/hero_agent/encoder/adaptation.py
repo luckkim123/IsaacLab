@@ -3,25 +3,19 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Phase 2 adaptation network: temporal convolution replaces encoder for z estimation.
+"""Phase 2 adaptation network: adapt_tconv replaces encoder for z estimation.
 
 This module provides:
     - ProprioAdaptTConv: Temporal conv network (proprio history -> z_hat)
-    - ActorCriticEncoderAdapt: Full network with frozen base + trainable adapt (base RL)
+    - ActorCriticEncoderAdapt: Full network with frozen base + trainable adapt_tconv
 
 Architecture:
-    ProprioAdaptTConv:
-        Input: (N, H, D) proprioception history (D=8: roll, pitch, p, q, joint_pos, prev_actions)
-        -> channel_transform: per-timestep MLP (D -> 32 -> 32)
-        -> temporal_aggregation: 3x Conv1d (H -> 3 time steps)
-        -> low_dim_proj: Linear(32*3 -> output_dim)
-        -> raw output (activation applied externally)
+    ProprioAdaptTConv: proprio_hist (N, H, 8) -> z_hat (13D)
+    Actor: cat([policy_obs, hist_flat, z_hat.detach()]) -> actions
+    Critic: cat([policy_obs, hist_flat, z_hat.detach()]) -> value
 
-    ActorCriticEncoderAdapt:
-        Inherits ActorCriticEncoder directly (base RL, NOT TDC chain).
-        Overrides _get_combined_obs() to use adapt_tconv(proprio_hist) instead
-        of _encode(privileged). z_hat uses _activate_z() (matching Phase 1).
-        evaluate() overridden to use encoder z for critic (symmetric).
+    hist_flat = proprio_hist.flatten(1) is used for MLP inputs (from parent).
+    ProprioAdaptTConv uses the 3D proprio_hist directly for temporal processing.
 
 Reference:
     HORA ProprioAdaptTConv (references/hora/hora/algo/models/models.py)
@@ -116,16 +110,18 @@ class ProprioAdaptTConv(nn.Module):
 
 
 class ActorCriticEncoderAdapt(ActorCriticEncoder):
-    """Phase 2 adaptation network: adapt_tconv replaces encoder for z estimation.
+    """Phase 2 adaptation: adapt_tconv replaces encoder for z estimation.
 
-    Inherits ActorCriticEncoder directly (base RL pipeline, NOT TDC chain).
+    ProprioAdaptTConv: proprio_hist (N, H, 8) -> z_hat (13D)
+    Actor: cat([policy_obs, hist_flat, z_hat.detach()]) -> actions
+    Critic: cat([policy_obs, hist_flat, z_hat.detach()]) -> value
 
     During Phase 2 supervised training:
         - adapt_tconv is trainable (L2 loss only)
-        - _get_combined_obs() uses z_hat from adapt_tconv (not z from encoder)
-        - z_hat is DETACHED before actor input: PPO gradient does NOT reach adapt_tconv
+        - _get_combined_obs() uses z_hat from adapt (not z from encoder)
+        - z_hat is DETACHED before actor input: PPO gradient does NOT reach adapt
         - AdaptRunner recomputes z_hat independently for L2 loss gradient
-        - evaluate() overridden: critic sees z via encoder (symmetric design)
+        - evaluate() overridden: critic sees z_hat (matching actor's state)
 
     z_hat activation: matches Phase 1 encoder (via _activate_z).
 
@@ -135,12 +131,17 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
 
     def __init__(
         self,
-        *args,
+        *args: Any,
         proprio_history_len: int = 30,
         proprio_feature_dim: int = 8,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            *args,
+            proprio_history_len=proprio_history_len,
+            proprio_feature_dim=proprio_feature_dim,
+            **kwargs,
+        )
 
         self.adapt_tconv = ProprioAdaptTConv(
             input_dim=proprio_feature_dim,
@@ -148,14 +149,18 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
             output_dim=self.encoder_latent_dim,
             history_len=proprio_history_len,
         )
-
-        self._proprio_hist_key = "proprio_hist"
-
-        # Proprioception history normalizer (train mode: online updates, eval: frozen).
         self.hist_normalizer = EmpiricalNormalization(proprio_feature_dim)
+        logger.info(
+            "Adapt tconv: %dD x %d steps -> %dD z_hat",
+            proprio_feature_dim,
+            proprio_history_len,
+            self.encoder_latent_dim,
+        )
 
     def compute_z_hat(self, obs: TensorDict) -> torch.Tensor:
-        """Canonical z_hat computation: normalize -> adapt_tconv -> activate.
+        """Compute z_hat from proprioception history via adapt_tconv.
+
+        Flow: normalize(proprio_hist) -> adapt_tconv -> _activate_z -> z_hat
 
         Both _get_combined_obs() and AdaptRunner's L2 loss use this method,
         ensuring normalization is always applied (train and inference).
@@ -167,7 +172,6 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
             z_hat: Activated latent estimate. Shape: (N, encoder_latent_dim).
         """
         proprio_hist = obs[self._proprio_hist_key]
-        # EmpiricalNormalization expects 2D; reshape 3D -> 2D -> 3D
         N, H, D = proprio_hist.shape
         flat = proprio_hist.reshape(N * H, D)
         flat_norm = self.hist_normalizer(flat)
@@ -187,6 +191,9 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
         """
         policy_obs = obs[self._policy_obs_key]
         z_hat = self.compute_z_hat(obs)
+        if self._has_history:
+            hist_flat = self._get_hist_flat(obs)
+            return torch.cat([policy_obs, hist_flat, z_hat.detach()], dim=-1)
         return torch.cat([policy_obs, z_hat.detach()], dim=-1)
 
     def evaluate(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
@@ -194,25 +201,30 @@ class ActorCriticEncoderAdapt(ActorCriticEncoder):
 
         PPO requires V(s) to evaluate the same state the actor sees.
         Using encoder z here would bias the advantage estimate since the
-        actor conditions on z_hat (from adapt_tconv), not z (from encoder).
+        actor conditions on z_hat (from adapt), not z (from encoder).
         """
         policy_obs = obs[self._policy_obs_key]
         z_hat = self.compute_z_hat(obs)
-        critic_obs = torch.cat([policy_obs, z_hat.detach()], dim=-1)
+        if self._has_history:
+            hist_flat = self._get_hist_flat(obs)
+            critic_obs = torch.cat([policy_obs, hist_flat, z_hat.detach()], dim=-1)
+        else:
+            critic_obs = torch.cat([policy_obs, z_hat.detach()], dim=-1)
         critic_obs = self.critic_obs_normalizer(critic_obs)  # type: ignore[operator]
         return self.critic(critic_obs)
 
     def compute_z_gt(self, obs: TensorDict) -> torch.Tensor:
         """Compute ground truth z from frozen Phase 1 encoder."""
         with torch.no_grad():
-            return self._encode(obs[self._privileged_key])
+            return self._encode(obs)
 
     def get_adapt_parameters(self):
         """Return only adaptation module parameters (for optimizer)."""
         return self.adapt_tconv.parameters()
 
     def freeze_base(self):
-        """Freeze all weights except adapt_tconv."""
+        """Freeze all weights except adaptation module."""
+        adapt_names = {"adapt_tconv", "hist_normalizer"}
         for name, param in self.named_parameters():
-            if "adapt_tconv" not in name:
+            if not any(adapt_name in name for adapt_name in adapt_names):
                 param.requires_grad = False

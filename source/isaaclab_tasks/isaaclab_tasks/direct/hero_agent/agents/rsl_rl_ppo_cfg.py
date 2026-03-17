@@ -77,6 +77,8 @@ class _RslRlPpoEncoderBaseCfg(_HeroAgentPolicyCfg):
     privileged_dim: int = 19
     z_bounds_coef: float = 0.3
     z_bounds_soft_bound: float = 0.9
+    proprio_history_len: int = 30
+    proprio_feature_dim: int = 8
 
 
 @configclass
@@ -101,10 +103,6 @@ class RslRlPpoActorCriticEncoderAdaptCfg(_RslRlPpoEncoderBaseCfg):
 
     class_name: str = "ActorCriticEncoderAdapt"
 
-    # Adaptation module parameters
-    proprio_history_len: int = 30
-    proprio_feature_dim: int = 8
-
 
 # =============================================================================
 # Runner Configurations
@@ -114,6 +112,12 @@ class RslRlPpoActorCriticEncoderAdaptCfg(_RslRlPpoEncoderBaseCfg):
 _PRIVILEGED_OBS_GROUPS: dict[str, list[str]] = {
     "policy": ["policy", "privileged"],
     "critic": ["policy", "privileged"],
+}
+
+# Observation groups for configs that use proprioception history.
+_HISTORY_PRIVILEGED_OBS_GROUPS: dict[str, list[str]] = {
+    "policy": ["policy", "privileged", "proprio_hist"],
+    "critic": ["policy", "privileged", "proprio_hist"],
 }
 
 
@@ -205,7 +209,7 @@ class HeroAgentEncoderPPORunnerCfg(_HeroAgentBaseRunnerCfg):
     class_name: str = "EncoderRunner"
     max_iterations = 2500
     experiment_name = "hero_agent_albc_encoder"
-    obs_groups = _PRIVILEGED_OBS_GROUPS
+    obs_groups = _HISTORY_PRIVILEGED_OBS_GROUPS
 
     # Encoder LR cosine decay schedule (fraction of max_iterations).
     # Warmup: encoder LR stays at initial value. Decay: cosine anneal to min_ratio.
@@ -250,7 +254,7 @@ class HeroAgentAdaptBaseRunnerCfg(_HeroAgentBaseRunnerCfg):
     num_steps_per_env = 1  # Unused by AdaptRunner (kept for base class compat)
     max_iterations = 1  # Unused by AdaptRunner (kept for base class compat)
     experiment_name = "hero_agent_adapt_base"
-    obs_groups = _PRIVILEGED_OBS_GROUPS
+    obs_groups = _HISTORY_PRIVILEGED_OBS_GROUPS
     policy = RslRlPpoActorCriticEncoderAdaptCfg()
 
     # -- Phase 2 supervised training parameters --
@@ -352,7 +356,7 @@ class HeroAgentConstrainedEncoderRunnerCfg(_HeroAgentBaseRunnerCfg):
     class_name: str = "ConstraintEncoderRunner"
     max_iterations = 2500
     experiment_name = "hero_agent_constrained_encoder"
-    obs_groups = _PRIVILEGED_OBS_GROUPS
+    obs_groups = _HISTORY_PRIVILEGED_OBS_GROUPS
 
     # Encoder LR schedule (inherited from EncoderRunner)
     encoder_lr_warmup_frac: float = 0.2

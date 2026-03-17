@@ -191,9 +191,10 @@ class ConstraintTRPO:
         encoder_params = []
         self._policy_params = []  # Actor-only for TRPO
 
+        encoder_prefixes = ("encoder",)
         for name, param in self.policy.named_parameters():
             is_value = name.startswith("critic") or name.startswith("cost_critic")
-            is_encoder = name.startswith("encoder")
+            is_encoder = any(name.startswith(p) for p in encoder_prefixes)
             if is_value:
                 value_params.append(param)
             elif is_encoder:

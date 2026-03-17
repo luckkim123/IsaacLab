@@ -8,7 +8,7 @@
 Neural network architectures for the HORA pipeline:
     - ActorCriticEncoder: Base encoder (Phase 1 teacher)
     - ActorCriticEncoderAdapt: Phase 2 adaptation (proprio history -> z_hat)
-    - ProprioAdaptTConv: Temporal conv for proprioception history
+    - ProprioAdaptTConv: Temporal conv for proprioception history (Phase 2)
 """
 
 from .actor_critic_encoder import ActorCriticEncoder

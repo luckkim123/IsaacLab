@@ -404,8 +404,7 @@ def log_encoder_metrics(
 
     with torch.no_grad():
         obs = env.get_observations().to(device)
-        privileged = obs[policy._privileged_key]
-        z = policy._encode(privileged)
+        z = policy._encode(obs)
 
         metrics["Encoder/z_mean"] = z.mean().item()
         metrics["Encoder/z_std"] = z.std().item()
