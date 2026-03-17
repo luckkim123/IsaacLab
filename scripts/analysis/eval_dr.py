@@ -12,9 +12,6 @@ DR parameters are linearly scaled from 0% (none) to 100% (hard = training DR):
     medium -> 60%  of training DR
     hard   -> 100% of training DR (matches DomainRandomizationCfg defaults)
 
-All levels start from 0 deg initial pose. Each segment is held for 5 s
-(configurable via --segment_duration).
-
 Supported tasks:
     Isaac-HeroAgent-v0              (debug, no DR)
     Isaac-HeroAgent-Base-v0         (base RL training)
@@ -23,23 +20,27 @@ Supported tasks:
     Isaac-HeroAgent-Adapt-Base-v0   (HORA Phase 2)
 
 Usage:
-    # Pure TDC baseline
-    ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/eval_dr_comparison.py \
-        --task Isaac-HeroAgent-TDC-v0 --checkpoint none --num_envs 16 --headless
-
-    # Encoder-Base policy
-    ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/eval_dr_comparison.py \
+    ./isaaclab.sh -p scripts/analysis/eval_dr.py \
         --task Isaac-HeroAgent-Encoder-Base-v0 --num_envs 64 --headless
+
+    # Pure TDC baseline
+    ./isaaclab.sh -p scripts/analysis/eval_dr.py \
+        --task Isaac-HeroAgent-TDC-v0 --checkpoint none --num_envs 16 --headless
 """
 
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import os
 import sys
+
+# cli_args lives in scripts/reinforcement_learning/rsl_rl/
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "reinforcement_learning", "rsl_rl"))
+# common.py lives in scripts/analysis/
+sys.path.insert(0, os.path.dirname(__file__))
 
 from isaaclab.app import AppLauncher
 
-# local imports
 import cli_args  # isort: skip
 
 # ---- CLI arguments ----
@@ -65,7 +66,6 @@ simulation_app = app_launcher.app
 
 """Rest everything follows."""
 
-import os
 from datetime import datetime
 
 import gymnasium as gym
@@ -92,6 +92,8 @@ from isaaclab_tasks.direct.hero_agent.utils import unwrap_env, connect_encoder_t
 from isaaclab_tasks.direct.hero_agent.encoder import ActorCriticEncoder, ActorCriticEncoderAdapt, ActorCriticEncoderConstrained
 from isaaclab_tasks.direct.hero_agent.runners import BaseRunner, EncoderRunner, ConstraintEncoderRunner
 
+from common import DR_LEVELS, DR_COLORS, DR_SCALE
+
 # Register custom classes in RSL-RL runner module namespace so the runner
 # can resolve class_name strings (same pattern as rsl_rl_ppo_cfg.py).
 _runner_module.ActorCriticEncoder = ActorCriticEncoder
@@ -103,13 +105,8 @@ _runner_module.ConstraintEncoderRunner = ConstraintEncoderRunner
 
 matplotlib.use("Agg")  # non-interactive backend for headless
 
-# ---- Configuration ----
-DR_LEVELS = ["none", "soft", "medium", "hard"]
-DR_COLORS = {"none": "#2196F3", "soft": "#4CAF50", "medium": "#FF9800", "hard": "#F44336"}
-DR_ANGLES = {"none": 15.0, "soft": 15.0, "medium": 15.0, "hard": 15.0}
-
-# DR scale factors: 0 = nominal physics, 1 = full training DR
-DR_SCALE = {"none": 0.0, "soft": 0.3, "medium": 0.6, "hard": 1.0}
+# All DR levels use the same target angle
+MAX_ANGLE_DEG = 15.0
 
 
 # ============================================================================
@@ -138,8 +135,6 @@ def build_dr_config(scale: float, is_tdc: bool) -> DomainRandomizationCfg:
     full = DomainRandomizationCfg()
     f = min(scale, 1.0)
 
-    # Fields to interpolate: (field_name, type)
-    # tuple[float,float] fields lerp element-wise
     float_tuple_fields = [
         "position_x_range", "position_y_range", "position_z_range",
         "yaw_range",
@@ -156,9 +151,7 @@ def build_dr_config(scale: float, is_tdc: bool) -> DomainRandomizationCfg:
         "joint_effort_limit_range",
         "joint_static_friction_range", "joint_viscous_friction_range",
     ]
-    # tuple[int,int] fields lerp and round
     int_tuple_fields = ["action_latency_range"]
-    # float fields lerp directly
     float_fields = ["payload_cog_offset_xy_radius"]
 
     cfg = DomainRandomizationCfg()
@@ -211,11 +204,7 @@ def _interpolate_waypoints(
     waypoints: list[tuple[float, float, str]],
     increment: float,
 ) -> list[tuple[float, float, str]]:
-    """Expand waypoints so each axis moves by exactly *increment* deg per step.
-
-    Each axis advances independently by *increment* and clamps at the target,
-    so all intermediate values are clean multiples of *increment*.
-    """
+    """Expand waypoints so each axis moves by exactly *increment* deg per step."""
     if len(waypoints) < 2:
         return list(waypoints)
 
@@ -246,20 +235,11 @@ def _clamp(val: float, a: float, b: float) -> float:
 def build_step_trajectory(
     segment_duration: float,
     step_dt: float,
-    max_angle_deg: float,
+    max_angle_deg: float = MAX_ANGLE_DEG,
     increment_deg: float = 15.0,
     target_num_segments: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    """Build step-change target trajectory with *increment_deg* max per segment.
-
-    Original waypoints (6): neutral, +roll, +pitch, combined-neg, mixed, neutral.
-    These are expanded so that consecutive segments differ by at most
-    *increment_deg* degrees on each axis.  Each segment is held for
-    *segment_duration* seconds.
-
-    If *target_num_segments* is given, shorter trajectories are padded with
-    hold-at-zero segments so all levels have equal length.
-    """
+    """Build step-change target trajectory with *increment_deg* max per segment."""
     a = max_angle_deg
     if a > 0:
         waypoints: list[tuple[float, float, str]] = [
@@ -274,7 +254,6 @@ def build_step_trajectory(
     else:
         segments = [(0.0, 0.0, "hold")]
 
-    # Pad with hold segments to match target length
     if target_num_segments and len(segments) < target_num_segments:
         last_r, last_p = segments[-1][0], segments[-1][1]
         while len(segments) < target_num_segments:
@@ -305,7 +284,7 @@ def build_step_trajectory(
 def compute_metrics(data: dict) -> dict:
     """Compute summary metrics from collected data."""
     time_s = data["time"]
-    error_roll = data["error_roll"]   # (steps, envs) in degrees
+    error_roll = data["error_roll"]
     error_pitch = data["error_pitch"]
     terminated = data["terminated"]
     num_envs = error_roll.shape[1]
@@ -313,16 +292,13 @@ def compute_metrics(data: dict) -> dict:
     error_norm = np.sqrt(error_roll**2 + error_pitch**2)
     alive = ~terminated
 
-    # Overall mean error (alive envs only)
     if alive.any():
         total_mean_error = float(np.nanmean(np.where(alive, error_norm, np.nan)))
     else:
         total_mean_error = float("nan")
 
-    # Survival rate
     survival_rate = float(alive[-1].sum()) / num_envs * 100.0
 
-    # Per-segment metrics
     seg_steps = data["steps_per_segment"]
     num_segments = len(data["segment_names"])
     steady_state_errors = []
@@ -336,7 +312,6 @@ def compute_metrics(data: dict) -> dict:
         seg_alive = alive[s:e]
         seg_time = time_s[s:e]
 
-        # Steady-state: last 50% of segment
         ss_start = int(seg_steps * 0.5)
         ss_error = seg_error[ss_start:]
         ss_alive = seg_alive[ss_start:]
@@ -345,7 +320,6 @@ def compute_metrics(data: dict) -> dict:
         else:
             steady_state_errors.append(float("nan"))
 
-        # Settling time: first step where mean error < 5 deg
         mean_per_step = np.nanmean(np.where(seg_alive, seg_error, np.nan), axis=1)
         settled = mean_per_step < 5.0
         if settled.any():
@@ -382,7 +356,7 @@ def generate_plots(
     all_metrics: dict[str, dict],
     output_dir: str,
 ) -> None:
-    """Generate 4 comparison figures and save as PNG."""
+    """Generate comparison figures and save as PNG."""
     levels = [lvl for lvl in DR_LEVELS if lvl in all_data]
 
     # ---- Figure 1: Per-Level Tracking (4x2 grid) ----
@@ -421,7 +395,7 @@ def generate_plots(
     fig1.savefig(os.path.join(output_dir, "tracking.png"), dpi=150)
     plt.close(fig1)
 
-    # ---- Figure 2: Error Time-Series (2x1, all levels overlaid) ----
+    # ---- Figure 2: Error Time-Series (all levels overlaid) ----
     fig2, (ax_re, ax_pe) = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
     fig2.suptitle("Tracking Error vs DR Level", fontsize=14)
 
@@ -475,24 +449,14 @@ def generate_plots(
     plt.close(fig3)
 
 
-
 # ============================================================================
 # Evaluation Loop
 # ============================================================================
 
 def run_evaluation(
-    env,
-    policy,
-    policy_nn,
-    raw_env,
-    time_s: np.ndarray,
-    target_roll_deg: np.ndarray,
-    target_pitch_deg: np.ndarray,
-    segment_names: list[str],
-    segment_duration: float,
-    step_dt: float,
-    num_envs: int,
-    device: torch.device,
+    env, policy, policy_nn, raw_env,
+    time_s, target_roll_deg, target_pitch_deg, segment_names,
+    segment_duration, step_dt, num_envs, device,
 ) -> dict:
     """Run one evaluation pass and collect per-step data."""
     total_steps = len(time_s)
@@ -512,9 +476,6 @@ def run_evaluation(
         if hasattr(policy_nn, "reset"):
             policy_nn.reset(torch.ones(num_envs, 1, dtype=torch.bool, device=device))
 
-    # Clear episode length counter to prevent timeout during evaluation.
-    # Without this, _reset_framework() jitters episode_length_buf to [0, half_ep),
-    # causing ~60% of environments to timeout before the trajectory completes.
     raw_env.episode_length_buf[:] = 0
 
     target_roll_rad = np.deg2rad(target_roll_deg)
@@ -522,7 +483,6 @@ def run_evaluation(
     terminated_ever = np.zeros(num_envs, dtype=bool)
 
     for step_idx in range(total_steps):
-        # Override target attitude
         raw_env._target_euler[:, 0] = target_roll_rad[step_idx]
         raw_env._target_euler[:, 1] = target_pitch_rad[step_idx]
         raw_env._target_euler[:, 2] = 0.0
@@ -533,22 +493,18 @@ def run_evaluation(
             if hasattr(policy_nn, "reset"):
                 policy_nn.reset(dones)
 
-        # Collect Euler angles
         roll_cur, pitch_cur, _ = euler_xyz_from_quat(raw_env._robot.data.root_quat_w)
         actual_roll[step_idx] = torch.rad2deg(roll_cur).cpu().numpy()
         actual_pitch[step_idx] = torch.rad2deg(pitch_cur).cpu().numpy()
 
-        # Error (signed, degrees)
         att_err = raw_env._attitude_error[:, :2]
         error_roll[step_idx] = torch.rad2deg(att_err[:, 0]).cpu().numpy()
         error_pitch[step_idx] = torch.rad2deg(att_err[:, 1]).cpu().numpy()
 
-        # Track terminations (cumulative)
         dones_np = dones.squeeze(-1).cpu().numpy().astype(bool) if dones.dim() > 1 else dones.cpu().numpy().astype(bool)
         terminated_ever |= dones_np
         terminated[step_idx] = terminated_ever
 
-        # Progress logging
         if (step_idx + 1) % 1000 == 0 or step_idx == total_steps - 1:
             alive_count = num_envs - terminated_ever.sum()
             err_norm = np.sqrt(error_roll[step_idx] ** 2 + error_pitch[step_idx] ** 2)
@@ -595,23 +551,18 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     if hasattr(env_cfg, "observation_noise_model"):
         env_cfg.observation_noise_model = None
     env_cfg.enable_payload = True
-    # Terminate ONLY on excessive attitude deviation
-    env_cfg.max_attitude_angle = 2.5  # ~143 deg absolute limit
+    env_cfg.max_attitude_angle = 2.5
     env_cfg.debug_vis = False
     env_cfg.seed = args_cli.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     if hasattr(env_cfg, "doraemon"):
         env_cfg.doraemon.enable = False
 
-    # Compute episode_length_s from the longest trajectory across all DR levels
-    _max_segs = 0
-    for _a in DR_ANGLES.values():
-        if _a > 0:
-            _wp = [(0, 0, ""), (_a, 0, ""), (0, _a, ""), (-_a, -_a, ""), (_a, -_a, ""), (0, 0, "")]
-            _max_segs = max(_max_segs, len(_interpolate_waypoints(_wp, 15.0)))
-        else:
-            _max_segs = max(_max_segs, 1)
-    env_cfg.episode_length_s = _max_segs * args_cli.segment_duration + 10.0  # +10s margin
+    # Compute episode_length_s from the longest trajectory
+    _wp = [(0, 0, ""), (MAX_ANGLE_DEG, 0, ""), (0, MAX_ANGLE_DEG, ""),
+           (-MAX_ANGLE_DEG, -MAX_ANGLE_DEG, ""), (MAX_ANGLE_DEG, -MAX_ANGLE_DEG, ""), (0, 0, "")]
+    _max_segs = len(_interpolate_waypoints(_wp, 15.0))
+    env_cfg.episode_length_s = _max_segs * args_cli.segment_duration + 10.0
 
     # ---- Load checkpoint ----
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
@@ -623,7 +574,6 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
             resume_path = retrieve_file_path(args_cli.checkpoint)
         else:
             resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
-            # Prefer best_model.pt when no checkpoint is explicitly specified
             best_model_path = os.path.join(os.path.dirname(resume_path), "best_model.pt")
             if os.path.isfile(best_model_path):
                 resume_path = best_model_path
@@ -633,7 +583,6 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     if args_cli.output_dir:
         output_dir = args_cli.output_dir
     else:
-        # Use training run timestamp from checkpoint path instead of current time
         if resume_path:
             ts = os.path.basename(os.path.dirname(resume_path))
         else:
@@ -689,11 +638,9 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         policy_nn = type("FakePolicy", (), {"reset": lambda _s, _d: None})()
         print("[INFO] Pure TDC mode (zero-action policy).")
 
-    # ---- Pre-compute max segment count so all levels have equal length ----
-    max_num_segs = 0
-    for angle in DR_ANGLES.values():
-        _, _, _, sn = build_step_trajectory(args_cli.segment_duration, step_dt, angle)
-        max_num_segs = max(max_num_segs, len(sn))
+    # ---- Pre-compute max segment count ----
+    _, _, _, sn = build_step_trajectory(args_cli.segment_duration, step_dt)
+    max_num_segs = len(sn)
     print(f"[INFO] Unified segment count: {max_num_segs} ({max_num_segs * args_cli.segment_duration:.0f}s)")
 
     # ---- Run evaluation for each DR level ----
@@ -703,39 +650,27 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     for level in DR_LEVELS:
         dr_pct = int(DR_SCALE[level] * 100)
         print(f"\n{'=' * 60}")
-        print(f"  DR Level: {level.upper()} | DR Scale: {dr_pct}% | Target: +-15 deg")
+        print(f"  DR Level: {level.upper()} | DR Scale: {dr_pct}% | Target: +-{MAX_ANGLE_DEG:.0f} deg")
         print(f"{'=' * 60}")
 
-        # Build trajectory for this level (padded to max_num_segs)
         time_s, target_roll_deg, target_pitch_deg, segment_names = build_step_trajectory(
             segment_duration=args_cli.segment_duration,
             step_dt=step_dt,
-            max_angle_deg=DR_ANGLES[level],
             target_num_segments=max_num_segs,
         )
         print(f"  Trajectory: {len(segment_names)} segs x {args_cli.segment_duration}s = {len(time_s)} steps")
 
-        # Apply DR preset
         apply_dr_config(raw_env.cfg, DR_SCALE[level], is_tdc)
 
-        # Run evaluation
         data = run_evaluation(
-            env=env,
-            policy=policy,
-            policy_nn=policy_nn,
-            raw_env=raw_env,
-            time_s=time_s,
-            target_roll_deg=target_roll_deg,
-            target_pitch_deg=target_pitch_deg,
-            segment_names=segment_names,
-            segment_duration=args_cli.segment_duration,
-            step_dt=step_dt,
-            num_envs=num_envs,
-            device=device,
+            env=env, policy=policy, policy_nn=policy_nn, raw_env=raw_env,
+            time_s=time_s, target_roll_deg=target_roll_deg,
+            target_pitch_deg=target_pitch_deg, segment_names=segment_names,
+            segment_duration=args_cli.segment_duration, step_dt=step_dt,
+            num_envs=num_envs, device=device,
         )
         all_data[level] = data
 
-        # Save per-level data
         np.savez_compressed(
             os.path.join(output_dir, f"eval_{level}.npz"),
             **{k: v for k, v in data.items() if isinstance(v, np.ndarray)},
@@ -751,7 +686,7 @@ def main(env_cfg: DirectRLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
         print(f"    Settling time (avg): {np.nanmean(metrics['settling_times']):.2f} s")
 
     # ---- Generate plots ----
-    print(f"\n[INFO] Generating plots...")
+    print("\n[INFO] Generating plots...")
     generate_plots(all_data, all_metrics, output_dir)
 
     # ---- Print final comparison ----

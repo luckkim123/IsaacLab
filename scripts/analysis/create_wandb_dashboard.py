@@ -1,19 +1,22 @@
-"""Create a WandB Report with 8-panel SAC-MPC monitoring dashboard.
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Create a WandB Report with PPO + Encoder training health dashboard.
 
 Usage:
     # Preview panel layout (no WandB dependency):
-    ./isaaclab.sh -p scripts/hero_agent/create_wandb_dashboard.py --dry-run
+    python scripts/analysis/create_wandb_dashboard.py --dry-run
 
-    # Create WandB report (requires: pip install wandb[workspaces]):
-    ./isaaclab.sh -p scripts/hero_agent/create_wandb_dashboard.py \
+    # Create WandB report:
+    python scripts/analysis/create_wandb_dashboard.py \
         --entity <WANDB_ENTITY> --project hero_agent
 
     # With specific run filter:
-    ./isaaclab.sh -p scripts/hero_agent/create_wandb_dashboard.py \
+    python scripts/analysis/create_wandb_dashboard.py \
         --entity <WANDB_ENTITY> --project hero_agent \
-        --run-filter "SAC-MPC*"
-
-See docs/SAC_MPC_MONITORING.md for metric interpretation guide.
+        --run-filter "encoder-base*"
 """
 
 from __future__ import annotations
@@ -23,13 +26,14 @@ import sys
 
 
 # =============================================================================
-# Panel Definitions (source of truth for all 8 panels)
+# Panel Definitions (8-panel PPO + Encoder dashboard)
 # =============================================================================
 
 PANELS: list[dict[str, str | list[str]]] = [
     {
-        "title": "1. Is Training Working? (Primary)",
+        "title": "1. Training Progress (Primary)",
         "metrics": [
+            "Train/mean_reward",
             "Episode_Reward/total",
             "Train/episode_length",
             "Attitude_Error/roll_deg",
@@ -37,57 +41,58 @@ PANELS: list[dict[str, str | list[str]]] = [
         ],
     },
     {
-        "title": "2. Reward Breakdown (Per-Term)",
+        "title": "2. Reward Breakdown",
         "metrics": [
             "Episode_Reward/tracking",
+            "Episode_Reward/settling",
+            "Episode_Reward/linear_error",
+            "Episode_Reward/progress",
             "Episode_Reward/action_magnitude",
             "Episode_Reward/action_rate",
+            "Episode_Reward/joint_velocity",
+            "Episode_Reward/joint_oscillation",
         ],
     },
     {
-        "title": "3. Actor-Critic Health",
+        "title": "3. PPO Loss",
         "metrics": [
-            "Loss/actor",
-            "Loss/critic",
-            "SAC/alpha",
-            "SAC/q1_mean",
-            "SAC/q2_mean",
-            "SAC/target_q_mean",
-            "SAC/log_prob_mean",
-            "SAC/actor_grad_norm",
-            "SAC/critic_grad_norm",
+            "Loss/value_function",
+            "Loss/surrogate",
+            "Loss/entropy",
+            "Loss/learning_rate",
         ],
     },
     {
-        "title": "4. Dynamics MLP Health",
-        "metrics": [
-            "Loss/dynamics",
-            "Dynamics/pred_err_mean",
-            "Dynamics/grad_norm",
-        ],
-    },
-    {
-        "title": "5. Encoder Health",
+        "title": "4. Encoder Health",
         "metrics": [
             "Encoder/z_mean",
             "Encoder/z_std",
+            "Encoder/z_min",
+            "Encoder/z_max",
             "Encoder/grad_norm",
+            "Loss/encoder",
         ],
     },
     {
-        "title": "6. MPC Health",
+        "title": "5. DORAEMON DR Scheduling",
         "metrics": [
-            "MPC/Q_diag_mean",
-            "MPC/R_diag_mean",
-            "MPC/solve_cost",
-            "MPC/state_err_total",
+            "DORAEMON/success_rate",
+            "DORAEMON/entropy",
+            "DORAEMON/temperature",
+        ],
+    },
+    {
+        "title": "6. Constraint Costs (NORBC)",
+        "metrics": [
+            "Constraint/joint_velocity",
+            "Constraint/joint_oscillation",
+            "Constraint/barrier_cost_total",
         ],
     },
     {
         "title": "7. Training Diagnostics",
         "metrics": [
             "Train/fps",
-            "Train/buffer_size",
             "Train/terminated",
             "Train/time_out",
         ],
@@ -108,7 +113,7 @@ def dry_run() -> None:
     """Print the panel layout without creating a WandB report."""
     total = 0
     print("=" * 60)
-    print("SAC-MPC Training Health Dashboard - Panel Layout")
+    print("PPO + Encoder Training Dashboard - Panel Layout")
     print("=" * 60)
     for panel in PANELS:
         metrics = panel["metrics"]
@@ -122,12 +127,12 @@ def dry_run() -> None:
 
 
 def create_report(entity: str, project: str, run_filter: str | None = None) -> str:
-    """Create WandB report with 8-panel SAC-MPC dashboard.
+    """Create WandB report with PPO + Encoder training dashboard.
 
     Args:
         entity: WandB entity (username or team).
         project: WandB project name.
-        run_filter: Optional run name glob filter (e.g., "SAC-MPC*").
+        run_filter: Optional run name glob filter.
 
     Returns:
         URL of the created report.
@@ -144,21 +149,20 @@ def create_report(entity: str, project: str, run_filter: str | None = None) -> s
         sys.exit(1)
 
     blocks: list = [
-        wr.H1("SAC-MPC Training Health Dashboard"),
+        wr.H1("PPO + Encoder Training Dashboard"),
         wr.P(
-            "Auto-generated monitoring dashboard. "
-            "See docs/SAC_MPC_MONITORING.md for metric interpretation guide."
+            "Hero Agent training health dashboard. "
+            "Panels cover reward, PPO loss, encoder z statistics, "
+            "DORAEMON DR scheduling, and constraint costs."
         ),
     ]
 
-    # Build runset with optional filter
     runset_kwargs: dict = {"entity": entity, "project": project}
     if run_filter:
         runset_kwargs["filters"] = {"display_name": {"$regex": run_filter}}
 
     runset = wr.Runset(**runset_kwargs)
 
-    # Add each panel section
     for panel_def in PANELS:
         metrics = panel_def["metrics"]
         blocks.append(wr.H2(str(panel_def["title"])))
@@ -178,8 +182,8 @@ def create_report(entity: str, project: str, run_filter: str | None = None) -> s
     report = wr.Report(
         entity=entity,
         project=project,
-        title="SAC-MPC Training Health Dashboard",
-        description="8-panel monitoring dashboard for SAC-MPC training health assessment",
+        title="PPO + Encoder Training Dashboard",
+        description="8-panel monitoring dashboard for Hero Agent PPO + Encoder training",
         blocks=blocks,
     )
 
@@ -191,14 +195,14 @@ def create_report(entity: str, project: str, run_filter: str | None = None) -> s
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Create WandB Report with SAC-MPC monitoring dashboard"
+        description="Create WandB Report with PPO + Encoder training dashboard"
     )
     parser.add_argument("--entity", default=None, help="WandB entity (username or team)")
     parser.add_argument("--project", default="hero_agent", help="WandB project name")
     parser.add_argument(
         "--run-filter",
         default=None,
-        help="Optional run name glob filter (e.g., 'SAC-MPC*')",
+        help="Optional run name glob filter (e.g., 'encoder-base*')",
     )
     parser.add_argument(
         "--dry-run",
