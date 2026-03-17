@@ -55,6 +55,44 @@ structure. Policy stops compressing noise once error reduction slows. This match
   With alpha_entropy=0, this constant downward pressure is uncontested.
   Reduced smoothness_weight -0.5 -> -0.1 (1/5 pressure) to test hypothesis.
 
+## [2026-03-17] Constraint reduction 8→6 + budget relaxation
+
+### Context
+Analysis of run `2026-03-17_09-10-27` (124 iters, smoothness=-0.1 + quadratic command)
+showed 4/8 constraints simultaneously OVER budget: attitude_err (3.02x), yaw_vel (2.31x),
+joint_torque (1.67x), singularity (1.35x). Excessive simultaneous constraint violations
+cause cost gradient to dominate reward gradient, suppressing learning.
+
+Two constraints identified as redundant:
+- `singularity`: DLS IK already handles singularity via damping (no safety benefit in sim)
+- `attitude_err`: duplicates quadratic command reward's tracking incentive (double-penalizing
+  error reduction through both reward and constraint). Budget 0.122 rad (7 deg) too tight
+  for early training, generating largest lambda and dominating policy gradient.
+
+Remaining OVER constraints (joint_torque, yaw_vel) kept but budgets relaxed to reduce
+initial constraint pressure while maintaining eventual compliance.
+
+Noise floor kept at 0.20: with alpha_entropy=0, quadratic reward's E[-(e+noise)^2] = -(E[e^2] + sigma^2)
+structurally drives noise to floor regardless of smoothness weight. Floor is the intended defense.
+
+### Changed
+- `config.py`: Disabled `singularity` constraint (DLS IK handles it mechanically)
+- `config.py`: Disabled `attitude_err` constraint (quadratic command reward covers tracking)
+- `config.py`: Relaxed `joint_torque` budget 0.05 -> 0.10 (was 1.67x OVER)
+- `config.py`: Relaxed `yaw_vel` budget 0.15 -> 0.35 (was 2.31x OVER)
+- `config.py`: Removed unused imports (`attitude_error_cost`, `singularity_cost`)
+- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` 8 -> 6, budgets synced to
+  (0.02, 0.01, 0.10, 0.05, 0.10, 0.35) matching: accum_rot, attitude_abs,
+  joint_torque, joint_vel_limit, overshoot, yaw_vel
+
+### Notes
+- Remaining 6 constraints: accum_rot, attitude_abs, joint_torque, joint_vel_limit,
+  overshoot, yaw_vel
+- Per-constraint advantage normalization handles cost_return scale differences
+  (absolute scale irrelevant, violation ratio matters)
+- With 2 fewer constraints, total constraint pressure reduced -- remaining OVER
+  constraints should converge faster
+
 ## [2026-03-17] Constraint expansion 3→9 + PBRS progress reward
 
 ### Context

@@ -47,11 +47,9 @@ from .mdp import (
     ConstraintTermCfg,
     accumulated_rotation_cost,
     attitude_absolute_cost,
-    attitude_error_cost,
     joint_torque_cost,
     joint_velocity_limit_cost,
     overshoot_cost,
-    singularity_cost,
     yaw_velocity_cost,
 )
 
@@ -585,7 +583,7 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
 
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(
         terms=[
-            # --- Binary constraints (6 terms) ---
+            # --- Binary constraints (4 terms) ---
             ConstraintTermCfg(
                 func=accumulated_rotation_cost,
                 params={"max_rotations": 2.0},
@@ -598,15 +596,11 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
                 budget=0.01,
                 name="attitude_abs",
             ),
-            ConstraintTermCfg(
-                func=singularity_cost,
-                params={"sin_g2_limit": 0.15},
-                budget=0.15,
-                name="singularity",
-            ),
+            # singularity: disabled -- DLS IK handles singularity smoothly
+            # attitude_err: disabled -- quadratic command reward covers tracking
             ConstraintTermCfg(
                 func=joint_torque_cost,
-                budget=0.05,
+                budget=0.10,
                 name="joint_torque",
             ),
             ConstraintTermCfg(
@@ -621,16 +615,10 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
                 budget=0.10,
                 name="overshoot",
             ),
-            # --- Continuous constraints (2 terms) ---
-            ConstraintTermCfg(
-                func=attitude_error_cost,
-                budget=0.122,
-                cost_type="average",
-                name="attitude_err",
-            ),
+            # --- Continuous constraints (1 term) ---
             ConstraintTermCfg(
                 func=yaw_velocity_cost,
-                budget=0.15,
+                budget=0.35,
                 cost_type="average",
                 name="yaw_vel",
             ),
