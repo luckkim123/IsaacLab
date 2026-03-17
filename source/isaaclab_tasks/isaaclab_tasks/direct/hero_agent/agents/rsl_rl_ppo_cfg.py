@@ -321,12 +321,13 @@ class RslRlConstraintTRPOAlgorithmCfg:
     lambda_warmup_frac: float = 0.5
     line_search_kl_margin: float = 1.5
 
-    # Entropy coefficient: disabled for TRPO (KL constraint provides exploration).
-    # TRPO takes max-KL steps every iteration; any alpha > 0 causes unbounded
-    # noise_std growth because there is no PPO-style clip/adaptive-LR to resist it.
+    # Fixed entropy bonus: alpha=0.005 provides constant upward pressure on entropy,
+    # preventing irreversible exploration collapse from constraint gradient pressure.
+    # alpha_entropy_lr=0.0 keeps alpha fixed (no SAC-style adaptive -- that caused
+    # instability with continuous constraints in earlier experiments).
     target_entropy: float = 2.0
     alpha_entropy_lr: float = 0.0
-    alpha_entropy_init: float = 0.0
+    alpha_entropy_init: float = 0.005
 
     # Encoder z bounds
     z_bounds_coef: float = 0.3

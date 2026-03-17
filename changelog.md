@@ -41,7 +41,35 @@ z_std=0.55, z_mean~0, grad healthy. BUT:
 - Root cause is purely exploration death: alpha_entropy=0 provides no entropy recovery force.
 - noise_floor=0.20 only sets lower bound; doesn't push entropy UP when constraint pressure eases.
 - Planned fix: alpha_entropy=0.005 (fixed, not adaptive), noise_floor 0.20->0.25 (moderate),
-  encoder grad clip max_norm=0.1 (safety). Avoid floor=0.30 (prevents fine-grained convergence).
+  encoder grad clip max_norm=0.2 (safety). Avoid floor=0.30 (prevents fine-grained convergence).
+
+## [2026-03-17] Fix entropy collapse: alpha_entropy + noise floor + encoder grad clip
+
+### Context
+Based on training analysis above: entropy collapsed irreversibly due to zero counterforce
+(alpha_entropy=0) against dual downward pressure (reward + constraint gradients). Lambda
+hysteresis: transient constraint pressure permanently killed exploration with no recovery.
+Grad norm escalation (40x) from 1/sigma^2 amplification threatened encoder stability.
+
+Three changes address the root cause (no entropy recovery) and symptoms (grad amplification):
+- noise_floor 0.25 chosen over 0.30 to preserve fine-grained convergence capability
+- alpha_entropy=0.005 fixed (not SAC adaptive, which caused instability with continuous
+  constraints in 2026-03-16 experiments)
+- encoder grad clip 0.2 (encoder grad currently 0.08, clip provides 2.5x headroom)
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `alpha_entropy_init` 0.0 -> 0.005 (fixed, alpha_entropy_lr stays 0.0)
+- `algorithms/constraint_trpo.py`: noise floor `min_log_std` from log(0.2) to log(0.25)
+- `algorithms/constraint_trpo.py`: encoder grad clip from max_grad_norm (1.0) to 0.2 (encoder-specific)
+- `runners/base_runner.py`: noise floor `min_std` 0.2 -> 0.25 (unified with constraint_trpo)
+
+### Notes
+- noise_floor=0.25: 1/sigma^2=16x max amplification (vs 25x at 0.20), sigma=0.25 still allows
+  precise actions (95% within +-0.5 of mean for [-1,1] range)
+- alpha_entropy=0.005 with lr=0.0: constant entropy bonus, not adaptive. Previous adaptive
+  alpha (SAC-style) caused instability -- alpha grew unbounded during lambda warmup period
+- encoder grad clip 0.2: current grad ~0.08, clip only activates during spikes. Value function
+  retains max_grad_norm=1.0 (separate clip)
 
 ## [2026-03-17] Reduce encoder LR for 272D input (actor-encoder desync fix)
 
@@ -451,13 +479,6 @@ surrogate -> LS 100% success, BUT error stuck at 17-20 deg (effort_limit budget 
 - `algorithms/constraint_trpo.py`: Cost value loss clamps targets >=0. NaN guard on cost
   advantage normalization. Log_std clamp before KL measurement.
 - `mdp/constraints.py`: effort_limit_cost uses per-env DR'd limits (was cached scalar).
-
-### Notes
-- Key architectural decisions: (1) std detach from cost = permanent fix for entropy collapse,
-  (2) Lagrangian vs IPO = handles infeasible start, (3) LS-gated updates = prevents death
-  spiral during line search failures, (4) z detach from cost = prevents encoder instability
-- Best run of the day: `04-27-48` (reward 42, roll 11.6 deg, pitch 13.4 deg, std=0.48)
-  but that used 8 constraints which were later reduced to 3 for stability
 
 ## [2026-03-05/10 Summary] ConstraintTRPO build-out, stabilization, NORBC conformance
 

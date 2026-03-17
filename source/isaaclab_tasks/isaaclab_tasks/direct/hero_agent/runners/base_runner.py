@@ -108,7 +108,7 @@ class BaseRunner(OnPolicyRunner):
         No ceiling: reward gradient alone controls variance (cost gradient
         is detached from std in ConstraintTRPO, and entropy_coef=0).
         """
-        min_std = 0.2
+        min_std = 0.25
         if hasattr(self.alg.policy, "log_std"):
             if not hasattr(self, "_cached_min_log_std"):
                 self._cached_min_log_std = torch.log(torch.tensor(min_std, device=self.device))

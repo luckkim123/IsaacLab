@@ -696,9 +696,9 @@ class ConstraintTRPO:
                 )
 
         # Noise floor: numerical safety net to prevent log_prob divergence
-        # when std -> 0. No ceiling needed: target entropy auto-regulates
-        # alpha (entropy coefficient) to prevent std from growing unbounded.
-        min_log_std = math.log(0.2)
+        # when std -> 0. Also limits 1/sigma^2 gradient amplification
+        # (0.25 -> max 16x vs 0.20 -> max 25x amplification).
+        min_log_std = math.log(0.25)
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=min_log_std)
 
@@ -743,7 +743,11 @@ class ConstraintTRPO:
                             has_grads = True
 
             if has_grads:
-                nn.utils.clip_grad_norm_(self._encoder_params, self.max_grad_norm)
+                # Encoder-specific clip (tighter than actor/value max_grad_norm=1.0).
+                # As noise_std decreases, 1/sigma^2 amplifies all gradients including
+                # encoder's. TRPO protects actor via KL step size, but encoder uses
+                # Adam with no such constraint. Clip at 0.2 to prevent grad escalation.
+                nn.utils.clip_grad_norm_(self._encoder_params, max_norm=0.2)
                 self.encoder_optimizer.step()
         elif self.encoder_optimizer is not None and hasattr(self.policy, "z_bounds_loss"):
             # Still compute z_bounds_loss for logging, but don't step
