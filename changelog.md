@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-17] Activate PBRS progress reward for constrained encoder
+
+### Context
+Analyzed run `2026-03-17_14-13-26` (with alpha_entropy=0.005, noise_floor=0.25, encoder grad
+clip=0.2 fixes from previous session). At iter 343:
+- Entropy recovering well: 1.54 (iter 100) -> 1.94 (iter 343). alpha_entropy working.
+- Noise_std stable at 0.67 (well above floor). No collapse.
+- Encoder grad_norm stable at 0.025 (no escalation, clip effective).
+- Line search 100% success. KL synced (trpo=0.010, post=0.012).
+
+BUT error started increasing at iter ~230: roll 8->19, pitch 12->20. Root cause analysis:
+- NOT entropy-driven: entropy was rising from iter 60 while error was IMPROVING (iter 60-140).
+  If entropy caused error, that phase would be impossible.
+- Lambda pressure: lambda_joint_torque reached ~0.15 at iter 230, competing with reward gradient
+  in TRPO conjugate gradient step. As lambda grows (lr_eff linearly increasing via warmup),
+  more of the trust region step goes toward constraint satisfaction vs reward optimization.
+- Entropy and error correlation is coincidental: both driven by separate monotonically increasing
+  forces (alpha_entropy and lambda growth respectively).
+
+Activated PBRS progress_weight=2.0 to strengthen reward signal against lambda pressure.
+PBRS rewards error REDUCTION rate (prev_potential - gamma * potential), providing stronger
+learning signal when lambda competes for the TRPO step direction. Mathematically safe:
+does not change optimal policy (Ng et al. 1999).
+
+### Changed
+- `config.py`: `progress_weight` 0.0 -> 2.0 in HeroAgentConstrainedEncoderEnvCfg reward config
+
 ## [2026-03-17] Training analysis: entropy hysteresis diagnosis
 
 ### Context

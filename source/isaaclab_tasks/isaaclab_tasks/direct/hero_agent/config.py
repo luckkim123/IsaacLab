@@ -359,6 +359,14 @@ class HeroAgentEnvCfg(DirectRLEnvCfg):
     tde_nu_dot_ema_alpha: float = 0.05  # EMA filter for angular acceleration
     tde_h: float = 0.180  # CoG-to-ABPC vertical offset (m), same as TDCControllerCfg
 
+    # ==========================================================================
+    # Proprioception History (for history-augmented encoder)
+    # 0 = disabled (default), 30 = standard for history encoder.
+    # When > 0, base_env creates a ring buffer and adds "proprio_hist" to observations.
+    # ==========================================================================
+    proprio_history_len: int = 0
+    proprio_feature_dim: int = 8  # [roll, pitch, p, q, joint_pos_norm(2), prev_actions(2)]
+
 
 @configclass
 class HeroAgentTrainEnvCfg(HeroAgentEnvCfg):
@@ -409,6 +417,7 @@ class HeroAgentEncoderTrainEnvCfg(HeroAgentTrainEnvCfg):
     """
 
     state_space: int = 19
+    proprio_history_len: int = 30  # Enable history for all encoder configs
     doraemon: DoraemonCfg = DoraemonCfg(enable=False)
 
 
@@ -555,8 +564,8 @@ class HeroAgentEncoderTDCEnvCfg(HeroAgentTDCEnvCfg):
 class HeroAgentAdaptBaseEnvCfg(HeroAgentEncoderTrainEnvCfg):
     """Phase 2 adaptation training config (base RL pipeline).
 
-    Inherits from HeroAgentEncoderTrainEnvCfg (state_space=19 for privileged z_gt).
-    Adds proprioception history buffer for the adaptation module.
+    Inherits from HeroAgentEncoderTrainEnvCfg (state_space=19 for privileged z_gt,
+    proprio_history_len=30 for history buffer).
 
     Per-timestep feature (8D):
         [roll(1), pitch(1), p(1), q(1), joint_pos_norm(2), prev_actions(2)]
@@ -565,8 +574,7 @@ class HeroAgentAdaptBaseEnvCfg(HeroAgentEncoderTrainEnvCfg):
     same action with different physical parameters produces different angular velocity.
     """
 
-    proprio_history_len: int = 30
-    proprio_feature_dim: int = 8  # body_state(2) + ang_vel(2) + joint_pos(2) + prev_actions(2)
+    pass
 
 
 @configclass
@@ -632,11 +640,11 @@ class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
 
     # settling replaced by attitude_err constraint (adaptive lambda vs fixed weight).
     # smoothness replaces joint_osc constraint (fixed weight avoids lambda competition).
-    # progress removed (PBRS not clearly helping, adds complexity).
+    # PBRS progress: strengthens reward signal against growing lambda pressure.
     reward: ALBCRewardCfg = ALBCRewardCfg(
         command_type="quadratic",
         settling_weight=0.0,
         energy_weight=0.0,
         smoothness_weight=-0.1,
-        progress_weight=0.0,
+        progress_weight=2.0,
     )
