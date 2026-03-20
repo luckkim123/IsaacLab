@@ -76,4 +76,3 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
         """
         critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))  # type: ignore[operator]
         return F.softplus(self.cost_critic(critic_obs))
-
