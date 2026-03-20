@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] Simplify constraint_trpo.py internal code duplication
+
+### Context
+`constrained_albc/algorithms/constraint_trpo.py` (1043 lines) contained four
+categories of code duplication: importance sampling ratio calculation (3 lines x 4
+sites), Gaussian KL formula (inlined in both `_kl_divergence` and
+`_fisher_vector_product`), line search logic (~40 lines each in `_line_search_safe`
+and `_line_search_recovery`), and TRPO step orchestration (~50 lines each in
+`_trpo_step_safe` and `_trpo_step_recovery`). The safe/recovery pairs differed only
+in which surrogate objective was evaluated, so the common structure was extracted
+into shared methods with callable injection.
+
+### Changed
+- `constraint_trpo.py`: Extracted `_compute_ratio()` helper (4 call sites reduced from 3 lines to 1)
+- `constraint_trpo.py`: Extracted `_gaussian_kl()` static method, used by `_kl_divergence` and `_fisher_vector_product`
+- `constraint_trpo.py`: Unified `_line_search_safe` + `_line_search_recovery` into `_line_search(surrogate_fn)`
+- `constraint_trpo.py`: Unified `_trpo_step_safe` + `_trpo_step_recovery` into `_trpo_step(compute_loss_fn, compute_surrogate_fn, mode_name)`
+- `constraint_trpo.py`: `update()` now passes mode-specific logic as closures to `_trpo_step`
+
+### Removed
+- `constraint_trpo.py`: `_line_search_safe`, `_line_search_recovery` (replaced by `_line_search`)
+- `constraint_trpo.py`: `_trpo_step_safe`, `_trpo_step_recovery` (replaced by `_trpo_step`)
+
+### Notes
+- 1043 lines -> 921 lines (-122), matching the ~920-940 estimate
+- No functional change: ruff check + format pass, AST verification confirms old methods removed and new methods present
+- Checkpoint compatibility unaffected (ConstraintTRPO has no own state_dict; RSL-RL OnPolicyRunner manages policy/optimizer)
+- Full Isaac Sim import not tested (requires runtime); syntax + structure verified via AST parse
+
 ## [2026-03-20] Extract constrained_albc + simplify agents/ config hierarchy + mdp cleanup
 
 ### Context

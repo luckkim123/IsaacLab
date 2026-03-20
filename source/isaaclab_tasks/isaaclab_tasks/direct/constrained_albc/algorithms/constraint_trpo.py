@@ -391,6 +391,12 @@ class ConstraintTRPO:
             p.data.copy_(flat_params[offset : offset + numel].view_as(p))
             offset += numel
 
+    def _compute_ratio(self, obs: TensorDict, actions: torch.Tensor, old_log_prob: torch.Tensor) -> torch.Tensor:
+        """Forward pass + compute importance sampling ratio pi/pi_old."""
+        self.policy.act(obs)
+        log_prob = self.policy.get_actions_log_prob(actions)
+        return torch.exp(log_prob - old_log_prob)
+
     def _linearized_surrogate_safe(
         self,
         obs: TensorDict,
@@ -405,9 +411,7 @@ class ConstraintTRPO:
         using the linearized log-barrier second derivative (Option C).
         Entropy bonus prevents premature exploration collapse.
         """
-        self.policy.act(obs)
-        log_prob = self.policy.get_actions_log_prob(actions)
-        ratio = torch.exp(log_prob - old_log_prob)
+        ratio = self._compute_ratio(obs, actions, old_log_prob)
         reward_surr = -(advantages * ratio).mean()
 
         # Entropy bonus: negative because we minimize the surrogate
@@ -436,9 +440,7 @@ class ConstraintTRPO:
         Only includes recovery-mode constraints. Returns a surrogate whose
         gradient direction reduces cost.
         """
-        self.policy.act(obs)
-        log_prob = self.policy.get_actions_log_prob(actions)
-        ratio = torch.exp(log_prob - old_log_prob)
+        ratio = self._compute_ratio(obs, actions, old_log_prob)
 
         recovery_surr = torch.tensor(0.0, device=self.device)
         for k in range(self.num_constraints):
@@ -447,17 +449,22 @@ class ConstraintTRPO:
                 recovery_surr = recovery_surr + cost_surr_k
         return recovery_surr
 
-    def _kl_divergence(self, obs: TensorDict, old_mu: torch.Tensor, old_sigma: torch.Tensor) -> torch.Tensor:
-        """Compute mean KL(pi_old || pi_new) analytically for Gaussian."""
-        self.policy.act(obs)
-        mu = self.policy.action_mean
-        sigma = self.policy.action_std
+    @staticmethod
+    def _gaussian_kl(
+        mu: torch.Tensor, sigma: torch.Tensor, old_mu: torch.Tensor, old_sigma: torch.Tensor
+    ) -> torch.Tensor:
+        """Compute mean KL(pi_old || pi_new) analytically for diagonal Gaussian."""
         kl = (
             torch.log((sigma / old_sigma).clamp(min=1e-5))
             + (old_sigma.pow(2) + (old_mu - mu).pow(2)) / (2.0 * sigma.pow(2))
             - 0.5
         )
         return kl.sum(dim=-1).mean()
+
+    def _kl_divergence(self, obs: TensorDict, old_mu: torch.Tensor, old_sigma: torch.Tensor) -> torch.Tensor:
+        """Compute mean KL(pi_old || pi_new) with a fresh forward pass."""
+        self.policy.act(obs)
+        return self._gaussian_kl(self.policy.action_mean, self.policy.action_std, old_mu, old_sigma)
 
     def _flat_grad(self, loss: torch.Tensor, params: list[nn.Parameter], retain_graph: bool = False) -> torch.Tensor:
         """Compute flattened gradient of loss w.r.t. params."""
@@ -479,19 +486,7 @@ class ConstraintTRPO:
         """
         # Forward pass to get current distribution
         self.policy.act(obs)
-        mu = self.policy.action_mean
-        sigma = self.policy.action_std
-
-        # KL divergence
-        kl = (
-            (
-                torch.log((sigma / old_sigma).clamp(min=1e-5))
-                + (old_sigma.pow(2) + (old_mu - mu).pow(2)) / (2.0 * sigma.pow(2))
-                - 0.5
-            )
-            .sum(dim=-1)
-            .mean()
-        )
+        kl = self._gaussian_kl(self.policy.action_mean, self.policy.action_std, old_mu, old_sigma)
 
         # First derivative of KL
         kl_grads = torch.autograd.grad(kl, self._policy_params, create_graph=True)
@@ -534,78 +529,36 @@ class ConstraintTRPO:
 
         return x
 
-    def _line_search_safe(
+    def _line_search(
         self,
         obs: TensorDict,
-        actions: torch.Tensor,
-        old_log_prob: torch.Tensor,
-        advantages: torch.Tensor,
-        cost_advantages: torch.Tensor,
         old_mu: torch.Tensor,
         old_sigma: torch.Tensor,
         step_dir: torch.Tensor,
         old_loss: torch.Tensor,
+        surrogate_fn: object,
     ) -> bool:
-        """Safe-mode line search: check KL constraint only.
+        """Backtracking line search shared by safe and recovery modes.
 
-        Barrier penalty is already embedded in the objective, so cost
-        constraints are implicitly enforced. Only need to verify:
+        Accepts a step when:
             1. Surrogate improvement > 0
             2. KL divergence <= max_kl * margin
+
+        Args:
+            surrogate_fn: No-arg callable returning the surrogate loss scalar.
         """
         old_params = self._get_policy_params_flat()
         step_size = 1.0
         kl_limit = self.max_kl * self.line_search_kl_margin
 
         for _ in range(self.line_search_max_backtracks):
-            new_params = old_params + step_size * step_dir
-            self._set_policy_params_flat(new_params)
+            self._set_policy_params_flat(old_params + step_size * step_dir)
 
             with torch.no_grad():
-                new_loss = self._linearized_surrogate_safe(obs, actions, advantages, cost_advantages, old_log_prob)
+                new_loss = surrogate_fn()
                 kl = self._kl_divergence(obs, old_mu, old_sigma)
 
-            improvement = old_loss - new_loss
-            if improvement > 0 and kl <= kl_limit:
-                return True
-
-            step_size *= self.line_search_shrink_factor
-
-        # Revert to old parameters if no valid step found
-        self._set_policy_params_flat(old_params)
-        return False
-
-    def _line_search_recovery(
-        self,
-        obs: TensorDict,
-        actions: torch.Tensor,
-        old_log_prob: torch.Tensor,
-        cost_advantages: torch.Tensor,
-        old_mu: torch.Tensor,
-        old_sigma: torch.Tensor,
-        step_dir: torch.Tensor,
-        old_loss: torch.Tensor,
-    ) -> bool:
-        """Recovery-mode line search: check KL + cost decrease.
-
-        Must verify both:
-            1. KL divergence <= max_kl * margin
-            2. Cost surrogate decreased (recovery making progress)
-        """
-        old_params = self._get_policy_params_flat()
-        step_size = 1.0
-        kl_limit = self.max_kl * self.line_search_kl_margin
-
-        for _ in range(self.line_search_max_backtracks):
-            new_params = old_params + step_size * step_dir
-            self._set_policy_params_flat(new_params)
-
-            with torch.no_grad():
-                new_loss = self._linearized_surrogate_recovery(obs, actions, cost_advantages, old_log_prob)
-                kl = self._kl_divergence(obs, old_mu, old_sigma)
-
-            improvement = old_loss - new_loss
-            if improvement > 0 and kl <= kl_limit:
+            if (old_loss - new_loss) > 0 and kl <= kl_limit:
                 return True
 
             step_size *= self.line_search_shrink_factor
@@ -673,30 +626,37 @@ class ConstraintTRPO:
         # Determine mode: if ANY constraint is in recovery, do recovery step.
         # Recovery takes priority since feasibility must be restored before
         # reward optimization can proceed meaningfully.
-        if any_recovery:
-            mode = "recovery"
-        else:
-            mode = "safe"
+        old_lp_sq = old_log_prob_flat.squeeze(-1)
+        adv_sq = advantages_flat.squeeze(-1)
 
-        if mode == "safe":
-            ls_success = self._trpo_step_safe(
-                obs_flat,
-                actions_flat,
-                advantages_flat,
-                cost_advantages_flat,
-                old_log_prob_flat,
-                old_mu_flat,
-                old_sigma_flat,
+        if any_recovery:
+
+            def compute_loss() -> torch.Tensor:
+                ratio = self._compute_ratio(obs_flat, actions_flat, old_lp_sq)
+                loss = torch.tensor(0.0, device=self.device)
+                for k in range(self.num_constraints):
+                    if self._in_recovery[k]:
+                        loss = loss + (ratio * cost_advantages_flat[:, k]).mean()
+                return loss
+
+            def compute_surrogate() -> torch.Tensor:
+                return self._linearized_surrogate_recovery(obs_flat, actions_flat, cost_advantages_flat, old_lp_sq)
+
+            ls_success = self._trpo_step(
+                obs_flat, old_mu_flat, old_sigma_flat, compute_loss, compute_surrogate, "recovery"
             )
         else:
-            ls_success = self._trpo_step_recovery(
-                obs_flat,
-                actions_flat,
-                cost_advantages_flat,
-                old_log_prob_flat,
-                old_mu_flat,
-                old_sigma_flat,
-            )
+
+            def compute_loss() -> torch.Tensor:
+                ratio = self._compute_ratio(obs_flat, actions_flat, old_lp_sq)
+                reward_surr = -(adv_sq * ratio).mean()
+                cost_surrs = [(ratio * cost_advantages_flat[:, k]).mean() for k in range(self.num_constraints)]
+                return reward_surr + self._compute_barrier_penalty(cost_surrs)
+
+            def compute_surrogate() -> torch.Tensor:
+                return self._linearized_surrogate_safe(obs_flat, actions_flat, adv_sq, cost_advantages_flat, old_lp_sq)
+
+            ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, compute_loss, compute_surrogate, "safe")
 
         # Noise floor: numerical safety net to prevent log_prob divergence
         min_log_std = math.log(0.25)
@@ -781,134 +741,52 @@ class ConstraintTRPO:
         return loss_dict
 
     # ==================================================================
-    # Internal: TRPO steps for each mode
+    # Internal: Unified TRPO step (safe or recovery via callables)
     # ==================================================================
 
-    def _trpo_step_safe(
+    def _trpo_step(
         self,
         obs_flat: TensorDict,
-        actions_flat: torch.Tensor,
-        advantages_flat: torch.Tensor,
-        cost_advantages_flat: torch.Tensor,
-        old_log_prob_flat: torch.Tensor,
         old_mu_flat: torch.Tensor,
         old_sigma_flat: torch.Tensor,
+        compute_loss_fn: object,
+        compute_surrogate_fn: object,
+        mode_name: str,
     ) -> bool:
-        """Execute safe-mode TRPO step: reward + barrier penalty objective."""
-        # Compute gradient of barrier-augmented objective
-        self.policy.act(obs_flat)
-        log_prob = self.policy.get_actions_log_prob(actions_flat)
-        ratio = torch.exp(log_prob - old_log_prob_flat.squeeze(-1))
-        reward_surrogate = -(advantages_flat.squeeze(-1) * ratio).mean()
+        """Execute a single TRPO natural-gradient step.
 
-        cost_surrogates = []
-        for k in range(self.num_constraints):
-            cost_surr_k = (ratio * cost_advantages_flat[:, k]).mean()
-            cost_surrogates.append(cost_surr_k)
-        barrier_penalty = self._compute_barrier_penalty(cost_surrogates)
+        Args:
+            compute_loss_fn: No-arg callable returning a differentiable loss tensor
+                (builds the computation graph for gradient extraction).
+            compute_surrogate_fn: No-arg callable returning a no-grad surrogate loss
+                (used in the line search to evaluate improvement).
+            mode_name: "safe" or "recovery" (for warning messages only).
+        """
+        # 1. Compute loss + flat gradient
+        loss = compute_loss_fn()
+        g = self._flat_grad(loss, self._policy_params, retain_graph=False)
 
-        policy_loss = reward_surrogate + barrier_penalty
-
-        # retain_graph=False: CG solver builds its own fresh graphs via FVP.
-        # Encoder gets separate multi-step updates in _update_encoder().
-        g = self._flat_grad(policy_loss, self._policy_params, retain_graph=False)
-
-        # Natural gradient via conjugate gradient: x = F^{-1} g
+        # 2. Natural gradient via conjugate gradient: x = F^{-1} g
         nat_grad = self._conjugate_gradient(obs_flat, old_mu_flat, old_sigma_flat, g)
 
-        # Step size: sqrt(2 * max_kl / (g^T F^{-1} g))
+        # 3. Step size: sqrt(2 * max_kl / (g^T F^{-1} g))
         shs = 0.5 * nat_grad.dot(g)
 
         if shs <= 0 or not torch.isfinite(shs):
-            logger.warning("TRPO safe: shs=%.6e non-positive or non-finite, skipping", shs.item())
+            logger.warning("TRPO %s: shs=%.6e non-positive or non-finite, skipping", mode_name, shs.item())
             return False
 
-        step_scale = torch.sqrt(self.max_kl / shs)
-        step_dir = -step_scale * nat_grad
+        step_dir = -torch.sqrt(self.max_kl / shs) * nat_grad
 
         if not torch.isfinite(step_dir).all():
-            logger.warning("TRPO safe: step_dir contains NaN/Inf, skipping")
+            logger.warning("TRPO %s: step_dir contains NaN/Inf, skipping", mode_name)
             return False
 
+        # 4. Line search
         with torch.no_grad():
-            old_loss = self._linearized_surrogate_safe(
-                obs_flat,
-                actions_flat,
-                advantages_flat.squeeze(-1),
-                cost_advantages_flat,
-                old_log_prob_flat.squeeze(-1),
-            )
+            old_loss = compute_surrogate_fn()
 
-        return self._line_search_safe(
-            obs_flat,
-            actions_flat,
-            old_log_prob_flat.squeeze(-1),
-            advantages_flat.squeeze(-1),
-            cost_advantages_flat,
-            old_mu_flat,
-            old_sigma_flat,
-            step_dir,
-            old_loss,
-        )
-
-    def _trpo_step_recovery(
-        self,
-        obs_flat: TensorDict,
-        actions_flat: torch.Tensor,
-        cost_advantages_flat: torch.Tensor,
-        old_log_prob_flat: torch.Tensor,
-        old_mu_flat: torch.Tensor,
-        old_sigma_flat: torch.Tensor,
-    ) -> bool:
-        """Execute recovery-mode TRPO step: minimize cost for infeasible constraints."""
-        # Compute gradient of cost minimization objective
-        self.policy.act(obs_flat)
-        log_prob = self.policy.get_actions_log_prob(actions_flat)
-        ratio = torch.exp(log_prob - old_log_prob_flat.squeeze(-1))
-
-        recovery_loss = torch.tensor(0.0, device=self.device)
-        for k in range(self.num_constraints):
-            if self._in_recovery[k]:
-                cost_surr_k = (ratio * cost_advantages_flat[:, k]).mean()
-                recovery_loss = recovery_loss + cost_surr_k
-
-        # Encoder gets separate multi-step updates in _update_encoder()
-        # (not gated on recovery mode -- encoder uses Adam, not TRPO trust region)
-
-        g = self._flat_grad(recovery_loss, self._policy_params, retain_graph=False)
-
-        nat_grad = self._conjugate_gradient(obs_flat, old_mu_flat, old_sigma_flat, g)
-        shs = 0.5 * nat_grad.dot(g)
-
-        if shs <= 0 or not torch.isfinite(shs):
-            logger.warning("TRPO recovery: shs=%.6e non-positive or non-finite, skipping", shs.item())
-            return False
-
-        step_scale = torch.sqrt(self.max_kl / shs)
-        step_dir = -step_scale * nat_grad
-
-        if not torch.isfinite(step_dir).all():
-            logger.warning("TRPO recovery: step_dir contains NaN/Inf, skipping")
-            return False
-
-        with torch.no_grad():
-            old_loss = self._linearized_surrogate_recovery(
-                obs_flat,
-                actions_flat,
-                cost_advantages_flat,
-                old_log_prob_flat.squeeze(-1),
-            )
-
-        return self._line_search_recovery(
-            obs_flat,
-            actions_flat,
-            old_log_prob_flat.squeeze(-1),
-            cost_advantages_flat,
-            old_mu_flat,
-            old_sigma_flat,
-            step_dir,
-            old_loss,
-        )
+        return self._line_search(obs_flat, old_mu_flat, old_sigma_flat, step_dir, old_loss, compute_surrogate_fn)
 
     def _update_encoder(
         self,
@@ -939,8 +817,8 @@ class ConstraintTRPO:
             ratio = torch.exp(log_prob - old_log_prob_flat.squeeze(-1))
             reward_surrogate = -(advantages_flat.squeeze(-1) * ratio).mean()
 
-            # Reward signal gradients to encoder (no cost/barrier -- see docstring
-            # in _trpo_step_safe for rationale)
+            # Reward signal gradients to encoder (no cost/barrier -- encoder
+            # only tracks reward objective; barrier shapes the actor trust region)
             enc_grads = torch.autograd.grad(
                 reward_surrogate,
                 self._encoder_params,
