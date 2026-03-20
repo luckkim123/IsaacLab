@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] constraint_trpo.py deep simplification (surrogates, forward passes, GAE)
+
+### Context
+Follow-up to the prior session's internal deduplication (921 LOC). The `update()` method still
+had 4 extra `policy.act()` calls purely for logging (kl_after_trpo, z_bounds when LS fails,
+barrier_penalty recomputation, entropy). Three standalone surrogate methods (`_compute_ratio`,
+`_linearized_surrogate_safe`, `_linearized_surrogate_recovery`) were identical to inline closures
+in `update()`. `_compute_cost_returns` used an O(K*T) double loop instead of O(T) vectorized.
+`entropy_coef` was always 0.0 (tested at 0.005/0.001 in 2026-03-18, both ineffective for TRPO).
+
+### Changed
+- `constraint_trpo.py`: Merged dual-closure pattern into single `surrogate()` closure per mode.
+  `_trpo_step` now takes 1 callable instead of 2 (`surrogate_fn` used for both gradient and LS eval).
+- `constraint_trpo.py`: Barrier penalty cached inside surrogate closure (`self._cached_barrier_penalty`),
+  eliminating post-update forward pass for logging. Recovery mode sets cache to 0.0.
+- `constraint_trpo.py`: `_compute_cost_returns()` vectorized across K constraints in single T-loop.
+  Advantage tensor shape (N,1)-per-k -> (N,K) simultaneous. Normalization uses
+  `mean(dim=(0,1))` / `std(dim=(0,1))` broadcasting.
+- `constraint_trpo.py`: `_trpo_step` signature simplified: `(compute_loss_fn, compute_surrogate_fn)`
+  -> `(surrogate_fn)`.
+
+### Removed
+- `constraint_trpo.py`: Deleted `_compute_ratio()`, `_linearized_surrogate_safe()`,
+  `_linearized_surrogate_recovery()` (3 methods, ~60 LOC). Logic inlined in closures.
+- `constraint_trpo.py`: Removed `entropy_coef` parameter and `self.entropy_coef` storage
+  (always 0.0, entropy bonus dead code path).
+- `constraint_trpo.py`: Removed 3 extra forward passes from `update()`: `kl_after_trpo`
+  measurement, `z_bounds_loss` when LS fails, barrier penalty recomputation block,
+  entropy computation. Single final KL measurement remains.
+- `constraint_trpo.py`: Removed `_cost_storage_initialized` flag (set but never read).
+- `constraint_trpo.py`: loss_dict keys reduced 8 -> 6 (removed `entropy`, `kl_trpo`).
+
+### Notes
+- 921 -> 813 LOC (-108), matching ~110 estimate
+- ruff check + format clean. No external references to removed keys/methods.
+- Core algorithm unchanged: CG, FVP, line search, barrier penalty, recovery mode, encoder update, value update
+
 ## [2026-03-20] Flatten constrained_albc runner hierarchy to single class
 
 ### Context

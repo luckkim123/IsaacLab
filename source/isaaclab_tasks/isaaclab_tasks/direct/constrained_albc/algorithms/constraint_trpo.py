@@ -95,8 +95,6 @@ class ConstraintTRPO:
         recovery_threshold_frac: float = 0.8,
         # Encoder z bounds
         z_bounds_coef: float = 0.3,
-        # Entropy bonus (TRPO has no built-in entropy incentive)
-        entropy_coef: float = 0.0,
         # Encoder update
         num_encoder_epochs: int = 5,
         encoder_lr: float = 3e-4,
@@ -136,7 +134,6 @@ class ConstraintTRPO:
         self.cost_lam = cost_lam
         self.line_search_kl_margin = line_search_kl_margin
         self.z_bounds_coef = z_bounds_coef
-        self.entropy_coef = entropy_coef
         self.num_encoder_epochs = num_encoder_epochs
 
         # C-TRPO barrier parameters
@@ -198,9 +195,6 @@ class ConstraintTRPO:
         self.storage: RolloutStorage | None = None
         self.transition = RolloutStorage.Transition()
 
-        # Cost storage (dynamically attached to RolloutStorage)
-        self._cost_storage_initialized = False
-
         # Learning rate (compatibility field for OnPolicyRunner logging)
         self.learning_rate = value_lr
 
@@ -234,7 +228,6 @@ class ConstraintTRPO:
         self.storage.cost_values = torch.zeros(T, N, K, device=self.device)
         self.storage.cost_returns = torch.zeros(T, N, K, device=self.device)
         self.storage.cost_advantages = torch.zeros(T, N, K, device=self.device)
-        self._cost_storage_initialized = True
 
     def act(self, obs: TensorDict) -> torch.Tensor:
         if self.policy.is_recurrent:
@@ -302,36 +295,28 @@ class ConstraintTRPO:
         self._compute_cost_returns(last_cost_values)
 
     def _compute_cost_returns(self, last_cost_values: torch.Tensor) -> None:
-        """Compute cost GAE returns for each constraint independently."""
+        """Compute cost GAE returns for all constraints simultaneously."""
         T = self.storage.num_transitions_per_env
-        for k in range(self.num_constraints):
-            advantage = torch.zeros(self.storage.num_envs, 1, device=self.device)
-            for step in reversed(range(T)):
-                next_cv = (
-                    last_cost_values[:, k : k + 1]
-                    if step == T - 1
-                    else self.storage.cost_values[step + 1, :, k : k + 1]
-                )
-                not_done = 1.0 - self.storage.dones[step].float()
-                delta = (
-                    self.storage.costs[step, :, k : k + 1]
-                    + not_done * self.cost_gamma * next_cv
-                    - self.storage.cost_values[step, :, k : k + 1]
-                )
-                advantage = delta + not_done * self.cost_gamma * self.cost_lam * advantage
-                self.storage.cost_returns[step, :, k : k + 1] = advantage + self.storage.cost_values[step, :, k : k + 1]
-            self.storage.cost_advantages[:, :, k : k + 1] = (
-                self.storage.cost_returns[:, :, k : k + 1] - self.storage.cost_values[:, :, k : k + 1]
-            )
+        N = self.storage.num_envs
+
+        # Vectorized GAE across all K constraints in a single T-loop
+        advantage = torch.zeros(N, self.num_constraints, device=self.device)
+        for step in reversed(range(T)):
+            next_cv = last_cost_values if step == T - 1 else self.storage.cost_values[step + 1]
+            not_done = (1.0 - self.storage.dones[step].float()).unsqueeze(-1)  # (N, 1)
+            delta = self.storage.costs[step] + not_done * self.cost_gamma * next_cv - self.storage.cost_values[step]
+            advantage = delta + not_done * self.cost_gamma * self.cost_lam * advantage
+            self.storage.cost_returns[step] = advantage + self.storage.cost_values[step]
+        self.storage.cost_advantages = self.storage.cost_returns - self.storage.cost_values
 
         # Per-constraint cost advantage standardization (NORBC Sec IV-B).
         for k in range(self.num_constraints):
-            adv_k = self.storage.cost_advantages[:, :, k]
-            if not torch.isfinite(adv_k).all():
+            if not torch.isfinite(self.storage.cost_advantages[:, :, k]).all():
                 logger.warning("Non-finite cost advantages for constraint %d, zeroing.", k)
                 self.storage.cost_advantages[:, :, k] = 0.0
-            else:
-                self.storage.cost_advantages[:, :, k] = (adv_k - adv_k.mean()) / (adv_k.std() + 1e-8)
+        mean = self.storage.cost_advantages.mean(dim=(0, 1), keepdim=True)
+        std = self.storage.cost_advantages.std(dim=(0, 1), keepdim=True)
+        self.storage.cost_advantages = (self.storage.cost_advantages - mean) / (std + 1e-8)
 
     # ==================================================================
     # C-TRPO Barrier
@@ -343,37 +328,47 @@ class ConstraintTRPO:
         Args:
             mean_cost_returns: Mean discounted cost return per constraint, shape (K,).
         """
+        self._margins = self.d_k - mean_cost_returns
+        # Recovery mode transitions: 3-way hysteresis per constraint
         for k in range(self.num_constraints):
-            self._margins[k] = self.d_k[k] - mean_cost_returns[k]
             if self._margins[k] <= 0:
                 self._in_recovery[k] = True
             elif mean_cost_returns[k] < self.d_k[k] * self.recovery_threshold_frac:
                 self._in_recovery[k] = False
             # else: hysteresis - keep current mode
 
-    def _compute_barrier_penalty(self, cost_surrogates: list[torch.Tensor]) -> torch.Tensor:
+    def _compute_cost_surrogates(self, ratio: torch.Tensor, cost_advantages: torch.Tensor) -> torch.Tensor:
+        """Compute per-constraint cost surrogates in a single vectorized op.
+
+        Args:
+            ratio: Importance sampling ratio pi/pi_old, shape (B,).
+            cost_advantages: Per-constraint advantages, shape (B, K).
+
+        Returns:
+            Cost surrogates, shape (K,).
+        """
+        return (ratio.unsqueeze(-1) * cost_advantages).mean(dim=0)
+
+    def _compute_barrier_penalty(self, cost_surrogates: torch.Tensor) -> torch.Tensor:
         """Compute linearized barrier divergence for safe-mode constraints.
 
         For each feasible, safe-mode constraint k:
             penalty_k = beta * phi''(margin_k) * A_C_k^2
         where phi''(m) = 1/m^2 is the log-barrier second derivative.
 
-        Args:
-            cost_surrogates: List of per-constraint cost surrogate tensors.
+        Uses masked tensor ops instead of per-k loop. Only safe-mode
+        constraints (positive margin and not in recovery) contribute.
 
-        Returns:
-            Scalar barrier penalty to add to the policy objective.
+        Note: the paper's Bregman divergence has a 1/2 factor (Eq. 7):
+            D_phi = (1/2) * phi'' * delta^2
+        We absorb this into beta for simplicity.
         """
-        # Note: the paper's Bregman divergence has a 1/2 factor (Eq. 7):
-        #   D_phi = (1/2) * phi'' * delta^2
-        # We absorb this into beta for simplicity. Effective barrier strength
-        # is 2x the paper's semantics when using the same beta value.
-        penalty = torch.tensor(0.0, device=self.device)
-        for k in range(self.num_constraints):
-            if self._margins[k] > 0 and not self._in_recovery[k]:
-                phi_pp = 1.0 / (self._margins[k].pow(2) + 1e-8)
-                penalty = penalty + self.beta * phi_pp * cost_surrogates[k].pow(2)
-        return penalty
+        recovery = torch.tensor(self._in_recovery, device=self.device)
+        safe_mask = (self._margins > 0) & ~recovery
+        if not safe_mask.any():
+            return torch.tensor(0.0, device=self.device)
+        phi_pp = 1.0 / (self._margins.pow(2) + 1e-8)
+        return self.beta * (safe_mask * phi_pp * cost_surrogates.pow(2)).sum()
 
     # ==================================================================
     # TRPO Core
@@ -390,64 +385,6 @@ class ConstraintTRPO:
             numel = p.numel()
             p.data.copy_(flat_params[offset : offset + numel].view_as(p))
             offset += numel
-
-    def _compute_ratio(self, obs: TensorDict, actions: torch.Tensor, old_log_prob: torch.Tensor) -> torch.Tensor:
-        """Forward pass + compute importance sampling ratio pi/pi_old."""
-        self.policy.act(obs)
-        log_prob = self.policy.get_actions_log_prob(actions)
-        return torch.exp(log_prob - old_log_prob)
-
-    def _linearized_surrogate_safe(
-        self,
-        obs: TensorDict,
-        actions: torch.Tensor,
-        advantages: torch.Tensor,
-        cost_advantages: torch.Tensor,
-        old_log_prob: torch.Tensor,
-    ) -> torch.Tensor:
-        """Evaluate safe-mode objective: reward surrogate - barrier penalty + entropy bonus.
-
-        The barrier penalty is computed from per-constraint cost surrogates
-        using the linearized log-barrier second derivative (Option C).
-        Entropy bonus prevents premature exploration collapse.
-        """
-        ratio = self._compute_ratio(obs, actions, old_log_prob)
-        reward_surr = -(advantages * ratio).mean()
-
-        # Entropy bonus: negative because we minimize the surrogate
-        entropy_bonus = torch.tensor(0.0, device=self.device)
-        if self.entropy_coef > 0.0:
-            entropy_bonus = -self.entropy_coef * self.policy.entropy.mean()
-
-        # Per-constraint cost surrogates (standard ratio, no detached std needed)
-        cost_surrogates = []
-        for k in range(self.num_constraints):
-            cost_surr_k = (ratio * cost_advantages[:, k]).mean()
-            cost_surrogates.append(cost_surr_k)
-
-        barrier_penalty = self._compute_barrier_penalty(cost_surrogates)
-        return reward_surr + entropy_bonus + barrier_penalty
-
-    def _linearized_surrogate_recovery(
-        self,
-        obs: TensorDict,
-        actions: torch.Tensor,
-        cost_advantages: torch.Tensor,
-        old_log_prob: torch.Tensor,
-    ) -> torch.Tensor:
-        """Evaluate recovery-mode objective: minimize cost for recovery constraints.
-
-        Only includes recovery-mode constraints. Returns a surrogate whose
-        gradient direction reduces cost.
-        """
-        ratio = self._compute_ratio(obs, actions, old_log_prob)
-
-        recovery_surr = torch.tensor(0.0, device=self.device)
-        for k in range(self.num_constraints):
-            if self._in_recovery[k]:
-                cost_surr_k = (ratio * cost_advantages[:, k]).mean()
-                recovery_surr = recovery_surr + cost_surr_k
-        return recovery_surr
 
     @staticmethod
     def _gaussian_kl(
@@ -616,9 +553,7 @@ class ConstraintTRPO:
         all_recovery = all(self._in_recovery)
 
         # Compute violations for logging
-        violations = []
-        for k in range(self.num_constraints):
-            violations.append((mean_cost_returns[k] - self.d_k[k]).item())
+        violations = (mean_cost_returns - self.d_k).tolist()
 
         # ------------------------------------------------------------------
         # 2. TRPO policy update (full-batch, single step)
@@ -630,42 +565,35 @@ class ConstraintTRPO:
         adv_sq = advantages_flat.squeeze(-1)
 
         if any_recovery:
+            self._cached_barrier_penalty = 0.0
+            recovery_mask = torch.tensor(self._in_recovery, dtype=torch.float32, device=self.device)
 
-            def compute_loss() -> torch.Tensor:
-                ratio = self._compute_ratio(obs_flat, actions_flat, old_lp_sq)
-                loss = torch.tensor(0.0, device=self.device)
-                for k in range(self.num_constraints):
-                    if self._in_recovery[k]:
-                        loss = loss + (ratio * cost_advantages_flat[:, k]).mean()
-                return loss
+            def surrogate() -> torch.Tensor:
+                self.policy.act(obs_flat)
+                log_prob = self.policy.get_actions_log_prob(actions_flat)
+                ratio = torch.exp(log_prob - old_lp_sq)
+                cost_surrs = self._compute_cost_surrogates(ratio, cost_advantages_flat)
+                return (recovery_mask * cost_surrs).sum()
 
-            def compute_surrogate() -> torch.Tensor:
-                return self._linearized_surrogate_recovery(obs_flat, actions_flat, cost_advantages_flat, old_lp_sq)
-
-            ls_success = self._trpo_step(
-                obs_flat, old_mu_flat, old_sigma_flat, compute_loss, compute_surrogate, "recovery"
-            )
+            ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate, "recovery")
         else:
 
-            def compute_loss() -> torch.Tensor:
-                ratio = self._compute_ratio(obs_flat, actions_flat, old_lp_sq)
+            def surrogate() -> torch.Tensor:
+                self.policy.act(obs_flat)
+                log_prob = self.policy.get_actions_log_prob(actions_flat)
+                ratio = torch.exp(log_prob - old_lp_sq)
                 reward_surr = -(adv_sq * ratio).mean()
-                cost_surrs = [(ratio * cost_advantages_flat[:, k]).mean() for k in range(self.num_constraints)]
-                return reward_surr + self._compute_barrier_penalty(cost_surrs)
+                cost_surrs = self._compute_cost_surrogates(ratio, cost_advantages_flat)
+                bp = self._compute_barrier_penalty(cost_surrs)
+                self._cached_barrier_penalty = bp.item()
+                return reward_surr + bp
 
-            def compute_surrogate() -> torch.Tensor:
-                return self._linearized_surrogate_safe(obs_flat, actions_flat, adv_sq, cost_advantages_flat, old_lp_sq)
-
-            ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, compute_loss, compute_surrogate, "safe")
+            ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate, "safe")
 
         # Noise floor: numerical safety net to prevent log_prob divergence
         min_log_std = math.log(0.25)
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=min_log_std)
-
-        # Measure KL right after TRPO step + clamp (before encoder update shifts z)
-        with torch.no_grad():
-            kl_after_trpo = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
 
         # ------------------------------------------------------------------
         # 3. Encoder update (gated on ls_success)
@@ -673,13 +601,8 @@ class ConstraintTRPO:
         mean_z_bounds_loss = 0.0
         if self.encoder_optimizer is not None and ls_success:
             mean_z_bounds_loss = self._update_encoder(obs_flat, advantages_flat, old_log_prob_flat, actions_flat)
-        elif self.encoder_optimizer is not None and hasattr(self.policy, "z_bounds_loss"):
-            # Still compute z_bounds_loss for logging, but don't step
-            with torch.no_grad():
-                self.policy.act(obs_flat)
-                mean_z_bounds_loss = self.policy.z_bounds_loss().item()
 
-        # Compute KL after full update for logging
+        # Compute KL after full update for logging (single measurement)
         with torch.no_grad():
             mean_kl = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
 
@@ -691,33 +614,16 @@ class ConstraintTRPO:
         )
 
         # ------------------------------------------------------------------
-        # Compute barrier penalty for logging
-        # ------------------------------------------------------------------
-        with torch.no_grad():
-            self.policy.act(obs_flat)
-            log_prob = self.policy.get_actions_log_prob(actions_flat)
-            ratio = torch.exp(log_prob - old_log_prob_flat.squeeze(-1))
-            cost_surrogates = []
-            for k in range(self.num_constraints):
-                cost_surr_k = (ratio * cost_advantages_flat[:, k]).mean()
-                cost_surrogates.append(cost_surr_k)
-            barrier_penalty_val = self._compute_barrier_penalty(cost_surrogates).item()
-
-        # ------------------------------------------------------------------
         # Store monitoring metrics (read by ConstraintEncoderRunner)
         # ------------------------------------------------------------------
-        self._last_cost_returns = [mean_cost_returns[k].item() for k in range(self.num_constraints)]
+        barrier_penalty_val = self._cached_barrier_penalty
+        self._last_cost_returns = mean_cost_returns.tolist()
         self._last_violations = violations
         self._last_line_search_success = float(ls_success)
-        self._last_margins = [self._margins[k].item() for k in range(self.num_constraints)]
+        self._last_margins = self._margins.tolist()
         self._last_in_recovery = [float(r) for r in self._in_recovery]
         self._last_barrier_penalty = barrier_penalty_val
         self._last_mode = 2 if all_recovery else (1 if any_recovery else 0)
-
-        # Compute entropy for logging
-        with torch.no_grad():
-            self.policy.act(obs_flat)
-            mean_entropy = self.policy.entropy.mean().item()
 
         # Clear storage
         self.storage.clear()
@@ -728,9 +634,7 @@ class ConstraintTRPO:
         loss_dict: dict[str, float] = {
             "value_function": mean_value_loss,
             "barrier_penalty": barrier_penalty_val,
-            "entropy": mean_entropy,
             "kl": mean_kl,
-            "kl_trpo": kl_after_trpo,
             "cost_value": mean_cost_value_loss,
             "mode": float(self._last_mode),
             "adv_raw_std": adv_raw_std.item(),
@@ -749,21 +653,19 @@ class ConstraintTRPO:
         obs_flat: TensorDict,
         old_mu_flat: torch.Tensor,
         old_sigma_flat: torch.Tensor,
-        compute_loss_fn: object,
-        compute_surrogate_fn: object,
+        surrogate_fn: object,
         mode_name: str,
     ) -> bool:
         """Execute a single TRPO natural-gradient step.
 
         Args:
-            compute_loss_fn: No-arg callable returning a differentiable loss tensor
-                (builds the computation graph for gradient extraction).
-            compute_surrogate_fn: No-arg callable returning a no-grad surrogate loss
-                (used in the line search to evaluate improvement).
+            surrogate_fn: No-arg callable returning the surrogate loss scalar.
+                Called with grad for gradient extraction; under torch.no_grad()
+                for line search evaluation.
             mode_name: "safe" or "recovery" (for warning messages only).
         """
         # 1. Compute loss + flat gradient
-        loss = compute_loss_fn()
+        loss = surrogate_fn()
         g = self._flat_grad(loss, self._policy_params, retain_graph=False)
 
         # 2. Natural gradient via conjugate gradient: x = F^{-1} g
@@ -784,9 +686,9 @@ class ConstraintTRPO:
 
         # 4. Line search
         with torch.no_grad():
-            old_loss = compute_surrogate_fn()
+            old_loss = surrogate_fn()
 
-        return self._line_search(obs_flat, old_mu_flat, old_sigma_flat, step_dir, old_loss, compute_surrogate_fn)
+        return self._line_search(obs_flat, old_mu_flat, old_sigma_flat, step_dir, old_loss, surrogate_fn)
 
     def _update_encoder(
         self,
@@ -809,48 +711,25 @@ class ConstraintTRPO:
 
         for _epoch in range(self.num_encoder_epochs):
             self.encoder_optimizer.zero_grad()
-            has_grads = False
 
             # Fresh forward pass through encoder + actor
             self.policy.act(obs_flat)
             log_prob = self.policy.get_actions_log_prob(actions_flat)
             ratio = torch.exp(log_prob - old_log_prob_flat.squeeze(-1))
-            reward_surrogate = -(advantages_flat.squeeze(-1) * ratio).mean()
+            total_loss = -(advantages_flat.squeeze(-1) * ratio).mean()
 
-            # Reward signal gradients to encoder (no cost/barrier -- encoder
-            # only tracks reward objective; barrier shapes the actor trust region)
-            enc_grads = torch.autograd.grad(
-                reward_surrogate,
-                self._encoder_params,
-                retain_graph=True,
-                allow_unused=True,
-            )
-            for i, p in enumerate(self._encoder_params):
-                if i < len(enc_grads) and enc_grads[i] is not None:
-                    p.grad = enc_grads[i]
-                    has_grads = True
-
-            # Accumulate z_bounds gradients (same forward pass, shared z tensor)
+            # Add z_bounds loss (same forward pass, shared z tensor)
             if hasattr(self.policy, "z_bounds_loss"):
                 z_b_loss = self.policy.z_bounds_loss()
                 mean_z_bounds_loss = z_b_loss.item()
                 if z_b_loss.requires_grad:
-                    z_bounds_grads = torch.autograd.grad(
-                        z_b_loss,
-                        self._encoder_params,
-                        allow_unused=True,
-                    )
-                    for i, p in enumerate(self._encoder_params):
-                        if i < len(z_bounds_grads) and z_bounds_grads[i] is not None:
-                            if p.grad is not None:
-                                p.grad = p.grad + z_bounds_grads[i]
-                            else:
-                                p.grad = z_bounds_grads[i]
-                            has_grads = True
+                    total_loss = total_loss + z_b_loss
 
-            if has_grads:
-                nn.utils.clip_grad_norm_(self._encoder_params, max_norm=0.2)
-                self.encoder_optimizer.step()
+            # Single backward: encoder_optimizer only steps encoder params,
+            # so actor/critic grads are computed but not applied
+            total_loss.backward()
+            nn.utils.clip_grad_norm_(self._encoder_params, max_norm=0.2)
+            self.encoder_optimizer.step()
 
         return mean_z_bounds_loss
 
@@ -913,9 +792,5 @@ class ConstraintTRPO:
     # ==================================================================
 
     def set_max_iterations(self, max_iterations: int) -> None:
-        """Configure iteration-based schedules.
-
-        No lambda warmup needed in C-TRPO (no lambda), but kept for
-        interface compatibility with ConstraintEncoderRunner.
-        """
+        """Interface compatibility with ConstraintEncoderRunner."""
         logger.info("[ConstraintTRPO] C-TRPO barrier mode, beta=%.4f, max_iterations=%d", self.beta, max_iterations)
