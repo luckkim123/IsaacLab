@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [2026-03-20] Extract constrained_albc + simplify agents/ config hierarchy
+## [2026-03-20] Extract constrained_albc + simplify agents/ config hierarchy + mdp cleanup
 
 ### Context
 The constrained encoder environment (`Isaac-HeroAgent-Constrained-Encoder-Base-v0`) was embedded
@@ -53,8 +53,15 @@ Verified: grep for `hero_agent|HeroAgent` shows only external asset references
 - `utils/logging.py`: Deleted `pearson_r()` (only hero_agent uses it) and `_WandbTBWriter`
   class (never instantiated in constrained_albc)
 - `utils/__init__.py`: Removed `pearson_r` from imports and `__all__` (8 -> 7 exports)
+- `mdp/constraints.py`: Removed 5 unused cost functions (no config reference):
+  `joint_velocity_cost`, `joint_oscillation_cost`, `singularity_cost`,
+  `attitude_error_cost`, `cob_cog_alignment_cost`. Also removed `quat_apply`,
+  `quat_apply_inverse` imports (only used by `cob_cog_alignment_cost`). 391 -> 251 lines.
+- `mdp/__init__.py`: Removed 5 deleted functions from exports
 
 ### Fixed
+- `mdp/__init__.py`: Added missing `randomize_joint_effort_limit` to exports
+  (was defined in events.py but not re-exported; albc_env.py imported directly)
 - `utils/logging.py`: Section header said "4 essential metrics" but actually logs 5; fixed
   to match. TDC references replaced with ALBC terminology ("TDC lambda" -> "ALBC torque
   capacity", "TDC stability" -> "rotational dynamics") since constrained_albc has no TDC
