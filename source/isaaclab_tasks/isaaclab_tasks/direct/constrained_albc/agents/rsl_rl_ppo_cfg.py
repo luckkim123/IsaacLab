@@ -26,12 +26,10 @@ from ..encoder import (
     ActorCriticEncoder,
     ActorCriticEncoderConstrained,
 )
-from ..runners import BaseRunner, ConstraintEncoderRunner, EncoderRunner
+from ..runners import ConstraintEncoderRunner
 
 _runner_module.ActorCriticEncoder = ActorCriticEncoder
 _runner_module.ActorCriticEncoderConstrained = ActorCriticEncoderConstrained
-_runner_module.BaseRunner = BaseRunner
-_runner_module.EncoderRunner = EncoderRunner
 _runner_module.ConstraintEncoderRunner = ConstraintEncoderRunner
 _runner_module.ConstraintTRPO = ConstraintTRPO
 
@@ -157,8 +155,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
 class ConstrainedALBCEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
     """Runner configuration for constrained encoder training (C-TRPO barrier).
 
-    Uses ConstraintEncoderRunner which inherits EncoderRunner and adds
-    barrier state persistence + constraint metrics logging.
+    Uses ConstraintEncoderRunner: DORAEMON + encoder metrics + barrier state.
     """
 
     class_name: str = "ConstraintEncoderRunner"
@@ -171,10 +168,6 @@ class ConstrainedALBCEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
         "policy": ["policy", "privileged", "proprio_hist"],
         "critic": ["policy", "privileged", "proprio_hist"],
     }
-
-    # Encoder LR schedule (inherited from EncoderRunner)
-    encoder_lr_warmup_frac: float = 0.2
-    encoder_lr_min_ratio: float = 0.1
 
     algorithm = RslRlConstraintTRPOAlgorithmCfg()
     policy = RslRlPpoActorCriticEncoderConstrainedCfg()

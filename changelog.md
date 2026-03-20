@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] Flatten constrained_albc runner hierarchy to single class
+
+### Context
+The constrained ALBC runner used a 3-level inheritance chain:
+`OnPolicyRunner -> BaseRunner -> EncoderRunner -> ConstraintEncoderRunner`.
+Only `ConstraintEncoderRunner` was ever instantiated. The intermediate layers
+contained dead code (`_apply_noise_floor` superseded by ConstraintTRPO's own
+0.25 floor; `_update_encoder_lr` no-op overridden in ConstraintEncoderRunner)
+that complicated debugging and code tracing.
+
+Merged all live logic from BaseRunner (DORAEMON scheduling, aux state helpers)
+and EncoderRunner (encoder detection, encoder metrics logging) directly into
+ConstraintEncoderRunner, which now inherits OnPolicyRunner directly.
+
+### Changed
+- `runners/constraint_encoder_runner.py`: Rewritten as flat OnPolicyRunner subclass (236 lines).
+  Inlined: `_doraemon` property, `_should_log` property, `_save_aux_state`/`_load_aux_state`
+  static methods, `learn()` (max_iterations setup + env reset), `log()` (DORAEMON step +
+  encoder metrics), `save()`/`load()` (DORAEMON state persistence). Encoder detection
+  (`_has_encoder`) from EncoderRunner inlined into `__init__`.
+- `runners/__init__.py`: Exports only `ConstraintEncoderRunner` (was 3 classes).
+- `agents/rsl_rl_ppo_cfg.py`: Removed `BaseRunner`/`EncoderRunner` imports and
+  `_runner_module` registrations. Removed dead config fields `encoder_lr_warmup_frac`
+  and `encoder_lr_min_ratio` from `ConstrainedALBCEncoderRunnerCfg`.
+
+### Removed
+- `runners/base_runner.py`: Deleted (all live logic inlined into ConstraintEncoderRunner).
+- `runners/encoder_runner.py`: Deleted (all live logic inlined into ConstraintEncoderRunner).
+- Dead code: `_apply_noise_floor()` (ConstraintTRPO.update() applies its own 0.25 floor).
+- Dead code: `_update_encoder_lr()`, `_enc_warmup_frac`, `_enc_lr_min_ratio`
+  (ConstraintTRPO manages encoder LR via separate fixed-LR Adam optimizer).
+
+### Notes
+- Zero functional change: all surviving logic is identical to pre-merge behavior
+- Checkpoint compatibility preserved: doraemon_state.pt and barrier_state.pt format unchanged
+- ruff check passed on all modified files
+
 ## [2026-03-20] constrained_albc code simplification (methods + dead code)
 
 ### Context

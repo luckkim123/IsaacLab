@@ -3,31 +3,36 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""EncoderRunner with C-TRPO constraint metrics logging, barrier state persistence, and auto-sync.
+"""Single runner for constrained ALBC: DORAEMON DR scheduling + encoder metrics + barrier state.
 
-Extends EncoderRunner to:
-    - Log per-constraint margins, recovery mode flags, and barrier penalty
-    - Use constraint names from env config instead of numeric indices
-    - Auto-sync num_constraints from env config to algorithm/policy config
-    - Save/load barrier state (margins, recovery flags) for checkpoint persistence
+Flat subclass of OnPolicyRunner that combines:
+    - DORAEMON distribution updates each iteration
+    - HORA Phase 1 encoder metrics logging (if encoder present)
+    - C-TRPO barrier state persistence and per-constraint metrics
+    - Auto-sync of num_constraints from env config
 """
 
 from __future__ import annotations
 
 import logging
+import os
 
-from ..utils.logging import flush_metrics
-from .encoder_runner import EncoderRunner
+import torch
+from rsl_rl.runners import OnPolicyRunner
+
+from ..utils.logging import flush_metrics, log_encoder_metrics, unwrap_env
 
 logger = logging.getLogger(__name__)
 
 
-class ConstraintEncoderRunner(EncoderRunner):
-    """EncoderRunner with C-TRPO barrier constraint support.
+class ConstraintEncoderRunner(OnPolicyRunner):
+    """OnPolicyRunner with DORAEMON DR scheduling, encoder metrics, and C-TRPO barrier support.
 
-    Inherits encoder metrics and DORAEMON DR scheduling from EncoderRunner.
-    Adds barrier state persistence and constraint-specific WandB/TB logging.
-    Auto-syncs num_constraints from env config.
+    Provides:
+        - DORAEMON integration: each iteration, log() calls doraemon.step()
+        - Encoder metrics: z latent statistics, gradient norms (when encoder present)
+        - Barrier state persistence: save/load constraint margins and recovery flags
+        - Auto-sync: num_constraints from env config to algorithm/policy config
     """
 
     def __init__(self, env, train_cfg, log_dir=None, device="cpu"):
@@ -62,11 +67,57 @@ class ConstraintEncoderRunner(EncoderRunner):
 
         super().__init__(env, train_cfg, log_dir, device)
 
-    def _update_encoder_lr(self, _iteration: int, _total_iterations: int) -> None:
-        """No-op: ConstraintTRPO manages its own encoder Adam optimizer with fixed LR."""
+        # Detect encoder for conditional metrics logging
+        self._has_encoder = hasattr(self.alg.policy, "encoder")
+        if self._has_encoder:
+            logger.info("[ConstraintEncoderRunner] Encoder detected. Encoder metrics logging enabled.")
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def _doraemon(self):
+        """Return the DORAEMON scheduler from the unwrapped env, or None."""
+        raw_env = unwrap_env(self.env)
+        return getattr(raw_env, "_doraemon", None)
+
+    @property
+    def _should_log(self) -> bool:
+        """Whether logging is active (log_dir set and logs not disabled)."""
+        return self.log_dir is not None and not self.disable_logs
+
+    # ------------------------------------------------------------------
+    # Auxiliary state persistence helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _save_aux_state(path: str, name: str, state: dict) -> None:
+        """Save auxiliary state dict alongside a model checkpoint."""
+        aux_path = os.path.join(os.path.dirname(path), name)
+        torch.save(state, aux_path)
+
+    @staticmethod
+    def _load_aux_state(path: str, name: str, device: str) -> dict | None:
+        """Load auxiliary state dict from alongside a model checkpoint, or None."""
+        aux_path = os.path.join(os.path.dirname(path), name)
+        if os.path.exists(aux_path):
+            return torch.load(aux_path, map_location=device, weights_only=False)
+        return None
+
+    # ------------------------------------------------------------------
+    # Training loop overrides
+    # ------------------------------------------------------------------
+
+    def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
+        """Reset environments before training so initial DR samples come from DORAEMON."""
+        if hasattr(self.alg, "set_max_iterations"):
+            self.alg.set_max_iterations(num_learning_iterations)
+        self.env.reset()
+        super().learn(num_learning_iterations, init_at_random_ep_len)
 
     def log(self, locs: dict, width: int = 80, pad: int = 35) -> None:
-        """Extended log with constraint metrics.
+        """Extended log with DORAEMON update, encoder metrics, and constraint metrics.
 
         Args:
             locs: Local variables from the learn() training loop.
@@ -77,11 +128,78 @@ class ConstraintEncoderRunner(EncoderRunner):
 
         iteration = locs["it"]
 
-        # Log constraint-specific metrics
-        if self._should_log:
-            self._log_constraint_metrics(locs, iteration)
+        # DORAEMON: update DR distribution based on episode statistics
+        doraemon = self._doraemon
+        if doraemon is not None:
+            metrics = doraemon.step()
+            if self._should_log:
+                flush_metrics(
+                    self.writer,
+                    {f"DORAEMON/{k}": v for k, v in metrics.items()},
+                    iteration,
+                    self.logger_type,
+                )
 
-    def _log_constraint_metrics(self, _locs: dict, iteration: int) -> None:
+        # Encoder metrics (z latent stats, gradient norms, etc.)
+        if self._has_encoder and self._should_log:
+            log_encoder_metrics(
+                writer=self.writer,
+                policy=self.alg.policy,
+                env=self.env,
+                iteration=iteration,
+                device=self.device,
+                logger_type=self.logger_type,
+            )
+
+        # Constraint-specific metrics (barrier, violations, margins)
+        if self._should_log:
+            self._log_constraint_metrics(iteration)
+
+    # ------------------------------------------------------------------
+    # Checkpoint save/load
+    # ------------------------------------------------------------------
+
+    def save(self, path: str, infos: dict | None = None) -> None:
+        """Save model checkpoint with DORAEMON state and barrier state."""
+        super().save(path, infos)
+
+        doraemon = self._doraemon
+        if doraemon is not None:
+            self._save_aux_state(path, "doraemon_state.pt", doraemon.state_dict())
+
+        self._save_aux_state(
+            path,
+            "barrier_state.pt",
+            {
+                "in_recovery": self.alg._in_recovery,
+                "margins": self.alg._margins,
+            },
+        )
+
+    def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
+        """Load model checkpoint and restore DORAEMON + barrier state if available."""
+        infos = super().load(path, load_optimizer, map_location)
+
+        doraemon = self._doraemon
+        if doraemon is not None:
+            state = self._load_aux_state(path, "doraemon_state.pt", self.device)
+            if state is not None:
+                doraemon.load_state_dict(state)
+                logger.info("[DORAEMON] Loaded distribution state from checkpoint")
+
+        state = self._load_aux_state(path, "barrier_state.pt", self.device)
+        if state is not None:
+            self.alg._in_recovery = state["in_recovery"]
+            self.alg._margins = state["margins"].to(self.device)
+            logger.info("Restored barrier state from checkpoint")
+
+        return infos
+
+    # ------------------------------------------------------------------
+    # Constraint metrics
+    # ------------------------------------------------------------------
+
+    def _log_constraint_metrics(self, iteration: int) -> None:
         """Log constraint metrics to TensorBoard/WandB.
 
         Logs per-constraint: cost_return, violation, margin, recovery flag, and d_k.
@@ -111,27 +229,3 @@ class ConstraintEncoderRunner(EncoderRunner):
         metrics["Policy/line_search_success"] = alg._last_line_search_success
 
         flush_metrics(self.writer, metrics, iteration, self.logger_type)
-
-    def save(self, path, infos=None):
-        """Save checkpoint with barrier state."""
-        super().save(path, infos)
-        self._save_aux_state(
-            path,
-            "barrier_state.pt",
-            {
-                "in_recovery": self.alg._in_recovery,
-                "margins": self.alg._margins,
-            },
-        )
-
-    def load(self, path, load_optimizer=True, map_location=None):
-        """Load checkpoint and restore barrier state if available."""
-        infos = super().load(path, load_optimizer, map_location)
-
-        state = self._load_aux_state(path, "barrier_state.pt", self.device)
-        if state is not None:
-            self.alg._in_recovery = state["in_recovery"]
-            self.alg._margins = state["margins"].to(self.device)
-            logger.info("Restored barrier state from checkpoint")
-
-        return infos
