@@ -339,8 +339,9 @@ class RslRlConstraintTRPOAlgorithmCfg:
     causes uncontrolled KL divergence (encoder changes z -> distribution shift
     not bounded by TRPO trust region). Recovery mode fix is the real encoder fix."""
 
-    encoder_lr: float = 1e-3
-    """Encoder Adam learning rate."""
+    encoder_lr: float = 3e-4
+    """Encoder Adam learning rate. Matches pre-mod C-TRPO value; higher values
+    (1e-3) caused excessive distribution shift even with 1 epoch."""
 
 
 @configclass

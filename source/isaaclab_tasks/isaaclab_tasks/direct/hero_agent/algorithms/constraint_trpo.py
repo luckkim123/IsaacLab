@@ -99,7 +99,7 @@ class ConstraintTRPO:
         entropy_coef: float = 0.0,
         # Encoder update
         num_encoder_epochs: int = 5,
-        encoder_lr: float = 1e-3,
+        encoder_lr: float = 3e-4,
         # Device
         device: str = "cpu",
         # Unused kwargs from RSL-RL config forwarding (including legacy Lagrangian params)

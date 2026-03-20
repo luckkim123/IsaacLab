@@ -29,6 +29,9 @@ Mode oscillation (safe/recovery switching) destabilized training without clear b
 ### Changed
 - `agents/rsl_rl_ppo_cfg.py`: Reverted `num_encoder_epochs: 5 -> 1`. Multi-step encoder
   update incompatible with TRPO trust region (indirect KL not bounded).
+- `agents/rsl_rl_ppo_cfg.py`: Reverted `encoder_lr: 1e-3 -> 3e-4`. Even with 1 epoch,
+  3.3x higher LR caused excessive distribution shift vs pre-mod baseline (kl=0.013).
+- `algorithms/constraint_trpo.py`: Matched default `encoder_lr` to 3e-4.
 - `agents/rsl_rl_ppo_cfg.py`: `joint_torque` budget 0.15 -> 0.20 (reduces constraint floor).
 - `config.py`: Synced `joint_torque` budget to 0.20.
 - `runners/base_runner.py`: `min_std` 0.25 -> 0.18 (no observed effect yet).
