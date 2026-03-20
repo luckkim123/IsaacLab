@@ -55,7 +55,6 @@ class _EncoderPolicyCfg(RslRlPpoActorCriticCfg):
     encoder_hidden_dims: list[int] = [256, 128, 64]
     encoder_latent_dim: int = 13
     encoder_activation: str = "elu"
-    encoder_output_activation: str = "tanh"
     encoder_obs_normalization: bool = True
     policy_obs_dim: int = 13
     privileged_dim: int = 19
@@ -67,15 +66,11 @@ class _EncoderPolicyCfg(RslRlPpoActorCriticCfg):
 
 @configclass
 class RslRlPpoActorCriticEncoderConstrainedCfg(_EncoderPolicyCfg):
-    """Policy config for ActorCriticEncoderConstrained (encoder + cost critic).
-
-    asymmetric_critic=True (default): critics see raw privileged obs (NORBC design).
-    """
+    """Policy config for ActorCriticEncoderConstrained (encoder + cost critic)."""
 
     class_name: str = "ActorCriticEncoderConstrained"
     num_constraints: int = 0  # Auto-synced from env config by ConstraintEncoderRunner
     cost_critic_hidden_dims: list[int] = [256, 128, 64]
-    asymmetric_critic: bool = True
 
 
 # =============================================================================
