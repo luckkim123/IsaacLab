@@ -27,10 +27,6 @@ from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse
 
 from isaaclab_tasks.models import HydrodynamicsModel
 
-from isaaclab_assets.robots.uuv import (
-    HERO_AGENT_ALBC_LINK1_LENGTH,
-    HERO_AGENT_ALBC_LINK2_LENGTH,
-)
 
 from .config import ALBCEnvCfg
 from .mdp import (
@@ -41,11 +37,10 @@ from .mdp import (
     compute_all_costs,
     compute_policy_obs,
     compute_privileged_obs,
-    energy_penalty,
     progress_reward,
-    settling_reward,
 )
 from .mdp.events import (
+    DRSampler,
     compute_equilibrium_joint_positions,
     randomize_body_mass,
     randomize_hydrodynamics,
@@ -59,7 +54,7 @@ from .mdp.events import (
     reset_joint_positions_default,
     reset_robot_pose_default,
 )
-from .utils import DebugVisualization, log_dr_infeasibility, log_dr_metrics
+from .utils import DebugVisualization, log_dr_metrics
 
 
 class ALBCEnv(DirectRLEnv):
@@ -99,11 +94,6 @@ class ALBCEnv(DirectRLEnv):
             render_mode: Render mode for visualization.
             **kwargs: Additional arguments.
         """
-        # Adjust observation_space for optional TDE obs (must be before super().__init__)
-        if cfg.enable_tde_obs:
-            cfg.observation_space += 2
-            self._pad_noise_cfg_for_tde(cfg)
-
         # Convert noise config tuples to tensors before DirectRLEnv creates the noise model.
         # Tuples are used in config for OmegaConf/Hydra serialization compatibility.
         self._convert_noise_cfg_tuples(cfg)
@@ -174,17 +164,6 @@ class ALBCEnv(DirectRLEnv):
                 val = getattr(sub_cfg, param, None)
                 if isinstance(val, (list, tuple)):
                     yield sub_cfg, param, val
-
-    @staticmethod
-    def _pad_noise_cfg_for_tde(cfg: ALBCEnvCfg) -> None:
-        """Pad observation noise config by 2 dims (zeros) for TDE obs channels.
-
-        TDE obs (H_hat) has no sensor noise model -- it's a computed signal
-        whose noise comes from nu_dot estimation and is handled by the EMA filter.
-        Must be called before _convert_noise_cfg_tuples() to preserve tuple format.
-        """
-        for sub_cfg, param, val in ALBCEnv._iter_noise_params(cfg):
-            setattr(sub_cfg, param, type(val)(list(val) + [0.0, 0.0]))
 
     @staticmethod
     def _convert_noise_cfg_tuples(cfg: ALBCEnvCfg) -> None:
@@ -277,43 +256,23 @@ class ALBCEnv(DirectRLEnv):
             cfg=self._build_reward_terms(),
             num_envs=self.num_envs,
             device=self.device,
-            penalty_curriculum_ratio=self.cfg.reward.penalty_curriculum_ratio,
         )
-        self._init_doraemon()
 
     def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
         """Build the reward terms dict. Override in subclasses to add/modify terms.
 
-        4-term architecture (all dt-scaled):
-            1. command: composite Laplacian + linear ramp [0,1]
-            2. settling: binary threshold bonus {0,1}
-            3. energy: mean(joint_vel^2)
-            4. smoothness: mean(da^2) + mean(d2a^2)
+        3-term architecture:
+            1. command  (+): quadratic -(roll_err^2 + pitch_err^2), dt-scaled
+            2. smoothness (-): mean(da^2) + mean(d2a^2), dt-scaled
+            3. progress (+): PBRS, NOT dt-scaled
         """
         rcfg = self.cfg.reward
-        terms = {
+        terms: dict[str, RewardTermCfg] = {
             "command": RewardTermCfg(
                 func=command_reward,
                 weight=rcfg.command_weight,
-                params={
-                    "reward_type": rcfg.command_type,
-                    "sigma": rcfg.command_sigma,
-                    "e_max": rcfg.command_e_max,
-                    "alpha": rcfg.command_alpha,
-                },
             ),
         }
-        if rcfg.settling_weight != 0.0:
-            terms["settling"] = RewardTermCfg(
-                func=settling_reward,
-                weight=rcfg.settling_weight,
-                params={"threshold": rcfg.settling_threshold},
-            )
-        if rcfg.energy_weight != 0.0:
-            terms["energy"] = RewardTermCfg(
-                func=energy_penalty,
-                weight=rcfg.energy_weight,
-            )
         if rcfg.smoothness_weight != 0.0:
             terms["smoothness"] = RewardTermCfg(
                 func=action_smoothness_penalty,
@@ -327,29 +286,6 @@ class ALBCEnv(DirectRLEnv):
                 scale_by_dt=False,
             )
         return terms
-
-    def _init_doraemon(self) -> None:
-        """Initialize DORAEMON adaptive DR scheduler if enabled."""
-        doraemon_cfg = getattr(self.cfg, "doraemon", None)
-        if doraemon_cfg is not None and doraemon_cfg.enable:
-            from .doraemon import NDIMS, DoraemonScheduler
-
-            self._doraemon = DoraemonScheduler(doraemon_cfg, self.device)
-            self._doraemon_ndims = NDIMS
-        else:
-            self._doraemon = None
-            self._doraemon_ndims = 0
-
-        # Per-env DORAEMON tracking buffers
-        if self._doraemon is not None:
-            ndims = self._doraemon_ndims
-            self._episode_dr_xi = torch.zeros(self.num_envs, ndims, device=self.device)
-            self._episode_dr_log_probs = torch.zeros(self.num_envs, device=self.device)
-            self._episode_return_accum = torch.zeros(self.num_envs, device=self.device)
-            # Settling window: last 1 second (50 steps at 50Hz control)
-            self._settling_window = 50
-            self._settling_errors = torch.zeros(self.num_envs, self._settling_window, device=self.device)
-            self._settling_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
     def _init_state_buffers(self) -> None:
         """Initialize action and force/torque buffers."""
@@ -368,7 +304,7 @@ class ALBCEnv(DirectRLEnv):
 
         # EMA joint velocity (for high-pass oscillation penalty)
         self._ema_joint_vel = torch.zeros(self.num_envs, 2, device=self.device)
-        self._ema_joint_vel_alpha = self.cfg.reward.ema_joint_vel_alpha
+        self._ema_joint_vel_alpha = self.cfg.ema_joint_vel_alpha
         self._joint_pos_targets = torch.zeros(self.num_envs, 2, device=self.device)
         # Global step counter (not per-env). With control_decimation=1 (default),
         # this modulo always passes. If control_decimation > 1, all envs share
@@ -387,27 +323,6 @@ class ALBCEnv(DirectRLEnv):
         rand_cfg = self.cfg.randomization
         perturb_cycle = max(1, rand_cfg.perturbation_interval + rand_cfg.perturbation_duration)
         self._perturb_timer = torch.randint(0, perturb_cycle, (self.num_envs,), device=self.device)
-
-        # Buoy perturbation buffers (independent phase from main body)
-        self._buoy_perturb_forces = torch.zeros(self.num_envs, 3, device=self.device)
-        self._buoy_perturb_torques = torch.zeros(self.num_envs, 3, device=self.device)
-        self._buoy_perturb_timer = torch.randint(0, perturb_cycle, (self.num_envs,), device=self.device)
-
-        # TDE observation buffers (optional dynamics mismatch signal)
-        if self.cfg.enable_tde_obs:
-            self._tde_m_hat = torch.tensor(self.cfg.tde_m_hat, device=self.device, dtype=torch.float32)
-            self._tde_nu_prev = torch.zeros(self.num_envs, 2, device=self.device)
-            self._tde_nu_dot_filtered = torch.zeros(self.num_envs, 2, device=self.device)
-            self._tde_h_hat = torch.zeros(self.num_envs, 2, device=self.device)
-            self._tde_is_initialized = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-            self._tde_h = self.cfg.tde_h
-            self._tde_ema_alpha = self.cfg.tde_nu_dot_ema_alpha
-            self._tde_l1 = HERO_AGENT_ALBC_LINK1_LENGTH
-            self._tde_l2 = HERO_AGENT_ALBC_LINK2_LENGTH
-            # History buffers for true TDE (H_t approx H_{t-L}):
-            # Lambda*p_EE and T_b from previous step, matching TDC controller pattern
-            self._tde_Lambda_p_EE_prev = torch.zeros(self.num_envs, 2, device=self.device)
-            self._tde_T_b_prev = torch.zeros(self.num_envs, 2, device=self.device)
 
         # Proprioception history buffer (ring buffer for temporal conv encoder)
         self._proprio_history_len = self.cfg.proprio_history_len
@@ -603,53 +518,32 @@ class ALBCEnv(DirectRLEnv):
         return timer
 
     def _update_perturbation(self) -> None:
-        """Update per-step random perturbation forces on the base body and buoy.
+        """Update per-step random perturbation forces on the base body.
 
         Uses per-env timers that cycle through [0, interval+duration).
         Phase [0, duration): perturbation active. Phase [duration, cycle): cooldown.
         New random wrench is generated at the start of each active phase.
 
-        Main body and buoy have independent timers (decorrelated phases) but
-        share the same interval/duration timing parameters.
-
-        Forces are stored in ``_perturb_forces`` / ``_perturb_torques`` (main body)
-        and ``_buoy_perturb_forces`` / ``_buoy_perturb_torques`` (buoy), then
-        added to hydro forces in ``_apply_action()``.
+        Forces are stored in ``_perturb_forces`` / ``_perturb_torques``
+        and added to hydro forces in ``_apply_action()``.
         """
         rand_cfg = self.cfg.randomization
-        if not rand_cfg.enable:
-            return
-
-        main_perturb = rand_cfg.enable_perturbation
-        buoy_perturb = rand_cfg.enable_buoy_perturbation
-        if not main_perturb and not buoy_perturb:
+        if not rand_cfg.enable or not rand_cfg.enable_perturbation:
             return
 
         interval = rand_cfg.perturbation_interval
         duration = rand_cfg.perturbation_duration
         cycle = interval + duration
 
-        if main_perturb:
-            self._perturb_timer = self._apply_perturbation_cycle(
-                self._perturb_timer,
-                self._perturb_forces,
-                self._perturb_torques,
-                rand_cfg.perturbation_force_range,
-                rand_cfg.perturbation_torque_range,
-                cycle,
-                duration,
-            )
-
-        if buoy_perturb:
-            self._buoy_perturb_timer = self._apply_perturbation_cycle(
-                self._buoy_perturb_timer,
-                self._buoy_perturb_forces,
-                self._buoy_perturb_torques,
-                rand_cfg.buoy_perturbation_force_range,
-                rand_cfg.buoy_perturbation_torque_range,
-                cycle,
-                duration,
-            )
+        self._perturb_timer = self._apply_perturbation_cycle(
+            self._perturb_timer,
+            self._perturb_forces,
+            self._perturb_torques,
+            rand_cfg.perturbation_force_range,
+            rand_cfg.perturbation_torque_range,
+            cycle,
+            duration,
+        )
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Process actions before physics step with control decimation.
@@ -731,12 +625,10 @@ class ALBCEnv(DirectRLEnv):
             root_ang_vel_w=self._robot.data.body_ang_vel_w[:, buoy_idx, :],
             root_quat_w=self._robot.data.body_quat_w[:, buoy_idx, :],
         )
-        buoy_total_forces = self._buoy_hydro_forces + self._buoy_perturb_forces
-        buoy_total_torques = self._buoy_hydro_torques + self._buoy_perturb_torques
         self._robot.permanent_wrench_composer.set_forces_and_torques(
             body_ids=self._buoy_body_id,
-            forces=buoy_total_forces.unsqueeze(1),
-            torques=buoy_total_torques.unsqueeze(1),
+            forces=self._buoy_hydro_forces.unsqueeze(1),
+            torques=self._buoy_hydro_torques.unsqueeze(1),
         )
 
         # Gripper payload (weight force applied at attachment point + CoG offset)
@@ -765,90 +657,16 @@ class ALBCEnv(DirectRLEnv):
         payload_torque_b = torch.cross(effective_offset, payload_weight_b, dim=-1)
         return payload_weight_b, payload_torque_b
 
-    def _compute_tde_obs(self) -> torch.Tensor:
-        """Compute TDE-based dynamics mismatch observation H_hat (2D).
-
-        Uses Time Delay Estimation: H_hat_t = H_{t-L}, computed from
-        **previous step** values of Lambda*p_EE and T_b, matching the
-        TDC controller's TDE implementation.
-
-        TDE identity:
-            H_hat = (Lambda*p_EE)_prev + T_b_prev - M_bar * nu_dot
-
-        Where H captures inertia error, coupling, Coriolis, damping,
-        gravity, and external disturbances.
-
-        Uses EMA-filtered angular acceleration to reduce sensor noise.
-        On the first step after reset, returns zeros (no valid history).
-
-        Returns:
-            H_hat tensor of shape (num_envs, 2).
-        """
-        roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
-        nu = self._robot.data.root_ang_vel_b[:, :2]  # [p, q]
-
-        # Angular acceleration via EMA-filtered finite difference
-        nu_dot_raw = (nu - self._tde_nu_prev) / self.step_dt
-        self._tde_nu_dot_filtered = (
-            self._tde_ema_alpha * nu_dot_raw + (1.0 - self._tde_ema_alpha) * self._tde_nu_dot_filtered
-        )
-
-        # Buoyancy force from buoy hydro model (per-env, DR'd)
-        F_bu = self._buoy_hydro.buoyancy_force
-
-        # Current Lambda * p_EE (computed now, used as _prev next step)
-        lf = torch.cos(pitch) * torch.cos(roll) * F_bu
-        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
-        g1 = joint_pos[:, 0]
-        g12 = joint_pos[:, 0] + joint_pos[:, 1]
-        p_EE_x = self._tde_l1 * torch.cos(g1) + self._tde_l2 * torch.cos(g12)
-        p_EE_y = self._tde_l1 * torch.sin(g1) + self._tde_l2 * torch.sin(g12)
-        # Lambda = [[0, lf], [-lf, 0]] -> Lambda @ [x, y] = [lf*y, -lf*x]
-        Lambda_p_EE_roll = lf * p_EE_y
-        Lambda_p_EE_pitch = -lf * p_EE_x
-        Lambda_p_EE_current = torch.stack([Lambda_p_EE_roll, Lambda_p_EE_pitch], dim=-1)
-
-        # Current restoring torque T_b (computed now, used as _prev next step)
-        h = self._tde_h
-        T_b_roll = -torch.cos(pitch) * torch.sin(roll) * F_bu * h
-        T_b_pitch = -torch.sin(pitch) * F_bu * h
-        T_b_current = torch.stack([T_b_roll, T_b_pitch], dim=-1)
-
-        # H_hat = (Lambda*p_EE)_prev + T_b_prev - M_bar*nu_dot  (TDE: use previous step)
-        lp_prev = self._tde_Lambda_p_EE_prev
-        tb_prev = self._tde_T_b_prev
-        nu_dot_f = self._tde_nu_dot_filtered
-        H_hat_roll = lp_prev[:, 0] + tb_prev[:, 0] - self._tde_m_hat[0] * nu_dot_f[:, 0]
-        H_hat_pitch = lp_prev[:, 1] + tb_prev[:, 1] - self._tde_m_hat[1] * nu_dot_f[:, 1]
-
-        h_hat = torch.stack([H_hat_roll, H_hat_pitch], dim=-1)
-
-        # Zero out for envs without valid history (first step after reset)
-        h_hat = torch.where(self._tde_is_initialized.unsqueeze(-1), h_hat, torch.zeros_like(h_hat))
-
-        # Update history for next step
-        self._tde_nu_prev.copy_(nu)
-        self._tde_Lambda_p_EE_prev.copy_(Lambda_p_EE_current)
-        self._tde_T_b_prev.copy_(T_b_current)
-        self._tde_is_initialized[:] = True
-        self._tde_h_hat = h_hat
-
-        return h_hat
-
     def _get_observations(self) -> dict:
         """Compute ALBC-specific observations.
 
-        Returns 13-dim (or 15-dim with TDE) policy observation
-        and optional privileged observations.
+        Returns 13-dim policy observation and optional privileged observations.
         See mdp.observations for implementation details.
 
         Returns:
             Observation dictionary with "policy" key and optional "privileged" key.
         """
         policy_obs = compute_policy_obs(self, self._robot)
-        if self.cfg.enable_tde_obs:
-            tde_obs = self._compute_tde_obs()
-            policy_obs = torch.cat([policy_obs, tde_obs], dim=-1)
 
         observations = {"policy": policy_obs}
         if self.cfg.state_space > 0:
@@ -884,14 +702,6 @@ class ALBCEnv(DirectRLEnv):
         if self.cfg.reward.termination_penalty != 0.0:
             reward += self.reset_terminated * self.cfg.reward.termination_penalty
 
-        # DORAEMON: accumulate episode return and settling error
-        if self._doraemon is not None:
-            self._episode_return_accum += reward
-            err = torch.linalg.norm(self._attitude_error[:, :2], dim=-1)
-            idx = self._settling_idx % self._settling_window
-            self._settling_errors.scatter_(1, idx.unsqueeze(1), err.unsqueeze(1))
-            self._settling_idx += 1
-
         # Compute constraint costs for IPO pipeline (if constraints configured)
         constraints_cfg = getattr(self.cfg, "constraints", None)
         if constraints_cfg is not None:
@@ -926,9 +736,6 @@ class ALBCEnv(DirectRLEnv):
         # Weight for downstream weighted averaging (SAC runner uses this)
         log["_num_resets"] = float(n)
 
-        # Penalty curriculum scale (0.0 ~ 1.0)
-        log["Reward/penalty_scale"] = self._reward_manager.penalty_scale
-
         # Reward sums (normalized by max episode duration for episode-length-independent metrics)
         total = 0.0
         for name, value in reward_sums.items():
@@ -961,9 +768,6 @@ class ALBCEnv(DirectRLEnv):
             # log_dr_metrics expects extras["log"] dict -- pass a wrapper
             extras_wrapper: dict = {"log": log}
             log_dr_metrics(extras_wrapper, self)
-
-        # DR infeasibility check (only for constrained envs with DR enabled)
-        self._check_dr_infeasibility(env_ids)
 
         return log
 
@@ -1005,71 +809,6 @@ class ALBCEnv(DirectRLEnv):
         # Velocity limit saturation
         vel_lim = self._robot.data.joint_vel_limits[env_ids][:, jids]
         log["Dynamics/vel_saturation_frac"] = (joint_vel.abs() >= vel_lim.clamp(min=1e-6) * 0.95).float().mean().item()
-
-    _dr_infeasibility_call_count: int = 0
-    _dr_infeasibility_log_interval: int = 100  # Log details every N calls
-    _dr_infeasibility_max_samples: int = 3  # Max detailed logs per interval
-
-    def _check_dr_infeasibility(self, env_ids: torch.Tensor) -> None:
-        """Detect DR combinations where correct control cannot reduce error.
-
-        Only checks timed-out episodes (had full episode length to converge).
-        Flags environments that have: (1) high error (> 10 deg), (2) arm near
-        singularity, and (3) arm pointing in the correct direction.
-
-        Logs infeasible count to extras["log"] every call (for WandB).
-        Logs detailed params at most max_samples per log_interval calls.
-        """
-        if len(env_ids) == 0 or getattr(self.cfg, "constraints", None) is None:
-            return
-
-        # Only check timed-out episodes (early termination != infeasibility)
-        timed_out_mask = self.reset_time_outs[env_ids]
-        timed_out_ids = env_ids[timed_out_mask]
-        if len(timed_out_ids) == 0:
-            return
-
-        err = self._attitude_error[timed_out_ids, :2]  # (N, 2) roll/pitch error
-        mean_err_deg = torch.rad2deg(err.abs().mean(dim=-1))
-
-        # Condition 1: high error (> 10 degrees)
-        high_error = mean_err_deg > 10.0
-
-        # Condition 2: arm near singularity (fully extended)
-        g2 = self._robot.data.joint_pos[timed_out_ids][:, self._albc_joint_ids[1]]
-        near_singularity = g2.sin().abs() < 0.15
-
-        # Condition 3: arm pointing in the correct direction
-        g1 = self._robot.data.joint_pos[timed_out_ids][:, self._albc_joint_ids[0]]
-        desired_g1 = torch.atan2(err[:, 0], err[:, 1])
-        direction_aligned = torch.cos(g1 - desired_g1) > 0.5  # within ~60 deg
-
-        infeasible = high_error & near_singularity & direction_aligned
-        n_infeasible = infeasible.sum().item()
-
-        # Always record count for WandB (lightweight)
-        if hasattr(self, "extras") and "log" in self.extras:
-            self.extras["log"]["DR/infeasible_count"] = n_infeasible
-
-        # Detailed logging: sample at most N envs every M calls
-        self._dr_infeasibility_call_count += 1
-        if n_infeasible > 0 and (self._dr_infeasibility_call_count % self._dr_infeasibility_log_interval == 0):
-            inf_ids = timed_out_ids[infeasible]
-            inf_errs = mean_err_deg[infeasible]
-            # Random sample if too many
-            if len(inf_ids) > self._dr_infeasibility_max_samples:
-                perm = torch.randperm(len(inf_ids), device=inf_ids.device)[: self._dr_infeasibility_max_samples]
-                inf_ids = inf_ids[perm]
-                inf_errs = inf_errs[perm]
-            log_dr_infeasibility(
-                env_ids=inf_ids,
-                mean_errors_deg=inf_errs,
-                hydro=self._hydro,
-                buoy_hydro=self._buoy_hydro,
-                payload_mass=self._payload_mass,
-                robot=self._robot,
-                albc_joint_ids=self._albc_joint_ids,
-            )
 
     def get_eval_snapshot(self) -> dict[str, float]:
         """Return current evaluation metrics for play-mode diagnostics.
@@ -1154,26 +893,7 @@ class ALBCEnv(DirectRLEnv):
         self._reset_task_and_state(env_ids_)
 
     def _log_and_reset_rewards(self, env_ids: torch.Tensor) -> None:
-        """Collect episode metrics, record DORAEMON episodes, and reset accumulators."""
-        # Record completed episodes to DORAEMON buffer before resetting
-        if self._doraemon is not None and len(env_ids) > 0:
-            # Success = mean settling error < threshold (no timed_out requirement).
-            # Early-terminated episodes that achieved low error before termination
-            # still count as successful for DR distribution optimization.
-            current_threshold = self._doraemon._current_threshold_deg
-            threshold_rad = torch.deg2rad(torch.tensor(current_threshold, device=self.device))
-            # Use the filled portion of settling ring buffer
-            filled = self._settling_idx[env_ids].clamp(max=self._settling_window).float()
-            mean_settling_err = self._settling_errors[env_ids].sum(dim=-1) / filled.clamp(min=1.0)
-            success = mean_settling_err < threshold_rad
-
-            self._doraemon.record_episodes(
-                xi=self._episode_dr_xi[env_ids],
-                returns=self._episode_return_accum[env_ids],
-                success=success.float(),
-                log_probs=self._episode_dr_log_probs[env_ids],
-            )
-
+        """Collect episode metrics and reset accumulators."""
         reward_sums = self._reward_manager.reset(env_ids)
         self.extras["log"] = self._collect_episode_metrics(env_ids, reward_sums)
 
@@ -1201,15 +921,6 @@ class ALBCEnv(DirectRLEnv):
         if self._proprio_hist is not None:
             self._proprio_hist[env_ids] = 0.0
 
-        # Reset TDE observation buffers
-        if self.cfg.enable_tde_obs:
-            self._tde_nu_prev[env_ids] = 0.0
-            self._tde_nu_dot_filtered[env_ids] = 0.0
-            self._tde_h_hat[env_ids] = 0.0
-            self._tde_Lambda_p_EE_prev[env_ids] = 0.0
-            self._tde_T_b_prev[env_ids] = 0.0
-            self._tde_is_initialized[env_ids] = False
-
         # Reset action latency: sample new per-env latency and clear history
         if self._action_history is not None and self._action_latency is not None:
             lo, hi = self.cfg.randomization.action_latency_range
@@ -1232,9 +943,6 @@ class ALBCEnv(DirectRLEnv):
         self._perturb_forces[env_ids] = 0.0
         self._perturb_torques[env_ids] = 0.0
         self._perturb_timer[env_ids] = torch.randint(0, perturb_cycle, (len(env_ids),), device=self.device)
-        self._buoy_perturb_forces[env_ids] = 0.0
-        self._buoy_perturb_torques[env_ids] = 0.0
-        self._buoy_perturb_timer[env_ids] = torch.randint(0, perturb_cycle, (len(env_ids),), device=self.device)
 
     def _reset_physics(self, env_ids: torch.Tensor) -> None:
         """Reset hydrodynamics, payload, and apply domain randomization.
@@ -1255,29 +963,15 @@ class ALBCEnv(DirectRLEnv):
         if not rand_cfg.enable:
             return
 
-        # Build sampled dict from DORAEMON Beta distribution
-        sampled: dict[str, torch.Tensor] | None = None
-        if self._doraemon is not None:
-            from .doraemon import PARAM_SPECS
+        # Create DRSampler (bundles rand_cfg + num_envs + device)
+        dr = DRSampler(rand_cfg, num_envs=len(env_ids), device=self.device)
+        # Store for _reset_task_and_state (joint gains/friction)
+        self._current_dr_sampler = dr
 
-            n = len(env_ids)
-            xi_physical, log_probs = self._doraemon.sample(n)
-            sampled = {spec.name: xi_physical[:, i] for i, spec in enumerate(PARAM_SPECS)}
-
-            # Store for episode tracking
-            self._episode_dr_xi[env_ids] = xi_physical
-            self._episode_dr_log_probs[env_ids] = log_probs
-            self._episode_return_accum[env_ids] = 0.0
-            self._settling_errors[env_ids] = 0.0
-            self._settling_idx[env_ids] = 0
-
-        # Store sampled dict for _reset_task_and_state (joint gains/friction)
-        self._current_sampled = sampled
-
-        randomize_hydrodynamics(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
-        randomize_body_mass(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
+        randomize_hydrodynamics(env=self, env_ids=env_ids, dr=dr)
+        randomize_body_mass(env=self, env_ids=env_ids, dr=dr)
         if self._payload_enabled:
-            randomize_payload(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
+            randomize_payload(env=self, env_ids=env_ids, dr=dr)
 
         has_ocean_current = any(v > 0 for v in self.cfg.ocean_current.max_velocity)
         if has_ocean_current:
@@ -1312,10 +1006,12 @@ class ALBCEnv(DirectRLEnv):
 
         # Joint actuator DR: always applied (when DR disabled, ranges collapse to defaults).
         # TDC envs override stiffness/damping in their own _reset_idx().
-        sampled = getattr(self, "_current_sampled", None)
-        randomize_joint_gains(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
-        randomize_joint_effort_limit(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
-        randomize_joint_friction(env=self, env_ids=env_ids, rand_cfg=rand_cfg, sampled=sampled)
+        dr = getattr(self, "_current_dr_sampler", None)
+        if dr is None:
+            dr = DRSampler(rand_cfg, num_envs=len(env_ids), device=self.device)
+        randomize_joint_gains(env=self, env_ids=env_ids, dr=dr)
+        randomize_joint_effort_limit(env=self, env_ids=env_ids, dr=dr)
+        randomize_joint_friction(env=self, env_ids=env_ids, dr=dr)
 
         # Potential initialization (must be after pose reset).
         # write_root_pose_to_sim() immediately updates internal data cache,

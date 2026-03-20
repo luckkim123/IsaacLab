@@ -3,10 +3,9 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Single runner for constrained ALBC: DORAEMON DR scheduling + encoder metrics + barrier state.
+"""Single runner for constrained ALBC: encoder metrics + barrier state.
 
 Flat subclass of OnPolicyRunner that combines:
-    - DORAEMON distribution updates each iteration
     - HORA Phase 1 encoder metrics logging (if encoder present)
     - C-TRPO barrier state persistence and per-constraint metrics
     - Auto-sync of num_constraints from env config
@@ -20,16 +19,15 @@ import os
 import torch
 from rsl_rl.runners import OnPolicyRunner
 
-from ..utils.logging import flush_metrics, log_encoder_metrics, unwrap_env
+from ..utils.logging import flush_metrics, log_encoder_metrics
 
 logger = logging.getLogger(__name__)
 
 
 class ConstraintEncoderRunner(OnPolicyRunner):
-    """OnPolicyRunner with DORAEMON DR scheduling, encoder metrics, and C-TRPO barrier support.
+    """OnPolicyRunner with encoder metrics and C-TRPO barrier support.
 
     Provides:
-        - DORAEMON integration: each iteration, log() calls doraemon.step()
         - Encoder metrics: z latent statistics, gradient norms (when encoder present)
         - Barrier state persistence: save/load constraint margins and recovery flags
         - Auto-sync: num_constraints from env config to algorithm/policy config
@@ -77,12 +75,6 @@ class ConstraintEncoderRunner(OnPolicyRunner):
     # ------------------------------------------------------------------
 
     @property
-    def _doraemon(self):
-        """Return the DORAEMON scheduler from the unwrapped env, or None."""
-        raw_env = unwrap_env(self.env)
-        return getattr(raw_env, "_doraemon", None)
-
-    @property
     def _should_log(self) -> bool:
         """Whether logging is active (log_dir set and logs not disabled)."""
         return self.log_dir is not None and not self.disable_logs
@@ -128,18 +120,6 @@ class ConstraintEncoderRunner(OnPolicyRunner):
 
         iteration = locs["it"]
 
-        # DORAEMON: update DR distribution based on episode statistics
-        doraemon = self._doraemon
-        if doraemon is not None:
-            metrics = doraemon.step()
-            if self._should_log:
-                flush_metrics(
-                    self.writer,
-                    {f"DORAEMON/{k}": v for k, v in metrics.items()},
-                    iteration,
-                    self.logger_type,
-                )
-
         # Encoder metrics (z latent stats, gradient norms, etc.)
         if self._has_encoder and self._should_log:
             log_encoder_metrics(
@@ -160,12 +140,8 @@ class ConstraintEncoderRunner(OnPolicyRunner):
     # ------------------------------------------------------------------
 
     def save(self, path: str, infos: dict | None = None) -> None:
-        """Save model checkpoint with DORAEMON state and barrier state."""
+        """Save model checkpoint with barrier state."""
         super().save(path, infos)
-
-        doraemon = self._doraemon
-        if doraemon is not None:
-            self._save_aux_state(path, "doraemon_state.pt", doraemon.state_dict())
 
         self._save_aux_state(
             path,
@@ -177,15 +153,8 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         )
 
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
-        """Load model checkpoint and restore DORAEMON + barrier state if available."""
+        """Load model checkpoint and restore barrier state if available."""
         infos = super().load(path, load_optimizer, map_location)
-
-        doraemon = self._doraemon
-        if doraemon is not None:
-            state = self._load_aux_state(path, "doraemon_state.pt", self.device)
-            if state is not None:
-                doraemon.load_state_dict(state)
-                logger.info("[DORAEMON] Loaded distribution state from checkpoint")
 
         state = self._load_aux_state(path, "barrier_state.pt", self.device)
         if state is not None:

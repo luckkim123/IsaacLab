@@ -84,14 +84,6 @@ def compute_policy_obs(
     )
 
 
-def _added_mass_surge(hydro: HydrodynamicsModel) -> torch.Tensor:
-    """Extract surge added mass from diagonal matrix.
-
-    Returns: (num_envs, 1) = [M_a_surge].
-    """
-    return hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1)
-
-
 def compute_privileged_obs(
     env: ALBCEnv,
 ) -> torch.Tensor:
@@ -135,6 +127,6 @@ def compute_privileged_obs(
     # Main body surge added mass: effective inertia = I_rigid + M_added.
     # Buoy added mass surge excluded (zero encoder sensitivity across all runs).
     if env.cfg.state_space >= 19:
-        priv_obs.append(_added_mass_surge(env._hydro))  # 1D: main M_a surge
+        priv_obs.append(env._hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1))  # 1D: main M_a surge
 
     return torch.cat(priv_obs, dim=-1)

@@ -158,10 +158,6 @@ def effort_limit_cost(
     return (computed.abs().max(dim=-1).values > real_limit).float()
 
 
-# Alias: same logic, clearer name for config readability
-joint_torque_cost = effort_limit_cost
-
-
 def joint_velocity_limit_cost(
     _robot: Articulation,
     env: ALBCEnv,

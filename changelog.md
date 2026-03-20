@@ -4,6 +4,59 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] Constrained ALBC MDP simplification (rewards, events, constraints, observations)
+
+### Context
+MDP module (4 files, ~1,607 lines) had accumulated dead code paths, unused reward functions,
+penalty curriculum mechanism (always disabled at ratio=0.0), and redundant abstractions across
+DR function signatures. Only 1 registered task (`Isaac-Constrained-ALBC-Encoder-v0`) uses 3
+active rewards (command/quadratic +5.0, smoothness -0.1, progress +2.0). Simplified to reduce
+algorithmic complexity for easier debugging and problem diagnosis.
+
+Discovered pre-existing runner namespace collision: both `hero_agent` and `constrained_albc`
+register `ConstraintEncoderRunner` into `_runner_module`, causing hero_agent's version to
+override constrained_albc's at runtime. This is a separate issue not addressed in this session.
+
+### Changed
+- `mdp/rewards.py`: `ALBCRewardCfg` reduced from 10 fields to 5 (removed `command_type`,
+  `command_sigma`, `command_e_max`, `command_alpha`, `settling_weight`, `settling_threshold`,
+  `energy_weight`, `penalty_curriculum_ratio`). `RewardManager` simplified: removed penalty
+  curriculum mechanism, `_last_step_terms` dead storage, `penalty_scale` property,
+  `update_curriculum()`. Added no-op `set_max_iterations()` for runner compatibility.
+  `command_reward()` simplified to quadratic-only (removed laplacian branch).
+- `mdp/events.py`: Introduced `DRSampler` class bundling `(cfg, num_envs, device,
+  doraemon_sampled)`. Absorbed `_sample_or_uniform()` into `DRSampler.get()` and
+  `_apply_xyz_offset_with_doraemon()` into `DRSampler.sample_xyz_offset()`. All 6 DR
+  functions (`randomize_hydrodynamics`, `randomize_joint_gains`, `randomize_joint_effort_limit`,
+  `randomize_body_mass`, `randomize_joint_friction`, `randomize_payload`) changed signature
+  from `(env, env_ids, rand_cfg, sampled=None)` to `(env, env_ids, dr: DRSampler)`.
+- `mdp/observations.py`: Inlined `_added_mass_surge()` helper into `compute_privileged_obs()`.
+- `mdp/constraints.py`: Removed `joint_torque_cost` alias (was `= effort_limit_cost`).
+- `mdp/__init__.py`: Removed exports `settling_reward`, `energy_penalty`, `joint_torque_cost`.
+  Added `DRSampler` export.
+- `config.py`: Constraint term `func=joint_torque_cost` -> `func=effort_limit_cost`.
+  `ConstrainedALBCEncoderEnvCfg.reward` simplified (removed `command_type`, `settling_weight`,
+  `energy_weight`). Moved `ema_joint_vel_alpha` from `ALBCRewardCfg` to `ALBCEnvCfg`.
+- `albc_env.py`: `_build_reward_terms()` simplified (removed settling, energy branches;
+  command term no longer passes laplacian params). `_apply_domain_randomization()` creates
+  `DRSampler` and passes `dr=dr` to all DR functions. `_ema_joint_vel_alpha` reads from
+  `self.cfg` instead of `self.cfg.reward`.
+- `runners/constraint_encoder_runner.py`: Removed `set_max_iterations` and
+  `update_curriculum` calls from `learn()` and `log()`.
+
+### Removed
+- `mdp/rewards.py`: `settling_reward()`, `energy_penalty()` functions (weight=0.0, never active)
+- `mdp/rewards.py`: Laplacian reward branch in `command_reward()` (only quadratic used)
+- `mdp/rewards.py`: Penalty curriculum mechanism (`_penalty_scale`, `_penalty_curriculum_ratio`,
+  `_penalty_curriculum_end_iter`, `update_curriculum()`, `penalty_scale` property)
+
+### Notes
+- ruff check + format clean. py_compile verified on all 8 modified files.
+- Pre-existing issue: runner namespace collision prevents standalone constrained_albc training.
+  Not addressed in this session per user instruction.
+- Pre-existing issue: `config.py` imports from deleted `doraemon.py` (previous session).
+  Not addressed per user instruction.
+
 ## [2026-03-20] Simplify constrained_albc encoder: remove dead branches
 
 ### Context

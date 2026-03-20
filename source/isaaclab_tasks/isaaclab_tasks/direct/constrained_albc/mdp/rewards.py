@@ -8,11 +8,10 @@
 Provides reward configuration, a lightweight reward manager, and reward
 functions for ALBC (joint-based attitude control) training.
 
-4-term reward architecture:
-    1. command  (+): composite Laplacian + linear ramp [0,1], dt-scaled
-    2. settling (+): binary threshold bonus {0,1}, dt-scaled
-    3. energy   (-): mean(joint_vel^2), dt-scaled
-    4. smoothness (-): mean(da^2) + mean(d2a^2), dt-scaled
+3-term reward architecture:
+    1. command    (+): quadratic -(roll_err^2 + pitch_err^2), dt-scaled
+    2. smoothness (-): mean(da^2) + mean(d2a^2), dt-scaled
+    3. progress   (+): PBRS prev_potential - gamma*potential, NOT dt-scaled
 
 Plus: termination_penalty (one-time, NOT dt-scaled).
 """
@@ -40,40 +39,22 @@ if TYPE_CHECKING:
 
 @configclass
 class ALBCRewardCfg:
-    """ALBC reward configuration: 4-term architecture.
+    """ALBC reward configuration: 3-term architecture.
 
-    Active terms (all dt-scaled):
-        command    (+5.0): composite Laplacian + linear ramp [0,1]
-        settling   (+3.0): binary threshold bonus {0,1}
-        energy     (-0.3): mean(joint_vel^2) kinetic energy proxy
-        smoothness (-0.5): mean(da^2) + mean(d2a^2) action smoothness
+    Active terms (all dt-scaled unless noted):
+        command    (+5.0): quadratic -(roll_err^2 + pitch_err^2)
+        smoothness (-0.1): mean(da^2) + mean(d2a^2) action smoothness
+        progress   (+2.0): PBRS prev_potential - gamma*potential (NOT dt-scaled)
     """
 
-    # Command tracking reward
-    # "quadratic": -k * (roll_err^2 + pitch_err^2), gradient weakens near zero
-    # "laplacian": composite exp(-e/sigma) + linear ramp, gradient strong near zero
+    # Command tracking reward: quadratic -(roll_err^2 + pitch_err^2)
     command_weight: float = 5.0
-    command_type: str = "laplacian"  # "quadratic" or "laplacian"
-    command_sigma: float = 0.35  # Laplacian 1/e point (rad)
-    command_e_max: float = 1.0  # Linear ramp saturation (rad)
-    command_alpha: float = 0.6  # Laplacian fraction
-
-    # Settling: binary threshold bonus (1 if ||e|| < threshold, 0 otherwise)
-    settling_weight: float = 3.0
-    settling_threshold: float = 0.087  # ~5 deg
-
-    # Energy: joint velocity squared (kinetic energy proxy)
-    energy_weight: float = -0.3
 
     # Action smoothness: first + second order action difference
     smoothness_weight: float = -0.5
 
     # -- Meta fields (not reward terms) --
     termination_penalty: float = -10.0
-    penalty_curriculum_ratio: float = 0.0
-
-    # EMA alpha for constraint system (not used by rewards directly)
-    ema_joint_vel_alpha: float = 0.2
 
     # -- PBRS progress reward --
     progress_weight: float = 0.0
@@ -121,13 +102,9 @@ class RewardManager:
         cfg: dict[str, RewardTermCfg],
         num_envs: int,
         device: str,
-        penalty_curriculum_ratio: float = 0.0,
     ) -> None:
         self.num_envs = num_envs
         self.device = device
-        self._penalty_curriculum_ratio = penalty_curriculum_ratio
-        self._penalty_curriculum_end_iter = 0
-        self._penalty_scale = 1.0 if penalty_curriculum_ratio <= 0 else 0.0
 
         # Parse configurations (skip terms with zero weight)
         self._term_names: list[str] = []
@@ -143,10 +120,6 @@ class RewardManager:
         self._episode_sums: dict[str, torch.Tensor] = {
             name: torch.zeros(num_envs, dtype=torch.float32, device=device) for name in self._term_names
         }
-        # Last step's per-term per-env scaled values (for post-hoc gate correction)
-        self._last_step_terms: dict[str, torch.Tensor] = {
-            name: torch.zeros(num_envs, dtype=torch.float32, device=device) for name in self._term_names
-        }
 
     @property
     def active_terms(self) -> list[str]:
@@ -158,22 +131,8 @@ class RewardManager:
         """Episode sums for each reward term (for logging)."""
         return self._episode_sums
 
-    @property
-    def penalty_scale(self) -> float:
-        """Current penalty curriculum scale [0, 1]."""
-        return self._penalty_scale
-
-    def set_max_iterations(self, max_iterations: int) -> None:
-        """Compute penalty curriculum end iteration from ratio and max_iterations."""
-        if self._penalty_curriculum_ratio <= 0:
-            return
-        self._penalty_curriculum_end_iter = int(self._penalty_curriculum_ratio * max_iterations)
-
-    def update_curriculum(self, iteration: int) -> None:
-        """Update penalty scale based on training iteration (linear ramp)."""
-        if self._penalty_curriculum_end_iter <= 0:
-            return
-        self._penalty_scale = min(1.0, iteration / self._penalty_curriculum_end_iter)
+    def set_max_iterations(self, _max_iterations: int) -> None:
+        """No-op: penalty curriculum removed. Kept for runner compatibility."""
 
     def compute(
         self,
@@ -194,11 +153,6 @@ class RewardManager:
             else:
                 scaled_value = term_value * weight
 
-            # Penalty curriculum: scale negative-weight terms
-            if weight < 0:
-                scaled_value = scaled_value * self._penalty_scale
-
-            self._last_step_terms[name] = scaled_value
             self._reward_buf += scaled_value
             self._episode_sums[name] += scaled_value
 
@@ -215,61 +169,24 @@ class RewardManager:
 
 
 # =============================================================================
-# Reward Functions (4-term architecture)
+# Reward Functions (3-term architecture)
 # =============================================================================
 
 
 def command_reward(
     _robot: Articulation,
     env: ALBCEnv,
-    reward_type: str = "laplacian",
-    sigma: float = 0.35,
-    e_max: float = 1.0,
-    alpha: float = 0.6,
     **_kwargs,
 ) -> torch.Tensor:
-    """Command tracking reward with selectable type.
+    """Quadratic command tracking reward: -(roll_err^2 + pitch_err^2).
 
-    "quadratic": -(roll_err^2 + pitch_err^2). Gradient = -2*error, weakens near
-    zero -- natural entropy-friendly structure (paper default).
-
-    "laplacian": composite exp(-e/sigma) + linear ramp [0,1]. Gradient stays
-    strong near zero -- good for fine control but can cause entropy collapse
-    without entropy bonus.
+    Gradient = -2*error, weakens near zero -- natural entropy-friendly structure.
 
     Args:
-        env: Environment instance (provides _potentials, _attitude_error).
-        reward_type: "quadratic" or "laplacian".
-        sigma: Laplacian 1/e width in radians (laplacian only).
-        e_max: Linear ramp saturation in radians (laplacian only).
-        alpha: Laplacian fraction [0, 1] (laplacian only).
+        env: Environment instance (provides _attitude_error).
     """
-    if reward_type == "quadratic":
-        err_rp = env._attitude_error[:, :2]
-        return -(err_rp[:, 0] ** 2 + err_rp[:, 1] ** 2)
-    else:
-        e = env._potentials
-        laplacian = torch.exp(-e / sigma)
-        linear = torch.clamp(1.0 - e / e_max, min=0.0)
-        return alpha * laplacian + (1.0 - alpha) * linear
-
-
-def settling_reward(
-    _robot: Articulation,
-    env: ALBCEnv,
-    threshold: float = 0.087,
-    **_kwargs,
-) -> torch.Tensor:
-    """Binary per-step settling bonus: 1.0 if error < threshold, 0.0 otherwise.
-
-    Incentivizes fast settling: episode sum = weight * dt * (steps inside threshold).
-    dt-scaled.
-
-    Args:
-        env: Environment instance (provides _potentials).
-        threshold: Settling zone boundary in radians.
-    """
-    return (env._potentials < threshold).float()
+    err_rp = env._attitude_error[:, :2]
+    return -(err_rp[:, 0] ** 2 + err_rp[:, 1] ** 2)
 
 
 def progress_reward(
@@ -291,20 +208,6 @@ def progress_reward(
         gamma: Discount factor for shaping (should match training gamma).
     """
     return env._prev_potentials - gamma * env._potentials
-
-
-def energy_penalty(
-    _robot: Articulation,
-    env: ALBCEnv,
-    **_kwargs,
-) -> torch.Tensor:
-    """Joint kinetic energy proxy: mean(joint_vel^2).
-
-    Zero at equilibrium, penalizes fast joint motion. Provides soft preference
-    for energy-efficient control within hard velocity bounds (constraint system).
-    dt-scaled. Use with negative weight.
-    """
-    return torch.mean(_robot.data.joint_vel[:, env._albc_joint_ids] ** 2, dim=-1)
 
 
 def action_smoothness_penalty(

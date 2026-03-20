@@ -8,8 +8,6 @@
 This module provides:
 - Event functions for domain randomization and reset
 - Reward system (manager, configuration, reward functions)
-
-Following Isaac Lab conventions, all MDP components are organized under this module.
 """
 
 from .constraints import (
@@ -19,12 +17,12 @@ from .constraints import (
     attitude_absolute_cost,
     compute_all_costs,
     effort_limit_cost,
-    joint_torque_cost,
     joint_velocity_limit_cost,
     overshoot_cost,
     yaw_velocity_cost,
 )
 from .events import (
+    DRSampler,
     compute_equilibrium_joint_positions,
     randomize_body_mass,
     randomize_hydrodynamics,
@@ -48,9 +46,7 @@ from .rewards import (
     RewardTermCfg,
     action_smoothness_penalty,
     command_reward,
-    energy_penalty,
     progress_reward,
-    settling_reward,
 )
 
 __all__ = [
@@ -61,11 +57,11 @@ __all__ = [
     "attitude_absolute_cost",
     "compute_all_costs",
     "effort_limit_cost",
-    "joint_torque_cost",
     "joint_velocity_limit_cost",
     "overshoot_cost",
     "yaw_velocity_cost",
     # Events
+    "DRSampler",
     "compute_equilibrium_joint_positions",
     "randomize_body_mass",
     "randomize_hydrodynamics",
@@ -88,7 +84,5 @@ __all__ = [
     # Rewards (functions)
     "action_smoothness_penalty",
     "command_reward",
-    "energy_penalty",
     "progress_reward",
-    "settling_reward",
 ]
