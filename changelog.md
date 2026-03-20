@@ -121,6 +121,28 @@ Verified: grep for `hero_agent|HeroAgent` shows only external asset references
   compat code (4 lines, legacy from hero_agent copy, never relevant in constrained_albc).
   save/load uses `_save_aux_state`/`_load_aux_state`. Removed unused `os`/`torch` imports.
 
+### Changed (encoder/ structural refactoring, separate session)
+- `encoder/actor_critic_encoder.py`: Unified activation path -- removed conditional
+  `last_activation="tanh"` from MLP construction. Both tanh and sigmoid now flow through
+  `_activate_z()` unconditionally. Checkpoint-safe (nn.Tanh has 0 params, state_dict identical).
+  501 -> 464 lines.
+- `encoder/actor_critic_encoder.py`: Extracted `_build_encoder_input()` helper that returns
+  `(encoder_input, hist_flat)` tuple. Eliminates double `_get_hist_flat()` call in
+  `_get_combined_obs()` and duplicate encoder-input concatenation in `update_normalization()`.
+  `_encode()`, `_get_combined_obs()`, `_get_critic_obs()`, `update_normalization()` all refactored.
+- `encoder/actor_critic_encoder.py`: `_handle_critic_dim_mismatch()` simplified -- removed
+  `prefix` parameter and `cost_critic` knowledge. Base class now handles only `critic.` prefix.
+- `encoder/actor_critic_encoder_constrained.py`: Cost critic input dim mismatch check inlined
+  in `load_state_dict()` (was delegated to base class via `_handle_critic_dim_mismatch()`).
+  117 -> 130 lines.
+
+### Removed (encoder/ dead code, separate session)
+- `encoder/actor_critic_encoder.py`: Removed `act_with_z_hat()` (13 LOC, AdaptRunner-only method
+  not applicable to constrained_albc which has no Phase 2 adaptation pipeline)
+- `encoder/actor_critic_encoder.py`: Removed `self._proprio_history_len` and
+  `self._proprio_feature_dim` instance variable storage (ActorCriticEncoderAdapt-specific,
+  never referenced within this class). Signature params kept to absorb config kwargs.
+
 ## [2026-03-18] C-TRPO encoder fix experiments: multi-step caused KL instability
 
 ### Context

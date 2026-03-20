@@ -112,6 +112,19 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
                         state_dict[cost_prefix + k] = v
 
             # Detect input dimension mismatch (symmetric <-> asymmetric)
-            self._handle_critic_dim_mismatch(state_dict, cost_prefix)
+            weight_keys = sorted(
+                [k for k in state_dict if k.startswith(cost_prefix) and k.endswith(".weight")],
+                key=lambda k: int(k.removeprefix(cost_prefix).split(".")[0]),
+            )
+            if weight_keys:
+                ckpt_input_dim = state_dict[weight_keys[0]].shape[1]
+                if ckpt_input_dim != self.num_critic_obs:
+                    logger.warning(
+                        "cost_critic input dim mismatch (checkpoint %dD vs model %dD), reinitializing.",
+                        ckpt_input_dim,
+                        self.num_critic_obs,
+                    )
+                    for k, v in self.cost_critic.state_dict().items():
+                        state_dict[cost_prefix + k] = v
 
         return super().load_state_dict(state_dict, strict=strict)
