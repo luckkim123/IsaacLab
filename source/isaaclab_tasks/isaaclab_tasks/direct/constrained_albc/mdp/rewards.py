@@ -94,7 +94,7 @@ class RewardManager:
 
     Computes total reward as a weighted sum of individual terms, with automatic
     dt scaling and episode sum tracking for logging. All weights are fixed from
-    construction (DORAEMON manages DR difficulty, not reward weights).
+    construction.
     """
 
     def __init__(

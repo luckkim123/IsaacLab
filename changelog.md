@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] Final DORAEMON reference cleanup + constraint_trpo dead guard removal
+
+### Context
+Final pass of the constrained ALBC simplification plan. Previous sessions deleted
+`doraemon.py` and removed all functional DORAEMON code, but docstrings in 4 files
+still referenced "DORAEMON samples" and "optional DORAEMON". Additionally,
+`constraint_trpo.py` had 3 `hasattr(self.policy, "evaluate_costs")` guards that
+were dead code (the policy class `ActorCriticEncoderConstrained` always has
+`evaluate_costs`), a `**kwargs` catch-all for "legacy Lagrangian params" that no
+longer exist, and `self.rnd = None` (random network distillation, never used).
+Verified entire simplification plan: AST parse, grep for removed features, ruff
+check all pass. Total plan reduction: ~1,317 lines.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Removed `**kwargs` catch-all from `__init__`
+  (no unexpected kwargs after config cleanup). Removed 3 `hasattr` guards around
+  `self.policy.evaluate_costs()` calls (policy always has this method). Simplified
+  `self.rnd = None` comment to just document `self.optimizer` purpose. -12 lines.
+- `mdp/events.py`: Removed "optional DORAEMON samples" from 8 docstrings across
+  DR functions (`randomize_hydrodynamics`, `randomize_body_mass`, `randomize_payload`,
+  `randomize_joint_gains`, `randomize_joint_effort_limit`, `randomize_joint_friction`,
+  `DRSampler`, `_randomize_hydro_model`).
+- `mdp/rewards.py`: Removed "DORAEMON manages DR difficulty" from `RewardManager` docstring.
+- `agents/rsl_rl_ppo_cfg.py`: Removed "DORAEMON +" from runner config docstring.
+
 ## [2026-03-20] Constrained ALBC MDP simplification (rewards, events, constraints, observations)
 
 ### Context

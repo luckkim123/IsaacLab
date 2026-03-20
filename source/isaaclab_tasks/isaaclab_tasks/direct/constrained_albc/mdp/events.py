@@ -67,7 +67,7 @@ def _rand_uniform_range(
 
 
 # -----------------------------------------------------------------------------
-# DRSampler: bundles DR config and optional DORAEMON samples
+# DRSampler: bundles DR config for domain randomization
 # -----------------------------------------------------------------------------
 
 
@@ -89,17 +89,10 @@ class DRSampler:
         self.num_envs = num_envs
         self.device = device
 
-    def get(
-        self,
-        _key: str,
-        range_tuple: tuple[float, float],
-        shape: tuple | int | None = None,
-        **_kwargs,
-    ) -> torch.Tensor:
+    def get(self, range_tuple: tuple[float, float], shape: tuple | int | None = None) -> torch.Tensor:
         """Sample uniform random values for DR parameter.
 
         Args:
-            _key: Parameter name (unused, kept for call-site consistency).
             range_tuple: (low, high) for uniform sampling.
             shape: Output tensor shape. Defaults to num_envs.
 
@@ -181,35 +174,35 @@ def _randomize_hydro_model(
     Args:
         hydro: The hydrodynamics model to randomize.
         env_ids: Environment indices to randomize.
-        dr: DRSampler with config and optional DORAEMON samples.
+        dr: DRSampler with config.
     """
     n = dr.num_envs
     cfg = dr.cfg
     base = _get_hydro_base(hydro)
 
     # Added mass (scale each of 6 DOF)
-    am_scales = dr.get("added_mass_scale", cfg.added_mass_scale, shape=(n, 6), broadcast_dim=6)
+    am_scales = dr.get(cfg.added_mass_scale, shape=(n, 6))
     hydro.added_mass_matrix[env_ids] = torch.diag_embed(base.added_mass.unsqueeze(0) * am_scales)
 
     # Linear damping
-    ld_scales = dr.get("linear_damping_scale", cfg.linear_damping_scale, shape=(n, 6), broadcast_dim=6)
+    ld_scales = dr.get(cfg.linear_damping_scale, shape=(n, 6))
     hydro.linear_damping[env_ids] = base.linear_damping.unsqueeze(0) * ld_scales
 
     # Quadratic damping
-    qd_scales = dr.get("quadratic_damping_scale", cfg.quadratic_damping_scale, shape=(n, 6), broadcast_dim=6)
+    qd_scales = dr.get(cfg.quadratic_damping_scale, shape=(n, 6))
     hydro.quadratic_damping[env_ids] = base.quadratic_damping.unsqueeze(0) * qd_scales
 
     # Yaw-specific quadratic damping override (index 5 = yaw)
     if hasattr(cfg, "yaw_damping_scale"):
-        yaw_scales = dr.get("yaw_damping_scale", cfg.yaw_damping_scale)
+        yaw_scales = dr.get(cfg.yaw_damping_scale)
         hydro.quadratic_damping[env_ids, 5] = base.quadratic_damping[5] * yaw_scales
 
     # Volume
-    vol_scales = dr.get("volume_scale", cfg.volume_scale)
+    vol_scales = dr.get(cfg.volume_scale)
     hydro.volume[env_ids] = base.volume * vol_scales
 
     # Water density
-    hydro.water_density[env_ids] = dr.get("water_density", cfg.water_density_range)
+    hydro.water_density[env_ids] = dr.get(cfg.water_density_range)
 
     hydro.update_buoyancy_force(env_ids)
 
@@ -234,7 +227,7 @@ def _randomize_hydro_model(
     )
 
     # Rigid body inertia
-    inertia_scales = dr.get("inertia_scale", cfg.inertia_scale, shape=(n, 3), broadcast_dim=3)
+    inertia_scales = dr.get(cfg.inertia_scale, shape=(n, 3))
     hydro.rigid_body_inertia[env_ids] = base.inertia.unsqueeze(0) * inertia_scales
 
     # Enforce added mass stability constraint after DR.
@@ -263,7 +256,7 @@ def randomize_hydrodynamics(
     Args:
         env: The ALBC environment instance.
         env_ids: Environment indices to randomize. If None, randomizes all.
-        dr: DRSampler with config and optional DORAEMON samples.
+        dr: DRSampler with config.
     """
     env_ids = _ensure_env_ids(env, env_ids)
 
@@ -514,7 +507,7 @@ def randomize_payload(
     Args:
         env: The ALBC environment instance.
         env_ids: Environment indices to randomize. If None, randomizes all.
-        dr: DRSampler with config and optional DORAEMON samples.
+        dr: DRSampler with config.
     """
     env_ids = _ensure_env_ids(env, env_ids)
 
@@ -526,7 +519,7 @@ def randomize_payload(
     cfg = dr.cfg
 
     # Randomize mass
-    env._payload_mass[env_ids] = dr.get("payload_mass", cfg.payload_mass_range)
+    env._payload_mass[env_ids] = dr.get(cfg.payload_mass_range)
 
     # Reset attachment offset to fixed default (no randomization)
     base_offset = torch.tensor(env.cfg.payload_attachment_offset, device=device, dtype=torch.float32)
@@ -594,12 +587,12 @@ def randomize_joint_gains(
     Args:
         env: The ALBC environment instance.
         env_ids: Environment indices to randomize.
-        dr: DRSampler with config and optional DORAEMON samples.
+        dr: DRSampler with config.
     """
     cfg = dr.cfg
 
-    stiffness = dr.get("joint_stiffness", cfg.joint_stiffness_range)
-    damping = dr.get("joint_damping", cfg.joint_damping_range)
+    stiffness = dr.get(cfg.joint_stiffness_range)
+    damping = dr.get(cfg.joint_damping_range)
 
     # unsqueeze for broadcasting: (num_reset,) -> (num_reset, 1) -> (num_reset, num_joints)
     env._robot.write_joint_stiffness_to_sim(stiffness.unsqueeze(-1), joint_ids=env._albc_joint_ids, env_ids=env_ids)
@@ -624,9 +617,9 @@ def randomize_joint_effort_limit(
     Args:
         env: The ALBC environment instance.
         env_ids: Environment indices to randomize.
-        dr: DRSampler with config and optional DORAEMON samples.
+        dr: DRSampler with config.
     """
-    scale = dr.get("joint_effort_limit", dr.cfg.joint_effort_limit_range)
+    scale = dr.get(dr.cfg.joint_effort_limit_range)
 
     # Cache default effort limit on first call (no default_joint_effort_limit in Isaac Lab API)
     if not hasattr(env, "_default_effort_limit"):
@@ -672,7 +665,7 @@ def randomize_body_mass(
     Args:
         env: The ALBC environment instance.
         env_ids: Environment indices to randomize.
-        dr: DRSampler with config and optional DORAEMON samples.
+        dr: DRSampler with config.
     """
     env_ids_cpu = env_ids.cpu()
 
@@ -681,7 +674,7 @@ def randomize_body_mass(
     masses[env_ids_cpu] = env._robot.data.default_mass[env_ids_cpu].clone()
 
     # Single scale per env, broadcast to all bodies (always cpu for PhysX API)
-    scales = dr.get("body_mass_scale", dr.cfg.body_mass_scale).cpu()
+    scales = dr.get(dr.cfg.body_mass_scale).cpu()
     masses[env_ids_cpu] *= scales.unsqueeze(-1)
     masses = torch.clamp(masses, min=1e-6)
 
@@ -716,12 +709,12 @@ def randomize_joint_friction(
     Args:
         env: The ALBC environment instance.
         env_ids: Environment indices to randomize.
-        dr: DRSampler with config and optional DORAEMON samples.
+        dr: DRSampler with config.
     """
     cfg = dr.cfg
 
-    static = dr.get("joint_static_friction", cfg.joint_static_friction_range)
-    viscous = dr.get("joint_viscous_friction", cfg.joint_viscous_friction_range)
+    static = dr.get(cfg.joint_static_friction_range)
+    viscous = dr.get(cfg.joint_viscous_friction_range)
 
     # unsqueeze for broadcasting: (num_reset,) -> (num_reset, 1) -> (num_reset, num_joints)
     env._robot.write_joint_friction_coefficient_to_sim(

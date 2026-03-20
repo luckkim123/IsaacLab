@@ -155,7 +155,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
 class ConstrainedALBCEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
     """Runner configuration for constrained encoder training (C-TRPO barrier).
 
-    Uses ConstraintEncoderRunner: DORAEMON + encoder metrics + barrier state.
+    Uses ConstraintEncoderRunner: encoder metrics + barrier state.
     """
 
     class_name: str = "ConstraintEncoderRunner"
