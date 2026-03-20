@@ -6,12 +6,7 @@
 """Constraint cost functions for Lagrangian constrained RL.
 
 Provides cost functions (binary indicator or continuous) for the constrained
-RL pipeline. Each constraint has a per-step budget D_k and a cost_type.
-
-Binary constraints output 0/1 per step. Continuous constraints output a
-non-negative scalar per step. The budget semantics differ:
-    - binary: D_k = probability of violation per step
-    - average: D_k = expected cost per step (mean over episode)
+RL pipeline. Each constraint has a per-step budget D_k.
 
 Registry pattern: ALBCConstraintCfg holds a list of ConstraintTermCfg,
 each referencing a cost function. compute_all_costs() iterates over them.
@@ -46,14 +41,12 @@ class ConstraintTermCfg:
         func: Cost function (robot, env, **params) -> (num_envs,) tensor.
         params: Keyword arguments forwarded to func.
         budget: Per-step budget D_k.
-        cost_type: "binary" (0/1 indicator) or "average" (continuous non-negative).
         name: Logging name. Derived from func.__name__ if empty.
     """
 
     func: Callable = lambda _r, _e: torch.zeros(1)  # placeholder; overridden per term
     params: dict = {}
     budget: float = 0.1
-    cost_type: str = "binary"
     name: str = ""
 
 
@@ -153,9 +146,9 @@ def effort_limit_cost(
         (num_envs,) binary tensor.
     """
     computed = _robot.data.computed_torque[:, env._albc_joint_ids]
-    # Per-env DR'd effort limits: (num_envs, num_joints) -> max across joints -> (num_envs,)
-    real_limit = _robot.data.joint_effort_limits[:, env._albc_joint_ids].max(dim=-1).values * real_limit_scale
-    return (computed.abs().max(dim=-1).values > real_limit).float()
+    # Per-env, per-joint DR'd effort limits: (num_envs, num_joints)
+    limits = _robot.data.joint_effort_limits[:, env._albc_joint_ids] * real_limit_scale
+    return (computed.abs() > limits).any(dim=-1).float()
 
 
 def joint_velocity_limit_cost(
@@ -198,8 +191,8 @@ def overshoot_cost(
     """
     curr = env._attitude_error[:, :2]
     prev = env._prev_attitude_error_rp
-    # Per-axis conjunction: sign flip AND magnitude > threshold on the SAME axis
-    per_axis = (curr * prev < 0) & (curr.abs() > threshold)
+    # Per-axis conjunction: sign flip AND previous error > threshold (overshoot from significant error)
+    per_axis = (curr * prev < 0) & (prev.abs() > threshold)
     return per_axis.any(dim=-1).float()
 
 

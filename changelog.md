@@ -4,6 +4,61 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] MDP code review: 3 critical bugs + 5 theoretical fixes
+
+### Context
+Systematic code review of Constrained ALBC MDP modules (rewards.py, constraints.py,
+observations.py, events.py, albc_env.py) using 3 parallel code-explorer agents.
+Identified 3 critical bugs, 7 theoretical issues, 7 design items, and 6 minor items.
+Fixed all critical bugs and 5 of 7 theoretical issues in this session.
+
+BUG-1 root cause: `_update_action_buffers()` stored `self._actions` (current step a_t)
+into `_prev_actions_obs` instead of `self._prev_actions` (a_{t-1}). This caused a causal
+violation -- policy obs[11:13] contained the current action, while encoder proprio history
+correctly used the previous action. Temporal inconsistency between policy and encoder.
+
+BUG-2: `effort_limit_cost` compared `max(torques)` against `max(limits)` instead of
+per-joint comparison. When joints have different DR'd limits, a violation on the weaker
+joint could be masked by the stronger joint's higher limit.
+
+BUG-3: Joint gain/friction randomization ran unconditionally even with `rand_cfg.enable=False`
+(debug/eval mode). Comment claimed "ranges collapse to defaults" but actual DR ranges were
+wide (Kp 40-120, Kd 0.5-5.0), so debug envs had randomized actuator properties.
+
+### Fixed
+- `albc_env.py`: BUG-1 -- `_prev_actions_obs` now stores `_prev_actions` (a_{t-1}) instead
+  of `_actions` (a_t). Both sliced and full-clone paths corrected.
+- `mdp/constraints.py`: BUG-2 -- `effort_limit_cost` uses per-joint comparison
+  `(computed.abs() > limits).any(dim=-1)` instead of `max(dim=-1)` reduction on both sides.
+- `albc_env.py`: BUG-3 -- Joint actuator DR (gains, effort limits, friction) wrapped in
+  `if rand_cfg.enable:` guard. Debug/eval envs now keep default actuator properties.
+- `mdp/constraints.py`: THEO-1 -- `overshoot_cost` checks `prev.abs() > threshold` (departure
+  magnitude) instead of `curr.abs() > threshold` (landing magnitude). Catches small overshoots
+  where zero crossing lands below threshold (e.g., prev=+0.04rad -> curr=-0.01rad).
+
+### Changed
+- `albc_env.py`: THEO-3 -- `_get_attitude_error()` returns cached `self._attitude_error` instead
+  of recomputing. Safe because `_get_rewards()` -> `_update_potentials()` always runs first in
+  Isaac Lab's step order (line 393 before 410 in direct_rl_env.py). Eliminates duplicate
+  `compute_attitude_error()` call per step.
+- `mdp/events.py`: THEO-6 -- Payload restoring moment clamp uses horizontal (xy) norm instead
+  of 3D norm. Roll/pitch restoring moment depends only on horizontal offset; Z-component payload
+  was being over-constrained.
+- `mdp/events.py`: THEO-7 -- `_HydroBaseCache.inertia` fallback (0.5 * added_mass[3:6]) now
+  emits `logger.warning()` when `rigid_body_inertia` is None. Added `import logging`.
+
+### Removed
+- `mdp/constraints.py`: THEO-2 -- Removed dead `cost_type` field from `ConstraintTermCfg`.
+  Never read by `compute_all_costs()` or `constraint_trpo.py`. Removed `cost_type="average"`
+  from `yaw_velocity_cost` term in `config.py`. Updated module docstring.
+
+### Notes
+- THEO-4 (PBRS L2 norm vs quadratic gradient mismatch): Not fixed -- reward landscape change
+  would require full retraining. Documented only.
+- THEO-5 (yaw in obs but not in reward): Not fixed -- obs dimension change affects encoder/actor
+  architecture. Separate task.
+- DES-1~7 and M-1~6: Out of scope (no functional impact). Documented in review plan.
+
 ## [2026-03-20] Full package code review: encoder optimizer resume + NaN guard
 
 ### Context

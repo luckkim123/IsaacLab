@@ -352,8 +352,7 @@ class ALBCEnv(DirectRLEnv):
         return torch.atan2(torch.sin(error), torch.cos(error))
 
     def _get_attitude_error(self) -> torch.Tensor:
-        """Compute and cache attitude error for observations."""
-        self._attitude_error = self.compute_attitude_error(self._robot.data.root_quat_w)
+        """Return cached attitude error (computed in _update_potentials during reward step)."""
         return self._attitude_error
 
     def _get_proprio_features(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -428,9 +427,9 @@ class ALBCEnv(DirectRLEnv):
         self._prev_actions = self._actions.clone()
         self._actions = actions.clone().clamp(-1.0, 1.0)
         if obs_action_slice is not None:
-            self._prev_actions_obs = self._actions[:, obs_action_slice].clone()
+            self._prev_actions_obs = self._prev_actions[:, obs_action_slice].clone()
         else:
-            self._prev_actions_obs = self._actions.clone()
+            self._prev_actions_obs = self._prev_actions.clone()
         self._control_step_counter += 1
 
     def _get_delayed_actions(self, actions: torch.Tensor) -> torch.Tensor:
@@ -974,14 +973,15 @@ class ALBCEnv(DirectRLEnv):
         else:
             reset_joint_positions_default(env=self, env_ids=env_ids)
 
-        # Joint actuator DR: always applied (when DR disabled, ranges collapse to defaults).
+        # Joint actuator DR: only when DR enabled.
         # TDC envs override stiffness/damping in their own _reset_idx().
-        dr = getattr(self, "_current_dr_sampler", None)
-        if dr is None:
-            dr = DRSampler(rand_cfg, num_envs=len(env_ids), device=self.device)
-        randomize_joint_gains(env=self, env_ids=env_ids, dr=dr)
-        randomize_joint_effort_limit(env=self, env_ids=env_ids, dr=dr)
-        randomize_joint_friction(env=self, env_ids=env_ids, dr=dr)
+        if rand_cfg.enable:
+            dr = getattr(self, "_current_dr_sampler", None)
+            if dr is None:
+                dr = DRSampler(rand_cfg, num_envs=len(env_ids), device=self.device)
+            randomize_joint_gains(env=self, env_ids=env_ids, dr=dr)
+            randomize_joint_effort_limit(env=self, env_ids=env_ids, dr=dr)
+            randomize_joint_friction(env=self, env_ids=env_ids, dr=dr)
 
         # Potential initialization (must be after pose reset).
         # write_root_pose_to_sim() immediately updates internal data cache,

@@ -250,7 +250,6 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     # Virtual Payload Configuration
     # Payload is applied to the gripper body (fixed to base). Offsets in gripper frame.
     # ==========================================================================
-    enable_payload: bool = True
     payload_mass: float = 0.5  # kg
     payload_attachment_offset: tuple[float, float, float] = (0.0, 0.0, -0.05)  # m, gripper frame
 
@@ -277,6 +276,9 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     # ==========================================================================
     # Constraints (C-TRPO / IPO)
     # ==========================================================================
+    # Budget values are per-step raw budgets D_k. The algorithm transforms them to
+    # discounted budgets d_k = D_k / (1 - cost_gamma). With cost_gamma=0.99 (default),
+    # d_k = D_k * 100. Barrier penalty activates as mean cost return approaches d_k.
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(
         terms=[
             # --- Binary constraints (5 terms) ---
@@ -288,7 +290,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
             ),
             ConstraintTermCfg(
                 func=attitude_absolute_cost,
-                params={"limit": 1.396},
+                params={"limit": 1.396},  # ~80 deg
                 budget=0.01,
                 name="attitude_abs",
             ),
@@ -299,7 +301,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
             ),
             ConstraintTermCfg(
                 func=joint_velocity_limit_cost,
-                params={"limit_rad_per_s": 4.189},
+                params={"limit_rad_per_s": 4.189},  # 40 RPM (Dynamixel XW540 no-load)
                 budget=0.05,
                 name="joint_vel_limit",
             ),
@@ -313,7 +315,6 @@ class ALBCEnvCfg(DirectRLEnvCfg):
             ConstraintTermCfg(
                 func=yaw_velocity_cost,
                 budget=0.35,
-                cost_type="average",
                 name="yaw_vel",
             ),
         ],

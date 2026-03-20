@@ -15,9 +15,12 @@ thrusters.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import torch
+
+logger = logging.getLogger(__name__)
 
 from isaaclab.utils.math import euler_xyz_from_quat, quat_from_euler_xyz, quat_mul
 
@@ -149,11 +152,15 @@ class _HydroBaseCache:
         self.volume: float = hydro.cfg.volume if hydro.cfg.volume is not None else hydro.volume[0].item()
         self.cob = torch.tensor(hydro.cfg.center_of_buoyancy, **kw)
         self.cog = torch.tensor(hydro.cfg.center_of_gravity, **kw)
-        self.inertia = (
-            torch.tensor(hydro.cfg.rigid_body_inertia, **kw)
-            if hydro.cfg.rigid_body_inertia is not None
-            else torch.tensor(hydro.cfg.added_mass[3:6], **kw) * 0.5
-        )
+        if hydro.cfg.rigid_body_inertia is not None:
+            self.inertia = torch.tensor(hydro.cfg.rigid_body_inertia, **kw)
+        else:
+            logger.warning(
+                "rigid_body_inertia not set for %s; falling back to 0.5 * added_mass[3:6]. "
+                "This heuristic may not match the actual rigid body inertia.",
+                type(hydro.cfg).__name__,
+            )
+            self.inertia = torch.tensor(hydro.cfg.added_mass[3:6], **kw) * 0.5
         self.water_density: float = hydro.cfg.water_density
 
 
@@ -542,8 +549,9 @@ def randomize_payload(
         env._payload_cog_offset[env_ids, 2] = _rand_uniform_range(num_reset, (z_lo, z_hi), device)
 
         # Clamp effective offset so max payload moment <= buoy restoring moment.
-        # Constraint: m * g * |r_eff| <= F_bu * h
-        # => |r_eff| <= F_bu * h / (m * g)
+        # Constraint: m * g * |r_eff_xy| <= F_bu * h
+        # => |r_eff_xy| <= F_bu * h / (m * g)
+        # Only horizontal (xy) offset contributes to roll/pitch restoring moment.
         if hasattr(env, "_buoy_hydro"):
             F_bu = env._buoy_hydro.buoyancy_force[env_ids]  # (N,)
             h = cfg.buoy_moment_arm  # scalar
@@ -552,7 +560,7 @@ def randomize_payload(
 
             # effective_offset = attachment_offset + cog_offset
             effective = env._payload_attachment_offset[env_ids] + env._payload_cog_offset[env_ids]  # (N, 3)
-            current_norm = effective.norm(dim=-1)  # (N,)
+            current_norm = effective[:, :2].norm(dim=-1)  # (N,) horizontal only
 
             # max offset magnitude per-env (inf when mass=0)
             max_norm = torch.where(
