@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] Extract constrained_albc as standalone package
+
+### Context
+The constrained encoder environment (`Isaac-HeroAgent-Constrained-Encoder-Base-v0`) was embedded
+in `hero_agent/`, sharing `base_env.py`, `config.py`, `mdp/`, `encoder/`, `runners/`, `utils/`
+with 9 other tasks. This made hero_agent a monolithic dependency: any change to shared modules
+could break constrained training, and the constrained pipeline couldn't run without the full
+hero_agent package installed.
+
+Extracted into `constrained_albc/` as a fully independent package with zero runtime dependency
+on hero_agent. Renamed `HeroAgent*` -> `ALBC*` (Active Link Buoyancy Control) throughout.
+Registered as `Isaac-Constrained-ALBC-Encoder-v0`. TDC-specific code (controllers, TDC rewards,
+TDC logging, adaptation module) was excluded since the constrained pipeline uses only base RL
+with C-TRPO + encoder.
+
+Verified: grep for `hero_agent|HeroAgent` shows only external asset references
+(`HeroAgentHydrodynamicsCfg` from `isaaclab_assets`). All ruff lint + format checks pass.
+
+### Added
+- `constrained_albc/` package (23 files): standalone C-TRPO + encoder constrained RL
+- `constrained_albc/__init__.py`: gym registration for `Isaac-Constrained-ALBC-Encoder-v0`
+- `constrained_albc/albc_env.py`: `ALBCEnv` (renamed from `HeroAgentEnv`)
+- `constrained_albc/config.py`: 5 config classes (`DomainRandomizationCfg`, `ALBCEnvCfg`, `ALBCTrainEnvCfg`, `ALBCEncoderTrainEnvCfg`, `ConstrainedALBCEncoderEnvCfg`)
+- `constrained_albc/doraemon.py`: DORAEMON adaptive DR scheduler (verbatim)
+- `constrained_albc/mdp/`: observations, events, rewards, constraints (TYPE_CHECKING renames)
+- `constrained_albc/encoder/`: `ActorCriticEncoder`, `ActorCriticEncoderConstrained` (verbatim)
+- `constrained_albc/algorithms/`: `ConstraintTRPO` only (no ppo_patch)
+- `constrained_albc/runners/`: `BaseRunner`, `EncoderRunner`, `ConstraintEncoderRunner` (no AdaptRunner)
+- `constrained_albc/agents/rsl_rl_ppo_cfg.py`: `ConstrainedALBCEncoderRunnerCfg` + constrained policy/algorithm configs
+- `constrained_albc/utils/`: logging (no TDC functions), debug_vis (verbatim)
+
+### Changed
+- `direct/__init__.py`: Added `from . import constrained_albc` for gym auto-registration
+
+### Removed
+- (From copied code) All TDC controller imports, TDC reward functions (`tdc_torque_penalty`, `_compute_M_true`, `mhat_accuracy_reward`, `compute_stability_gate`), TDC logging functions (`log_tdc_*`), adaptation module, ppo_patch
+
 ## [2026-03-18] C-TRPO encoder fix experiments: multi-step caused KL instability
 
 ### Context
