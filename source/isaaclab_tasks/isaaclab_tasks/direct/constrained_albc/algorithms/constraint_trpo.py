@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any
 
 import torch
 import torch.nn as nn
@@ -100,12 +99,7 @@ class ConstraintTRPO:
         encoder_lr: float = 3e-4,
         # Device
         device: str = "cpu",
-        # Unused kwargs from RSL-RL config forwarding (including legacy Lagrangian params)
-        **kwargs: Any,
     ) -> None:
-        if kwargs:
-            logger.debug("ConstraintTRPO ignoring unexpected kwargs: %s", list(kwargs.keys()))
-
         self.device = device
         self.policy = policy
         self.policy.to(self.device)
@@ -198,9 +192,8 @@ class ConstraintTRPO:
         # Learning rate (compatibility field for OnPolicyRunner logging)
         self.learning_rate = value_lr
 
-        # Compatibility with OnPolicyRunner (expects these attributes)
-        self.rnd = None  # No random network distillation
-        self.optimizer = self.value_optimizer  # For checkpoint save/load
+        # Compatibility with OnPolicyRunner (expects this attribute for checkpoint save/load)
+        self.optimizer = self.value_optimizer
 
     # ==================================================================
     # Storage & Rollout Interface (matches PPO)
@@ -241,10 +234,7 @@ class ConstraintTRPO:
         self.transition.observations = obs
 
         # Store cost values for this step
-        if hasattr(self.policy, "evaluate_costs"):
-            self._current_cost_values = self.policy.evaluate_costs(obs).detach()
-        else:
-            self._current_cost_values = torch.zeros(obs.batch_size[0], self.num_constraints, device=self.device)
+        self._current_cost_values = self.policy.evaluate_costs(obs).detach()
 
         return self.transition.actions
 
@@ -288,10 +278,7 @@ class ConstraintTRPO:
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
         # Cost GAE (K separate passes)
-        if hasattr(self.policy, "evaluate_costs"):
-            last_cost_values = self.policy.evaluate_costs(obs).detach()
-        else:
-            last_cost_values = torch.zeros(self.storage.num_envs, self.num_constraints, device=self.device)
+        last_cost_values = self.policy.evaluate_costs(obs).detach()
         self._compute_cost_returns(last_cost_values)
 
     def _compute_cost_returns(self, last_cost_values: torch.Tensor) -> None:
@@ -763,12 +750,10 @@ class ConstraintTRPO:
                 value_loss = (returns_mb - value_pred).pow(2).mean()
 
                 # Cost value loss (MSE, per constraint, d_k^2-normalized)
-                cost_value_loss = torch.tensor(0.0, device=self.device)
-                if hasattr(self.policy, "evaluate_costs"):
-                    cost_value_pred = self.policy.evaluate_costs(obs_mb)
-                    target = cost_returns_mb.clamp(min=0.0)
-                    per_k_mse = (target - cost_value_pred).pow(2).mean(dim=0)  # (K,)
-                    cost_value_loss = (per_k_mse / self.d_k.pow(2).clamp(min=0.01)).mean()
+                cost_value_pred = self.policy.evaluate_costs(obs_mb)
+                target = cost_returns_mb.clamp(min=0.0)
+                per_k_mse = (target - cost_value_pred).pow(2).mean(dim=0)  # (K,)
+                cost_value_loss = (per_k_mse / self.d_k.pow(2).clamp(min=0.01)).mean()
 
                 total_value_loss = self.value_loss_coef * value_loss + self.cost_value_loss_coef * cost_value_loss
 
