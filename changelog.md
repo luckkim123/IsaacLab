@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] Full package code review: encoder optimizer resume + NaN guard
+
+### Context
+Systematic code review of entire constrained_albc package (6 review areas: agents,
+encoder, algorithms, mdp, config+env, runners+utils). Found 1 confirmed bug
+(encoder optimizer state not saved on checkpoint), 2 theoretical concerns (recovery
+drops reward globally, standardization-barrier inverse variance), and 2 design issues
+(unused cost_type field, missing isfinite guard on encoder loss).
+
+BUG-1 root cause: `self.optimizer = self.value_optimizer` alias (constraint_trpo.py:210)
+means OnPolicyRunner.save() only persists value_optimizer state_dict. The separate
+`encoder_optimizer` (Adam with lr=3e-4, wd=1e-5) loses momentum (exp_avg, exp_avg_sq)
+on resume, causing a transient gradient magnitude spike as Adam re-estimates statistics.
+
+### Fixed
+- `runners/constraint_encoder_runner.py`: Save/load `encoder_optimizer.pt` alongside
+  `barrier_state.pt` in checkpoint. Uses existing `_save_aux_state`/`_load_aux_state`
+  helpers. Load respects `load_optimizer` flag (skip during eval/play).
+- `algorithms/constraint_trpo.py`: Added `torch.isfinite(total_loss)` guard before
+  `.backward()` in `_update_encoder()`. NaN/Inf loss skips the epoch with warning
+  instead of corrupting encoder parameters irreversibly.
+
+### Notes
+- THEORY-1 (recovery drops reward surrogate globally): conservative valid choice per
+  C-TRPO paper (Muller et al. Sec 4.1). Monitor reward stalls during recovery.
+- THEORY-2 (standardization-barrier inverse variance): tight constraints get stronger
+  barrier (arguably correct). Undocumented interaction, monitor per-constraint magnitude.
+- DESIGN-1 (cost_type field in ConstraintTermCfg): dead field, never consumed by
+  algorithm. Deferred cleanup.
+
 ## [2026-03-20] Constrained ALBC encoder code review: DRY, perf, backward compat
 
 ### Context

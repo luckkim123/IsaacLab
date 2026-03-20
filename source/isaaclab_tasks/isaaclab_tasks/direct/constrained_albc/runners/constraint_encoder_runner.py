@@ -142,7 +142,7 @@ class ConstraintEncoderRunner(OnPolicyRunner):
     # ------------------------------------------------------------------
 
     def save(self, path: str, infos: dict | None = None) -> None:
-        """Save model checkpoint with barrier state."""
+        """Save model checkpoint with barrier state and encoder optimizer."""
         super().save(path, infos)
 
         self._save_aux_state(
@@ -154,8 +154,12 @@ class ConstraintEncoderRunner(OnPolicyRunner):
             },
         )
 
+        # Save encoder optimizer state for seamless resume (BUG-1 fix)
+        if getattr(self.alg, "encoder_optimizer", None) is not None:
+            self._save_aux_state(path, "encoder_optimizer.pt", self.alg.encoder_optimizer.state_dict())
+
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
-        """Load model checkpoint and restore barrier state if available."""
+        """Load model checkpoint, barrier state, and encoder optimizer if available."""
         infos = super().load(path, load_optimizer, map_location)
 
         state = self._load_aux_state(path, "barrier_state.pt", self.device)
@@ -163,6 +167,13 @@ class ConstraintEncoderRunner(OnPolicyRunner):
             self.alg._in_recovery = state["in_recovery"]
             self.alg._margins = state["margins"].to(self.device)
             logger.info("Restored barrier state from checkpoint")
+
+        # Restore encoder optimizer state for seamless resume (BUG-1 fix)
+        if load_optimizer and getattr(self.alg, "encoder_optimizer", None) is not None:
+            enc_opt_state = self._load_aux_state(path, "encoder_optimizer.pt", self.device)
+            if enc_opt_state is not None:
+                self.alg.encoder_optimizer.load_state_dict(enc_opt_state)
+                logger.info("Restored encoder optimizer state from checkpoint")
 
         return infos
 

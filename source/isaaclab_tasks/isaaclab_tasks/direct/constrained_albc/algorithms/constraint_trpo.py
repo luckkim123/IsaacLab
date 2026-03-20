@@ -101,6 +101,8 @@ class ConstraintTRPO:
         device: str = "cpu",
         **_kwargs,
     ) -> None:
+        if _kwargs:
+            logger.debug("ConstraintTRPO ignoring unexpected kwargs: %s", list(_kwargs.keys()))
         self.device = device
         self.policy = policy
         self.policy.to(self.device)
@@ -370,7 +372,10 @@ class ConstraintTRPO:
         safe_mask = (self._margins > 0) & ~recovery
         if not safe_mask.any():
             return torch.tensor(0.0, device=self.device)
-        phi_pp = 1.0 / (self._margins.pow(2) + 1e-8)
+        # Clamp margin to prevent barrier singularity when margin is small positive
+        # but recovery mode hasn't triggered yet (margin in (0, ~0.01) gap).
+        margin_safe = self._margins.clamp(min=0.01)
+        phi_pp = 1.0 / margin_safe.pow(2)
         return self.beta * (safe_mask * phi_pp * cost_surrogates.pow(2)).sum()
 
     # ==================================================================
@@ -564,6 +569,13 @@ class ConstraintTRPO:
         # Determine mode: if ANY constraint is in recovery, do recovery step.
         # Recovery takes priority since feasibility must be restored before
         # reward optimization can proceed meaningfully.
+        #
+        # Design note: this "any-recovery" policy is conservative. If only 1 of K
+        # constraints is barely violated, ALL reward optimization halts. A per-constraint
+        # blend (safe constraints use barrier, violated use cost min) would allow
+        # reward progress on feasible dimensions but adds implementation complexity
+        # and may interact poorly with the shared trust region. Keep as-is unless
+        # training shows excessive mode oscillation.
         old_lp_sq = old_log_prob_flat.squeeze(-1)
         adv_sq = advantages_flat.squeeze(-1)
 
@@ -728,6 +740,11 @@ class ConstraintTRPO:
                 if z_b_loss.requires_grad:
                     total_loss = total_loss + z_b_loss
 
+            # Guard against NaN/Inf loss propagating to encoder params
+            if not torch.isfinite(total_loss):
+                logger.warning("Encoder loss non-finite (%.4e), skipping epoch %d", total_loss.item(), _epoch)
+                continue
+
             # Single backward: encoder_optimizer only steps encoder params,
             # so actor/critic grads are computed but not applied
             total_loss.backward()
@@ -769,6 +786,8 @@ class ConstraintTRPO:
                 cost_value_pred = self.policy.evaluate_costs(obs_mb)
                 target = cost_returns_mb.clamp(min=0.0)
                 per_k_mse = (target - cost_value_pred).pow(2).mean(dim=0)  # (K,)
+                # Guard for edge-case budgets: with default cost_gamma=0.99, min d_k=1.0
+                # so d_k^2>=1.0 and the clamp never activates. Kept as defensive bound.
                 cost_value_loss = (per_k_mse / self.d_k.pow(2).clamp(min=0.01)).mean()
 
                 total_value_loss = self.value_loss_coef * value_loss + self.cost_value_loss_coef * cost_value_loss
