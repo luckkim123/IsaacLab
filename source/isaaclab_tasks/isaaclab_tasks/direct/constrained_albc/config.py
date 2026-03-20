@@ -228,10 +228,8 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     target_attitude_range: tuple[float, float, float] = (0.349, 0.349, 0.0)
 
     # smoothness replaces joint_osc constraint (fixed weight avoids lambda competition).
-    # PBRS progress: strengthens reward signal against growing lambda pressure.
     reward: ALBCRewardCfg = ALBCRewardCfg(
         smoothness_weight=-0.1,
-        progress_weight=2.0,
     )
 
     # ==========================================================================

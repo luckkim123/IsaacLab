@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] Remove PBRS progress reward (redundant with quadratic command)
+
+### Context
+Analysis of reward structure revealed that `progress_reward` (PBRS: prev_potential -
+gamma * potential) is redundant with `command_reward` (quadratic: -(roll_err^2 + pitch_err^2)).
+Both derive from the same attitude_error variable, producing identical gradient directions.
+
+Key findings from mathematical analysis:
+- PBRS telescopes to initial minus discounted final error (path-independent),
+  while command integrates error over entire trajectory (path-dependent).
+  However, for stabilization tasks with monotonic error decrease, both produce
+  mirror-image WandB curves with no independent learning signal.
+- PBRS theorem (Ng et al. 1999) guarantees progress does not change optimal policy.
+- Progress was NOT dt-scaled, making it ~2x stronger per step than command --
+  effectively dominating the reward signal while adding no new information.
+- C-TRPO uses full-batch natural gradient, so the "early training value function
+  noise" argument for PBRS is weaker than in PPO.
+
+Dry run verified: 2 iterations, 4 envs, headless -- clean execution with only
+command + smoothness reward terms logged.
+
+### Removed
+- `mdp/rewards.py`: Deleted `progress_reward()` function and `progress_weight`/`progress_gamma`
+  fields from `ALBCRewardCfg`. Reward architecture simplified from 3-term to 2-term.
+- `albc_env.py`: Removed `_potentials` and `_prev_potentials` buffers (only used by progress).
+  Renamed `_update_potentials()` to `_update_attitude_error()` (simpler, reflects actual purpose).
+  Removed progress term construction in `_build_reward_terms()`.
+  Removed potential initialization/reset in `_reset_task_and_state()`.
+- `config.py`: Removed `progress_weight=2.0` from `ALBCRewardCfg` instantiation.
+- `mdp/__init__.py`: Removed `progress_reward` from imports and `__all__`.
+
 ## [2026-03-20] config.py code review: dead fields, barrier singularity, documentation
 
 ### Context

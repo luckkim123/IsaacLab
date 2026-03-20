@@ -36,7 +36,6 @@ from .mdp import (
     compute_all_costs,
     compute_policy_obs,
     compute_privileged_obs,
-    progress_reward,
 )
 from .mdp.events import (
     DRSampler,
@@ -229,8 +228,6 @@ class ALBCEnv(DirectRLEnv):
         self._target_range = torch.tensor(self.cfg.target_attitude_range, device=self.device)
         self._target_euler = self._base_attitude.unsqueeze(0).expand(self.num_envs, -1).clone()
         self._attitude_error = torch.zeros(self.num_envs, 3, dtype=torch.float32, device=self.device)
-        self._potentials = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self._prev_potentials = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
 
         self._reward_manager = RewardManager(
             cfg=self._build_reward_terms(),
@@ -241,10 +238,9 @@ class ALBCEnv(DirectRLEnv):
     def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
         """Build the reward terms dict. Override in subclasses to add/modify terms.
 
-        3-term architecture:
-            1. command  (+): quadratic -(roll_err^2 + pitch_err^2), dt-scaled
+        2-term architecture:
+            1. command    (+): quadratic -(roll_err^2 + pitch_err^2), dt-scaled
             2. smoothness (-): mean(da^2) + mean(d2a^2), dt-scaled
-            3. progress (+): PBRS, NOT dt-scaled
         """
         rcfg = self.cfg.reward
         terms: dict[str, RewardTermCfg] = {
@@ -257,13 +253,6 @@ class ALBCEnv(DirectRLEnv):
             terms["smoothness"] = RewardTermCfg(
                 func=action_smoothness_penalty,
                 weight=rcfg.smoothness_weight,
-            )
-        if rcfg.progress_weight != 0.0:
-            terms["progress"] = RewardTermCfg(
-                func=progress_reward,
-                weight=rcfg.progress_weight,
-                params={"gamma": rcfg.progress_gamma},
-                scale_by_dt=False,
             )
         return terms
 
@@ -352,7 +341,7 @@ class ALBCEnv(DirectRLEnv):
         return torch.atan2(torch.sin(error), torch.cos(error))
 
     def _get_attitude_error(self) -> torch.Tensor:
-        """Return cached attitude error (computed in _update_potentials during reward step)."""
+        """Return cached attitude error (computed in _update_attitude_error during reward step)."""
         return self._attitude_error
 
     def _get_proprio_features(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -384,19 +373,13 @@ class ALBCEnv(DirectRLEnv):
         self._proprio_hist[:, :-1] = self._proprio_hist[:, 1:].clone()
         self._proprio_hist[:, -1] = new_entry
 
-    def _update_potentials(self, quat: torch.Tensor) -> None:
-        """Update potential values for reward computation.
-
-        Saves current potential as prev_potential and computes new potential
-        from roll/pitch errors. Yaw is excluded because buoyancy control
-        cannot generate Z-axis torque.
+    def _update_attitude_error(self, quat: torch.Tensor) -> None:
+        """Update cached attitude error from current orientation.
 
         Args:
             quat: Current root quaternion. Shape: (num_envs, 4).
         """
-        self._prev_potentials = self._potentials.clone()
         self._attitude_error = self.compute_attitude_error(quat)
-        self._potentials = torch.linalg.norm(self._attitude_error[:, :2], dim=-1)
 
     def _setup_scene(self):
         """Setup simulation scene with robot and underwater lighting."""
@@ -657,8 +640,8 @@ class ALBCEnv(DirectRLEnv):
         Returns:
             Reward tensor. Shape: (num_envs,).
         """
-        # Update error potentials before reward computation
-        self._update_potentials(self._robot.data.root_quat_w)
+        # Update attitude error before reward computation
+        self._update_attitude_error(self._robot.data.root_quat_w)
 
         # Update EMA joint velocity (low-pass) before reward computation
         vel = self._robot.data.joint_vel[:, self._albc_joint_ids]
@@ -670,7 +653,7 @@ class ALBCEnv(DirectRLEnv):
             dt=self.step_dt,
             actions=self._actions,
             prev_actions=self._prev_actions,
-            env=self,  # Pass env for accessing potentials, EMA state
+            env=self,  # Pass env for accessing attitude_error, EMA state
         )
 
         # Termination penalty: large one-time penalty on early termination
@@ -859,7 +842,7 @@ class ALBCEnv(DirectRLEnv):
             1. Logging and reward reset
             2. Framework reset (robot, parent class, episode jitter, action buffers)
             3. Physics reset (hydrodynamics, payload, domain randomization, ocean current)
-            4. Task and state reset (attitude targets, robot pose, joint DR, potentials)
+            4. Task and state reset (attitude targets, robot pose, joint DR, error buffers)
         """
         env_ids_ = self._coerce_env_ids(env_ids)
         self._log_and_reset_rewards(env_ids_)
@@ -947,7 +930,7 @@ class ALBCEnv(DirectRLEnv):
             randomize_ocean_current(env=self, env_ids=env_ids)
 
     def _reset_task_and_state(self, env_ids: torch.Tensor) -> None:
-        """Reset attitude targets, robot pose, joint DR, and initialize potentials."""
+        """Reset attitude targets, robot pose, joint DR, and initialize error buffers."""
         # Reset attitude targets
         num_reset = len(env_ids)
         if self._randomize_targets:
@@ -955,8 +938,6 @@ class ALBCEnv(DirectRLEnv):
             self._target_euler[env_ids] = self._base_attitude + random_offset
         else:
             self._target_euler[env_ids] = self._base_attitude.unsqueeze(0).expand(num_reset, -1)
-        self._potentials[env_ids] = 0.0
-        self._prev_potentials[env_ids] = 0.0
 
         rand_cfg = self.cfg.randomization
         # Pose must be set BEFORE joints so equilibrium init can read current attitude
@@ -983,14 +964,10 @@ class ALBCEnv(DirectRLEnv):
             randomize_joint_effort_limit(env=self, env_ids=env_ids, dr=dr)
             randomize_joint_friction(env=self, env_ids=env_ids, dr=dr)
 
-        # Potential initialization (must be after pose reset).
+        # Initialize overshoot buffer to initial error (prevents false positive on first step).
         # write_root_pose_to_sim() immediately updates internal data cache,
         # so root_quat_w reflects the new pose without needing an explicit update() call.
         attitude_error = self.compute_attitude_error(self._robot.data.root_quat_w[env_ids], env_ids)
-        initial_potential = torch.linalg.norm(attitude_error[:, :2], dim=-1)
-        self._potentials[env_ids] = initial_potential
-        self._prev_potentials[env_ids] = initial_potential
-        # Initialize overshoot buffer to initial error (prevents false positive on first step)
         self._prev_attitude_error_rp[env_ids] = attitude_error[:, :2]
 
         # Re-sync _prev_joint_pos after joint positions were changed above.

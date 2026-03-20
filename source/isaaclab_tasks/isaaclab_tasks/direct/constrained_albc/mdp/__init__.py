@@ -46,7 +46,6 @@ from .rewards import (
     RewardTermCfg,
     action_smoothness_penalty,
     command_reward,
-    progress_reward,
 )
 
 __all__ = [
@@ -84,5 +83,4 @@ __all__ = [
     # Rewards (functions)
     "action_smoothness_penalty",
     "command_reward",
-    "progress_reward",
 ]

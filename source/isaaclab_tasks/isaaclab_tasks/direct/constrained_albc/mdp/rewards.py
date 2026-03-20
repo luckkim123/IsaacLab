@@ -8,10 +8,9 @@
 Provides reward configuration, a lightweight reward manager, and reward
 functions for ALBC (joint-based attitude control) training.
 
-3-term reward architecture:
+2-term reward architecture:
     1. command    (+): quadratic -(roll_err^2 + pitch_err^2), dt-scaled
     2. smoothness (-): mean(da^2) + mean(d2a^2), dt-scaled
-    3. progress   (+): PBRS prev_potential - gamma*potential, NOT dt-scaled
 
 Plus: termination_penalty (one-time, NOT dt-scaled).
 """
@@ -39,12 +38,11 @@ if TYPE_CHECKING:
 
 @configclass
 class ALBCRewardCfg:
-    """ALBC reward configuration: 3-term architecture.
+    """ALBC reward configuration: 2-term architecture.
 
-    Active terms (all dt-scaled unless noted):
+    Active terms (all dt-scaled):
         command    (+5.0): quadratic -(roll_err^2 + pitch_err^2)
         smoothness (-0.1): mean(da^2) + mean(d2a^2) action smoothness
-        progress   (+2.0): PBRS prev_potential - gamma*potential (NOT dt-scaled)
     """
 
     # Command tracking reward: quadratic -(roll_err^2 + pitch_err^2)
@@ -55,10 +53,6 @@ class ALBCRewardCfg:
 
     # -- Meta fields (not reward terms) --
     termination_penalty: float = -10.0
-
-    # -- PBRS progress reward --
-    progress_weight: float = 0.0
-    progress_gamma: float = 0.99
 
 
 # =============================================================================
@@ -169,7 +163,7 @@ class RewardManager:
 
 
 # =============================================================================
-# Reward Functions (3-term architecture)
+# Reward Functions (2-term architecture)
 # =============================================================================
 
 
@@ -187,27 +181,6 @@ def command_reward(
     """
     err_rp = env._attitude_error[:, :2]
     return -(err_rp[:, 0] ** 2 + err_rp[:, 1] ** 2)
-
-
-def progress_reward(
-    _robot: Articulation,
-    env: ALBCEnv,
-    gamma: float = 0.99,
-    **_kwargs,
-) -> torch.Tensor:
-    """PBRS (Potential-Based Reward Shaping) progress reward.
-
-    Returns prev_potential - gamma * potential. Positive when error decreases
-    (making progress), negative when error increases (regressing).
-    Theoretically safe: does not change the optimal policy (Ng et al. 1999).
-
-    NOT dt-scaled: the temporal difference already reflects per-step change.
-
-    Args:
-        env: Environment instance (provides _prev_potentials, _potentials).
-        gamma: Discount factor for shaping (should match training gamma).
-    """
-    return env._prev_potentials - gamma * env._potentials
 
 
 def action_smoothness_penalty(
