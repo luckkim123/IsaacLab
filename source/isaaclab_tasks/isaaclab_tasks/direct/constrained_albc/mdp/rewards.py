@@ -9,7 +9,7 @@ Provides reward configuration, a lightweight reward manager, and reward
 functions for ALBC (joint-based attitude control) training.
 
 2-term reward architecture:
-    1. command    (+): quadratic -(roll_err^2 + pitch_err^2), dt-scaled
+    1. command    (+): attitude tracking (quadratic or laplacian), dt-scaled
     2. smoothness (-): mean(da^2) + mean(d2a^2), dt-scaled
 
 Plus: termination_penalty (one-time, NOT dt-scaled).
@@ -41,12 +41,19 @@ class ALBCRewardCfg:
     """ALBC reward configuration: 2-term architecture.
 
     Active terms (all dt-scaled):
-        command    (+5.0): quadratic -(roll_err^2 + pitch_err^2)
+        command    (+5.0): attitude tracking (quadratic or laplacian)
         smoothness (-0.1): mean(da^2) + mean(d2a^2) action smoothness
     """
 
-    # Command tracking reward: quadratic -(roll_err^2 + pitch_err^2)
+    # Command tracking reward
     command_weight: float = 5.0
+    command_type: str = "quadratic"
+    """Reward type: "quadratic" = -(e_r^2 + e_p^2), "laplacian" = exp(-|e|/sigma).
+    Laplacian has stronger gradient near zero (opposite of quadratic)."""
+
+    command_sigma: float = 0.15
+    """Laplacian scale parameter (rad). Controls reward sharpness near zero.
+    Smaller sigma = sharper peak = stronger near-zero gradient."""
 
     # Action smoothness: first + second order action difference
     smoothness_weight: float = -0.5
@@ -170,16 +177,25 @@ class RewardManager:
 def command_reward(
     _robot: Articulation,
     env: ALBCEnv,
+    command_type: str = "quadratic",
+    sigma: float = 0.15,
     **_kwargs,
 ) -> torch.Tensor:
-    """Quadratic command tracking reward: -(roll_err^2 + pitch_err^2).
+    """Attitude tracking reward with selectable kernel.
 
-    Gradient = -2*error, weakens near zero -- natural entropy-friendly structure.
+    Quadratic: -(e_r^2 + e_p^2). Gradient = -2e, weakens near zero.
+    Laplacian: exp(-|e|/sigma) per axis, summed. Gradient increases near zero.
 
     Args:
         env: Environment instance (provides _attitude_error).
+        command_type: "quadratic" or "laplacian".
+        sigma: Laplacian scale parameter (rad). Only used when command_type="laplacian".
     """
     err_rp = env._attitude_error[:, :2]
+    if command_type == "laplacian":
+        # Per-axis Laplacian kernel: gradient = (1/sigma)*exp(-|e_i|/sigma)
+        # Stronger gradient near zero -- drives fine convergence below 5 deg.
+        return torch.exp(-err_rp.abs() / sigma).sum(dim=-1)
     return -(err_rp[:, 0] ** 2 + err_rp[:, 1] ** 2)
 
 

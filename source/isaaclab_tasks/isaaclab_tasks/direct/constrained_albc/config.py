@@ -229,6 +229,8 @@ class ALBCEnvCfg(DirectRLEnvCfg):
 
     # smoothness replaces joint_osc constraint (fixed weight avoids lambda competition).
     reward: ALBCRewardCfg = ALBCRewardCfg(
+        command_type="laplacian",
+        command_sigma=0.15,
         smoothness_weight=-0.1,
     )
 
@@ -305,8 +307,8 @@ class ALBCEnvCfg(DirectRLEnvCfg):
             ),
             ConstraintTermCfg(
                 func=overshoot_cost,
-                params={"threshold": 0.035},
-                budget=0.10,
+                params={"threshold": 0.087},
+                budget=0.20,
                 name="overshoot",
             ),
             # --- Continuous constraints (1 term) ---

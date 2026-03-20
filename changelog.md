@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] 5-7 deg convergence plateau fix: Laplacian reward + noise floor + overshoot relaxation
+
+### Context
+`Isaac-Constrained-ALBC-Encoder-v0` training plateaued at 5-7 deg attitude error (target: 3 deg).
+Root cause analysis identified 3 primary causes working together:
+
+1. **Quadratic reward gradient dies near zero** (CRITICAL): gradient = -2e, so at 5 deg the
+   reward improvement for 5->3 deg is only 0.000243/step -- barely above smoothness penalty noise.
+2. **Action noise floor std=0.25 blocks precision** (CRITICAL): `min_log_std = log(0.25)` gave
+   1.2 deg/step noise (40% of 3 deg target). Policy reached the floor at ~100 iterations and
+   couldn't reduce std further despite 2400 more iterations of training.
+3. **Overshoot constraint too tight for fine convergence** (HIGH): threshold=0.035 rad (2 deg)
+   triggered recovery mode during normal fine-correction oscillation at 5-7 deg, halting all
+   reward optimization.
+
+Implemented Phase 1 (Exp 3A + 1A) and Phase 2 (Exp 2) simultaneously:
+- Laplacian reward: gradient = (1/sigma)*exp(-|e|/sigma), INCREASES near zero (4.71/rad at 3 deg
+  vs quadratic's 0.10/rad). Per-axis kernel with sigma=0.15.
+- Noise floor 0.25 -> 0.01: per-step noise drops from 1.2 deg to 0.048 deg. KL constraint
+  (max_kl=0.01) already prevents std collapse, making the floor redundant.
+- Overshoot threshold 2 deg -> 5 deg, budget 0.10 -> 0.20: allows fine correction without
+  triggering recovery mode.
+
+Phase 3 (perturbation torque 0.4->0.2 Nm) and Phase 4 (observation noise halving) deferred --
+apply only if Phase 1+2 insufficient.
+
+### Changed
+- `mdp/rewards.py`: `command_reward()` accepts `command_type` ("quadratic" or "laplacian") and
+  `sigma` params. Laplacian mode: `exp(-|e_i|/sigma)` per axis, summed. `ALBCRewardCfg` gained
+  `command_type` and `command_sigma` fields (defaults: "quadratic", 0.15).
+- `config.py`: Reward default changed to `command_type="laplacian"`, `command_sigma=0.15`.
+  Overshoot constraint: threshold 0.035 -> 0.087 rad (~5 deg), budget 0.10 -> 0.20.
+- `algorithms/constraint_trpo.py`: `min_log_std` changed from `log(0.25)` to `log(0.01)`.
+  std floor from 0.25 to 0.01 (per-step noise 1.2 deg -> 0.048 deg).
+- `albc_env.py`: `_build_reward_terms()` passes `command_type` and `sigma` from config to
+  `command_reward` via `RewardTermCfg.params`.
+
+### Notes
+- Deferred experiments (config-only changes, no code needed):
+  - Exp 4: `perturbation_torque_range (0.0, 0.2)` -- if 3 deg infeasible under max perturbation
+  - Exp 5: observation noise std halved -- if SNR too low at 3 deg (sim2real impact to consider)
+- Verification: `Episode/attitude_error_mean < 0.052 rad`, `Policy/action_std` freely decreasing
+  below 0.25, `Constraint/mode` safe(0) ratio > 70%.
+
 ## [2026-03-20] Remove constrained_encoder_base code from hero_agent
 
 ### Context

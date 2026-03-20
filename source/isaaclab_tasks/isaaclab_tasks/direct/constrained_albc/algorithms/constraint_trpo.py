@@ -622,8 +622,11 @@ class ConstraintTRPO:
 
             ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate, "safe")
 
-        # Noise floor: numerical safety net to prevent log_prob divergence
-        min_log_std = math.log(0.25)
+        # Noise floor: numerical safety net to prevent log_prob divergence.
+        # Lowered from 0.25 to 0.01: std=0.25 gave 1.2 deg/step noise, blocking
+        # precision below 5 deg. KL constraint (max_kl=0.01) naturally prevents
+        # std collapse, so a tight floor is safe.
+        min_log_std = math.log(0.01)
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=min_log_std)
 

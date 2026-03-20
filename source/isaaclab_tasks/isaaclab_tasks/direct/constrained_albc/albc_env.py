@@ -239,7 +239,7 @@ class ALBCEnv(DirectRLEnv):
         """Build the reward terms dict. Override in subclasses to add/modify terms.
 
         2-term architecture:
-            1. command    (+): quadratic -(roll_err^2 + pitch_err^2), dt-scaled
+            1. command    (+): attitude tracking (quadratic or laplacian), dt-scaled
             2. smoothness (-): mean(da^2) + mean(d2a^2), dt-scaled
         """
         rcfg = self.cfg.reward
@@ -247,6 +247,10 @@ class ALBCEnv(DirectRLEnv):
             "command": RewardTermCfg(
                 func=command_reward,
                 weight=rcfg.command_weight,
+                params={
+                    "command_type": rcfg.command_type,
+                    "sigma": rcfg.command_sigma,
+                },
             ),
         }
         if rcfg.smoothness_weight != 0.0:
