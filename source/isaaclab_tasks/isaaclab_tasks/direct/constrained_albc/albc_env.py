@@ -550,8 +550,8 @@ class ALBCEnv(DirectRLEnv):
             effective_actions = self._get_delayed_actions(self._actions)
 
             # Integrate velocity to position: delta_pos = dt * max_vel * action
-            # control_dt = physics_dt * control_decimation (50Hz = 0.005 * 4 = 0.02s)
-            control_dt = self.physics_dt * self.cfg.control_decimation
+            # control_dt = step_dt * control_decimation (50Hz = 0.005 * 4 = 0.02s)
+            control_dt = self.step_dt * self.cfg.control_decimation
             position_delta = control_dt * self.cfg.max_joint_velocity * effective_actions
             self._joint_pos_targets += position_delta
 
@@ -992,6 +992,12 @@ class ALBCEnv(DirectRLEnv):
         self._prev_potentials[env_ids] = initial_potential
         # Initialize overshoot buffer to initial error (prevents false positive on first step)
         self._prev_attitude_error_rp[env_ids] = attitude_error[:, :2]
+
+        # Re-sync _prev_joint_pos after joint positions were changed above.
+        # Without this, the first _pre_physics_step() sees a false delta between
+        # the post-reset joint_pos and the stale pre-reset _prev_joint_pos,
+        # injecting a spurious offset into _accumulated_rotation (IPO constraint).
+        self._prev_joint_pos[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Setup or toggle visibility of debug visualization markers."""

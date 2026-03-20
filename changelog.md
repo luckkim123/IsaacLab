@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] albc_env.py code review: _prev_joint_pos timing + control_dt fix
+
+### Context
+Code review of `albc_env.py` (1016 lines) identified 2 bugs and 1 question requiring
+user confirmation. BUG-1: `_prev_joint_pos` was set in `_reset_action_buffers()` (during
+`_reset_framework` phase) but joint positions are subsequently changed by
+`_reset_task_and_state()` (equilibrium/random init). This injected a false delta (~0.5 rad)
+into `_accumulated_rotation` on the first step after reset, skewing IPO constraint budget.
+BUG-2: `control_dt` used `physics_dt` instead of `step_dt` -- latent bug currently masked
+by `decimation=1` but would cause position_delta underestimation if decimation changed.
+BUG-3: encoder weight_decay 1e-5 vs hero_agent's 1e-4 -- deferred to user confirmation.
+
+### Fixed
+- `albc_env.py`: Added `_prev_joint_pos` re-sync at end of `_reset_task_and_state()` after
+  joint positions are set to equilibrium/random. Prevents false delta in
+  `_accumulated_rotation` (IPO constraint) on first post-reset step.
+- `albc_env.py`: Changed `control_dt = self.physics_dt * ...` to `self.step_dt * ...`.
+  Latent bug -- no behavioral change at current `decimation=1`, but correct for any value.
+
+### Notes
+- BUG-3 (encoder weight_decay 1e-5 in constraint_trpo.py vs 1e-4 in hero_agent) pending
+  user confirmation on whether the difference is intentional.
+- 10 additional items verified correct (VERIFY-1~6, DESIGN-1~3, MINOR-1~2).
+
 ## [2026-03-20] Constrained ALBC algorithms code review + runtime integration fixes
 
 ### Context
