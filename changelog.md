@@ -4,6 +4,46 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] C-TRPO per-constraint blend: fix recovery damage to attitude performance
+
+### Context
+Post-B1/B2 analysis of run 2026-03-20_13-21-52 (571 iter) revealed that while phantom mode
+oscillation was resolved, recovery mode caused irreversible step-wise attitude degradation.
+When yaw_vel triggered recovery, ALL reward optimization halted (reward gradient = 0) for
+44+ iterations. Since yaw_vel and attitude control are orthogonal, cost reduction during
+recovery provided zero benefit to attitude -- but removing reward gradient caused pitch error
+to jump from 5-7 deg to 13-18 deg in staircase pattern, never fully recovering.
+
+Additionally, encoder was updated with reward-only objective during recovery while actor used
+cost-only -- directional mismatch caused z drift (z_std +39%), z_bounds_loss 15x spike, and
+KL explosion to 0.13 (vs normal 0.01) from encoder-driven distribution shift.
+
+Solution: per-constraint blend replaces binary if/else with unified surrogate
+`reward + barrier(safe) + cost(violated)`. Reward gradient never turns off. Line search
+gains cost non-regression check to prevent reward improvement from masking cost worsening.
+Encoder objective aligned with actor (includes recovery cost when in blend mode).
+
+### Changed
+- `algorithms/constraint_trpo.py`: Replaced binary `if any_recovery / else` (lines 599-623)
+  with unified surrogate: `reward_surr + barrier_penalty + recovery_cost`. Reward always active;
+  recovery constraints add cost minimization gradient without killing reward optimization.
+- `algorithms/constraint_trpo.py`: `_line_search()` gains `recovery_cost_fn` parameter. When
+  provided, steps where recovery cost worsens (new_rc > old_rc + 1e-6) are rejected, preventing
+  reward improvement from masking cost regression in the total surrogate.
+- `algorithms/constraint_trpo.py`: `_trpo_step()` passes `recovery_cost_fn` through to
+  `_line_search()`. Mode name changes from "recovery" to "blend".
+- `algorithms/constraint_trpo.py`: `_update_encoder()` gains `recovery_mask` and
+  `cost_advantages_flat` parameters. During blend mode, encoder objective includes recovery cost
+  term, aligning encoder and actor gradient directions (fixes z drift root cause).
+
+### Notes
+- `_compute_barrier_penalty()` unchanged: already uses `safe_mask = (margins>0) & ~recovery`
+- `_compute_margins()`, `_in_recovery` hysteresis logic preserved
+- Noise floor (0.01) unchanged -- already fixed in prior session
+- No new config parameters needed
+- Verification criteria: pitch error recovery < 2 deg after blend episodes, KL < 0.05,
+  z_std expansion < 10% during blend, cost_return_yaw_vel decreasing during blend
+
 ## [2026-03-20] 5-7 deg convergence plateau fix: Laplacian reward + noise floor + overshoot relaxation
 
 ### Context
