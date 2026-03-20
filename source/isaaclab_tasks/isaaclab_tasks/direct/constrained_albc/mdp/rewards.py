@@ -48,8 +48,11 @@ class ALBCRewardCfg:
     # Command tracking reward
     command_weight: float = 5.0
     command_type: str = "quadratic"
-    """Reward type: "quadratic" = -(e_r^2 + e_p^2), "laplacian" = exp(-|e|/sigma).
-    Laplacian has stronger gradient near zero (opposite of quadratic)."""
+    """Reward type: "quadratic" = -(e_r^2 + e_p^2),
+    "laplacian" = exp(-|e|/sigma) per axis summed,
+    "min_laplacian" = exp(-|e|/sigma) per axis min (worst-axis drives reward).
+    Laplacian has stronger gradient near zero (opposite of quadratic).
+    min_laplacian prevents the better axis from dominating reward gradient."""
 
     command_sigma: float = 0.15
     """Laplacian scale parameter (rad). Controls reward sharpness near zero.
@@ -185,16 +188,19 @@ def command_reward(
 
     Quadratic: -(e_r^2 + e_p^2). Gradient = -2e, weakens near zero.
     Laplacian: exp(-|e|/sigma) per axis, summed. Gradient increases near zero.
+    Min-Laplacian: exp(-|e|/sigma) per axis, min. Worst axis drives reward,
+        preventing the better axis from dominating gradient signal.
 
     Args:
         env: Environment instance (provides _attitude_error).
-        command_type: "quadratic" or "laplacian".
-        sigma: Laplacian scale parameter (rad). Only used when command_type="laplacian".
+        command_type: "quadratic", "laplacian", or "min_laplacian".
+        sigma: Laplacian scale parameter (rad). Only used for laplacian types.
     """
     err_rp = env._attitude_error[:, :2]
+    if command_type == "min_laplacian":
+        per_axis = torch.exp(-err_rp.abs() / sigma)
+        return per_axis.min(dim=-1).values
     if command_type == "laplacian":
-        # Per-axis Laplacian kernel: gradient = (1/sigma)*exp(-|e_i|/sigma)
-        # Stronger gradient near zero -- drives fine convergence below 5 deg.
         return torch.exp(-err_rp.abs() / sigma).sum(dim=-1)
     return -(err_rp[:, 0] ** 2 + err_rp[:, 1] ** 2)
 

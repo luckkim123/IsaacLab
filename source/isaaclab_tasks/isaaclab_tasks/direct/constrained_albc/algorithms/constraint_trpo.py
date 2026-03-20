@@ -101,7 +101,7 @@ class ConstraintTRPO:
         num_encoder_epochs: int = 1,
         encoder_lr: float = 3e-4,
         # Entropy bonus (Fix 1: prevents monotonic std decay)
-        entropy_coef: float = 0.005,
+        entropy_coef: float = 0.001,
         # Post-encoder KL gating (Fix 2: prevents encoder-induced KL violation)
         max_encoder_kl: float = 0.016,
         # Device
@@ -721,9 +721,7 @@ class ConstraintTRPO:
             "cost_value": mean_cost_value_loss,
             "mode": float(self._last_mode),
             "adv_raw_std": adv_raw_std.item(),
-            "entropy": self._cached_mean_entropy,
             "surrogate": self._cached_surrogate_loss,
-            "pre_encoder_kl": self._last_pre_encoder_kl,
         }
         if hasattr(self.policy, "z_bounds_loss"):
             loss_dict["z_bounds"] = mean_z_bounds_loss

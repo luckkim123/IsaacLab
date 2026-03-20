@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] Min-axis Laplacian reward + entropy/logging fixes
+
+### Context
+Analysis of run `2026-03-20_16-40-57` (650+ iter, post-stability-fix) revealed:
+1. **Roll/pitch asymmetry**: roll converged to 3-5 deg but pitch stuck at 25-30 deg. Root cause:
+   Laplacian reward `exp(-|e|/sigma).sum()` with sigma=0.15 makes roll (3 deg, reward=0.707)
+   dominate gradient over pitch (25 deg, reward=0.054) -- 93:7 ratio. Advantage function sees
+   total reward, so pitch-improving actions produce negligible advantage signal.
+2. **entropy_coef=0.005 too strong**: noise_std climbed to 1.62 (above init 1.0), entropy=3.80
+   at ceiling. TRPO's single natural gradient step amplifies entropy bonus vs PPO's ~20 mini-batch
+   steps. Reduced to 0.001.
+3. **Duplicate logging**: `entropy` and `pre_encoder_kl` appeared in both `Loss/` (via loss_dict)
+   and `Policy/` (via runner metrics). Removed from loss_dict, kept in Policy/ only.
+
+### Changed
+- `mdp/rewards.py`: Added `"min_laplacian"` command_type to `command_reward()`. Uses
+  `per_axis.min(dim=-1).values` instead of `.sum()`. Worst axis determines reward, preventing
+  the better axis from dominating gradient signal. Updated `ALBCRewardCfg` docstring.
+- `config.py`: `command_type="laplacian"` -> `"min_laplacian"`.
+- `algorithms/constraint_trpo.py`: `entropy_coef` default 0.005 -> 0.001. Removed `entropy`
+  and `pre_encoder_kl` from `loss_dict` (duplicate with Policy/ metrics in runner).
+- `agents/rsl_rl_ppo_cfg.py`: `entropy_coef` default 0.005 -> 0.001. Updated docstring with
+  rationale (TRPO amplification of entropy bonus).
+
+### Notes
+- min_laplacian preserves Laplacian's near-zero gradient advantage while fixing far-error blindness
+- At roll 3 deg / pitch 25 deg: min-axis reward = 0.054 (pitch determines), gradient 100% on pitch
+- When both axes reach ~5 deg, rewards become balanced and fine convergence activates naturally
+- joint_torque cost still diverging (cr=18.85, dk=20.0) -- monitor but not yet critical
+
 ## [2026-03-20] C-TRPO training stability: entropy bonus, encoder KL gating, yaw_vel budget, surrogate logging
 
 ### Context
