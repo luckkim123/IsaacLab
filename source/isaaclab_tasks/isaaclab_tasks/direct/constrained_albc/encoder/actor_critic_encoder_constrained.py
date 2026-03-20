@@ -72,7 +72,39 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
         Uses the same asymmetric critic input: cat([policy_obs, hist_flat, privileged]).
 
         Returns:
-            Cost values (softplus activated). Shape: (batch, K).
+            Cost values (ReLU activated, non-negative). Shape: (batch, K).
         """
         critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))  # type: ignore[operator]
-        return F.softplus(self.cost_critic(critic_obs))
+        return F.relu(self.cost_critic(critic_obs))
+
+    def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
+        """Load with backward compatibility for checkpoints without cost_critic or K/dim mismatch."""
+        cost_prefix = "cost_critic."
+        has_cost_keys = any(k.startswith(cost_prefix) for k in state_dict)
+
+        if not has_cost_keys:
+            logger.info("Checkpoint lacks cost_critic keys; using random initialization.")
+            for k, v in self.cost_critic.state_dict().items():
+                state_dict[cost_prefix + k] = v
+        else:
+            # Detect K mismatch (e.g. K=3 checkpoint loaded into K=6 model)
+            weight_keys = sorted(
+                [k for k in state_dict if k.startswith(cost_prefix) and k.endswith(".weight")],
+                key=lambda k: int(k.removeprefix(cost_prefix).split(".")[0]),
+            )
+            if weight_keys:
+                output_key = weight_keys[-1]
+                if state_dict[output_key].shape[0] != self.num_constraints:
+                    old_k = state_dict[output_key].shape[0]
+                    logger.warning(
+                        "Cost critic K mismatch (%d -> %d), reinitializing cost_critic.",
+                        old_k,
+                        self.num_constraints,
+                    )
+                    for k, v in self.cost_critic.state_dict().items():
+                        state_dict[cost_prefix + k] = v
+
+            # Detect input dimension mismatch (reuse parent helper)
+            self._handle_critic_dim_mismatch(state_dict, cost_prefix)
+
+        return super().load_state_dict(state_dict, strict=strict)

@@ -223,7 +223,8 @@ class ActorCriticEncoder(nn.Module):
         Returns zero tensor if z_bounds_coef is 0 or _last_z is not available.
         """
         if self.z_bounds_coef <= 0.0 or self._last_z is None:
-            return torch.tensor(0.0, device=self._last_z.device if self._last_z is not None else "cpu")
+            device = self._last_z.device if self._last_z is not None else next(self.parameters()).device
+            return torch.tensor(0.0, device=device)
         z = self._last_z
         excess = torch.clamp_min(z.abs() - self.z_bounds_soft_bound, 0.0)
         return self.z_bounds_coef * excess.pow(2).sum(dim=-1).mean()
@@ -232,10 +233,7 @@ class ActorCriticEncoder(nn.Module):
         """Combined observation for actor: cat([policy_obs, hist_flat, z])."""
         policy_obs = obs[self._policy_obs_key]
         hist_flat = self._get_hist_flat(obs)
-        encoder_input = torch.cat([policy_obs, hist_flat, obs[self._privileged_key]], dim=-1)
-        z = self.encoder(self.encoder_obs_normalizer(encoder_input))
-        if store_z:
-            self._last_z = z
+        z = self._encode(obs, store_z=store_z)
         return torch.cat([policy_obs, hist_flat, z], dim=-1)
 
     def _get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
@@ -282,17 +280,73 @@ class ActorCriticEncoder(nn.Module):
             )
             self.encoder_obs_normalizer.update(encoder_input)  # type: ignore[union-attr]
 
-        combined = self._get_combined_obs(obs)
         if self.actor_obs_normalization:
+            with torch.no_grad():
+                combined = self._get_combined_obs(obs)
             self.actor_obs_normalizer.update(combined)  # type: ignore[union-attr]
         if self.critic_obs_normalization:
             critic_input = self._get_critic_obs(obs)
             self.critic_obs_normalizer.update(critic_input)  # type: ignore[union-attr]
 
-    def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
-        """Load model parameters.
+    def _handle_critic_dim_mismatch(self, state_dict: dict, prefix: str) -> None:
+        """Reinitialize critic if checkpoint input dimension doesn't match current model."""
+        weight_keys = sorted(
+            [k for k in state_dict if k.startswith(prefix) and k.endswith(".weight")],
+            key=lambda k: int(k.removeprefix(prefix).split(".")[0]),
+        )
+        if not weight_keys:
+            return
+        first_key = weight_keys[0]
+        ckpt_input_dim = state_dict[first_key].shape[1]
 
+        if prefix == "critic.":
+            current_module = self.critic
+            expected_dim = self.num_critic_obs
+        elif prefix == "cost_critic." and hasattr(self, "cost_critic"):
+            current_module = self.cost_critic
+            expected_dim = self.num_critic_obs
+        else:
+            return
+
+        if ckpt_input_dim != expected_dim:
+            logger.warning(
+                "%s input dim mismatch (checkpoint %dD vs model %dD), reinitializing.",
+                prefix.rstrip("."),
+                ckpt_input_dim,
+                expected_dim,
+            )
+            for k, v in current_module.state_dict().items():
+                state_dict[prefix + k] = v
+
+    def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
+        """Load model parameters with backward compatibility.
+
+        Handles missing keys, dimension mismatches, and old checkpoints.
         Returns True to indicate resumed training (RSL-RL API contract).
         """
-        super().load_state_dict(state_dict, strict=False)
+        if self.encoder_obs_normalization:
+            prefix = "encoder_obs_normalizer."
+            if not any(k.startswith(prefix) for k in state_dict):
+                logger.info("Old checkpoint: injecting default encoder_obs_normalizer state.")
+                for k, v in self.encoder_obs_normalizer.state_dict().items():
+                    state_dict[prefix + k] = v
+
+        # Detect critic input dimension mismatch (symmetric <-> asymmetric checkpoint)
+        self._handle_critic_dim_mismatch(state_dict, "critic.")
+
+        # Filter out unknown keys from old checkpoints
+        current_keys = set(self.state_dict().keys())
+        filtered = {k: v for k, v in state_dict.items() if k in current_keys}
+        if len(filtered) < len(state_dict):
+            dropped = set(state_dict.keys()) - current_keys
+            logger.info("Dropped %d unknown checkpoint keys: %s", len(dropped), dropped)
+
+        # Warn if essential keys are missing
+        missing = current_keys - set(filtered.keys())
+        essential_prefixes = ("encoder.", "actor.", "critic.", "log_std")
+        missing_essential = {k for k in missing if any(k.startswith(p) for p in essential_prefixes)}
+        if missing_essential:
+            logger.warning("Missing %d essential keys in checkpoint: %s", len(missing_essential), missing_essential)
+
+        super().load_state_dict(filtered, strict=False)
         return True

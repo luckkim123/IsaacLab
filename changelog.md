@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] Constrained ALBC encoder code review: DRY, perf, backward compat
+
+### Context
+Code review of constrained_albc encoder directory (`actor_critic_encoder.py`,
+`actor_critic_encoder_constrained.py`) after the simplification session. Found 7 issues
+(5 required code changes, 2 already fixed). Key findings: (1) `_encode()` defined but
+never called -- `_get_combined_obs()` duplicated its logic inline (DRY violation from
+simplification that inlined `_build_encoder_input()` but forgot to delegate). (2)
+`update_normalization()` ran encoder forward pass with grad tracking on every env step
+(262K unnecessary grad-enabled passes per iteration). (3) `load_state_dict()` had all
+backward compatibility stripped, causing silent partial loads on architecture mismatch.
+(4) softplus on cost critic biased gradient for near-zero costs. (5) z_bounds_loss
+returned CPU tensor on fallback path.
+
+### Changed
+- `encoder/actor_critic_encoder.py`: `_get_combined_obs()` now delegates to `_encode()`
+  instead of duplicating encoder forward-pass logic inline (DRY fix).
+- `encoder/actor_critic_encoder.py`: `update_normalization()` wraps encoder call in
+  `torch.no_grad()` and only runs when `actor_obs_normalization=True`. Saves 262K
+  unnecessary grad-tracked encoder passes per iteration (4096 envs x 64 steps).
+- `encoder/actor_critic_encoder_constrained.py`: Cost critic activation `F.softplus()`
+  -> `F.relu()`. softplus required x -> -inf for zero output (gradient vanishing for
+  healthy constraints); ReLU allows exact zero with finite MLP values.
+
+### Fixed
+- `encoder/actor_critic_encoder.py`: `z_bounds_loss()` device fallback uses
+  `next(self.parameters()).device` instead of hardcoded "cpu" when `_last_z is None`.
+- `encoder/actor_critic_encoder.py`: Restored `_handle_critic_dim_mismatch()` and full
+  `load_state_dict()` with backward compatibility: encoder_obs_normalizer injection for
+  old checkpoints, critic input dim mismatch detection + reinitialization, unknown key
+  filtering with logging, missing essential key warnings.
+- `encoder/actor_critic_encoder_constrained.py`: Restored `load_state_dict()` override
+  with cost_critic handling: K mismatch detection (different num_constraints), input dim
+  mismatch via parent `_handle_critic_dim_mismatch()`, missing cost_critic key injection.
+
+### Notes
+- MEDIUM-3 (num_encoder_epochs default=5) and LOW-2 (dead encoder_output_activation
+  config field) already fixed in prior sessions
+- Agent-reported "missing encoder gradient from cost surrogate" verified as by-design
+  (encoder role is information compression, cost avoidance is actor's responsibility)
+
 ## [2026-03-20] albc_env.py code review: _prev_joint_pos timing + control_dt fix
 
 ### Context
