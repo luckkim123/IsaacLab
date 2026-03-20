@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""OnPolicyRunner with DORAEMON DR scheduling for Hero Agent.
+"""OnPolicyRunner with DORAEMON DR scheduling for constrained ALBC.
 
 This module provides BaseRunner, a subclass of OnPolicyRunner that:
     - Triggers DORAEMON distribution updates each iteration via log()
@@ -11,7 +11,7 @@ This module provides BaseRunner, a subclass of OnPolicyRunner that:
     - Logs all metrics (DORAEMON) to TensorBoard/WandB
 
 Usage:
-    Registered as runner for Base and other non-encoder Hero Agent envs.
+    Registered as runner for Base and other non-encoder constrained ALBC envs.
     EncoderRunner inherits from this class to add encoder-specific metrics.
 """
 
@@ -23,7 +23,7 @@ import os
 import torch
 from rsl_rl.runners import OnPolicyRunner
 
-from ..utils.logging import unwrap_env
+from ..utils.logging import flush_metrics, unwrap_env
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,32 @@ class BaseRunner(OnPolicyRunner):
 
     EncoderRunner subclass adds encoder-specific metrics logging.
     """
+
+    @property
+    def _doraemon(self):
+        """Return the DORAEMON scheduler from the unwrapped env, or None."""
+        raw_env = unwrap_env(self.env)
+        dora = getattr(raw_env, "_doraemon", None)
+        return dora
+
+    @property
+    def _should_log(self) -> bool:
+        """Whether logging is active (log_dir set and logs not disabled)."""
+        return self.log_dir is not None and not self.disable_logs
+
+    @staticmethod
+    def _save_aux_state(path: str, name: str, state: dict) -> None:
+        """Save auxiliary state dict alongside a model checkpoint."""
+        aux_path = os.path.join(os.path.dirname(path), name)
+        torch.save(state, aux_path)
+
+    @staticmethod
+    def _load_aux_state(path: str, name: str, device: str) -> dict | None:
+        """Load auxiliary state dict from alongside a model checkpoint, or None."""
+        aux_path = os.path.join(os.path.dirname(path), name)
+        if os.path.exists(aux_path):
+            return torch.load(aux_path, map_location=device, weights_only=False)
+        return None
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         """Reset environments before training so initial DR samples come from DORAEMON."""
@@ -60,17 +86,21 @@ class BaseRunner(OnPolicyRunner):
         self._apply_noise_floor()
 
         iteration = locs["it"]
-        raw_env = unwrap_env(self.env)
 
         # Penalty curriculum: linearly ramp penalty scale
-        raw_env._reward_manager.update_curriculum(iteration)
+        unwrap_env(self.env)._reward_manager.update_curriculum(iteration)
 
         # DORAEMON: update DR distribution based on episode statistics
-        if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
-            metrics = raw_env._doraemon.step()
-            if self.log_dir is not None and not self.disable_logs:
-                for key, value in metrics.items():
-                    self.writer.add_scalar(f"DORAEMON/{key}", value, iteration)
+        doraemon = self._doraemon
+        if doraemon is not None:
+            metrics = doraemon.step()
+            if self._should_log:
+                flush_metrics(
+                    self.writer,
+                    {f"DORAEMON/{k}": v for k, v in metrics.items()},
+                    iteration,
+                    self.logger_type,
+                )
 
     def save(self, path: str, infos: dict | None = None) -> None:
         """Save model checkpoint and DORAEMON state.
@@ -79,10 +109,9 @@ class BaseRunner(OnPolicyRunner):
         the model checkpoint to avoid modifying the RSL-RL checkpoint format.
         """
         super().save(path, infos)
-        raw_env = unwrap_env(self.env)
-        if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
-            doraemon_path = os.path.join(os.path.dirname(path), "doraemon_state.pt")
-            torch.save(raw_env._doraemon.state_dict(), doraemon_path)
+        doraemon = self._doraemon
+        if doraemon is not None:
+            self._save_aux_state(path, "doraemon_state.pt", doraemon.state_dict())
 
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
         """Load model checkpoint and restore DORAEMON state if available.
@@ -92,13 +121,12 @@ class BaseRunner(OnPolicyRunner):
         old checkpoints that lack DORAEMON state).
         """
         infos = super().load(path, load_optimizer, map_location)
-        raw_env = unwrap_env(self.env)
-        if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
-            doraemon_path = os.path.join(os.path.dirname(path), "doraemon_state.pt")
-            if os.path.exists(doraemon_path):
-                state = torch.load(doraemon_path, map_location=self.device, weights_only=False)
-                raw_env._doraemon.load_state_dict(state)
-                logger.info("[DORAEMON] Loaded distribution state from %s", doraemon_path)
+        doraemon = self._doraemon
+        if doraemon is not None:
+            state = self._load_aux_state(path, "doraemon_state.pt", self.device)
+            if state is not None:
+                doraemon.load_state_dict(state)
+                logger.info("[DORAEMON] Loaded distribution state from checkpoint")
         return infos
 
     def _apply_noise_floor(self) -> None:

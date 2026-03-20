@@ -70,7 +70,7 @@ class EncoderRunner(BaseRunner):
             self._update_encoder_lr(iteration, locs["tot_iter"])
 
         # Log encoder metrics if encoder exists and logging is enabled
-        if self._has_encoder and self.log_dir is not None and not self.disable_logs:
+        if self._has_encoder and self._should_log:
             log_encoder_metrics(
                 writer=self.writer,
                 policy=self.alg.policy,
@@ -102,5 +102,5 @@ class EncoderRunner(BaseRunner):
         self.alg.optimizer.param_groups[1]["lr"] = enc_lr
 
         # Log encoder LR
-        if self.log_dir is not None and not self.disable_logs:
+        if self._should_log:
             self.writer.add_scalar("Loss/encoder_lr", enc_lr, iteration)

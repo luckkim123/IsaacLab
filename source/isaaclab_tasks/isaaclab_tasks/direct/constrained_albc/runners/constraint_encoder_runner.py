@@ -15,9 +15,6 @@ Extends EncoderRunner to:
 from __future__ import annotations
 
 import logging
-import os
-
-import torch
 
 from ..utils.logging import flush_metrics
 from .encoder_runner import EncoderRunner
@@ -81,7 +78,7 @@ class ConstraintEncoderRunner(EncoderRunner):
         iteration = locs["it"]
 
         # Log constraint-specific metrics
-        if self.log_dir is not None and not self.disable_logs:
+        if self._should_log:
             self._log_constraint_metrics(locs, iteration)
 
     def _log_constraint_metrics(self, _locs: dict, iteration: int) -> None:
@@ -100,58 +97,41 @@ class ConstraintEncoderRunner(EncoderRunner):
         # Per-constraint: cost_return, violation, margin, recovery, d_k
         for k in range(K):
             suffix = self._constraint_names[k] if k < len(self._constraint_names) else str(k)
-            if hasattr(alg, "_last_violations"):
-                metrics[f"Constraint/violation_{suffix}"] = alg._last_violations[k]
-            if hasattr(alg, "_last_cost_returns"):
-                metrics[f"Constraint/cost_return_{suffix}"] = alg._last_cost_returns[k]
-            if hasattr(alg, "_last_margins"):
-                metrics[f"Constraint/margin_{suffix}"] = alg._last_margins[k]
-            if hasattr(alg, "_last_in_recovery"):
-                metrics[f"Constraint/in_recovery_{suffix}"] = alg._last_in_recovery[k]
-            if hasattr(alg, "d_k"):
-                metrics[f"Constraint/d_k_{suffix}"] = alg.d_k[k].item()
+            metrics[f"Constraint/violation_{suffix}"] = alg._last_violations[k]
+            metrics[f"Constraint/cost_return_{suffix}"] = alg._last_cost_returns[k]
+            metrics[f"Constraint/margin_{suffix}"] = alg._last_margins[k]
+            metrics[f"Constraint/in_recovery_{suffix}"] = alg._last_in_recovery[k]
+            metrics[f"Constraint/d_k_{suffix}"] = alg.d_k[k].item()
 
         # Aggregate metrics
-        if hasattr(alg, "_last_barrier_penalty"):
-            metrics["Constraint/barrier_penalty"] = alg._last_barrier_penalty
-        if hasattr(alg, "_last_mode"):
-            metrics["Constraint/mode"] = float(alg._last_mode)
+        metrics["Constraint/barrier_penalty"] = alg._last_barrier_penalty
+        metrics["Constraint/mode"] = float(alg._last_mode)
 
         # Line search (policy update metric)
-        if hasattr(alg, "_last_line_search_success"):
-            metrics["Policy/line_search_success"] = alg._last_line_search_success
+        metrics["Policy/line_search_success"] = alg._last_line_search_success
 
         flush_metrics(self.writer, metrics, iteration, self.logger_type)
 
     def save(self, path, infos=None):
         """Save checkpoint with barrier state."""
         super().save(path, infos)
-        barrier_path = os.path.join(os.path.dirname(path), "barrier_state.pt")
-        state = {
-            "in_recovery": self.alg._in_recovery,
-            "margins": self.alg._margins,
-        }
-        torch.save(state, barrier_path)
+        self._save_aux_state(
+            path,
+            "barrier_state.pt",
+            {
+                "in_recovery": self.alg._in_recovery,
+                "margins": self.alg._margins,
+            },
+        )
 
     def load(self, path, load_optimizer=True, map_location=None):
-        """Load checkpoint and restore barrier state if available.
-
-        Also handles backward compatibility: if lambda_state.pt exists (from
-        old Lagrangian checkpoints), it is ignored since C-TRPO has no lambdas.
-        """
+        """Load checkpoint and restore barrier state if available."""
         infos = super().load(path, load_optimizer, map_location)
 
-        # Load C-TRPO barrier state
-        barrier_path = os.path.join(os.path.dirname(path), "barrier_state.pt")
-        if os.path.exists(barrier_path):
-            state = torch.load(barrier_path, map_location=self.device, weights_only=False)
+        state = self._load_aux_state(path, "barrier_state.pt", self.device)
+        if state is not None:
             self.alg._in_recovery = state["in_recovery"]
             self.alg._margins = state["margins"].to(self.device)
-            logger.info("Restored barrier state from %s", barrier_path)
-
-        # Backward compat: ignore old lambda_state.pt silently
-        lambda_path = os.path.join(os.path.dirname(path), "lambda_state.pt")
-        if os.path.exists(lambda_path):
-            logger.info("Ignoring legacy lambda_state.pt (C-TRPO has no lambdas)")
+            logger.info("Restored barrier state from checkpoint")
 
         return infos

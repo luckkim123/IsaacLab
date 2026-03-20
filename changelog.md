@@ -62,6 +62,18 @@ Verified: grep for `hero_agent|HeroAgent` shows only external asset references
 - `utils/debug_vis.py`: Extracted 4 magic numbers into class constants (`_PAYLOAD_COG_RADIUS`,
   `_PAYLOAD_STEM_RADIUS`, `_MIN_STEM_DIST`, `_HIDDEN_POS`) for clarity
 
+### Refactored (runners/ simplification, 7 steps)
+- `runners/base_runner.py`: Docstring "Hero Agent" -> "constrained ALBC". Added `_doraemon`
+  property (replaces 3x `hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None`),
+  `_should_log` property (replaces 4x `self.log_dir is not None and not self.disable_logs`),
+  `_save_aux_state`/`_load_aux_state` static methods (replaces manual `os.path.join` + `torch.save/load`
+  in save/load). DORAEMON logging switched from raw `writer.add_scalar` loop to `flush_metrics()`.
+- `runners/encoder_runner.py`: 2x logging guard replaced with `self._should_log`.
+- `runners/constraint_encoder_runner.py`: Removed 8 `hasattr(alg, "_last_...")` guards
+  (ConstraintTRPO.update() always sets these before log()). Removed lambda_state.pt backward
+  compat code (4 lines, legacy from hero_agent copy, never relevant in constrained_albc).
+  save/load uses `_save_aux_state`/`_load_aux_state`. Removed unused `os`/`torch` imports.
+
 ## [2026-03-18] C-TRPO encoder fix experiments: multi-step caused KL instability
 
 ### Context
