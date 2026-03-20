@@ -6,14 +6,14 @@
 """ActorCriticEncoder with multi-head cost value function for constrained RL (IPO).
 
 Extends ActorCriticEncoder with a cost critic head that predicts per-constraint
-cost values V_C_k(s) for K constraints. The cost critic shares the same input
-path as the reward critic (symmetric or asymmetric).
+cost values V_C_k(s) for K constraints. The cost critic uses the same asymmetric
+input path as the reward critic: cat([policy_obs, hist_flat, privileged]).
 
-Architecture (asymmetric critic, default for constrained RL / NORBC):
-    Encoder:     privileged (19D) -> MLP -> tanh -> z (13D)
-    Actor:       cat([policy_obs, z]) = 26D -> MLP -> actions
-    Critic:      cat([policy_obs, privileged_raw]) = 32D -> MLP -> value (1D)
-    Cost Critic: cat([policy_obs, privileged_raw]) = 32D -> MLP -> cost values (K)
+Architecture:
+    Encoder:     cat([policy_obs, hist_flat, privileged]) -> MLP -> tanh -> z (13D)
+    Actor:       cat([policy_obs, hist_flat, z]) -> MLP -> actions
+    Critic:      cat([policy_obs, hist_flat, privileged]) -> MLP -> value (1D)
+    Cost Critic: cat([policy_obs, hist_flat, privileged]) -> MLP -> cost values (K)
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
 
         self.num_constraints = num_constraints
 
-        # Cost critic: same input dimension as reward critic
+        # Cost critic: same input dimension as reward critic (asymmetric)
         num_critic_obs = self.num_critic_obs
         self.cost_critic = MLP(
             num_critic_obs,
@@ -59,10 +59,8 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
             list(cost_critic_hidden_dims),
             "elu",
         )
-        mode_str = "asymmetric" if self.asymmetric_critic else "symmetric"
         logger.info(
-            "Cost critic MLP (%s, %dD input, %d outputs): %s",
-            mode_str,
+            "Cost critic MLP (history-asymmetric, %dD input, %d outputs): %s",
             num_critic_obs,
             num_constraints,
             self.cost_critic,
@@ -71,14 +69,10 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
     def evaluate_costs(self, obs: TensorDict) -> torch.Tensor:
         """Evaluate cost value function for all K constraints.
 
-        Uses the same critic observation path as the reward critic:
-        asymmetric (raw privileged) or symmetric (encoder z).
-
-        Args:
-            obs: TensorDict with policy and privileged observations.
+        Uses the same asymmetric critic input: cat([policy_obs, hist_flat, privileged]).
 
         Returns:
-            Cost values. Shape: (batch, K).
+            Cost values (softplus activated). Shape: (batch, K).
         """
         critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))  # type: ignore[operator]
         return F.softplus(self.cost_critic(critic_obs))
@@ -93,8 +87,7 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
             for k, v in self.cost_critic.state_dict().items():
                 state_dict[cost_prefix + k] = v
         else:
-            # Detect K mismatch (e.g. K=3 checkpoint loaded into K=6 model).
-            # MLP (nn.Sequential) keys: "0.weight", "2.weight", ..., last is output layer.
+            # Detect K mismatch (e.g. K=3 checkpoint loaded into K=6 model)
             weight_keys = sorted(
                 [k for k in state_dict if k.startswith(cost_prefix) and k.endswith(".weight")],
                 key=lambda k: int(k.removeprefix(cost_prefix).split(".")[0]),
@@ -111,20 +104,7 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
                     for k, v in self.cost_critic.state_dict().items():
                         state_dict[cost_prefix + k] = v
 
-            # Detect input dimension mismatch (symmetric <-> asymmetric)
-            weight_keys = sorted(
-                [k for k in state_dict if k.startswith(cost_prefix) and k.endswith(".weight")],
-                key=lambda k: int(k.removeprefix(cost_prefix).split(".")[0]),
-            )
-            if weight_keys:
-                ckpt_input_dim = state_dict[weight_keys[0]].shape[1]
-                if ckpt_input_dim != self.num_critic_obs:
-                    logger.warning(
-                        "cost_critic input dim mismatch (checkpoint %dD vs model %dD), reinitializing.",
-                        ckpt_input_dim,
-                        self.num_critic_obs,
-                    )
-                    for k, v in self.cost_critic.state_dict().items():
-                        state_dict[cost_prefix + k] = v
+            # Detect input dimension mismatch (reuse parent helper)
+            self._handle_critic_dim_mismatch(state_dict, cost_prefix)
 
         return super().load_state_dict(state_dict, strict=strict)

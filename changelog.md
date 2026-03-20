@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] Simplify constrained_albc encoder: remove dead branches
+
+### Context
+`actor_critic_encoder.py` (465 lines) and `actor_critic_encoder_constrained.py` (131 lines)
+contained dead code paths from legacy modes that are never used in constrained_albc: no-history
+mode (obs_groups always has 3 keys), symmetric critic (asymmetric_critic always True), sigmoid
+activation (always tanh), and Phase 2 adaptation parameters. These files are independent from
+hero_agent's encoder, so all dead paths were safely removable.
+
+### Changed
+- `encoder/actor_critic_encoder.py`: Removed 6 parameters from `__init__` signature
+  (`encoder_output_activation`, `z_min`, `z_max`, `asymmetric_critic`, `proprio_history_len`,
+  `proprio_feature_dim`) -- absorbed by `**kwargs` for config forwarding compatibility.
+  obs_groups now requires exactly 3 keys (ValueError if not). Encoder MLP uses
+  `last_activation="tanh"` (rsl_rl MLP built-in) instead of manual `_activate_z()`.
+  `_get_critic_obs()` always returns `[policy_obs, hist_flat, privileged]` (no branching).
+  `_handle_critic_dim_mismatch()` takes `prefix` parameter and uses `getattr(self, name)`
+  to resolve module, enabling reuse from subclass for cost_critic. 465 -> 348 lines (-117).
+- `encoder/actor_critic_encoder_constrained.py`: Cost critic log message hardcoded to
+  "history-asymmetric" (removed `self.asymmetric_critic` reference that no longer exists in
+  parent). Input dim mismatch check replaced with parent's `_handle_critic_dim_mismatch()`.
+  131 -> 110 lines (-21).
+
+### Removed
+- `encoder/actor_critic_encoder.py`: `_activate_z()` method (tanh now inside MLP)
+- `encoder/actor_critic_encoder.py`: `_build_encoder_input()` method (inlined in callers)
+- `encoder/actor_critic_encoder.py`: All `_has_history` conditional branches
+- `encoder/actor_critic_encoder.py`: Sigmoid initialization block
+- `encoder/actor_critic_encoder_constrained.py`: `_reinit_cost_critic_on_mismatch()` method
+
+### Notes
+- Checkpoint compatible: `nn.Tanh` has 0 parameters, state_dict keys identical
+- All public API signatures unchanged (act, act_inference, evaluate, evaluate_costs)
+- Total: 596 -> 458 lines (-138, 23% reduction)
+- ruff check + format clean
+
 ## [2026-03-20] constraint_trpo.py deep simplification (surrogates, forward passes, GAE)
 
 ### Context
