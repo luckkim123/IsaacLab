@@ -124,11 +124,28 @@ class RslRlConstraintTRPOAlgorithmCfg:
     line_search_kl_margin: float = 1.5
 
     # C-TRPO barrier parameters
-    beta: float = 0.01
-    """Barrier coefficient weighting D_phi relative to D_KL."""
+    beta: float = 0.05
+    """Barrier coefficient weighting D_phi relative to D_KL.
 
-    recovery_threshold_frac: float = 0.8
-    """Fraction of budget: if cost_return < budget * frac, exit recovery mode."""
+    Increased from 0.01 to 0.05: at beta=0.01, barrier penalty was negligible
+    (0.0004 * cost_surr^2 at margin=5) compared to reward surrogate O(0.1-1.0),
+    so policy only "felt" the barrier when margin < 1 -- too late to prevent
+    recovery entry."""
+
+    recovery_threshold_frac: float = 0.6
+    """Fraction of budget: if cost_return < budget * frac, exit recovery mode.
+
+    Widened from 0.8 to 0.6: narrower hysteresis (0.8) allowed rapid safe->recovery
+    cycling when a single recovery step pushed cost just below 0.8*d_k. Wider band
+    keeps policy in recovery longer, allowing cost to drop further before switching."""
+
+    ema_cost_alpha: float = 0.3
+    """EMA smoothing factor for mean_cost_returns used in margin computation.
+
+    Prevents phantom mode switches caused by cost critic drift when the actor is
+    frozen (line search failure). alpha=0.3 gives ~3-iteration lag, which is fast
+    enough to detect real constraint violations while filtering single-iteration
+    cost value jumps."""
 
     # Encoder z bounds
     z_bounds_coef: float = 0.3

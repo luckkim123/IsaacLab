@@ -92,6 +92,7 @@ class ConstraintTRPO:
         # C-TRPO barrier parameters
         beta: float = 0.01,
         recovery_threshold_frac: float = 0.8,
+        ema_cost_alpha: float = 0.3,
         # Encoder z bounds
         z_bounds_coef: float = 0.3,
         # Encoder update
@@ -139,6 +140,13 @@ class ConstraintTRPO:
         self._in_recovery = [False] * num_constraints
         self._margins = torch.zeros(num_constraints, device=device)
 
+        # B1: EMA smoothing on mean_cost_returns to prevent phantom mode switches.
+        # When cost critic updates without actor change, raw mean_cost_returns can
+        # jump, causing spurious mode transitions. EMA damps this noise.
+        self._ema_cost_returns = torch.zeros(num_constraints, device=device)
+        self._ema_alpha = ema_cost_alpha
+        self._ema_initialized = False
+
         # Initialize monitoring attributes (read by ConstraintEncoderRunner before first update)
         self._cached_barrier_penalty = 0.0
         self._last_cost_returns = [0.0] * num_constraints
@@ -179,6 +187,7 @@ class ConstraintTRPO:
                 self._policy_params.append(param)
 
         self._value_params = value_params
+        self._base_value_lr = value_lr  # B2: saved for LR gating
         self.value_optimizer = optim.Adam(value_params, lr=value_lr)
         self._has_encoder_params = len(encoder_params) > 0
         self.encoder_lr = encoder_lr
@@ -555,7 +564,15 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         # 1. Compute margins and determine safe/recovery mode
         # ------------------------------------------------------------------
-        self._compute_margins(mean_cost_returns)
+        # B1: EMA smoothing to prevent phantom mode switches from cost critic drift.
+        if not self._ema_initialized:
+            self._ema_cost_returns = mean_cost_returns.clone()
+            self._ema_initialized = True
+        else:
+            self._ema_cost_returns = (
+                1 - self._ema_alpha
+            ) * self._ema_cost_returns + self._ema_alpha * mean_cost_returns
+        self._compute_margins(self._ema_cost_returns)
 
         any_recovery = any(self._in_recovery)
         all_recovery = all(self._in_recovery)
@@ -625,7 +642,7 @@ class ConstraintTRPO:
         # 4. Value function update (pure MSE)
         # ------------------------------------------------------------------
         mean_value_loss, mean_cost_value_loss = self._update_values(
-            obs_flat, returns_flat, cost_returns_flat, batch_size
+            obs_flat, returns_flat, cost_returns_flat, batch_size, actor_updated=ls_success
         )
 
         # ------------------------------------------------------------------
@@ -759,11 +776,21 @@ class ConstraintTRPO:
         returns_flat: torch.Tensor,
         cost_returns_flat: torch.Tensor,
         batch_size: int,
+        actor_updated: bool = True,
     ) -> tuple[float, float]:
-        """Update value functions (reward + cost) via MSE."""
+        """Update value functions (reward + cost) via MSE.
+
+        B2: When actor is frozen (actor_updated=False), cost critic LR is reduced
+        10x to prevent phantom mode switches from cost value drift.
+        """
         mean_value_loss = 0.0
         mean_cost_value_loss = 0.0
         num_value_updates = 0
+
+        # B2: Reduce value LR when actor is frozen to slow cost critic drift
+        if not actor_updated:
+            for pg in self.value_optimizer.param_groups:
+                pg["lr"] = self._base_value_lr * 0.1
 
         for _epoch in range(self.num_learning_epochs):
             indices = torch.randperm(batch_size, device=self.device)
@@ -804,6 +831,11 @@ class ConstraintTRPO:
         if num_value_updates > 0:
             mean_value_loss /= num_value_updates
             mean_cost_value_loss /= num_value_updates
+
+        # B2: Restore value LR after update
+        if not actor_updated:
+            for pg in self.value_optimizer.param_groups:
+                pg["lr"] = self._base_value_lr
 
         return mean_value_loss, mean_cost_value_loss
 

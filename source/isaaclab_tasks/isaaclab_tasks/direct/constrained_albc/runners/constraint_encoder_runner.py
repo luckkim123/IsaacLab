@@ -151,6 +151,8 @@ class ConstraintEncoderRunner(OnPolicyRunner):
             {
                 "in_recovery": self.alg._in_recovery,
                 "margins": self.alg._margins,
+                "ema_cost_returns": self.alg._ema_cost_returns,
+                "ema_initialized": self.alg._ema_initialized,
             },
         )
 
@@ -166,6 +168,10 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         if state is not None:
             self.alg._in_recovery = state["in_recovery"]
             self.alg._margins = state["margins"].to(self.device)
+            # Restore EMA state (added in B1 fix; backward-compatible with old checkpoints)
+            if "ema_cost_returns" in state:
+                self.alg._ema_cost_returns = state["ema_cost_returns"].to(self.device)
+                self.alg._ema_initialized = state["ema_initialized"]
             logger.info("Restored barrier state from checkpoint")
 
         # Restore encoder optimizer state for seamless resume (BUG-1 fix)
@@ -194,11 +200,12 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         K = alg.num_constraints
         metrics: dict[str, float] = {}
 
-        # Per-constraint: cost_return, violation, margin, recovery, d_k
+        # Per-constraint: cost_return, violation, margin, recovery, d_k, ema_cost_return
         for k in range(K):
             suffix = self._constraint_names[k] if k < len(self._constraint_names) else str(k)
             metrics[f"Constraint/violation_{suffix}"] = alg._last_violations[k]
             metrics[f"Constraint/cost_return_{suffix}"] = alg._last_cost_returns[k]
+            metrics[f"Constraint/ema_cost_return_{suffix}"] = alg._ema_cost_returns[k].item()
             metrics[f"Constraint/margin_{suffix}"] = alg._last_margins[k]
             metrics[f"Constraint/in_recovery_{suffix}"] = alg._last_in_recovery[k]
             metrics[f"Constraint/d_k_{suffix}"] = alg.d_k[k].item()

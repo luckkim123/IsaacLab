@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] C-TRPO mode oscillation fix: EMA smoothing + cost critic LR gating
+
+### Context
+C-TRPO training exhibited rapid mode oscillation (loss/mode flipping 0<->1 every
+5-10 iterations in later training). Root cause analysis identified 5 layers:
+- RC1 (HIGH): Cost critic decoupling -- `_update_values()` runs 20 gradient steps
+  regardless of actor update success. When actor is frozen (ls_success=False), cost
+  critic drifts, changing margin without policy change -> "phantom" mode switches.
+- RC2 (HIGH): Weak barrier beta=0.01 -- barrier penalty negligible until margin < 1.
+- RC3 (MEDIUM): Hard binary mode switch with no continuous interpolation.
+- RC4 (MEDIUM): Narrow hysteresis band (0.8) allowing rapid safe<->recovery cycling.
+- RC5 (LOW): Binary constraint volatility (minor with 4096-env averaging).
+
+Implemented Approach B (B1 + B2, ~30 lines) targeting RC1, plus Approach A tuning
+targeting RC2 + RC4. Approach C (soft mode transition, ~120 lines) reserved as
+follow-up if oscillation persists.
+
+### Changed
+- `algorithms/constraint_trpo.py`: B1 -- EMA smoothing (alpha=0.3) on mean_cost_returns
+  before margin computation. `_compute_margins()` now receives smoothed values instead
+  of raw per-iteration cost returns. ~3-iteration lag, sufficient for real violation
+  detection while filtering single-iteration cost value jumps.
+- `algorithms/constraint_trpo.py`: B2 -- Cost critic LR gated on actor update success.
+  When `ls_success=False`, value optimizer LR reduced to 10% of base LR. Prevents
+  cost critic from drifting while actor is frozen, eliminating the primary source of
+  phantom mode switches. LR restored after `_update_values()` completes.
+- `agents/rsl_rl_ppo_cfg.py`: Added `ema_cost_alpha=0.3` parameter. Updated `beta`
+  default 0.01->0.05 (5x barrier strengthening). Updated `recovery_threshold_frac`
+  default 0.8->0.6 (wider hysteresis band).
+- `runners/constraint_encoder_runner.py`: EMA state (ema_cost_returns, ema_initialized)
+  persisted in barrier_state.pt checkpoint. Backward-compatible with old checkpoints
+  (missing EMA keys handled gracefully). Added per-constraint `ema_cost_return` metric
+  to WandB/TensorBoard logging for monitoring smoothed vs raw cost returns.
+
+### Notes
+- B3 (adaptive beta based on min margin) is designed but not implemented -- add if
+  beta=0.05 proves insufficient after B1+B2 stabilize mode switching.
+- Approach C (soft mode transition with sigmoid alpha_k blending) is the structural
+  solution if oscillation fundamentally persists. ~120 lines, replaces binary
+  safe/recovery with continuous interpolation. Reserved as follow-up.
+- Verification: run with same config, check Loss/mode switch period > 30 iters in
+  step 100-300 range, Constraint/cost_return stable near d_k, Policy/line_search_success > 70%.
+
 ## [2026-03-20] Remove PBRS progress reward (redundant with quadratic command)
 
 ### Context
