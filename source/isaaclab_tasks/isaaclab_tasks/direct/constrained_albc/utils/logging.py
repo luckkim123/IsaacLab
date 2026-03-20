@@ -7,7 +7,7 @@
 
 Provides all TB/WandB metric functions and environment helpers:
     - flush_metrics: Core logging utilities
-    - unwrap_env, connect_encoder_to_env: Environment unwrapping helpers
+    - unwrap_env: Environment unwrapping helper
     - log_dr_metrics: Domain randomization parameters
     - log_encoder_metrics: Encoder z health
 """
@@ -100,20 +100,6 @@ def unwrap_env(env: Any) -> Any:
     while hasattr(raw, "unwrapped") and raw is not raw.unwrapped:
         raw = raw.unwrapped
     return raw
-
-
-def connect_encoder_to_env(env: Any, policy: Any, caller_name: str = "Runner") -> None:
-    """Wire encoder policy to environment for encoder z access.
-
-    Args:
-        env: Wrapped environment (will be unwrapped).
-        policy: Policy with encoder (ActorCriticEncoder or subclass).
-        caller_name: Name for log message.
-    """
-    raw_env = unwrap_env(env)
-    if hasattr(raw_env, "set_encoder_policy"):
-        raw_env.set_encoder_policy(policy)
-        logger.info("[%s] Connected encoder policy to env for M_hat extraction.", caller_name)
 
 
 # =============================================================================

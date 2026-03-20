@@ -7,7 +7,6 @@
 
 from .debug_vis import DebugVisualization
 from .logging import (
-    connect_encoder_to_env,
     flush_metrics,
     log_dr_infeasibility,
     log_dr_metrics,
@@ -17,7 +16,6 @@ from .logging import (
 
 __all__ = [
     "DebugVisualization",
-    "connect_encoder_to_env",
     "flush_metrics",
     "log_dr_infeasibility",
     "log_dr_metrics",

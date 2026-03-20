@@ -937,15 +937,8 @@ class ALBCEnv(DirectRLEnv):
             total += normalized
         log["Episode_Reward/total"] = total
 
-        # Termination rates (0.0~1.0, scale-invariant for weighted averaging)
-        def _term_rate(flag: torch.Tensor) -> float:
-            return torch.count_nonzero(flag[env_ids]).item() / n if n > 0 else 0.0
-
-        log["Episode_Termination/terminated"] = _term_rate(self.reset_terminated)
-        log["Episode_Termination/time_out"] = _term_rate(self.reset_time_outs)
-        log["Episode_Termination/too_fast"] = _term_rate(self._term_too_fast)
-        log["Episode_Termination/bad_state"] = _term_rate(self._term_bad_state)
-        log["Episode_Termination/excessive_tilt"] = _term_rate(self._term_excessive_tilt)
+        # Termination rates
+        self._collect_termination_metrics(log, env_ids, n)
 
         if n == 0:
             return log
@@ -960,7 +953,34 @@ class ALBCEnv(DirectRLEnv):
         da = self._actions[env_ids] - self._prev_actions[env_ids]
         log["Action/rate_mean"] = torch.linalg.norm(da, dim=-1).mean().item()
 
-        # --- Dynamics & actuator diagnostics ---
+        # Dynamics & actuator diagnostics
+        self._collect_dynamics_metrics(log, env_ids)
+
+        # DR parameters (when randomization is enabled)
+        if hasattr(self.cfg, "randomization") and self.cfg.randomization.enable:
+            # log_dr_metrics expects extras["log"] dict -- pass a wrapper
+            extras_wrapper: dict = {"log": log}
+            log_dr_metrics(extras_wrapper, self)
+
+        # DR infeasibility check (only for constrained envs with DR enabled)
+        self._check_dr_infeasibility(env_ids)
+
+        return log
+
+    def _collect_termination_metrics(self, log: dict[str, float | torch.Tensor], env_ids: torch.Tensor, n: int) -> None:
+        """Collect termination rate metrics (0.0~1.0, scale-invariant)."""
+
+        def _term_rate(flag: torch.Tensor) -> float:
+            return torch.count_nonzero(flag[env_ids]).item() / n if n > 0 else 0.0
+
+        log["Episode_Termination/terminated"] = _term_rate(self.reset_terminated)
+        log["Episode_Termination/time_out"] = _term_rate(self.reset_time_outs)
+        log["Episode_Termination/too_fast"] = _term_rate(self._term_too_fast)
+        log["Episode_Termination/bad_state"] = _term_rate(self._term_bad_state)
+        log["Episode_Termination/excessive_tilt"] = _term_rate(self._term_excessive_tilt)
+
+    def _collect_dynamics_metrics(self, log: dict[str, float | torch.Tensor], env_ids: torch.Tensor) -> None:
+        """Collect angular velocity, joint, and actuator saturation diagnostics."""
         ang_vel = self._robot.data.root_ang_vel_b[env_ids]
         log["Dynamics/angular_velocity_rp_rms"] = ang_vel[:, :2].pow(2).mean().sqrt().item()
         log["Dynamics/angular_velocity_yaw_rms"] = ang_vel[:, 2].pow(2).mean().sqrt().item()
@@ -975,27 +995,16 @@ class ALBCEnv(DirectRLEnv):
         log["Dynamics/joint_pos_mean_abs"] = joint_pos.abs().mean().item()
         log["Dynamics/joint_vel_abs_max"] = joint_vel.abs().max().item()
 
-        # Effort limit saturation (verify DR'd effort limits are active)
+        # Effort limit saturation
         effort_lim = self._robot.data.joint_effort_limits[env_ids][:, jids]
         computed = self._robot.data.computed_torque[env_ids][:, jids]
         log["Dynamics/effort_limit_mean"] = effort_lim.mean().item()
         log["Dynamics/computed_torque_abs_max"] = computed.abs().max().item()
         log["Dynamics/effort_saturation_frac"] = (computed.abs() >= effort_lim * 0.99).float().mean().item()
 
-        # Velocity limit saturation (verify PhysX velocity limits are active)
+        # Velocity limit saturation
         vel_lim = self._robot.data.joint_vel_limits[env_ids][:, jids]
         log["Dynamics/vel_saturation_frac"] = (joint_vel.abs() >= vel_lim.clamp(min=1e-6) * 0.95).float().mean().item()
-
-        # DR parameters (when randomization is enabled)
-        if hasattr(self.cfg, "randomization") and self.cfg.randomization.enable:
-            # log_dr_metrics expects extras["log"] dict -- pass a wrapper
-            extras_wrapper: dict = {"log": log}
-            log_dr_metrics(extras_wrapper, self)
-
-        # DR infeasibility check (only for constrained envs with DR enabled)
-        self._check_dr_infeasibility(env_ids)
-
-        return log
 
     _dr_infeasibility_call_count: int = 0
     _dr_infeasibility_log_interval: int = 100  # Log details every N calls
@@ -1185,25 +1194,8 @@ class ALBCEnv(DirectRLEnv):
             max_jitter = max(1, int(self.max_episode_length * 0.1))
             self.episode_length_buf[env_ids] = torch.randint_like(self.episode_length_buf[env_ids], high=max_jitter)
 
-        for buf in (self._actions, self._prev_actions, self._prev_prev_actions, self._prev_actions_obs):
-            buf[env_ids] = 0.0
-        # Reset EMA to zero (velocity is reset to 0 in _reset_task_and_state after this)
-        self._ema_joint_vel[env_ids] = 0.0
-        # Reset accumulated rotation tracking (IPO constraint)
-        self._accumulated_rotation[env_ids] = 0.0
-        self._prev_joint_pos[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
-        # Reset overshoot detection buffer (set to 0; overwritten in _reset_task_and_state)
-        self._prev_attitude_error_rp[env_ids] = 0.0
-
-        # Reset perturbation state: randomize timer phase to decorrelate envs
-        rand_cfg = self.cfg.randomization
-        perturb_cycle = max(1, rand_cfg.perturbation_interval + rand_cfg.perturbation_duration)
-        self._perturb_forces[env_ids] = 0.0
-        self._perturb_torques[env_ids] = 0.0
-        self._perturb_timer[env_ids] = torch.randint(0, perturb_cycle, (len(env_ids),), device=self.device)
-        self._buoy_perturb_forces[env_ids] = 0.0
-        self._buoy_perturb_torques[env_ids] = 0.0
-        self._buoy_perturb_timer[env_ids] = torch.randint(0, perturb_cycle, (len(env_ids),), device=self.device)
+        self._reset_action_buffers(env_ids)
+        self._reset_perturbation_buffers(env_ids)
 
         # Reset proprioception history buffer
         if self._proprio_hist is not None:
@@ -1220,9 +1212,29 @@ class ALBCEnv(DirectRLEnv):
 
         # Reset action latency: sample new per-env latency and clear history
         if self._action_history is not None and self._action_latency is not None:
-            lo, hi = rand_cfg.action_latency_range
+            lo, hi = self.cfg.randomization.action_latency_range
             self._action_history[env_ids] = 0.0
             self._action_latency[env_ids] = torch.randint(lo, hi + 1, (len(env_ids),), device=self.device)
+
+    def _reset_action_buffers(self, env_ids: torch.Tensor) -> None:
+        """Zero action, EMA, rotation tracking, and overshoot detection buffers."""
+        for buf in (self._actions, self._prev_actions, self._prev_prev_actions, self._prev_actions_obs):
+            buf[env_ids] = 0.0
+        self._ema_joint_vel[env_ids] = 0.0
+        self._accumulated_rotation[env_ids] = 0.0
+        self._prev_joint_pos[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
+        self._prev_attitude_error_rp[env_ids] = 0.0
+
+    def _reset_perturbation_buffers(self, env_ids: torch.Tensor) -> None:
+        """Zero perturbation forces/torques and randomize timer phase."""
+        rand_cfg = self.cfg.randomization
+        perturb_cycle = max(1, rand_cfg.perturbation_interval + rand_cfg.perturbation_duration)
+        self._perturb_forces[env_ids] = 0.0
+        self._perturb_torques[env_ids] = 0.0
+        self._perturb_timer[env_ids] = torch.randint(0, perturb_cycle, (len(env_ids),), device=self.device)
+        self._buoy_perturb_forces[env_ids] = 0.0
+        self._buoy_perturb_torques[env_ids] = 0.0
+        self._buoy_perturb_timer[env_ids] = torch.randint(0, perturb_cycle, (len(env_ids),), device=self.device)
 
     def _reset_physics(self, env_ids: torch.Tensor) -> None:
         """Reset hydrodynamics, payload, and apply domain randomization.

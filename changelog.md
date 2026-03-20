@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] constrained_albc code simplification (methods + dead code)
+
+### Context
+Code simplification plan for `constrained_albc/`: remove dead code and extract helper methods
+from large monolithic methods. The codebase was already ruff-clean; focus was on structural
+readability. `connect_encoder_to_env()` was a no-op (checks for `set_encoder_policy` which
+only exists in hero_agent's TDC env, never in ALBCEnv). `_collect_episode_metrics` (99 lines)
+and `_reset_framework` (56 lines) each contained independent logical sections that could be
+cleanly extracted.
+
+### Changed
+- `albc_env.py`: Extracted `_collect_termination_metrics()` (5 termination rate calculations)
+  and `_collect_dynamics_metrics()` (angular vel, joint, actuator saturation diagnostics) from
+  `_collect_episode_metrics`. Parent method reduced from 99 to ~30 lines.
+- `albc_env.py`: Extracted `_reset_action_buffers()` (action, EMA, rotation, overshoot buffers)
+  and `_reset_perturbation_buffers()` (forces, torques, timer phase) from `_reset_framework`.
+  Parent method reduced from 56 to ~15 lines.
+- `runners/encoder_runner.py`: Removed `connect_encoder_to_env()` call from `__init__`.
+
+### Removed
+- `utils/logging.py`: Deleted `connect_encoder_to_env()` function (always no-op in ALBCEnv)
+- `utils/__init__.py`: Removed `connect_encoder_to_env` from imports and `__all__`
+
+### Notes
+- Zero functional change: all extracted helpers preserve identical logic
+- ruff check + format clean. AST parse verification passed (23 files)
+- Full Isaac Sim import not tested (requires runtime); syntax verified
+
 ## [2026-03-20] Simplify constraint_trpo.py internal code duplication
 
 ### Context

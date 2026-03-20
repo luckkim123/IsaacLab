@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import math
 
-from ..utils.logging import connect_encoder_to_env, log_encoder_metrics
+from ..utils.logging import log_encoder_metrics
 from .base_runner import BaseRunner
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,6 @@ class EncoderRunner(BaseRunner):
 
         if self._has_encoder:
             logger.info("[EncoderRunner] Encoder detected. Encoder metrics logging enabled.")
-            connect_encoder_to_env(self.env, self.alg.policy, "EncoderRunner")
         else:
             logger.info("[EncoderRunner] No encoder detected. Using standard logging only.")
 
