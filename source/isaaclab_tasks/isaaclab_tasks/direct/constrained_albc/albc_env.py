@@ -28,7 +28,7 @@ from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse
 from isaaclab_tasks.models import HydrodynamicsModel
 
 
-from .config import ALBCEnvCfg
+from .config import ConstrainedConstrainedALBCEnvCfg
 from .mdp import (
     RewardManager,
     RewardTermCfg,
@@ -84,9 +84,9 @@ class ALBCEnv(DirectRLEnv):
         - joint_limits: from URDF (±2*pi rad, i.e. ±360 deg)
     """
 
-    cfg: ALBCEnvCfg
+    cfg: ConstrainedALBCEnvCfg
 
-    def __init__(self, cfg: ALBCEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: ConstrainedALBCEnvCfg, render_mode: str | None = None, **kwargs):
         """Initialize the ALBC environment.
 
         Args:
@@ -151,7 +151,7 @@ class ALBCEnv(DirectRLEnv):
         self.set_debug_vis(self.cfg.debug_vis)
 
     @staticmethod
-    def _iter_noise_params(cfg: ALBCEnvCfg):
+    def _iter_noise_params(cfg: ConstrainedALBCEnvCfg):
         """Yield (sub_cfg, param_name, value) for all tuple/list noise params."""
         noise_model = getattr(cfg, "observation_noise_model", None)
         if noise_model is None:
@@ -166,7 +166,7 @@ class ALBCEnv(DirectRLEnv):
                     yield sub_cfg, param, val
 
     @staticmethod
-    def _convert_noise_cfg_tuples(cfg: ALBCEnvCfg) -> None:
+    def _convert_noise_cfg_tuples(cfg: ConstrainedALBCEnvCfg) -> None:
         """Convert noise config tuple/list values to torch.Tensor in-place.
 
         Config uses tuples for OmegaConf/Hydra serialization compatibility.
