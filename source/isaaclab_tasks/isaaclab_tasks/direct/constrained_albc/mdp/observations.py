@@ -116,17 +116,15 @@ def compute_privileged_obs(
     priv_obs.append(env._hydro.rigid_body_inertia[:, :2])  # 2D: main Ixx, Iyy
     priv_obs.append(env._buoy_hydro.rigid_body_inertia[:, :2])  # 2D: buoy Ixx, Iyy
 
-    # Include payload info if enabled and state_space is large enough
-    if env._payload_mass is not None and env._payload_cog_offset is not None and env.cfg.state_space >= 18:
-        payload_priv = torch.cat(
-            [env._payload_mass.unsqueeze(-1), env._payload_cog_offset],
-            dim=-1,
-        )
-        priv_obs.append(payload_priv)  # 4D: mass, cog_offset_xyz
+    # Payload: mass + CoG offset (4D)
+    payload_priv = torch.cat(
+        [env._payload_mass.unsqueeze(-1), env._payload_cog_offset],
+        dim=-1,
+    )
+    priv_obs.append(payload_priv)  # 4D: mass, cog_offset_xyz
 
-    # Main body surge added mass: effective inertia = I_rigid + M_added.
+    # Main body surge added mass: effective inertia = I_rigid + M_added (1D).
     # Buoy added mass surge excluded (zero encoder sensitivity across all runs).
-    if env.cfg.state_space >= 19:
-        priv_obs.append(env._hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1))  # 1D: main M_a surge
+    priv_obs.append(env._hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1))  # 1D: main M_a surge
 
     return torch.cat(priv_obs, dim=-1)

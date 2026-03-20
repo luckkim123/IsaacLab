@@ -114,13 +114,6 @@ class ALBCEnv(DirectRLEnv):
         if self.cfg.state_space < 0:
             raise ValueError(f"state_space={self.cfg.state_space} must be non-negative")
 
-        # Validate state_space vs enable_payload consistency
-        if self.cfg.state_space >= 18 and not self.cfg.enable_payload:
-            raise ValueError(
-                f"state_space={self.cfg.state_space} requires enable_payload=True "
-                f"(payload provides 4D of the {self.cfg.state_space}D privileged obs)"
-            )
-
         # Validate control frequency: control_decimation must be a positive divisor
         # of episode steps. step_dt * control_decimation gives the control period.
         if cfg.control_decimation < 1:
@@ -203,27 +196,15 @@ class ALBCEnv(DirectRLEnv):
         )
 
     def _init_payload(self) -> None:
-        """Initialize payload physics buffers if enabled.
+        """Initialize payload physics buffers.
 
         Payload is applied to the gripper body (fixed to base via base_to_gripper joint).
-        When disabled, all payload attributes are set to None.
         """
-        if self.cfg.enable_payload:
-            self._payload_mass = torch.full((self.num_envs,), self.cfg.payload_mass, device=self.device)
-            offset = torch.tensor(self.cfg.payload_attachment_offset, device=self.device, dtype=torch.float32)
-            self._payload_attachment_offset = offset.expand(self.num_envs, -1).clone()
-            self._payload_cog_offset = torch.zeros(self.num_envs, 3, device=self.device)
-            self._payload_gravity_vec = torch.tensor(self.sim.cfg.gravity, device=self.device, dtype=torch.float32)
-        else:
-            self._payload_mass = None
-            self._payload_attachment_offset = None
-            self._payload_cog_offset = None
-            self._payload_gravity_vec = None
-
-    @property
-    def _payload_enabled(self) -> bool:
-        """Whether payload physics is enabled."""
-        return self._payload_mass is not None
+        self._payload_mass = torch.full((self.num_envs,), self.cfg.payload_mass, device=self.device)
+        offset = torch.tensor(self.cfg.payload_attachment_offset, device=self.device, dtype=torch.float32)
+        self._payload_attachment_offset = offset.expand(self.num_envs, -1).clone()
+        self._payload_cog_offset = torch.zeros(self.num_envs, 3, device=self.device)
+        self._payload_gravity_vec = torch.tensor(self.sim.cfg.gravity, device=self.device, dtype=torch.float32)
 
     def _init_joints(self) -> None:
         """Initialize ALBC joint IDs and limits."""
@@ -632,22 +613,18 @@ class ALBCEnv(DirectRLEnv):
 
         # Gripper payload (weight force applied at attachment point + CoG offset)
         payload_forces, payload_torques = self._compute_payload_wrench()
-        if payload_forces is not None and payload_torques is not None:
-            self._robot.permanent_wrench_composer.set_forces_and_torques(
-                body_ids=self._gripper_body_id,
-                forces=payload_forces.unsqueeze(1),
-                torques=payload_torques.unsqueeze(1),
-            )
+        self._robot.permanent_wrench_composer.set_forces_and_torques(
+            body_ids=self._gripper_body_id,
+            forces=payload_forces.unsqueeze(1),
+            torques=payload_torques.unsqueeze(1),
+        )
 
-    def _compute_payload_wrench(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    def _compute_payload_wrench(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute payload weight force and torque in the gripper body frame.
 
         Returns:
-            Tuple of (forces, torques) in gripper body frame, or (None, None) if disabled.
+            Tuple of (forces, torques) in gripper body frame.
         """
-        if self._payload_mass is None:
-            return None, None
-
         gripper_idx = self._gripper_body_id[0]
         gripper_quat = self._robot.data.body_quat_w[:, gripper_idx, :]
         payload_weight_w = self._payload_mass.unsqueeze(-1) * self._payload_gravity_vec
@@ -948,11 +925,10 @@ class ALBCEnv(DirectRLEnv):
         self._hydro.reset(env_ids)
         self._buoy_hydro.reset(env_ids)
 
-        if self._payload_mass is not None:
-            self._payload_mass[env_ids] = self.cfg.payload_mass
-            offset = torch.tensor(self.cfg.payload_attachment_offset, device=self.device, dtype=torch.float32)
-            self._payload_attachment_offset[env_ids] = offset
-            self._payload_cog_offset[env_ids] = 0.0
+        self._payload_mass[env_ids] = self.cfg.payload_mass
+        offset = torch.tensor(self.cfg.payload_attachment_offset, device=self.device, dtype=torch.float32)
+        self._payload_attachment_offset[env_ids] = offset
+        self._payload_cog_offset[env_ids] = 0.0
 
         rand_cfg = self.cfg.randomization
         if not rand_cfg.enable:
@@ -965,8 +941,7 @@ class ALBCEnv(DirectRLEnv):
 
         randomize_hydrodynamics(env=self, env_ids=env_ids, dr=dr)
         randomize_body_mass(env=self, env_ids=env_ids, dr=dr)
-        if self._payload_enabled:
-            randomize_payload(env=self, env_ids=env_ids, dr=dr)
+        randomize_payload(env=self, env_ids=env_ids, dr=dr)
 
         has_ocean_current = any(v > 0 for v in self.cfg.ocean_current.max_velocity)
         if has_ocean_current:
@@ -1021,7 +996,7 @@ class ALBCEnv(DirectRLEnv):
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Setup or toggle visibility of debug visualization markers."""
         if debug_vis:
-            self._debug_vis.setup(enable_payload=self._payload_enabled)
+            self._debug_vis.setup(enable_payload=True)
         self._debug_vis.set_visibility(debug_vis)
 
     def _debug_vis_callback(self, _event):
