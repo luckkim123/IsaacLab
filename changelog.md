@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] C-TRPO training stability: entropy bonus, encoder KL gating, yaw_vel budget, surrogate logging
+
+### Context
+Analysis of run `2026-03-20_14-01-34` (1000+ iter) identified 4 linked stability issues:
+(1) Noise std monotonically decayed 1.0->0.15 because TRPO has no entropy bonus -- the natural
+gradient always reduces std (tighter distribution = higher expected reward for current mean).
+This caused roll/pitch "axis alternation" (one axis converges, other collapses). (2) Encoder
+updates change z (actor input), shifting the conditional distribution `pi(a|s,z)` beyond the
+trust region. Logged KL reached 0.02-0.10 (2-10x the 0.015 target), with step 375-384 KL
+spike directly draining yaw_vel margin. (3) yaw_vel budget=0.35 (d_k=35, ~20 deg/s) too tight
+for passive yaw dynamics. (4) surrogate loss not logged, hindering gradient debugging.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Fix 1 -- entropy bonus `-entropy_coef * H(pi)` added to
+  `surrogate()` closure. Counteracts TRPO's inherent std-reduction bias. `entropy_coef=0.005`
+  (matching RSL-RL PPO default). Only in surrogate, not encoder update (log_std not encoder param).
+- `algorithms/constraint_trpo.py`: Fix 2 -- Pre-encoder KL measured after noise floor clamp.
+  `_update_encoder()` gains KL gating: after each encoder step, if KL exceeds
+  `pre_encoder_kl + max_encoder_kl` (default 0.016), encoder params are reverted and epoch stops.
+  Prevents encoder-induced distribution shift from violating trust region.
+- `algorithms/constraint_trpo.py`: Fix 4 -- `_trpo_step()` caches `loss.item()` for surrogate
+  logging. Added `entropy`, `surrogate`, `pre_encoder_kl` to `loss_dict` (auto-logged as
+  `Loss/entropy`, `Loss/surrogate`, `Loss/pre_encoder_kl` by OnPolicyRunner).
+- `config.py`: Fix 3 -- yaw_vel budget 0.35 -> 0.785 (d_k=78.5, ~45 deg/s).
+- `agents/rsl_rl_ppo_cfg.py`: Added `entropy_coef=0.005` and `max_encoder_kl=0.016` to
+  `RslRlConstraintTRPOAlgorithmCfg`.
+- `runners/constraint_encoder_runner.py`: Added `Policy/entropy` and `Policy/pre_encoder_kl`
+  to constraint metrics logging.
+
 ## [2026-03-20] C-TRPO per-constraint blend: fix recovery damage to attitude performance
 
 ### Context

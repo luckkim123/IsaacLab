@@ -150,6 +150,18 @@ class RslRlConstraintTRPOAlgorithmCfg:
     # Encoder z bounds
     z_bounds_coef: float = 0.3
 
+    # Entropy bonus (Fix 1: prevents monotonic std decay in TRPO)
+    entropy_coef: float = 0.005
+    """Entropy bonus coefficient. Added to surrogate loss as -entropy_coef * H(pi).
+    Counteracts TRPO's natural tendency to always decrease std (exploration collapse).
+    0.005 matches RSL-RL PPO default for comparable effective impact."""
+
+    # Post-encoder KL gating (Fix 2: prevents encoder-induced KL violation)
+    max_encoder_kl: float = 0.016
+    """Maximum additional KL divergence allowed from encoder update. If an encoder
+    step causes KL to exceed pre_encoder_kl + max_encoder_kl, the encoder params
+    are reverted. 0.016 = max_kl * line_search_kl_margin (same budget as policy step)."""
+
     # Encoder update
     num_encoder_epochs: int = 1
     """Number of encoder gradient steps per iteration. Must stay at 1: multi-step

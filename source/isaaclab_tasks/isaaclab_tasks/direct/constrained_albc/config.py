@@ -314,7 +314,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
             # --- Continuous constraints (1 term) ---
             ConstraintTermCfg(
                 func=yaw_velocity_cost,
-                budget=0.35,
+                budget=0.785,
                 name="yaw_vel",
             ),
         ],

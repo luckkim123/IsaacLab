@@ -217,4 +217,8 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         # Line search (policy update metric)
         metrics["Policy/line_search_success"] = alg._last_line_search_success
 
+        # Entropy and pre-encoder KL (Fix 1 + Fix 2)
+        metrics["Policy/entropy"] = alg._cached_mean_entropy
+        metrics["Policy/pre_encoder_kl"] = alg._last_pre_encoder_kl
+
         flush_metrics(self.writer, metrics, iteration, self.logger_type)

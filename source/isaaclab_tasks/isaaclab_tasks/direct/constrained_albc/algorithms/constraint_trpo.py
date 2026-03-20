@@ -100,6 +100,10 @@ class ConstraintTRPO:
         # Encoder update
         num_encoder_epochs: int = 1,
         encoder_lr: float = 3e-4,
+        # Entropy bonus (Fix 1: prevents monotonic std decay)
+        entropy_coef: float = 0.005,
+        # Post-encoder KL gating (Fix 2: prevents encoder-induced KL violation)
+        max_encoder_kl: float = 0.016,
         # Device
         device: str = "cpu",
         **_kwargs,
@@ -135,6 +139,8 @@ class ConstraintTRPO:
         self.line_search_kl_margin = line_search_kl_margin
         self.z_bounds_coef = z_bounds_coef
         self.num_encoder_epochs = num_encoder_epochs
+        self.entropy_coef = entropy_coef
+        self.max_encoder_kl = max_encoder_kl
 
         # C-TRPO barrier parameters
         self.beta = beta
@@ -158,6 +164,9 @@ class ConstraintTRPO:
         self._last_in_recovery = [0.0] * num_constraints
         self._last_barrier_penalty = 0.0
         self._last_mode = 0
+        self._cached_mean_entropy = 0.0
+        self._cached_surrogate_loss = 0.0
+        self._last_pre_encoder_kl = 0.0
 
         if cost_gamma >= 1.0:
             raise ValueError(f"cost_gamma must be < 1.0, got {cost_gamma}")
@@ -626,7 +635,10 @@ class ConstraintTRPO:
             self._cached_barrier_penalty = bp.item()
             # Recovery cost (violated constraints only)
             recovery_cost = (recovery_mask * cost_surrs).sum()
-            return reward_surr + bp + recovery_cost
+            # Entropy bonus: maximize entropy (negative in loss = maximize)
+            entropy_bonus = -self.entropy_coef * self.policy.entropy.mean()
+            self._cached_mean_entropy = self.policy.entropy.mean().item()
+            return reward_surr + bp + recovery_cost + entropy_bonus
 
         # Cost non-regression check: reject line search steps that worsen
         # recovery constraints (prevents reward improvement from masking cost regression)
@@ -654,6 +666,11 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         # 3. Encoder update (gated on ls_success)
         # ------------------------------------------------------------------
+        # Fix 2: Measure pre-encoder KL for gating encoder-induced distribution shift
+        with torch.no_grad():
+            pre_encoder_kl = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
+        self._last_pre_encoder_kl = pre_encoder_kl
+
         mean_z_bounds_loss = 0.0
         if self.encoder_optimizer is not None and ls_success:
             mean_z_bounds_loss = self._update_encoder(
@@ -661,6 +678,9 @@ class ConstraintTRPO:
                 advantages_flat,
                 old_log_prob_flat,
                 actions_flat,
+                old_mu_flat=old_mu_flat,
+                old_sigma_flat=old_sigma_flat,
+                pre_encoder_kl=pre_encoder_kl,
                 recovery_mask=recovery_mask if any_recovery else None,
                 cost_advantages_flat=cost_advantages_flat if any_recovery else None,
             )
@@ -701,6 +721,9 @@ class ConstraintTRPO:
             "cost_value": mean_cost_value_loss,
             "mode": float(self._last_mode),
             "adv_raw_std": adv_raw_std.item(),
+            "entropy": self._cached_mean_entropy,
+            "surrogate": self._cached_surrogate_loss,
+            "pre_encoder_kl": self._last_pre_encoder_kl,
         }
         if hasattr(self.policy, "z_bounds_loss"):
             loss_dict["z_bounds"] = mean_z_bounds_loss
@@ -731,6 +754,7 @@ class ConstraintTRPO:
         """
         # 1. Compute loss + flat gradient
         loss = surrogate_fn()
+        self._cached_surrogate_loss = loss.item()
         g = self._flat_grad(loss, self._policy_params, retain_graph=False)
 
         # 2. Natural gradient via conjugate gradient: x = F^{-1} g
@@ -763,6 +787,9 @@ class ConstraintTRPO:
         advantages_flat: torch.Tensor,
         old_log_prob_flat: torch.Tensor,
         actions_flat: torch.Tensor,
+        old_mu_flat: torch.Tensor | None = None,
+        old_sigma_flat: torch.Tensor | None = None,
+        pre_encoder_kl: float = 0.0,
         recovery_mask: torch.Tensor | None = None,
         cost_advantages_flat: torch.Tensor | None = None,
     ) -> float:
@@ -775,10 +802,19 @@ class ConstraintTRPO:
         This method runs num_encoder_epochs fresh forward/backward passes through
         the encoder, each time recomputing the reward surrogate and z_bounds loss.
         The actor params are frozen (only encoder_optimizer steps), so this is safe.
+
+        Fix 2: After each encoder step, checks if the resulting KL divergence
+        exceeds pre_encoder_kl + max_encoder_kl. If so, reverts encoder params
+        and stops early to prevent encoder-induced distribution shift.
         """
         mean_z_bounds_loss = 0.0
+        kl_gating = self.max_encoder_kl > 0 and old_mu_flat is not None and old_sigma_flat is not None
 
         for _epoch in range(self.num_encoder_epochs):
+            # Save encoder state for potential rollback (Fix 2)
+            if kl_gating:
+                saved_state = {n: p.data.clone() for n, p in self.policy.named_parameters() if n.startswith("encoder")}
+
             self.encoder_optimizer.zero_grad()
 
             # Fresh forward pass through encoder + actor
@@ -809,6 +845,23 @@ class ConstraintTRPO:
             total_loss.backward()
             nn.utils.clip_grad_norm_(self._encoder_params, max_norm=0.2)
             self.encoder_optimizer.step()
+
+            # Fix 2: KL gating -- revert if encoder step caused excessive KL shift
+            if kl_gating:
+                with torch.no_grad():
+                    post_kl = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
+                if post_kl > pre_encoder_kl + self.max_encoder_kl:
+                    for n, p in self.policy.named_parameters():
+                        if n in saved_state:
+                            p.data.copy_(saved_state[n])
+                    logger.debug(
+                        "Encoder KL exceeded limit (%.4f > %.4f + %.4f), reverted epoch %d",
+                        post_kl,
+                        pre_encoder_kl,
+                        self.max_encoder_kl,
+                        _epoch,
+                    )
+                    break
 
         return mean_z_bounds_loss
 
