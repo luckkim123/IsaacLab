@@ -290,59 +290,9 @@ class ActorCriticEncoder(nn.Module):
             self.critic_obs_normalizer.update(critic_input)  # type: ignore[union-attr]
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
-        """Load model parameters with backward compatibility.
+        """Load model parameters.
 
-        Handles missing keys, dimension mismatches, and old checkpoints.
         Returns True to indicate resumed training (RSL-RL API contract).
         """
-        if self.encoder_obs_normalization:
-            prefix = "encoder_obs_normalizer."
-            if not any(k.startswith(prefix) for k in state_dict):
-                logger.info("Old checkpoint: injecting default encoder_obs_normalizer state.")
-                for k, v in self.encoder_obs_normalizer.state_dict().items():
-                    state_dict[prefix + k] = v
-
-        self._handle_critic_dim_mismatch(state_dict, "critic.")
-
-        # Filter out unknown keys from old checkpoints
-        current_keys = set(self.state_dict().keys())
-        filtered = {k: v for k, v in state_dict.items() if k in current_keys}
-        if len(filtered) < len(state_dict):
-            dropped = set(state_dict.keys()) - current_keys
-            logger.info("Dropped %d unknown checkpoint keys: %s", len(dropped), dropped)
-
-        # Warn if essential keys are missing
-        missing = current_keys - set(filtered.keys())
-        essential_prefixes = ("encoder.", "actor.", "critic.", "log_std")
-        missing_essential = {k for k in missing if any(k.startswith(p) for p in essential_prefixes)}
-        if missing_essential:
-            logger.warning("Missing %d essential keys in checkpoint: %s", len(missing_essential), missing_essential)
-
-        super().load_state_dict(filtered, strict=False)
+        super().load_state_dict(state_dict, strict=False)
         return True
-
-    def _handle_critic_dim_mismatch(self, state_dict: dict, prefix: str) -> None:
-        """Reinitialize a critic module if checkpoint input dimension doesn't match.
-
-        Args:
-            state_dict: Checkpoint state dict to patch in-place.
-            prefix: Module prefix in state_dict (e.g. "critic." or "cost_critic.").
-        """
-        weight_keys = sorted(
-            [k for k in state_dict if k.startswith(prefix) and k.endswith(".weight")],
-            key=lambda k: int(k.removeprefix(prefix).split(".")[0]),
-        )
-        if not weight_keys:
-            return
-        ckpt_input_dim = state_dict[weight_keys[0]].shape[1]
-        if ckpt_input_dim != self.num_critic_obs:
-            module_name = prefix.rstrip(".")
-            logger.warning(
-                "%s input dim mismatch (checkpoint %dD vs model %dD), reinitializing.",
-                module_name,
-                ckpt_input_dim,
-                self.num_critic_obs,
-            )
-            module = getattr(self, module_name)
-            for k, v in module.state_dict().items():
-                state_dict[prefix + k] = v
