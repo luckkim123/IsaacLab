@@ -95,7 +95,7 @@ class ConstraintTRPO:
         # Encoder z bounds
         z_bounds_coef: float = 0.3,
         # Encoder update
-        num_encoder_epochs: int = 5,
+        num_encoder_epochs: int = 1,
         encoder_lr: float = 3e-4,
         # Device
         device: str = "cpu",
@@ -135,6 +135,16 @@ class ConstraintTRPO:
         self.recovery_threshold_frac = recovery_threshold_frac
         self._in_recovery = [False] * num_constraints
         self._margins = torch.zeros(num_constraints, device=device)
+
+        # Initialize monitoring attributes (read by ConstraintEncoderRunner before first update)
+        self._cached_barrier_penalty = 0.0
+        self._last_cost_returns = [0.0] * num_constraints
+        self._last_violations = [0.0] * num_constraints
+        self._last_line_search_success = 0.0
+        self._last_margins = [0.0] * num_constraints
+        self._last_in_recovery = [0.0] * num_constraints
+        self._last_barrier_penalty = 0.0
+        self._last_mode = 0
 
         if cost_gamma >= 1.0:
             raise ValueError(f"cost_gamma must be < 1.0, got {cost_gamma}")
@@ -346,9 +356,11 @@ class ConstraintTRPO:
         Uses masked tensor ops instead of per-k loop. Only safe-mode
         constraints (positive margin and not in recovery) contribute.
 
-        Note: the paper's Bregman divergence has a 1/2 factor (Eq. 7):
-            D_phi = (1/2) * phi'' * delta^2
-        We absorb this into beta for simplicity.
+        Note on re-parametrization: the paper's Bregman divergence (Eq. 7) is
+            D_phi = (1/2) * (1/t) * phi''(m) * delta^2
+        where t is the barrier parameter. We absorb both the 1/2 and 1/t factors
+        into beta for simplicity, so: beta_code = beta_paper / (2 * t).
+        When comparing to paper hyperparameters, account for this relation.
         """
         recovery = torch.tensor(self._in_recovery, device=self.device)
         safe_mask = (self._margins > 0) & ~recovery

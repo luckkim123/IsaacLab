@@ -158,8 +158,8 @@ def log_encoder_metrics(
 ) -> None:
     """Log essential encoder metrics.
 
-    Metrics kept (3):
-        - Encoder/z_mean, z_std: aggregate z health
+    Metrics kept (5):
+        - Encoder/z_mean, z_std, z_min, z_max: z latent health
         - Encoder/grad_norm: training signal
 
     Args:
