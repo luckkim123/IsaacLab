@@ -99,6 +99,7 @@ class ConstraintTRPO:
         encoder_lr: float = 3e-4,
         # Device
         device: str = "cpu",
+        **_kwargs,
     ) -> None:
         self.device = device
         self.policy = policy
@@ -194,6 +195,9 @@ class ConstraintTRPO:
 
         # Iteration counter (updated in update())
         self._iteration = 0
+
+        # RND compatibility (OnPolicyRunner.learn checks self.alg.rnd at line 84)
+        self.rnd = None
 
         # Storage
         self.storage: RolloutStorage | None = None
@@ -300,7 +304,7 @@ class ConstraintTRPO:
         advantage = torch.zeros(N, self.num_constraints, device=self.device)
         for step in reversed(range(T)):
             next_cv = last_cost_values if step == T - 1 else self.storage.cost_values[step + 1]
-            not_done = (1.0 - self.storage.dones[step].float()).unsqueeze(-1)  # (N, 1)
+            not_done = (1.0 - self.storage.dones[step].float().squeeze(-1)).unsqueeze(-1)  # (N, 1)
             delta = self.storage.costs[step] + not_done * self.cost_gamma * next_cv - self.storage.cost_values[step]
             advantage = delta + not_done * self.cost_gamma * self.cost_lam * advantage
             self.storage.cost_returns[step] = advantage + self.storage.cost_values[step]

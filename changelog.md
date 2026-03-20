@@ -4,6 +4,56 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] Constrained ALBC algorithms code review + runtime integration fixes
+
+### Context
+Executed constrained ALBC algorithms code review plan targeting mathematical correctness
+and latent bugs. Plan identified 3 fixes (overshoot_cost cross-axis false positive,
+num_encoder_epochs default mismatch, barrier beta docstring). During dry run verification,
+5 additional runtime integration bugs were discovered that prevented the constrained_albc
+task from running at all -- the previous simplification session removed compatibility shims
+that were actually load-bearing, and the auto-sync mechanism was silently broken.
+
+Root cause of runtime failures: (1) hero_agent and constrained_albc registered identical
+class names into `_runner_module` namespace; alphabetical import order caused hero_agent to
+overwrite constrained_albc's classes. (2) `train.py` `_RUNNER_MAP` only had hero_agent
+paths. (3) Runner auto-sync used `hasattr()` on plain dicts (from `to_dict()`), silently
+skipping the `num_constraints` sync. (4) RSL-RL `OnPolicyRunner` expected `rnd` and
+`multi_gpu_cfg` attributes. (5) `storage.dones` shape was `(T,N,1)` not `(T,N)`.
+
+Dry run verified: 5 iterations of `Isaac-Constrained-ALBC-Encoder-v0` with 64 envs
+completed successfully after all fixes.
+
+### Fixed
+- `mdp/constraints.py`: `overshoot_cost` per-axis conjunction -- sign flip and magnitude
+  now checked on the SAME axis. Previously `any(dim=-1)` for sign flip and `max(dim=-1)`
+  for magnitude could match different axes, triggering false positive overshoot cost.
+- `algorithms/constraint_trpo.py`: `num_encoder_epochs` default 5 -> 1 to match config.
+  Default=5 would cause stale importance sampling ratio when instantiated without config.
+- `algorithms/constraint_trpo.py`: Barrier beta docstring now documents re-parametrization
+  `beta_code = beta_paper / (2*t)` absorbing the 1/2 and 1/t factors.
+- `algorithms/constraint_trpo.py`: Added `**_kwargs` to `__init__()` for RSL-RL
+  `multi_gpu_cfg` compatibility, and `self.rnd = None` for `OnPolicyRunner.learn()` line 84.
+- `algorithms/constraint_trpo.py`: Fixed `_compute_cost_returns` dones shape -- added
+  `.squeeze(-1)` before `unsqueeze(-1)` to handle `(T,N,1)` storage dones.
+- `agents/rsl_rl_ppo_cfg.py`: ALBC-prefixed `_runner_module` registration names
+  (`ALBCConstraintEncoderRunner`, `ALBCConstraintTRPO`, `ALBCActorCriticEncoderConstrained`)
+  to avoid namespace collision with hero_agent's identically-named registrations.
+- `runners/constraint_encoder_runner.py`: Changed `num_constraints` auto-sync from
+  `hasattr()`/attribute access to dict key access (`in`/`[]`). `train_cfg` is a plain dict
+  from `agent_cfg.to_dict()`, so `hasattr()` always returned False, silently skipping sync.
+- `scripts/.../train.py`: Added `ALBCConstraintEncoderRunner` to `_RUNNER_MAP` pointing
+  to `constrained_albc.runners.ConstraintEncoderRunner`.
+
+### Notes
+- Previous simplification session removed `**kwargs`, `self.rnd = None`, and `hasattr`
+  guards from `ConstraintTRPO` (commit cbd2dd24) -- these were actually required for
+  RSL-RL `OnPolicyRunner` compatibility when not running through hero_agent's BaseRunner.
+- hero_agent's `ConstraintEncoderRunner` has the same `hasattr()` auto-sync bug but was
+  masked because hero_agent's `BaseRunner` chain handles the initialization differently.
+- The `num_encoder_epochs` default mismatch existed since the C-TRPO migration (2026-03-17)
+  but was never triggered because config always provided the value explicitly.
+
 ## [2026-03-20] Constrained ALBC code review fixes
 
 ### Context

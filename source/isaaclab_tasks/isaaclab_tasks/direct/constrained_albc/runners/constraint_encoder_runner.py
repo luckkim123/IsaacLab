@@ -34,29 +34,31 @@ class ConstraintEncoderRunner(OnPolicyRunner):
     """
 
     def __init__(self, env, train_cfg, log_dir=None, device="cpu"):
-        # Auto-sync num_constraints from env config before parent init
+        # Auto-sync num_constraints from env config before parent init.
+        # train_cfg is a plain dict (from agent_cfg.to_dict()), so use dict
+        # key access instead of hasattr/getattr which only work on objects.
         constraints_cfg = getattr(env.unwrapped.cfg, "constraints", None)
         if constraints_cfg is not None:
             env_k = constraints_cfg.num_constraints
             alg_cfg = train_cfg["algorithm"]
             policy_cfg = train_cfg["policy"]
 
-            if hasattr(alg_cfg, "num_constraints") and alg_cfg.num_constraints != env_k:
+            if "num_constraints" in alg_cfg and alg_cfg["num_constraints"] != env_k:
                 logger.info(
                     "Auto-syncing num_constraints: alg %d -> %d",
-                    alg_cfg.num_constraints,
+                    alg_cfg["num_constraints"],
                     env_k,
                 )
-                alg_cfg.num_constraints = env_k
-                alg_cfg.constraint_budgets = constraints_cfg.constraint_budgets
+                alg_cfg["num_constraints"] = env_k
+                alg_cfg["constraint_budgets"] = constraints_cfg.constraint_budgets
 
-            if hasattr(policy_cfg, "num_constraints") and policy_cfg.num_constraints != env_k:
+            if "num_constraints" in policy_cfg and policy_cfg["num_constraints"] != env_k:
                 logger.info(
                     "Auto-syncing num_constraints: policy %d -> %d",
-                    policy_cfg.num_constraints,
+                    policy_cfg["num_constraints"],
                     env_k,
                 )
-                policy_cfg.num_constraints = env_k
+                policy_cfg["num_constraints"] = env_k
 
             # Cache constraint names for logging
             self._constraint_names = constraints_cfg.constraint_names

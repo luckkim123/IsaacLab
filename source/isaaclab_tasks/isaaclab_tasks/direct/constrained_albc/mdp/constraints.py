@@ -198,10 +198,9 @@ def overshoot_cost(
     """
     curr = env._attitude_error[:, :2]
     prev = env._prev_attitude_error_rp
-    # Sign change on any axis AND current magnitude exceeds threshold
-    sign_flip = (curr * prev < 0).any(dim=-1)
-    magnitude = curr.abs().max(dim=-1).values > threshold
-    return (sign_flip & magnitude).float()
+    # Per-axis conjunction: sign flip AND magnitude > threshold on the SAME axis
+    per_axis = (curr * prev < 0) & (curr.abs() > threshold)
+    return per_axis.any(dim=-1).float()
 
 
 def yaw_velocity_cost(

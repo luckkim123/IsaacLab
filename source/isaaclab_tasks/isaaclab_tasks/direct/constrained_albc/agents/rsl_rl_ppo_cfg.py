@@ -28,10 +28,13 @@ from ..encoder import (
 )
 from ..runners import ConstraintEncoderRunner
 
-_runner_module.ActorCriticEncoder = ActorCriticEncoder
-_runner_module.ActorCriticEncoderConstrained = ActorCriticEncoderConstrained
-_runner_module.ConstraintEncoderRunner = ConstraintEncoderRunner
-_runner_module.ConstraintTRPO = ConstraintTRPO
+# Use ALBC-prefixed names to avoid collision with hero_agent registrations.
+# Both packages register into the same _runner_module namespace; hero_agent
+# imports after constrained_albc (alphabetical) and overwrites unprefixed names.
+_runner_module.ALBCActorCriticEncoder = ActorCriticEncoder
+_runner_module.ALBCActorCriticEncoderConstrained = ActorCriticEncoderConstrained
+_runner_module.ALBCConstraintEncoderRunner = ConstraintEncoderRunner
+_runner_module.ALBCConstraintTRPO = ConstraintTRPO
 
 
 # =============================================================================
@@ -68,7 +71,7 @@ class _EncoderPolicyCfg(RslRlPpoActorCriticCfg):
 class RslRlPpoActorCriticEncoderConstrainedCfg(_EncoderPolicyCfg):
     """Policy config for ActorCriticEncoderConstrained (encoder + cost critic)."""
 
-    class_name: str = "ActorCriticEncoderConstrained"
+    class_name: str = "ALBCActorCriticEncoderConstrained"
     num_constraints: int = 0  # Auto-synced from env config by ConstraintEncoderRunner
     cost_critic_hidden_dims: list[int] = [256, 128, 64]
 
@@ -92,7 +95,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
     The class_name tells the runner to instantiate ConstraintTRPO instead of PPO.
     """
 
-    class_name: str = "ConstraintTRPO"
+    class_name: str = "ALBCConstraintTRPO"
 
     # TRPO parameters
     max_kl: float = 0.01
@@ -153,7 +156,7 @@ class ConstrainedALBCEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
     Uses ConstraintEncoderRunner: encoder metrics + barrier state.
     """
 
-    class_name: str = "ConstraintEncoderRunner"
+    class_name: str = "ALBCConstraintEncoderRunner"
     seed = 30
     num_steps_per_env = 64
     max_iterations = 2500
