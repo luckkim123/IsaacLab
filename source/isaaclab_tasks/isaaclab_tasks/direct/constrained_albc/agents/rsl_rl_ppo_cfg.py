@@ -75,7 +75,7 @@ class RslRlPpoActorCriticEncoderConstrainedCfg(_EncoderPolicyCfg):
     """
 
     class_name: str = "ActorCriticEncoderConstrained"
-    num_constraints: int = 6
+    num_constraints: int = 0  # Auto-synced from env config by ConstraintEncoderRunner
     cost_critic_hidden_dims: list[int] = [256, 128, 64]
     asymmetric_critic: bool = True
 
@@ -121,8 +121,8 @@ class RslRlConstraintTRPOAlgorithmCfg:
     lam: float = 0.95
 
     # Constraint
-    num_constraints: int = 6
-    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.20, 0.05, 0.10, 0.35)
+    num_constraints: int = 0  # Auto-synced from env config by ConstraintEncoderRunner
+    constraint_budgets: tuple[float, ...] = ()  # Auto-synced from env config by ConstraintEncoderRunner
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
     line_search_kl_margin: float = 1.5

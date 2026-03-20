@@ -59,6 +59,17 @@ Verified: grep for `hero_agent|HeroAgent` shows only external asset references
   `quat_apply_inverse` imports (only used by `cob_cog_alignment_cost`). 391 -> 251 lines.
 - `mdp/__init__.py`: Removed 5 deleted functions from exports
 
+### Changed (config cleanup, separate session)
+- `agents/rsl_rl_ppo_cfg.py`: `num_constraints` default 6 -> 0 in both
+  `RslRlPpoActorCriticEncoderConstrainedCfg` and `RslRlConstraintTRPOAlgorithmCfg`.
+  `constraint_budgets` default `(0.02, 0.01, 0.20, 0.05, 0.10, 0.35)` -> `()`.
+  These were duplicated from `config.py`; `ConstraintEncoderRunner` already auto-syncs
+  both fields from env config at init time (lines 41-56), making hardcoded defaults
+  a maintenance hazard.
+- `config.py`: Removed 2 disabled-constraint comments (`singularity: disabled`,
+  `attitude_err: disabled`) from `ConstrainedALBCEncoderEnvCfg.constraints`. Design
+  rationale already documented in `constraints.py` function docstrings.
+
 ### Fixed
 - `mdp/__init__.py`: Added missing `randomize_joint_effort_limit` to exports
   (was defined in events.py but not re-exported; albc_env.py imported directly)

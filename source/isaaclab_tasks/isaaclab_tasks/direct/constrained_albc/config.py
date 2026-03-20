@@ -445,8 +445,6 @@ class ConstrainedALBCEncoderEnvCfg(ALBCEncoderTrainEnvCfg):
                 budget=0.01,
                 name="attitude_abs",
             ),
-            # singularity: disabled -- DLS IK handles singularity smoothly
-            # attitude_err: disabled -- quadratic command reward covers tracking
             ConstraintTermCfg(
                 func=joint_torque_cost,
                 budget=0.20,
