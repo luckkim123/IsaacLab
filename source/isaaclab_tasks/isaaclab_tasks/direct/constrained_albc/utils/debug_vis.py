@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Debug visualization utilities for Hero Agent environment."""
+"""Debug visualization utilities for constrained ALBC environment."""
 
 from __future__ import annotations
 
@@ -30,6 +30,11 @@ class DebugVisualization:
     - Center of Buoyancy (CoB) - blue sphere
     - Payload CoG - yellow sphere (mass-scaled) with green stem from gripper (optional)
     """
+
+    _PAYLOAD_COG_RADIUS: float = 0.012
+    _PAYLOAD_STEM_RADIUS: float = 0.008
+    _MIN_STEM_DIST: float = 1e-3
+    _HIDDEN_POS: float = 1e6
 
     def __init__(self, num_envs: int, device: str):
         """Initialize debug visualization manager.
@@ -63,10 +68,10 @@ class DebugVisualization:
 
         if enable_payload:
             self._payload_cog_marker = self._create_sphere_marker(
-                "/Visuals/PayloadCoG", color=(1.0, 0.85, 0.0), radius=0.012
+                "/Visuals/PayloadCoG", color=(1.0, 0.85, 0.0), radius=self._PAYLOAD_COG_RADIUS
             )
             self._payload_stem_marker = self._create_cylinder_marker(
-                "/Visuals/PayloadStem", color=(0.0, 0.8, 0.0), radius=0.008, height=1.0
+                "/Visuals/PayloadStem", color=(0.0, 0.8, 0.0), radius=self._PAYLOAD_STEM_RADIUS, height=1.0
             )
 
         # World frame marker at origin (XYZ axes)
@@ -230,11 +235,10 @@ class DebugVisualization:
         dist = direction.norm(dim=-1, keepdim=True)
 
         # Hide stem for near-zero cog_offset (< 1mm)
-        min_dist = 1e-3
-        valid = dist.squeeze(-1) > min_dist
+        valid = dist.squeeze(-1) > self._MIN_STEM_DIST
         if not valid.any():
             # Move all stems out of view
-            far_away = torch.full_like(start_w, 1e6)
+            far_away = torch.full_like(start_w, self._HIDDEN_POS)
             self._payload_stem_marker.visualize(translations=far_away)
             return
 
@@ -242,7 +246,7 @@ class DebugVisualization:
         midpoint = (start_w + end_w) * 0.5
 
         # Orientation: rotate Z-axis to match direction
-        dir_norm = direction / dist.clamp(min=min_dist)
+        dir_norm = direction / dist.clamp(min=self._MIN_STEM_DIST)
         orientations = _quat_from_z_to_direction(dir_norm, self._device)
 
         # Scale: (1, 1, dist) since cylinder height=1.0 along Z
@@ -250,7 +254,7 @@ class DebugVisualization:
         scales[:, 2] = dist.squeeze(-1)
 
         # For near-zero offset envs, hide by moving far away
-        midpoint[~valid] = 1e6
+        midpoint[~valid] = self._HIDDEN_POS
 
         self._payload_stem_marker.visualize(translations=midpoint, orientations=orientations, scales=scales)
 

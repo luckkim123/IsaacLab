@@ -50,6 +50,17 @@ Verified: grep for `hero_agent|HeroAgent` shows only external asset references
 
 ### Removed
 - (From copied code) All TDC controller imports, TDC reward functions (`tdc_torque_penalty`, `_compute_M_true`, `mhat_accuracy_reward`, `compute_stability_gate`), TDC logging functions (`log_tdc_*`), adaptation module, ppo_patch
+- `utils/logging.py`: Deleted `pearson_r()` (only hero_agent uses it) and `_WandbTBWriter`
+  class (never instantiated in constrained_albc)
+- `utils/__init__.py`: Removed `pearson_r` from imports and `__all__` (8 -> 7 exports)
+
+### Fixed
+- `utils/logging.py`: Section header said "4 essential metrics" but actually logs 5; fixed
+  to match. TDC references replaced with ALBC terminology ("TDC lambda" -> "ALBC torque
+  capacity", "TDC stability" -> "rotational dynamics") since constrained_albc has no TDC
+- `utils/debug_vis.py`: Module docstring referenced "Hero Agent" instead of "constrained ALBC"
+- `utils/debug_vis.py`: Extracted 4 magic numbers into class constants (`_PAYLOAD_COG_RADIUS`,
+  `_PAYLOAD_STEM_RADIUS`, `_MIN_STEM_DIST`, `_HIDDEN_POS`) for clarity
 
 ## [2026-03-18] C-TRPO encoder fix experiments: multi-step caused KL instability
 

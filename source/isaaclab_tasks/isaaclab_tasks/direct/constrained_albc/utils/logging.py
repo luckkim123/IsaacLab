@@ -6,7 +6,7 @@
 """Consolidated logging and environment utilities for constrained ALBC.
 
 Provides all TB/WandB metric functions and environment helpers:
-    - flush_metrics, pearson_r: Core logging utilities
+    - flush_metrics: Core logging utilities
     - unwrap_env, connect_encoder_to_env: Environment unwrapping helpers
     - log_dr_metrics: Domain randomization parameters
     - log_encoder_metrics: Encoder z health
@@ -28,13 +28,6 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Core Logging Utilities
 # =============================================================================
-
-
-def pearson_r(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Compute Pearson correlation coefficient between two 1D tensors."""
-    a_c = a - a.mean()
-    b_c = b - b.mean()
-    return (a_c * b_c).sum() / (a_c.norm() * b_c.norm() + 1e-8)
 
 
 def flush_metrics(
@@ -74,24 +67,6 @@ def flush_metrics(
         wandb = _get_wandb()
         if wandb is not None:
             wandb.log(wandb_extras, step=step, commit=False)
-
-
-class _WandbTBWriter:
-    """Adapter that forwards ``add_scalar`` to both TensorBoard and WandB.
-
-    ``flush_metrics()`` relies on ``writer.add_scalar()`` for all scalar logging.
-    When WandB is the logger backend, we still need TensorBoard records, so this
-    adapter wraps a real TB SummaryWriter and additionally calls ``wandb.log()``.
-    """
-
-    def __init__(self, tb_writer: Any) -> None:
-        self._tb = tb_writer
-
-    def add_scalar(self, tag: str, value: Any, global_step: int | None = None, **kw: Any) -> None:
-        self._tb.add_scalar(tag, value, global_step, **kw)
-        wandb = _get_wandb()
-        if wandb is not None:
-            wandb.log({tag: value}, step=global_step, commit=False)
 
 
 def _get_wandb() -> Any | None:
@@ -142,7 +117,7 @@ def connect_encoder_to_env(env: Any, policy: Any, caller_name: str = "Runner") -
 
 
 # =============================================================================
-# Domain Randomization Metrics (4 essential metrics)
+# Domain Randomization Metrics (5 essential metrics)
 # =============================================================================
 
 
@@ -153,8 +128,8 @@ def log_dr_metrics(
     """Log essential domain randomization parameter statistics.
 
     Metrics kept (5):
-        - DR/buoyancy_force_mean: critical for TDC lambda
-        - DR/inertia_roll_mean, DR/inertia_pitch_mean: per-axis TDC stability
+        - DR/buoyancy_force_mean: critical for ALBC torque capacity
+        - DR/inertia_roll_mean, DR/inertia_pitch_mean: per-axis rotational dynamics
         - DR/payload_mass_mean: when payload enabled
         - DR/ocean_current_mag_mean: when ocean current enabled
 

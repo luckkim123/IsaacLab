@@ -12,7 +12,6 @@ from .logging import (
     log_dr_infeasibility,
     log_dr_metrics,
     log_encoder_metrics,
-    pearson_r,
     unwrap_env,
 )
 
@@ -23,6 +22,5 @@ __all__ = [
     "log_dr_infeasibility",
     "log_dr_metrics",
     "log_encoder_metrics",
-    "pearson_r",
     "unwrap_env",
 ]
