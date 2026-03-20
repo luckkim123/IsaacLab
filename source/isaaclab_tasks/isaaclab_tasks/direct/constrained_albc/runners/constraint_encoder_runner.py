@@ -160,6 +160,10 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         if getattr(self.alg, "encoder_optimizer", None) is not None:
             self._save_aux_state(path, "encoder_optimizer.pt", self.alg.encoder_optimizer.state_dict())
 
+        # Save EAPO state
+        if getattr(self.alg, "eapo_enabled", False):
+            self._save_aux_state(path, "eapo_state.pt", {"eapo_tau": self.alg.eapo_tau})
+
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
         """Load model checkpoint, barrier state, and encoder optimizer if available."""
         infos = super().load(path, load_optimizer, map_location)
@@ -180,6 +184,13 @@ class ConstraintEncoderRunner(OnPolicyRunner):
             if enc_opt_state is not None:
                 self.alg.encoder_optimizer.load_state_dict(enc_opt_state)
                 logger.info("Restored encoder optimizer state from checkpoint")
+
+        # Restore EAPO state
+        if getattr(self.alg, "eapo_enabled", False):
+            eapo_state = self._load_aux_state(path, "eapo_state.pt", self.device)
+            if eapo_state is not None:
+                self.alg.eapo_tau = eapo_state["eapo_tau"]
+                logger.info("Restored EAPO tau=%.4f from checkpoint", self.alg.eapo_tau)
 
         return infos
 
@@ -220,5 +231,9 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         # Entropy and pre-encoder KL (Fix 1 + Fix 2)
         metrics["Policy/entropy"] = alg._cached_mean_entropy
         metrics["Policy/pre_encoder_kl"] = alg._last_pre_encoder_kl
+
+        # EAPO metrics
+        if getattr(alg, "eapo_enabled", False):
+            metrics["Policy/entropy_tau"] = alg._cached_entropy_tau
 
         flush_metrics(self.writer, metrics, iteration, self.logger_type)

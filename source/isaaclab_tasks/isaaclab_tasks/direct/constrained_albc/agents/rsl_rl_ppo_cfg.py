@@ -162,6 +162,27 @@ class RslRlConstraintTRPOAlgorithmCfg:
     structurally unstable (competes with reward for single KL budget step).
     Exploration maintained via min_std floor instead."""
 
+    # EAPO: Entropy Advantage Policy Optimization (arXiv:2407.18143)
+    eapo_enabled: bool = True
+    """Enable EAPO entropy advantage in surrogate. Replaces entropy_coef
+    (keep entropy_coef=0.0 when active)."""
+
+    eapo_tau_init: float = 0.01
+    """Initial entropy temperature. Adaptive via SAC v2 dual gradient."""
+
+    eapo_target_entropy: float = 0.5
+    """Target entropy (2D action). std~0.34 per dim -> H~0.5.
+    Above floor (std=0.2, H=-0.39) but allows convergence."""
+
+    eapo_tau_lr: float = 0.001
+    """Dual variable learning rate for tau adaptation."""
+
+    eapo_tau_min: float = 0.001
+    """Minimum tau to prevent zero entropy pressure."""
+
+    eapo_tau_max: float = 0.5
+    """Maximum tau to prevent entropy dominating reward."""
+
     # Post-encoder KL gating (Fix 2: prevents encoder-induced KL violation)
     max_encoder_kl: float = 0.016
     """Maximum additional KL divergence allowed from encoder update. If an encoder

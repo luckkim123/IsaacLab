@@ -4,35 +4,85 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [2026-03-20] C-TRPO noise floor fix: replace entropy_coef with min_std clamp
+## [2026-03-20] EAPO: Entropy Advantage Policy Optimization for C-TRPO
 
 ### Context
-Run analysis showed noise_std collapsing from 1.0 to 0.15 within 40 iterations despite
-error at 30-40 degrees. Root cause: TRPO's single natural gradient step consumes the entire
-KL budget, so entropy_coef in the surrogate competes with reward for that budget. At 0.005
-entropy dominated (std exploded to 1.6); at 0.001 reward dominated (std collapsed to 0.15).
-No stable sweet spot exists because the crossover shifts with advantage structure.
+Implemented EAPO (arXiv:2407.18143) to solve C-TRPO entropy collapse. Previous attempt
+(min_std=0.2 floor, see entry below) failed: std monotonically collapsed to floor and
+stayed there permanently. Root cause: surrogate gradient w.r.t. log_std is almost always
+negative (high-advantage actions cluster near mean), and entropy_coef=0.0 provides no
+counterforce. Naive entropy_coef is structurally unstable in TRPO (competes with reward
+for single KL budget step).
 
-The hero_agent PPO solved this with a hard `min_std=0.18` clamp in `base_runner.py:110`.
-Noise floor applied *after* the optimization step is structurally superior for TRPO because
-it does not consume KL budget, does not distort the natural gradient direction, and is
-independent of the trust region optimization entirely.
+EAPO solution: per-sample entropy advantage `A_H = normalize(-log_prob)` added to task
+advantage as `soft_adv = A_task + tau * A_H`. Actions far from mean get positive entropy
+advantage, creating std-increase gradient. With state-independent log_std, discounted
+return reduces to simple batch normalization (entropy V(s) is constant). Adaptive tau
+via SAC v2 dual gradient: tau increases when entropy < target, decreases otherwise.
+Applied outside TRPO step, so KL budget is not consumed.
 
-Dry run (10 iter, 64 envs) verified: noise_std=0.93 at iter 9 (healthy), surrogate loss
-and barrier both logging correctly, safe mode (mode=0) maintained.
+Dry run verification (10 iter, 64 envs, headless): entropy_tau logged correctly (0.001,
+at tau_min since init_std=1.0 gives entropy >> target). noise_std=0.95 after 10 iter
+(gradual, not collapsing). Surrogate finite, training stable.
+
+### Added
+- `agents/rsl_rl_ppo_cfg.py`: 6 EAPO config fields (`eapo_enabled=True` default,
+  `eapo_tau_init=0.01`, `eapo_target_entropy=0.5`, `eapo_tau_lr=0.001`,
+  `eapo_tau_min=0.001`, `eapo_tau_max=0.5`)
+- `algorithms/constraint_trpo.py`: `_compute_entropy_advantages()` method (batch-normalized
+  `-log_prob`), entropy_advantages storage allocation in `init_storage()`
+- `runners/constraint_encoder_runner.py`: `Policy/entropy_tau` metric logging, EAPO tau
+  checkpoint save/load (`eapo_state.pt`)
 
 ### Changed
-- `agents/rsl_rl_ppo_cfg.py`: Added `min_std: float = 0.2` to `RslRlConstraintTRPOAlgorithmCfg`.
-  Changed `entropy_coef` default from 0.001 to 0.0 (disabled; structurally unstable in TRPO).
-- `algorithms/constraint_trpo.py`: Added `min_std` parameter to `__init__`, stored as
-  `self.min_std`. Changed noise floor clamp from `math.log(0.01)` to `math.log(self.min_std)`.
-  Entropy bonus code preserved (auto-disabled at coef=0.0, reactivatable via config).
-  Updated module docstring to reflect noise floor as primary exploration mechanism.
+- `algorithms/constraint_trpo.py`: `__init__` accepts 6 EAPO kwargs and stores state.
+  `compute_returns()` calls `_compute_entropy_advantages()` when enabled. `update()`
+  computes `soft_adv = adv + tau * entropy_adv` for surrogate closure. Adaptive tau
+  update after noise floor clamp (before encoder update). `loss_dict` includes
+  `entropy_tau` when enabled.
 
 ### Notes
-- Entropy bonus code intentionally kept in surrogate closure for future reactivation if needed
-- `_cached_mean_entropy` monitoring retained for diagnostics
-- Future options if fixed floor insufficient: adaptive PI controller on floor, entropy as barrier constraint, or state-dependent std
+- EAPO is actor-only: encoder update uses task-only advantages (no entropy pressure on
+  encoder, which must optimize for task performance)
+- tau_min=0.001 prevents zero entropy pressure; tau_max=0.5 prevents entropy domination
+- When entropy is already above target (e.g., init_std=1.0), tau naturally decreases to
+  floor -- EAPO only activates when exploration is actually needed
+- Pending: 200+ iter training run to verify entropy stabilizes near 0.5, std stays above
+  0.2 floor, and attitude convergence improves
+
+## [2026-03-20] C-TRPO noise floor fix: min_std=0.2 -- FAILED to solve entropy collapse
+
+### Context
+Replaced entropy_coef (structurally unstable in TRPO surrogate) with min_std=0.2 hard
+floor applied after TRPO step. Rationale: PPO uses min_std=0.18 floor in base_runner.py.
+
+Run `2026-03-20_17-41-26` (229 iter, 4096 envs) showed the fix is **insufficient**:
+- noise_std: 0.99 -> 0.52 (iter20) -> 0.27 (iter40) -> 0.20 (iter80+). Monotonic
+  decrease to floor regardless of error magnitude. Floor prevents going below 0.2 but
+  does not prevent the collapse itself.
+- Performance: roll 7 deg / pitch 14 deg at iter 150 (best), then pitch collapsed back
+  to 45 deg by iter 225. Same "converge then collapse" pattern as previous runs.
+- Entropy: stabilized at -0.39 (theoretical minimum for std=0.2 Gaussian). Permanently
+  locked at floor -- no adaptive response to high error.
+- Encoder z: saturated [-1.00, 0.99] (anomaly flagged).
+- joint_vel_limit: diverging (cr=3.76, dk=5.0).
+
+**Why min_std floor alone fails**: PPO's floor is a safety net, not the primary mechanism.
+PPO's entropy_coef works because multi-step mini-batch updates don't have KL budget
+competition. In C-TRPO, with entropy_coef=0.0 and only a passive floor, there is NO
+mechanism to resist std reduction. The surrogate gradient w.r.t. log_std is almost always
+negative (high-advantage actions cluster near mean), so std decreases every iteration
+until hitting the floor and staying there permanently.
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: Added `min_std: float = 0.2`. Changed `entropy_coef` 0.001 -> 0.0.
+- `algorithms/constraint_trpo.py`: Added `min_std` param, changed floor from `log(0.01)` to
+  `log(self.min_std)`. Entropy code preserved (disabled at coef=0.0).
+
+### Notes
+- The fix is committed but does not solve the problem. An active exploration mechanism is needed.
+- Candidates: (1) adaptive floor via PI controller, (2) state-dependent std, (3) entropy with
+  separate KL budget outside TRPO step. All require further analysis before implementation.
 
 ## [2026-03-20] Min-axis Laplacian reward + entropy/logging fixes
 

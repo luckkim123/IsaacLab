@@ -105,6 +105,13 @@ class ConstraintTRPO:
         min_std: float = 0.2,
         # Entropy bonus
         entropy_coef: float = 0.0,
+        # EAPO parameters
+        eapo_enabled: bool = False,
+        eapo_tau_init: float = 0.01,
+        eapo_target_entropy: float = 0.5,
+        eapo_tau_lr: float = 0.001,
+        eapo_tau_min: float = 0.001,
+        eapo_tau_max: float = 0.5,
         # Post-encoder KL gating (Fix 2: prevents encoder-induced KL violation)
         max_encoder_kl: float = 0.016,
         # Device
@@ -145,6 +152,15 @@ class ConstraintTRPO:
         self.min_std = min_std
         self.entropy_coef = entropy_coef
         self.max_encoder_kl = max_encoder_kl
+
+        # EAPO state
+        self.eapo_enabled = eapo_enabled
+        self.eapo_tau = eapo_tau_init
+        self.eapo_target_entropy = eapo_target_entropy
+        self.eapo_tau_lr = eapo_tau_lr
+        self.eapo_tau_min = eapo_tau_min
+        self.eapo_tau_max = eapo_tau_max
+        self._cached_entropy_tau = eapo_tau_init
 
         # C-TRPO barrier parameters
         self.beta = beta
@@ -262,6 +278,9 @@ class ConstraintTRPO:
         self.storage.cost_returns = torch.zeros(T, N, K, device=self.device)
         self.storage.cost_advantages = torch.zeros(T, N, K, device=self.device)
 
+        if self.eapo_enabled:
+            self.storage.entropy_advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+
     def act(self, obs: TensorDict) -> torch.Tensor:
         if self.policy.is_recurrent:
             self.transition.hidden_states = self.policy.get_hidden_states()
@@ -321,6 +340,9 @@ class ConstraintTRPO:
         last_cost_values = self.policy.evaluate_costs(obs).detach()
         self._compute_cost_returns(last_cost_values)
 
+        if self.eapo_enabled:
+            self._compute_entropy_advantages()
+
     def _compute_cost_returns(self, last_cost_values: torch.Tensor) -> None:
         """Compute cost GAE returns for all constraints simultaneously."""
         T = self.storage.num_transitions_per_env
@@ -344,6 +366,20 @@ class ConstraintTRPO:
         mean = self.storage.cost_advantages.mean(dim=(0, 1), keepdim=True)
         std = self.storage.cost_advantages.std(dim=(0, 1), keepdim=True)
         self.storage.cost_advantages = (self.storage.cost_advantages - mean) / (std + 1e-8)
+
+    def _compute_entropy_advantages(self) -> None:
+        """Compute per-sample entropy advantages for EAPO.
+
+        Uses -log_prob as entropy signal. With state-independent log_std,
+        no entropy critic needed -- batch normalization as baseline.
+        """
+        entropy_signal = -self.storage.actions_log_prob  # (T, N, 1)
+        ea_mean = entropy_signal.mean()
+        ea_std = entropy_signal.std()
+        if ea_std > 1e-8:
+            self.storage.entropy_advantages = (entropy_signal - ea_mean) / ea_std
+        else:
+            self.storage.entropy_advantages = torch.zeros_like(entropy_signal)
 
     # ==================================================================
     # C-TRPO Barrier
@@ -627,12 +663,19 @@ class ConstraintTRPO:
         adv_sq = advantages_flat.squeeze(-1)
         recovery_mask = torch.tensor(self._in_recovery, dtype=torch.float32, device=self.device)
 
+        # EAPO: soft advantage = task + tau * entropy advantage
+        if self.eapo_enabled:
+            entropy_adv_flat = self.storage.entropy_advantages.flatten(0, 1).clone().squeeze(-1)
+            soft_adv = adv_sq + self.eapo_tau * entropy_adv_flat
+        else:
+            soft_adv = adv_sq
+
         def surrogate() -> torch.Tensor:
             self.policy.act(obs_flat)
             log_prob = self.policy.get_actions_log_prob(actions_flat)
             ratio = torch.exp(log_prob - old_lp_sq)
-            # Reward (always active)
-            reward_surr = -(adv_sq * ratio).mean()
+            # Reward + EAPO entropy advantage (always active)
+            reward_surr = -(soft_adv * ratio).mean()
             # Barrier penalty (safe constraints only)
             cost_surrs = self._compute_cost_surrogates(ratio, cost_advantages_flat)
             bp = self._compute_barrier_penalty(cost_surrs)
@@ -666,6 +709,17 @@ class ConstraintTRPO:
         min_log_std = math.log(self.min_std)
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=min_log_std)
+
+        # EAPO: Adaptive tau (SAC v2 dual gradient, outside trust region)
+        if self.eapo_enabled:
+            with torch.no_grad():
+                self.policy.act(obs_flat)
+                current_entropy = self.policy.entropy.mean().item()
+                # Dual gradient: tau increases when H < target
+                self.eapo_tau -= self.eapo_tau_lr * (current_entropy - self.eapo_target_entropy)
+                self.eapo_tau = max(self.eapo_tau_min, min(self.eapo_tau_max, self.eapo_tau))
+            self._cached_entropy_tau = self.eapo_tau
+            self._cached_mean_entropy = current_entropy
 
         # ------------------------------------------------------------------
         # 3. Encoder update (gated on ls_success)
@@ -729,6 +783,8 @@ class ConstraintTRPO:
         }
         if hasattr(self.policy, "z_bounds_loss"):
             loss_dict["z_bounds"] = mean_z_bounds_loss
+        if self.eapo_enabled:
+            loss_dict["entropy_tau"] = self._cached_entropy_tau
 
         return loss_dict
 
