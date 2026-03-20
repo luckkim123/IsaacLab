@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] C-TRPO noise floor fix: replace entropy_coef with min_std clamp
+
+### Context
+Run analysis showed noise_std collapsing from 1.0 to 0.15 within 40 iterations despite
+error at 30-40 degrees. Root cause: TRPO's single natural gradient step consumes the entire
+KL budget, so entropy_coef in the surrogate competes with reward for that budget. At 0.005
+entropy dominated (std exploded to 1.6); at 0.001 reward dominated (std collapsed to 0.15).
+No stable sweet spot exists because the crossover shifts with advantage structure.
+
+The hero_agent PPO solved this with a hard `min_std=0.18` clamp in `base_runner.py:110`.
+Noise floor applied *after* the optimization step is structurally superior for TRPO because
+it does not consume KL budget, does not distort the natural gradient direction, and is
+independent of the trust region optimization entirely.
+
+Dry run (10 iter, 64 envs) verified: noise_std=0.93 at iter 9 (healthy), surrogate loss
+and barrier both logging correctly, safe mode (mode=0) maintained.
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: Added `min_std: float = 0.2` to `RslRlConstraintTRPOAlgorithmCfg`.
+  Changed `entropy_coef` default from 0.001 to 0.0 (disabled; structurally unstable in TRPO).
+- `algorithms/constraint_trpo.py`: Added `min_std` parameter to `__init__`, stored as
+  `self.min_std`. Changed noise floor clamp from `math.log(0.01)` to `math.log(self.min_std)`.
+  Entropy bonus code preserved (auto-disabled at coef=0.0, reactivatable via config).
+  Updated module docstring to reflect noise floor as primary exploration mechanism.
+
+### Notes
+- Entropy bonus code intentionally kept in surrogate closure for future reactivation if needed
+- `_cached_mean_entropy` monitoring retained for diagnostics
+- Future options if fixed floor insufficient: adaptive PI controller on floor, entropy as barrier constraint, or state-dependent std
+
 ## [2026-03-20] Min-axis Laplacian reward + entropy/logging fixes
 
 ### Context

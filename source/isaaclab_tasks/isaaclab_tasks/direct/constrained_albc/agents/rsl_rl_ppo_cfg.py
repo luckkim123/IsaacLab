@@ -150,12 +150,17 @@ class RslRlConstraintTRPOAlgorithmCfg:
     # Encoder z bounds
     z_bounds_coef: float = 0.3
 
-    # Entropy bonus (Fix 1: prevents monotonic std decay in TRPO)
-    entropy_coef: float = 0.001
-    """Entropy bonus coefficient. Added to surrogate loss as -entropy_coef * H(pi).
-    Counteracts TRPO's natural tendency to always decrease std (exploration collapse).
-    0.001: reduced from PPO default 0.005 because TRPO's single natural gradient step
-    amplifies entropy bonus relative to reward gradient (0.005 caused std > 1.5 ceiling)."""
+    # Noise floor (exploration maintenance)
+    min_std: float = 0.2
+    """Minimum action standard deviation. Clamped after TRPO step (outside
+    trust region optimization). Prevents exploration collapse without consuming
+    KL budget. Matches hero_agent PPO floor (~0.18)."""
+
+    # Entropy bonus
+    entropy_coef: float = 0.0
+    """Entropy bonus coefficient. Set to 0.0: entropy in TRPO surrogate is
+    structurally unstable (competes with reward for single KL budget step).
+    Exploration maintained via min_std floor instead."""
 
     # Post-encoder KL gating (Fix 2: prevents encoder-induced KL violation)
     max_encoder_kl: float = 0.016

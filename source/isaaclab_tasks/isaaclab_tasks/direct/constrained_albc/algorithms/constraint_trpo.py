@@ -29,7 +29,8 @@ Key design decisions:
       (NORBC Sec IV-B) equalizes gradient contribution across constraints.
     - LS-gated encoder updates preserved: when line search fails, both actor
       and encoder are frozen to prevent desync.
-    - Noise floor preserved: safety net against log_prob divergence.
+    - Noise floor (min_std=0.2): primary exploration maintenance mechanism.
+      Applied after TRPO step, outside trust region -- does not consume KL budget.
 
 The algorithm maintains the same interface as RSL-RL PPO (init_storage, act,
 process_env_step, compute_returns, update) so it can be used as a drop-in
@@ -100,8 +101,10 @@ class ConstraintTRPO:
         # Encoder update
         num_encoder_epochs: int = 1,
         encoder_lr: float = 3e-4,
-        # Entropy bonus (Fix 1: prevents monotonic std decay)
-        entropy_coef: float = 0.001,
+        # Noise floor (exploration maintenance)
+        min_std: float = 0.2,
+        # Entropy bonus
+        entropy_coef: float = 0.0,
         # Post-encoder KL gating (Fix 2: prevents encoder-induced KL violation)
         max_encoder_kl: float = 0.016,
         # Device
@@ -139,6 +142,7 @@ class ConstraintTRPO:
         self.line_search_kl_margin = line_search_kl_margin
         self.z_bounds_coef = z_bounds_coef
         self.num_encoder_epochs = num_encoder_epochs
+        self.min_std = min_std
         self.entropy_coef = entropy_coef
         self.max_encoder_kl = max_encoder_kl
 
@@ -655,11 +659,11 @@ class ConstraintTRPO:
         mode_name = "blend" if any_recovery else "safe"
         ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate, mode_name, recovery_cost_fn)
 
-        # Noise floor: numerical safety net to prevent log_prob divergence.
-        # Lowered from 0.25 to 0.01: std=0.25 gave 1.2 deg/step noise, blocking
-        # precision below 5 deg. KL constraint (max_kl=0.01) naturally prevents
-        # std collapse, so a tight floor is safe.
-        min_log_std = math.log(0.01)
+        # Noise floor: applied after TRPO step (outside trust region optimization).
+        # Does not consume KL budget or distort natural gradient direction.
+        # Prevents exploration collapse that entropy_coef failed to stabilize
+        # (entropy in surrogate competes with reward for single KL budget step).
+        min_log_std = math.log(self.min_std)
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=min_log_std)
 
