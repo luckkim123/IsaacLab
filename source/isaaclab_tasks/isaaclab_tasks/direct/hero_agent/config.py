@@ -41,17 +41,7 @@ from isaaclab_assets.robots.uuv import (
 
 from .controllers import TDCControllerCfg
 from .doraemon import DoraemonCfg
-from .mdp import (
-    ALBCConstraintCfg,
-    ALBCRewardCfg,
-    ConstraintTermCfg,
-    accumulated_rotation_cost,
-    attitude_absolute_cost,
-    joint_torque_cost,
-    joint_velocity_limit_cost,
-    overshoot_cost,
-    yaw_velocity_cost,
-)
+from .mdp import ALBCRewardCfg
 
 
 @configclass
@@ -577,74 +567,3 @@ class HeroAgentAdaptBaseEnvCfg(HeroAgentEncoderTrainEnvCfg):
     pass
 
 
-@configclass
-class HeroAgentConstrainedEncoderEnvCfg(HeroAgentEncoderTrainEnvCfg):
-    """Constrained encoder training with IPO (Interior-point Policy Optimization).
-
-    Inherits from HeroAgentEncoderTrainEnvCfg (state_space=19 for privileged obs).
-    Adds constraint configuration for the NORBC-style constrained RL pipeline.
-
-    Constraint terms (joint_velocity, joint_oscillation) that were previously
-    soft reward penalties are moved to explicit constraints. Their reward weights
-    are zeroed to avoid double-counting.
-    """
-
-    constraints: ALBCConstraintCfg = ALBCConstraintCfg(
-        terms=[
-            # --- Binary constraints (4 terms) ---
-            ConstraintTermCfg(
-                func=accumulated_rotation_cost,
-                params={"max_rotations": 2.0},
-                budget=0.02,
-                name="accum_rot",
-            ),
-            ConstraintTermCfg(
-                func=attitude_absolute_cost,
-                params={"limit": 1.396},
-                budget=0.01,
-                name="attitude_abs",
-            ),
-            # singularity: disabled -- DLS IK handles singularity smoothly
-            # attitude_err: disabled -- quadratic command reward covers tracking
-            ConstraintTermCfg(
-                func=joint_torque_cost,
-                budget=0.20,
-                name="joint_torque",
-            ),
-            ConstraintTermCfg(
-                func=joint_velocity_limit_cost,
-                params={"limit_rad_per_s": 4.189},
-                budget=0.05,
-                name="joint_vel_limit",
-            ),
-            ConstraintTermCfg(
-                func=overshoot_cost,
-                params={"threshold": 0.035},
-                budget=0.10,
-                name="overshoot",
-            ),
-            # --- Continuous constraints (1 term) ---
-            ConstraintTermCfg(
-                func=yaw_velocity_cost,
-                budget=0.35,
-                cost_type="average",
-                name="yaw_vel",
-            ),
-        ],
-    )
-
-    # Restore unified DR default (0.7-1.0x effort limit)
-    randomization: DomainRandomizationCfg = DomainRandomizationCfg(
-        enable=True,
-    )
-
-    # settling replaced by attitude_err constraint (adaptive lambda vs fixed weight).
-    # smoothness replaces joint_osc constraint (fixed weight avoids lambda competition).
-    # PBRS progress: strengthens reward signal against growing lambda pressure.
-    reward: ALBCRewardCfg = ALBCRewardCfg(
-        command_type="quadratic",
-        settling_weight=0.0,
-        energy_weight=0.0,
-        smoothness_weight=-0.1,
-        progress_weight=2.0,
-    )

@@ -105,8 +105,7 @@ class BaseRunner(OnPolicyRunner):
         """Clamp action noise std to minimum for numerical safety.
 
         Floor prevents log_prob divergence when std approaches zero.
-        No ceiling: reward gradient alone controls variance (cost gradient
-        is detached from std in ConstraintTRPO, and entropy_coef=0).
+        No ceiling: reward gradient alone controls variance.
         """
         min_std = 0.18
         if hasattr(self.alg.policy, "log_std"):

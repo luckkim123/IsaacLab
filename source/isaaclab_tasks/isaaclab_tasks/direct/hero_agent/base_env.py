@@ -38,7 +38,6 @@ from .mdp import (
     RewardTermCfg,
     action_smoothness_penalty,
     command_reward,
-    compute_all_costs,
     compute_policy_obs,
     compute_privileged_obs,
     energy_penalty,
@@ -59,7 +58,7 @@ from .mdp.events import (
     reset_joint_positions_default,
     reset_robot_pose_default,
 )
-from .utils import DebugVisualization, log_dr_infeasibility, log_dr_metrics, log_tdc_diagnostics
+from .utils import DebugVisualization, log_dr_metrics, log_tdc_diagnostics
 
 
 class HeroAgentEnv(DirectRLEnv):
@@ -363,9 +362,6 @@ class HeroAgentEnv(DirectRLEnv):
         self._accumulated_rotation = torch.zeros(self.num_envs, 2, device=self.device)
         self._prev_joint_pos = torch.zeros(self.num_envs, 2, device=self.device)
 
-        # Overshoot detection buffer (per-axis signed roll/pitch error from prev step)
-        self._prev_attitude_error_rp = torch.zeros(self.num_envs, 2, device=self.device)
-
         # EMA joint velocity (for high-pass oscillation penalty)
         self._ema_joint_vel = torch.zeros(self.num_envs, 2, device=self.device)
         self._ema_joint_vel_alpha = self.cfg.reward.ema_joint_vel_alpha
@@ -408,6 +404,18 @@ class HeroAgentEnv(DirectRLEnv):
             # Lambda*p_EE and T_b from previous step, matching TDC controller pattern
             self._tde_Lambda_p_EE_prev = torch.zeros(self.num_envs, 2, device=self.device)
             self._tde_T_b_prev = torch.zeros(self.num_envs, 2, device=self.device)
+
+        # Proprioception history buffer (ring buffer for temporal conv encoder)
+        self._proprio_history_len = self.cfg.proprio_history_len
+        if self._proprio_history_len > 0:
+            self._proprio_hist = torch.zeros(
+                self.num_envs,
+                self._proprio_history_len,
+                self.cfg.proprio_feature_dim,
+                device=self.device,
+            )
+        else:
+            self._proprio_hist = None
 
         # Action latency buffer (ring buffer for delayed action application)
         max_latency = rand_cfg.action_latency_range[1]
@@ -462,6 +470,21 @@ class HeroAgentEnv(DirectRLEnv):
         joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
         joint_pos_norm = 2.0 * (joint_pos - self._joint_limits_lower) / self._joint_limits_range - 1.0
         return roll, pitch, p, q, joint_pos_norm
+
+    def _update_proprio_hist(self) -> None:
+        """Shift ring buffer left and append current proprioception features.
+
+        Only active when proprio_history_len > 0. Called from _pre_physics_step().
+        """
+        if self._proprio_hist is None:
+            return
+        roll, pitch, p, q, joint_pos_norm = self._get_proprio_features()
+        new_entry = torch.cat(
+            [roll.unsqueeze(-1), pitch.unsqueeze(-1), p, q, joint_pos_norm, self._prev_actions_obs],
+            dim=-1,
+        )
+        self._proprio_hist[:, :-1] = self._proprio_hist[:, 1:].clone()
+        self._proprio_hist[:, -1] = new_entry
 
     def _update_potentials(self, quat: torch.Tensor) -> None:
         """Update potential values for reward computation.
@@ -634,6 +657,7 @@ class HeroAgentEnv(DirectRLEnv):
         Args:
             actions: Joint velocity commands [-1, 1]. Shape: (num_envs, 2).
         """
+        self._update_proprio_hist()
         self._update_action_buffers(actions)
 
         # Accumulate joint rotation delta (for IPO constraint)
@@ -825,6 +849,8 @@ class HeroAgentEnv(DirectRLEnv):
         observations = {"policy": policy_obs}
         if self.cfg.state_space > 0:
             observations["privileged"] = compute_privileged_obs(self)
+        if self._proprio_hist is not None:
+            observations["proprio_hist"] = self._proprio_hist.clone()
 
         return observations
 
@@ -861,14 +887,6 @@ class HeroAgentEnv(DirectRLEnv):
             idx = self._settling_idx % self._settling_window
             self._settling_errors.scatter_(1, idx.unsqueeze(1), err.unsqueeze(1))
             self._settling_idx += 1
-
-        # Compute constraint costs for IPO pipeline (if constraints configured)
-        constraints_cfg = getattr(self.cfg, "constraints", None)
-        if constraints_cfg is not None:
-            self.extras["costs"] = compute_all_costs(self._robot, self, constraints_cfg)
-
-        # Update overshoot buffer AFTER constraint computation (so overshoot_cost reads prev step)
-        self._prev_attitude_error_rp[:] = self._attitude_error[:, :2]
 
         return reward
 
@@ -966,75 +984,7 @@ class HeroAgentEnv(DirectRLEnv):
             extras_wrapper: dict = {"log": log}
             log_dr_metrics(extras_wrapper, self)
 
-        # DR infeasibility check (only for constrained envs with DR enabled)
-        self._check_dr_infeasibility(env_ids)
-
         return log
-
-    _dr_infeasibility_call_count: int = 0
-    _dr_infeasibility_log_interval: int = 100  # Log details every N calls
-    _dr_infeasibility_max_samples: int = 3  # Max detailed logs per interval
-
-    def _check_dr_infeasibility(self, env_ids: torch.Tensor) -> None:
-        """Detect DR combinations where correct control cannot reduce error.
-
-        Only checks timed-out episodes (had full episode length to converge).
-        Flags environments that have: (1) high error (> 10 deg), (2) arm near
-        singularity, and (3) arm pointing in the correct direction.
-
-        Logs infeasible count to extras["log"] every call (for WandB).
-        Logs detailed params at most max_samples per log_interval calls.
-        """
-        if len(env_ids) == 0 or getattr(self.cfg, "constraints", None) is None:
-            return
-
-        # Only check timed-out episodes (early termination != infeasibility)
-        timed_out_mask = self.reset_time_outs[env_ids]
-        timed_out_ids = env_ids[timed_out_mask]
-        if len(timed_out_ids) == 0:
-            return
-
-        err = self._attitude_error[timed_out_ids, :2]  # (N, 2) roll/pitch error
-        mean_err_deg = torch.rad2deg(err.abs().mean(dim=-1))
-
-        # Condition 1: high error (> 10 degrees)
-        high_error = mean_err_deg > 10.0
-
-        # Condition 2: arm near singularity (fully extended)
-        g2 = self._robot.data.joint_pos[timed_out_ids][:, self._albc_joint_ids[1]]
-        near_singularity = g2.sin().abs() < 0.15
-
-        # Condition 3: arm pointing in the correct direction
-        g1 = self._robot.data.joint_pos[timed_out_ids][:, self._albc_joint_ids[0]]
-        desired_g1 = torch.atan2(err[:, 0], err[:, 1])
-        direction_aligned = torch.cos(g1 - desired_g1) > 0.5  # within ~60 deg
-
-        infeasible = high_error & near_singularity & direction_aligned
-        n_infeasible = infeasible.sum().item()
-
-        # Always record count for WandB (lightweight)
-        if hasattr(self, "extras") and "log" in self.extras:
-            self.extras["log"]["DR/infeasible_count"] = n_infeasible
-
-        # Detailed logging: sample at most N envs every M calls
-        self._dr_infeasibility_call_count += 1
-        if n_infeasible > 0 and (self._dr_infeasibility_call_count % self._dr_infeasibility_log_interval == 0):
-            inf_ids = timed_out_ids[infeasible]
-            inf_errs = mean_err_deg[infeasible]
-            # Random sample if too many
-            if len(inf_ids) > self._dr_infeasibility_max_samples:
-                perm = torch.randperm(len(inf_ids), device=inf_ids.device)[: self._dr_infeasibility_max_samples]
-                inf_ids = inf_ids[perm]
-                inf_errs = inf_errs[perm]
-            log_dr_infeasibility(
-                env_ids=inf_ids,
-                mean_errors_deg=inf_errs,
-                hydro=self._hydro,
-                buoy_hydro=self._buoy_hydro,
-                payload_mass=self._payload_mass,
-                robot=self._robot,
-                albc_joint_ids=self._albc_joint_ids,
-            )
 
     def get_eval_snapshot(self) -> dict[str, float]:
         """Return current evaluation metrics for play-mode diagnostics.
@@ -1166,8 +1116,6 @@ class HeroAgentEnv(DirectRLEnv):
         # Reset accumulated rotation tracking (IPO constraint)
         self._accumulated_rotation[env_ids] = 0.0
         self._prev_joint_pos[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
-        # Reset overshoot detection buffer (set to 0; overwritten in _reset_task_and_state)
-        self._prev_attitude_error_rp[env_ids] = 0.0
 
         # Reset perturbation state: randomize timer phase to decorrelate envs
         rand_cfg = self.cfg.randomization
@@ -1178,6 +1126,10 @@ class HeroAgentEnv(DirectRLEnv):
         self._buoy_perturb_forces[env_ids] = 0.0
         self._buoy_perturb_torques[env_ids] = 0.0
         self._buoy_perturb_timer[env_ids] = torch.randint(0, perturb_cycle, (len(env_ids),), device=self.device)
+
+        # Reset proprioception history buffer
+        if self._proprio_hist is not None:
+            self._proprio_hist[env_ids] = 0.0
 
         # Reset TDE observation buffers
         if self.cfg.enable_tde_obs:
@@ -1282,8 +1234,6 @@ class HeroAgentEnv(DirectRLEnv):
         initial_potential = torch.linalg.norm(attitude_error[:, :2], dim=-1)
         self._potentials[env_ids] = initial_potential
         self._prev_potentials[env_ids] = initial_potential
-        # Initialize overshoot buffer to initial error (prevents false positive on first step)
-        self._prev_attitude_error_rp[env_ids] = attitude_error[:, :2]
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Setup or toggle visibility of debug visualization markers."""

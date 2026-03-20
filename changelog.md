@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] Remove constrained_encoder_base code from hero_agent
+
+### Context
+All constrained RL code has been fully migrated to `constrained_albc/` package.
+This session removes the remaining constrained_encoder_base references from
+hero_agent to eliminate dead imports and prevent runtime confusion between the
+two packages. 4 files deleted, 10 files edited, ruff check clean.
+
+### Changed
+- `base_env.py`: Removed `compute_all_costs` import, constraint cost computation block,
+  `_prev_attitude_error_rp` buffer (init + 3 reset/update sites), `_check_dr_infeasibility()`
+  method and its call site, `log_dr_infeasibility` import.
+- `config.py`: Removed constraint imports (ALBCConstraintCfg, ConstraintTermCfg, 6 cost functions).
+  Deleted `HeroAgentConstrainedEncoderEnvCfg` class (~70 lines).
+- `agents/rsl_rl_ppo_cfg.py`: Removed ConstraintTRPO/ConstraintEncoderRunner/
+  ActorCriticEncoderConstrained imports and module registrations. Deleted 3 config classes
+  (RslRlConstraintTRPOAlgorithmCfg, RslRlPpoActorCriticEncoderConstrainedCfg,
+  HeroAgentConstrainedEncoderRunnerCfg, ~95 lines).
+- `__init__.py`: Removed gym.register for Isaac-HeroAgent-Constrained-Encoder-Base-v0,
+  config import, and __all__ entry.
+- `encoder/__init__.py`, `agents/__init__.py`, `runners/__init__.py`,
+  `algorithms/__init__.py`, `mdp/__init__.py`: Removed all constrained-related imports/exports.
+- `utils/logging.py`: Deleted `log_dr_infeasibility()` and `_get_dr_infeasibility_logger()`.
+- `utils/__init__.py`: Removed `log_dr_infeasibility` from imports and __all__.
+- `runners/base_runner.py`: Removed ConstraintTRPO reference in docstring comment.
+
+### Removed
+- `encoder/actor_critic_encoder_constrained.py`: Constrained encoder network (4.5KB)
+- `algorithms/constraint_trpo.py`: C-TRPO algorithm (42KB)
+- `runners/constraint_encoder_runner.py`: Constrained encoder runner (6.4KB)
+- `mdp/constraints.py`: Constraint cost functions (12.5KB)
+
 ## [2026-03-20] C-TRPO mode oscillation fix: EMA smoothing + cost critic LR gating
 
 ### Context

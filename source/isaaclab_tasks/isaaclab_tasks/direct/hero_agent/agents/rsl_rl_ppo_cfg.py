@@ -10,9 +10,6 @@ Provides runner configurations:
     - HeroAgentTDEBasePPORunnerCfg: TDE-Base with training enhancements
     - HeroAgentEncoderPPORunnerCfg: HORA Phase 1 with extrinsics encoder
     - HeroAgentAdaptBaseRunnerCfg: Phase 2 adaptation (supervised, base RL)
-
-For evaluation, use CLI overrides instead of separate config classes:
-    --max_iterations 100 --save_interval 25
 """
 
 import rsl_rl.runners.on_policy_runner as _runner_module
@@ -24,21 +21,13 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 # Register custom classes in RSL-RL runner module namespace.
 # The runner resolves policy class_name and runner class dynamically.
 # This injection makes custom classes resolvable in that scope.
-from ..algorithms import ConstraintTRPO
-from ..encoder import (
-    ActorCriticEncoder,
-    ActorCriticEncoderAdapt,
-    ActorCriticEncoderConstrained,
-)
-from ..runners import BaseRunner, ConstraintEncoderRunner, EncoderRunner
+from ..encoder import ActorCriticEncoder, ActorCriticEncoderAdapt
+from ..runners import BaseRunner, EncoderRunner
 
 _runner_module.ActorCriticEncoder = ActorCriticEncoder
 _runner_module.ActorCriticEncoderAdapt = ActorCriticEncoderAdapt
-_runner_module.ActorCriticEncoderConstrained = ActorCriticEncoderConstrained
 _runner_module.BaseRunner = BaseRunner
 _runner_module.EncoderRunner = EncoderRunner
-_runner_module.ConstraintEncoderRunner = ConstraintEncoderRunner
-_runner_module.ConstraintTRPO = ConstraintTRPO
 
 
 # =============================================================================
@@ -274,105 +263,3 @@ class HeroAgentAdaptBaseRunnerCfg(_HeroAgentBaseRunnerCfg):
     max_grad_norm: float = 10.0
     """Gradient clipping threshold for adapt_tconv. Relaxed vs Phase 1 (1.0) to
     preserve fast initial convergence while catching anomalous gradient spikes."""
-
-
-# =============================================================================
-# Constrained Encoder (IPO + TRPO) Configurations
-# =============================================================================
-
-
-@configclass
-class RslRlConstraintTRPOAlgorithmCfg:
-    """Algorithm configuration for ConstraintTRPO (C-TRPO barrier-based trust region).
-
-    Implements C-TRPO (Muller et al., ICML 2025, arXiv:2411.02957):
-        - No Lagrangian dual variables (lambda removed)
-        - Safe mode: barrier-augmented objective + KL-only trust region
-        - Recovery mode: cost minimization with standard TRPO trust region
-        - Option C: barrier curvature in objective gradient only, FVP stays KL-only
-
-    These fields are forwarded as kwargs to ConstraintTRPO.__init__().
-    The class_name tells the runner to instantiate ConstraintTRPO instead of PPO.
-    """
-
-    class_name: str = "ConstraintTRPO"
-
-    # TRPO parameters
-    max_kl: float = 0.01
-    cg_iters: int = 10
-    cg_damping: float = 0.1
-    line_search_max_backtracks: int = 10
-    line_search_shrink_factor: float = 0.5
-
-    # Value function
-    num_learning_epochs: int = 5
-    num_mini_batches: int = 4
-    value_loss_coef: float = 1.0
-    cost_value_loss_coef: float = 1.0
-    value_lr: float = 1e-3
-    max_grad_norm: float = 1.0
-
-    # GAE
-    gamma: float = 0.99
-    lam: float = 0.95
-
-    # Constraint
-    num_constraints: int = 6
-    constraint_budgets: tuple[float, ...] = (0.02, 0.01, 0.20, 0.05, 0.10, 0.35)
-    cost_gamma: float = 0.99
-    cost_lam: float = 0.95
-    line_search_kl_margin: float = 1.5
-
-    # C-TRPO barrier parameters
-    beta: float = 0.01
-    """Barrier coefficient weighting D_phi relative to D_KL."""
-
-    recovery_threshold_frac: float = 0.8
-    """Fraction of budget: if cost_return < budget * frac, exit recovery mode."""
-
-    # Encoder z bounds
-    z_bounds_coef: float = 0.3
-
-    # Encoder update
-    num_encoder_epochs: int = 1
-    """Number of encoder gradient steps per iteration. Must stay at 1: multi-step
-    causes uncontrolled KL divergence (encoder changes z -> distribution shift
-    not bounded by TRPO trust region). Recovery mode fix is the real encoder fix."""
-
-    encoder_lr: float = 3e-4
-    """Encoder Adam learning rate. Matches pre-mod C-TRPO value; higher values
-    (1e-3) caused excessive distribution shift even with 1 epoch."""
-
-
-@configclass
-class RslRlPpoActorCriticEncoderConstrainedCfg(_RslRlPpoEncoderBaseCfg):
-    """Policy config for ActorCriticEncoderConstrained (encoder + cost critic).
-
-    asymmetric_critic=True (default): critics see raw privileged obs (NORBC design).
-    """
-
-    class_name: str = "ActorCriticEncoderConstrained"
-    num_constraints: int = 6
-    cost_critic_hidden_dims: list[int] = [256, 128, 64]
-    asymmetric_critic: bool = True
-
-
-@configclass
-class HeroAgentConstrainedEncoderRunnerCfg(_HeroAgentBaseRunnerCfg):
-    """Runner configuration for constrained encoder training (C-TRPO barrier).
-
-    Uses ConstraintEncoderRunner which inherits EncoderRunner and adds
-    barrier state persistence + constraint metrics logging.
-    """
-
-    class_name: str = "ConstraintEncoderRunner"
-    max_iterations = 2500
-    experiment_name = "hero_agent_constrained_encoder"
-    obs_groups = _HISTORY_PRIVILEGED_OBS_GROUPS
-
-    # Encoder LR schedule (inherited from EncoderRunner)
-    encoder_lr_warmup_frac: float = 0.2
-    encoder_lr_min_ratio: float = 0.1
-
-    algorithm = RslRlConstraintTRPOAlgorithmCfg()
-    policy = RslRlPpoActorCriticEncoderConstrainedCfg()
