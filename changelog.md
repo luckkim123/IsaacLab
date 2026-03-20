@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-20] config.py code review: dead fields, barrier singularity, documentation
+
+### Context
+Post-simplification code review of `config.py` plus cross-referenced issues in
+`constraint_trpo.py`. 8 verified issues found (3 exploration agents, false positives
+filtered). Issues 1-4 in config.py (dead field, undocumented budget scaling, magic numbers,
+missing validation); Issues 5-8 in constraint_trpo.py (barrier near-singularity, any-recovery
+design, kwargs absorption, dead clamp guard). Issue 4 (DR range validation) skipped as low ROI.
+
+Key finding: barrier penalty has a singularity gap -- when margin is small positive (0, ~0.01)
+but recovery mode hasn't triggered (threshold is margin <= 0), phi_pp = 1/m^2 can reach 1e6,
+causing explosive gradients. Clamping margin to min=0.01 caps phi_pp at 1e4 (barrier penalty
+~100 with beta=0.01 and cost_surrogate=0.1).
+
+### Changed
+- `config.py`: Added budget D_k vs d_k documentation. Per-step budget D_k is scaled to
+  discounted d_k = D_k / (1 - cost_gamma) = D_k * 100 by the algorithm. This relationship
+  was undocumented, making budget tuning non-obvious.
+- `config.py`: Added inline unit comments for constraint magic numbers: `1.396` -> `# ~80 deg`,
+  `4.189` -> `# 40 RPM (Dynamixel XW540 no-load)`.
+- `algorithms/constraint_trpo.py`: Added design note comment on "any-recovery" policy trade-off
+  at lines 569-578. Documents that per-constraint blend is a known alternative but adds
+  complexity with shared trust region interaction.
+
+### Fixed
+- `algorithms/constraint_trpo.py`: Barrier margin clamped to min=0.01 in
+  `_compute_barrier_penalty()`. Prevents phi_pp explosion when margin is small positive but
+  recovery hasn't triggered. Old: `1/(m^2 + 1e-8)` -> New: `1/max(m, 0.01)^2`.
+- `algorithms/constraint_trpo.py`: `**_kwargs` now logs ignored kwargs at debug level instead
+  of silently absorbing. Aids diagnosis when RSL-RL passes unexpected parameters.
+- `algorithms/constraint_trpo.py`: Added comment explaining d_k^2 clamp (min=0.01) is a
+  defensive guard that never activates with default cost_gamma=0.99 (min d_k=1.0).
+
+### Removed
+- `config.py`: Deleted dead `enable_payload: bool = True` field. Payload is always initialized
+  and computed unconditionally since the simplification removed its conditional logic.
+
 ## [2026-03-20] MDP code review: 3 critical bugs + 5 theoretical fixes
 
 ### Context
