@@ -102,14 +102,14 @@ class ConstraintEncoderRunner(OnPolicyRunner):
     # ------------------------------------------------------------------
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
-        """Reset environments before training so initial DR samples come from DORAEMON."""
+        """Reset environments before training."""
         if hasattr(self.alg, "set_max_iterations"):
             self.alg.set_max_iterations(num_learning_iterations)
         self.env.reset()
         super().learn(num_learning_iterations, init_at_random_ep_len)
 
     def log(self, locs: dict, width: int = 80, pad: int = 35) -> None:
-        """Extended log with DORAEMON update, encoder metrics, and constraint metrics.
+        """Extended log with encoder metrics and constraint metrics.
 
         Args:
             locs: Local variables from the learn() training loop.

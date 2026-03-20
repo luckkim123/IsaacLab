@@ -8,7 +8,6 @@
 from .debug_vis import DebugVisualization
 from .logging import (
     flush_metrics,
-    log_dr_infeasibility,
     log_dr_metrics,
     log_encoder_metrics,
     unwrap_env,
@@ -17,7 +16,6 @@ from .logging import (
 __all__ = [
     "DebugVisualization",
     "flush_metrics",
-    "log_dr_infeasibility",
     "log_dr_metrics",
     "log_encoder_metrics",
     "unwrap_env",

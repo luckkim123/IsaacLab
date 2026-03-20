@@ -137,11 +137,10 @@ class DomainRandomizationCfg:
 
 
 @configclass
-class ConstrainedALBCEnvCfg(DirectRLEnvCfg):
-    """Single configuration for Constrained ALBC Encoder environment.
+class ALBCEnvCfg(DirectRLEnvCfg):
+    """Base configuration for ALBC environment.
 
-    Merged from: ALBCEnvCfg + ALBCTrainEnvCfg + ALBCEncoderTrainEnvCfg
-    + ConstrainedALBCEncoderEnvCfg. All fields at their final production values.
+    Used directly by ALBCEnv. Inheritable for specialized configs.
 
     The vehicle uses 2 revolute joints (joint1, joint2) to position a buoyancy
     element for attitude stabilization. No thrusters are used.
@@ -248,9 +247,10 @@ class ConstrainedALBCEnvCfg(DirectRLEnvCfg):
     randomization: DomainRandomizationCfg = DomainRandomizationCfg(enable=True)
 
     # ==========================================================================
-    # Virtual Payload Configuration (always enabled)
+    # Virtual Payload Configuration
     # Payload is applied to the gripper body (fixed to base). Offsets in gripper frame.
     # ==========================================================================
+    enable_payload: bool = True
     payload_mass: float = 0.5  # kg
     payload_attachment_offset: tuple[float, float, float] = (0.0, 0.0, -0.05)  # m, gripper frame
 
@@ -318,3 +318,7 @@ class ConstrainedALBCEnvCfg(DirectRLEnvCfg):
             ),
         ],
     )
+
+
+# Backwards-compatible alias for gym registration and external references
+ConstrainedALBCEncoderEnvCfg = ALBCEnvCfg

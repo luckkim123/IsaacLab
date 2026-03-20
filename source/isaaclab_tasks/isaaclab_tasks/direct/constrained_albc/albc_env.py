@@ -27,8 +27,7 @@ from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse
 
 from isaaclab_tasks.models import HydrodynamicsModel
 
-
-from .config import ConstrainedConstrainedALBCEnvCfg
+from .config import ALBCEnvCfg
 from .mdp import (
     RewardManager,
     RewardTermCfg,
@@ -84,9 +83,9 @@ class ALBCEnv(DirectRLEnv):
         - joint_limits: from URDF (±2*pi rad, i.e. ±360 deg)
     """
 
-    cfg: ConstrainedALBCEnvCfg
+    cfg: ALBCEnvCfg
 
-    def __init__(self, cfg: ConstrainedALBCEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: ALBCEnvCfg, render_mode: str | None = None, **kwargs):
         """Initialize the ALBC environment.
 
         Args:
@@ -151,7 +150,7 @@ class ALBCEnv(DirectRLEnv):
         self.set_debug_vis(self.cfg.debug_vis)
 
     @staticmethod
-    def _iter_noise_params(cfg: ConstrainedALBCEnvCfg):
+    def _iter_noise_params(cfg: ALBCEnvCfg):
         """Yield (sub_cfg, param_name, value) for all tuple/list noise params."""
         noise_model = getattr(cfg, "observation_noise_model", None)
         if noise_model is None:
@@ -166,7 +165,7 @@ class ALBCEnv(DirectRLEnv):
                     yield sub_cfg, param, val
 
     @staticmethod
-    def _convert_noise_cfg_tuples(cfg: ConstrainedALBCEnvCfg) -> None:
+    def _convert_noise_cfg_tuples(cfg: ALBCEnvCfg) -> None:
         """Convert noise config tuple/list values to torch.Tensor in-place.
 
         Config uses tuples for OmegaConf/Hydra serialization compatibility.
@@ -945,11 +944,7 @@ class ALBCEnv(DirectRLEnv):
         self._perturb_timer[env_ids] = torch.randint(0, perturb_cycle, (len(env_ids),), device=self.device)
 
     def _reset_physics(self, env_ids: torch.Tensor) -> None:
-        """Reset hydrodynamics, payload, and apply domain randomization.
-
-        When DORAEMON is active, samples DR parameters from the Beta distribution
-        and passes them to randomize functions via the ``sampled`` dict.
-        """
+        """Reset hydrodynamics, payload, and apply domain randomization."""
         self._hydro.reset(env_ids)
         self._buoy_hydro.reset(env_ids)
 

@@ -17,8 +17,6 @@ import gymnasium as gym
 from .albc_env import ALBCEnv
 from .config import (
     ALBCEnvCfg,
-    ALBCEncoderTrainEnvCfg,
-    ALBCTrainEnvCfg,
     ConstrainedALBCEncoderEnvCfg,
     DomainRandomizationCfg,
 )
