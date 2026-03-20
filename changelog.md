@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [2026-03-20] Extract constrained_albc as standalone package
+## [2026-03-20] Extract constrained_albc + simplify agents/ config hierarchy
 
 ### Context
 The constrained encoder environment (`Isaac-HeroAgent-Constrained-Encoder-Base-v0`) was embedded
@@ -37,6 +37,16 @@ Verified: grep for `hero_agent|HeroAgent` shows only external asset references
 
 ### Changed
 - `direct/__init__.py`: Added `from . import constrained_albc` for gym auto-registration
+- `constrained_albc/agents/rsl_rl_ppo_cfg.py`: Flattened 3-level config hierarchy to 2-level.
+  Merged `_ALBCPolicyCfg` + `_RslRlPpoEncoderBaseCfg` into single `_EncoderPolicyCfg`.
+  Inlined `_ALBCBaseRunnerCfg` (PPO algorithm settings never used, always overridden by C-TRPO)
+  into `ConstrainedALBCEncoderRunnerCfg`. Inlined `_HISTORY_PRIVILEGED_OBS_GROUPS` constant.
+  Removed unused `RslRlPpoActorCriticEncoderCfg` (dead code, no runner references it).
+  Removed unused `RslRlPpoAlgorithmCfg` import. 223 -> 180 lines, 8 classes -> 4 classes.
+- `constrained_albc/agents/__init__.py`: Removed re-exports of network classes
+  (`ActorCriticEncoder`, `ActorCriticEncoderConstrained`) already available via
+  `constrained_albc.encoder`. Removed dead `RslRlPpoActorCriticEncoderCfg` export.
+  23 -> 18 lines, 6 exports -> 3 exports.
 
 ### Removed
 - (From copied code) All TDC controller imports, TDC reward functions (`tdc_torque_penalty`, `_compute_M_true`, `mhat_accuracy_reward`, `compute_stability_gate`), TDC logging functions (`log_tdc_*`), adaptation module, ppo_patch

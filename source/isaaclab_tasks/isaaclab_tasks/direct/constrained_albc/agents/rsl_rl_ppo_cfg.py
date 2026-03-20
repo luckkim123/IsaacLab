@@ -16,7 +16,7 @@ import rsl_rl.runners.on_policy_runner as _runner_module
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg
 
 # Register custom classes in RSL-RL runner module namespace.
 # The runner resolves policy class_name and runner class dynamically.
@@ -42,9 +42,10 @@ _runner_module.ConstraintTRPO = ConstraintTRPO
 
 
 @configclass
-class _ALBCPolicyCfg(RslRlPpoActorCriticCfg):
-    """Shared network architecture for all ALBC standard (non-encoder) policies."""
+class _EncoderPolicyCfg(RslRlPpoActorCriticCfg):
+    """Shared network architecture for ALBC encoder policies."""
 
+    # Actor/Critic
     init_noise_std: float = 1.0
     noise_std_type: str = "log"
     actor_obs_normalization: bool = True
@@ -52,17 +53,7 @@ class _ALBCPolicyCfg(RslRlPpoActorCriticCfg):
     actor_hidden_dims: list[int] = [256, 128, 64]
     critic_hidden_dims: list[int] = [256, 128, 64]
     activation: str = "elu"
-
-
-@configclass
-class _RslRlPpoEncoderBaseCfg(_ALBCPolicyCfg):
-    """Shared encoder architecture fields on top of shared policy config.
-
-    Inherits actor/critic network architecture from _ALBCPolicyCfg.
-    All encoder variants share the same encoder MLP
-    architecture and observation dimensions.
-    """
-
+    # Encoder
     encoder_hidden_dims: list[int] = [256, 128, 64]
     encoder_latent_dim: int = 13
     encoder_activation: str = "elu"
@@ -77,52 +68,20 @@ class _RslRlPpoEncoderBaseCfg(_ALBCPolicyCfg):
 
 
 @configclass
-class RslRlPpoActorCriticEncoderCfg(_RslRlPpoEncoderBaseCfg):
-    """PPO actor-critic configuration with extrinsics encoder for HORA Phase 1.
+class RslRlPpoActorCriticEncoderConstrainedCfg(_EncoderPolicyCfg):
+    """Policy config for ActorCriticEncoderConstrained (encoder + cost critic).
 
-    The encoder compresses privileged hydrodynamic parameters into a latent z
-    that can later be replaced by a history-based adaptation module (Phase 2).
+    asymmetric_critic=True (default): critics see raw privileged obs (NORBC design).
     """
 
-    class_name: str = "ActorCriticEncoder"
+    class_name: str = "ActorCriticEncoderConstrained"
+    num_constraints: int = 6
+    cost_critic_hidden_dims: list[int] = [256, 128, 64]
+    asymmetric_critic: bool = True
 
 
 # =============================================================================
-# Runner Configurations
-# =============================================================================
-
-# Observation groups for configs that use proprioception history.
-_HISTORY_PRIVILEGED_OBS_GROUPS: dict[str, list[str]] = {
-    "policy": ["policy", "privileged", "proprio_hist"],
-    "critic": ["policy", "privileged", "proprio_hist"],
-}
-
-
-@configclass
-class _ALBCBaseRunnerCfg(RslRlOnPolicyRunnerCfg):
-    """Shared runner fields and PPO algorithm for all constrained ALBC configs."""
-
-    seed = 30
-    num_steps_per_env = 64
-    save_interval = 50
-    algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=1.0,
-        use_clipped_value_loss=True,
-        clip_param=0.2,
-        entropy_coef=0.005,
-        num_learning_epochs=8,
-        num_mini_batches=4,
-        learning_rate=3.0e-4,
-        schedule="adaptive",
-        gamma=0.99,
-        lam=0.95,
-        desired_kl=0.01,
-        max_grad_norm=1.0,
-    )
-
-
-# =============================================================================
-# Constrained Encoder (IPO + TRPO) Configurations
+# Algorithm Configuration
 # =============================================================================
 
 
@@ -189,21 +148,13 @@ class RslRlConstraintTRPOAlgorithmCfg:
     (1e-3) caused excessive distribution shift even with 1 epoch."""
 
 
-@configclass
-class RslRlPpoActorCriticEncoderConstrainedCfg(_RslRlPpoEncoderBaseCfg):
-    """Policy config for ActorCriticEncoderConstrained (encoder + cost critic).
-
-    asymmetric_critic=True (default): critics see raw privileged obs (NORBC design).
-    """
-
-    class_name: str = "ActorCriticEncoderConstrained"
-    num_constraints: int = 6
-    cost_critic_hidden_dims: list[int] = [256, 128, 64]
-    asymmetric_critic: bool = True
+# =============================================================================
+# Runner Configuration
+# =============================================================================
 
 
 @configclass
-class ConstrainedALBCEncoderRunnerCfg(_ALBCBaseRunnerCfg):
+class ConstrainedALBCEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
     """Runner configuration for constrained encoder training (C-TRPO barrier).
 
     Uses ConstraintEncoderRunner which inherits EncoderRunner and adds
@@ -211,9 +162,15 @@ class ConstrainedALBCEncoderRunnerCfg(_ALBCBaseRunnerCfg):
     """
 
     class_name: str = "ConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
     max_iterations = 2500
+    save_interval = 50
     experiment_name = "constrained_albc_encoder"
-    obs_groups = _HISTORY_PRIVILEGED_OBS_GROUPS
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged", "proprio_hist"],
+    }
 
     # Encoder LR schedule (inherited from EncoderRunner)
     encoder_lr_warmup_frac: float = 0.2

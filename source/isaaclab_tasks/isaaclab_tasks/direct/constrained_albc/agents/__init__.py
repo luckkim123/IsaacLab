@@ -5,19 +5,14 @@
 
 """RL agent configurations for constrained ALBC environments."""
 
-from ..encoder import ActorCriticEncoder, ActorCriticEncoderConstrained
 from .rsl_rl_ppo_cfg import (
     ConstrainedALBCEncoderRunnerCfg,
     RslRlConstraintTRPOAlgorithmCfg,
-    RslRlPpoActorCriticEncoderCfg,
     RslRlPpoActorCriticEncoderConstrainedCfg,
 )
 
 __all__ = [
-    "ActorCriticEncoder",
-    "ActorCriticEncoderConstrained",
     "ConstrainedALBCEncoderRunnerCfg",
-    "RslRlPpoActorCriticEncoderCfg",
     "RslRlPpoActorCriticEncoderConstrainedCfg",
     "RslRlConstraintTRPOAlgorithmCfg",
 ]
