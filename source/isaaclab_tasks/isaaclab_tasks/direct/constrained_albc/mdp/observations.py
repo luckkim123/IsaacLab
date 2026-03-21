@@ -100,11 +100,11 @@ def compute_privileged_obs(
         - Joint stiffness (1D): PD Kp (DR range 40-120, 3x)
         - Joint damping (1D): PD Kd (DR range 0.5-5.0, 10x)
         - Joint effort limit (1D): max torque (DR range 0.7-1.0 x 9.5Nm)
+        - Main body linear damping roll, pitch (2D): DR 0.5-1.5 scale (3x)
+        - Main body quadratic damping roll, pitch (2D): DR 0.5-1.5 scale (3x)
+        - Body mass (1D): DR 0.9-1.1 scale (1.22x)
 
-    Total: 18D.
-    Changes from 19D: removed CoG x/y (+-0.01m, negligible), added joint actuator
-    params (stiffness/damping/effort_limit) which have the largest DR ranges and
-    directly determine control response but were previously invisible to the encoder.
+    Total: 23D.
 
     Args:
         env: The ALBC environment instance.
@@ -132,12 +132,22 @@ def compute_privileged_obs(
     # Main body surge added mass: effective inertia = I_rigid + M_added (1D).
     priv_obs.append(env._hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1))  # 1D: main M_a surge
 
-    # Joint actuator parameters: critical DR params previously missing from privileged obs.
+    # Joint actuator parameters: critical DR params with largest variability.
     # Both ALBC joints share the same DR'd value (scalar per env, broadcast to 2 joints).
-    # Read from Isaac Lab's ArticulationData (updated by write_joint_*_to_sim).
     jid = env._albc_joint_ids[0]
     priv_obs.append(env._robot.data.joint_stiffness[:, jid : jid + 1])  # 1D: Kp
     priv_obs.append(env._robot.data.joint_damping[:, jid : jid + 1])  # 1D: Kd
     priv_obs.append(env._robot.data.joint_effort_limits[:, jid : jid + 1])  # 1D: effort limit
+
+    # Hydrodynamic damping: roll/pitch components (indices 3, 4 of 6-DOF vector).
+    # DR scale 0.5-1.5 (3x range). Linear damping dominates at low angular velocity,
+    # quadratic at high. Both are critical for predicting angular velocity decay rate.
+    priv_obs.append(env._hydro.linear_damping[:, 3:5])  # 2D: roll, pitch linear damping
+    priv_obs.append(env._hydro.quadratic_damping[:, 3:5])  # 2D: roll, pitch quadratic damping
+
+    # Body mass: DR scale 0.9-1.1 (1.22x). Combined with volume (already included),
+    # determines buoyancy-gravity ratio F_bu/W = rho*V*g / (m*g) = rho*V/m.
+    # Volume without mass cannot determine equilibrium buoyancy.
+    priv_obs.append(env._hydro.body_mass.unsqueeze(-1))  # 1D: main body mass
 
     return torch.cat(priv_obs, dim=-1)

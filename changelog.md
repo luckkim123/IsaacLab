@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## [2026-03-21] Add joint actuator params to privileged obs -- fix encoder information gap
+## [2026-03-21] Expand privileged obs to 23D -- add damping + body mass + constraint cost analysis
 
 ### Context
 Run `2026-03-21_21-33-37` (enc_epochs=3, grad_clip=0.5) ran to 1924 iter with no improvement
@@ -34,31 +34,37 @@ Also removed CoG x/y for both main and buoy bodies (4D total): +-0.01m offset ra
 negligible torque (0.26Nm vs 6-10Nm effort limit). Only CoG z retained (dominates roll/pitch).
 
 ### Changed
-- `mdp/observations.py`: `_hydro_privileged_info()` returns 3D (volume, CoG_z, CoB_z) instead
-  of 5D (removed CoG_x, CoG_y). `compute_privileged_obs()` adds joint_stiffness (1D),
-  joint_damping (1D), joint_effort_limits (1D) read from Isaac Lab ArticulationData. Total
-  privileged: 19D -> 18D.
-- `config.py`: `state_space` 19 -> 18. Docstring updated.
-- `agents/rsl_rl_ppo_cfg.py`: `privileged_dim` 19 -> 18.
-- `encoder/actor_critic_encoder.py`: Architecture docstring 272D -> 271D.
-- `encoder/actor_critic_encoder_constrained.py`: Architecture docstring 272D -> 271D.
+- `mdp/observations.py`: Privileged obs expanded in two steps during this session.
+  Step 1 (19D->18D): `_hydro_privileged_info()` returns 3D (volume, CoG_z, CoB_z) instead of
+  5D (removed CoG_x, CoG_y). Added joint_stiffness/damping/effort_limit (3D).
+  Step 2 (18D->23D): Added main body linear damping roll/pitch (2D from
+  `hydro.linear_damping[:, 3:5]`), quadratic damping roll/pitch (2D from
+  `hydro.quadratic_damping[:, 3:5]`), body mass (1D from `hydro.body_mass`).
+  Final privileged: 19D -> 23D (+8D added, -4D removed CoG x/y).
+- `config.py`: `state_space` 19 -> 23. Docstring updated.
+- `agents/rsl_rl_ppo_cfg.py`: `privileged_dim` 19 -> 23.
+- `encoder/actor_critic_encoder.py`: Architecture docstring 272D -> 276D.
+- `encoder/actor_critic_encoder_constrained.py`: Architecture docstring 272D -> 276D.
 
 ### Notes
 - Checkpoint incompatible with previous runs (privileged dim changed). Must start fresh.
-- Joint stiffness/damping values read directly from `_robot.data.joint_stiffness` and
-  `_robot.data.joint_damping` (populated by Isaac Lab after `write_joint_*_to_sim()` calls
-  in DR). No additional buffers needed.
-- Both ALBC joints share the same DR'd stiffness/damping (scalar broadcast), so only one
-  joint's value is included (index [0]).
-- Other missing DR params (linear/quadratic damping, friction, latency) have smaller ranges
-  or are inferable from proprio history. Joint actuator params are highest priority.
-- Early results (run `2026-03-21_23-04-17`, 391 iter): roll=7.63 deg (improved from ~15 deg
-  at same iter in previous run), pitch=15.82 deg (similar), recovery=6% (improved from 14%).
-  However surrogate=4.9e-06 (still near zero), z_std=0.98 (saturated). Privileged obs fix
-  alone may be insufficient -- encoder gradient path through 271D input remains problematic.
-  Continue monitoring to 500-700 iter for definitive comparison.
-- Secondary concern identified but not addressed: encoder receives 271D input where only 18D
-  (privileged) is unique vs what actor already sees. Low signal-to-noise for encoder gradient.
+- All new values read directly from existing runtime tensors (ArticulationData for joint
+  params, HydrodynamicsModel for damping/mass). No additional buffers needed.
+- Full DR parameter audit (28 params total): 17 params now in privileged obs, 11 remain
+  hidden (water_density 1.03x negligible, joint friction low impact, perturbation/latency
+  are per-step events not model params, lateral CoB/CoG +-0.01m negligible).
+- Constraint cost divergence analysis: joint_torque/vel_limit worsen because policy learns
+  aggressive actions (act_size=1.20) for attitude tracking. At Kp=120 (DR max), action=1.0
+  generates 10.08Nm torque > 9.5Nm limit. Policy needs encoder to condition action scale on
+  Kp: use action~0.5 for Kp=120, action~1.0 for Kp=40. Without encoder differentiation,
+  uniform aggressive action violates torque in high-Kp envs.
+- yaw_vel plateaus because aggressive joint actuation creates reaction torques with yaw
+  component; equilibrium at ~0.34 rad/s where excitation balances hydrodynamic yaw drag.
+- No constraint warm-up/curriculum is implemented in current C-TRPO code.
+  `set_max_iterations()` is a log-only no-op. Budget, beta, recovery_threshold all fixed.
+- Early results (run `2026-03-21_23-04-17`, 391 iter, 18D version): roll=7.63 deg (improved),
+  pitch=15.82 deg (similar), recovery=6% (improved from 14%). Surrogate still near zero.
+- Secondary concern: encoder receives 276D input where only 23D (privileged) is unique.
   HORA Phase 1 uses privileged-only encoder input. May need architectural change later.
 
 ## [2026-03-21] Encoder update strengthening: multi-step encoder + relaxed grad clip
