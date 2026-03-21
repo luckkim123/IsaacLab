@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-21] Barrier penalty bug fix: structurally zero gradient
+
+### Context
+Run `2026-03-20_18-15-06` (2500 iter, EAPO + C-TRPO) showed attitude error stagnation at 10+
+deg. Root cause analysis revealed barrier penalty was structurally zero throughout ALL training.
+
+The barrier mechanism uses `cost_surr^2` (linearized Bregman divergence). But the code applied
+per-constraint cost advantage standardization (NORBC Sec IV-B) which sets `E[A_cost] = 0` by
+construction. At ratio=1: `cost_surr = mean(1 * A_cost) = 0`. Therefore `d(0^2)/d(theta) = 0`
+-- barrier gradient is identically zero regardless of constraint proximity.
+
+This means the TRPO step has been entirely reward-driven with no barrier repulsion from
+constraint boundaries for ALL prior constrained training runs. Constraints only received
+enforcement from recovery mode (after violation), never from the barrier (before violation).
+
+Fix: store raw (unstandardized) cost advantages separately. Use raw for barrier (needs actual
+cost change signal), standardized for recovery (needs balanced gradients). Scale-normalize raw
+by per-constraint std to prevent binary vs continuous cost scale domination.
+
+### Fixed
+- `constraint_trpo.py`: Added `cost_advantages_raw` buffer in `init_storage()` to store
+  unstandardized cost advantages
+- `constraint_trpo.py`: In `_compute_cost_returns()`, clone raw advantages before
+  standardization step
+- `constraint_trpo.py`: In `update()`, flatten raw advantages and compute `raw_cost_std`
+  for scale normalization
+- `constraint_trpo.py`: In `surrogate()`, barrier penalty now uses raw/scale-normalized
+  cost surrogates; recovery cost remains on standardized advantages
+
+### Notes
+- `_compute_barrier_penalty()` itself was correct -- it was just always fed zero input
+- No checkpoint format changes (raw buffer is compute-only, not saved)
+- Constraint budgets left unchanged initially -- barrier should naturally maintain margin
+- If barrier causes excessive conservatism, budgets can be increased (Task 3 in plan)
+- Also updated train-analyze skill with config reading (non-git, in `.claude/skills/`)
+
 ## [2026-03-20] EAPO: Entropy Advantage Policy Optimization for C-TRPO
 
 ### Context

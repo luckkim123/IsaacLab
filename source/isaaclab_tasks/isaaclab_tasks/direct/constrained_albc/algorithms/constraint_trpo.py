@@ -277,6 +277,7 @@ class ConstraintTRPO:
         self.storage.cost_values = torch.zeros(T, N, K, device=self.device)
         self.storage.cost_returns = torch.zeros(T, N, K, device=self.device)
         self.storage.cost_advantages = torch.zeros(T, N, K, device=self.device)
+        self.storage.cost_advantages_raw = torch.zeros(T, N, K, device=self.device)
 
         if self.eapo_enabled:
             self.storage.entropy_advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
@@ -363,6 +364,13 @@ class ConstraintTRPO:
             if not torch.isfinite(self.storage.cost_advantages[:, :, k]).all():
                 logger.warning("Non-finite cost advantages for constraint %d, zeroing.", k)
                 self.storage.cost_advantages[:, :, k] = 0.0
+
+        # Store raw (unstandardized) cost advantages for barrier penalty.
+        # Standardized advantages have E[A_cost] = 0, making barrier gradient
+        # structurally zero (cost_surr = mean(ratio * A) = 0 at ratio=1).
+        # Barrier needs the actual cost change signal to repel from boundaries.
+        self.storage.cost_advantages_raw = self.storage.cost_advantages.clone()
+
         mean = self.storage.cost_advantages.mean(dim=(0, 1), keepdim=True)
         std = self.storage.cost_advantages.std(dim=(0, 1), keepdim=True)
         self.storage.cost_advantages = (self.storage.cost_advantages - mean) / (std + 1e-8)
@@ -620,7 +628,12 @@ class ConstraintTRPO:
 
         # Cost storage flatten
         cost_returns_flat = self.storage.cost_returns.flatten(0, 1).clone()  # (B, K)
-        cost_advantages_flat = self.storage.cost_advantages.flatten(0, 1).clone()  # (B, K)
+        cost_advantages_flat = self.storage.cost_advantages.flatten(0, 1).clone()  # (B, K) standardized
+        cost_advantages_raw_flat = self.storage.cost_advantages_raw.flatten(0, 1).clone()  # (B, K) raw
+        # Per-constraint raw std for scale normalization in barrier penalty.
+        # Ensures barrier magnitude is driven by margin (phi_pp), not raw cost scale
+        # differences between binary (O(1)) and continuous (O(0.5)) constraints.
+        raw_cost_std = cost_advantages_raw_flat.std(dim=0).clamp(min=1e-8)  # (K,)
 
         batch_size = obs_flat.batch_size[0]
 
@@ -676,12 +689,15 @@ class ConstraintTRPO:
             ratio = torch.exp(log_prob - old_lp_sq)
             # Reward + EAPO entropy advantage (always active)
             reward_surr = -(soft_adv * ratio).mean()
-            # Barrier penalty (safe constraints only)
-            cost_surrs = self._compute_cost_surrogates(ratio, cost_advantages_flat)
-            bp = self._compute_barrier_penalty(cost_surrs)
+            # Barrier penalty (safe constraints only): use raw cost advantages
+            # so barrier gradient is non-zero (standardized E[A_cost]=0 -> zero gradient)
+            cost_surrs_raw = self._compute_cost_surrogates(ratio, cost_advantages_raw_flat)
+            cost_surrs_normed = cost_surrs_raw / raw_cost_std  # scale-normalize
+            bp = self._compute_barrier_penalty(cost_surrs_normed)
             self._cached_barrier_penalty = bp.item()
-            # Recovery cost (violated constraints only)
-            recovery_cost = (recovery_mask * cost_surrs).sum()
+            # Recovery cost (violated constraints only): use standardized for balanced gradients
+            cost_surrs_std = self._compute_cost_surrogates(ratio, cost_advantages_flat)
+            recovery_cost = (recovery_mask * cost_surrs_std).sum()
             # Entropy bonus: maximize entropy (negative in loss = maximize)
             entropy_bonus = -self.entropy_coef * self.policy.entropy.mean()
             self._cached_mean_entropy = self.policy.entropy.mean().item()
