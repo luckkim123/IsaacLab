@@ -928,4 +928,4 @@ class ConstraintTRPO:
 
     def set_max_iterations(self, max_iterations: int) -> None:
         """Interface compatibility with ConstraintEncoderRunner."""
-        logger.info("[ConstraintTRPO] C-TRPO barrier mode, beta=%.4f, max_iterations=%d", self.beta, max_iterations)
+        logger.info("[ConstraintTRPO] Lagrangian mode, lambda_lr=%.4f, lambda_max=%.2f, max_iterations=%d", self._lambda_lr, self._lambda_max, max_iterations)

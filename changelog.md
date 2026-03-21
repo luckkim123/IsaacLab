@@ -45,6 +45,43 @@ Cost monitoring (cost critic, GAE, margin tracking) preserved for logging.
 - `recovery_threshold_frac` parameter no longer used but kept in config for compatibility.
 - Previous run checkpoint incompatible (encoder dim change + algorithm structure change).
 
+## [2026-03-22] Replace quadratic barrier with Lagrangian constraint enforcement
+
+### Context
+Run `2026-03-22_01-10-42` (barrier-only, no recovery, no Lagrangian) analyzed at 1152 iter.
+Confirmed barrier-only approach fails completely: all 3 active constraints OVER budget
+(joint_torque=44.69 dk=20, joint_vel_limit=33.43 dk=10, yaw_vel=97.19 dk=78.5).
+barrier_penalty=1e-06 (effectively zero due to safe_mask zeroing violated constraints).
+eff_sat=0.31 (31% time over torque limit), act_size=1.27 (saturated). Reward=18.82
+and pitch=12.85 still improving -- attitude learning works, constraints are completely ignored.
+
+Mathematical analysis confirmed two structural flaws in the quadratic barrier:
+1. `safe_mask = margins > 0` zeros out violated constraints (no recovery gradient)
+2. Quadratic form: dB/dtheta = 2*S*dS/dtheta -> 0 when S=E[A_cost]~0 (calibrated critic)
+
+Replaced with adaptive Lagrangian multipliers (OmniSafe PPO-Lag standard):
+- Linear penalty: lambda_k * E[ratio * A_cost_std] (nonzero per-sample gradient)
+- Dual ascent: lambda_k += lr * (J_C_k - d_k), clamped to [0, lambda_max]
+- lambda_max=0.5 keeps constraint gradient <= 50% of reward gradient (reward-first)
+
+### Changed
+- `algorithms/constraint_trpo.py`: Replaced `_compute_barrier_penalty()` (quadratic,
+  safe_mask, beta*phi_pp*surr^2) with `_compute_lagrangian_penalty()` (linear,
+  lambda_k*surr_std). Added `_update_lambda()` dual ascent method. New init params:
+  `lambda_lr=0.035`, `lambda_max=0.5`. Removed `self.beta` storage. Monitoring renamed:
+  `barrier_penalty` -> `lagrangian_penalty`. `set_max_iterations` log updated.
+- `agents/rsl_rl_ppo_cfg.py`: Added `lambda_lr=0.035`, `lambda_max=0.5` config fields.
+  `beta` and `recovery_threshold_frac` marked deprecated.
+- `runners/constraint_encoder_runner.py`: Added lambda_k to save/load state, added
+  per-constraint lambda logging (`Constraint/lambda_{name}`), renamed barrier_penalty
+  -> lagrangian_penalty in aggregate metrics.
+- `analyze_training.py`: Added `lagrangian_penalty` as primary key with `barrier_penalty`
+  fallback for backward compat in Tier 2 output.
+
+### Fixed
+- `algorithms/constraint_trpo.py`: `set_max_iterations` referenced removed `self.beta`.
+- `runners/constraint_encoder_runner.py`: `save()` referenced removed `self.alg._in_recovery`.
+
 ## [2026-03-21] Encoder input: privileged-only (HORA Phase 1 style)
 
 ### Context
