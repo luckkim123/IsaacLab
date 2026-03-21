@@ -4,6 +4,58 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-21] Add joint actuator params to privileged obs -- fix encoder information gap
+
+### Context
+Run `2026-03-21_21-33-37` (enc_epochs=3, grad_clip=0.5) ran to 1924 iter with no improvement
+past iter ~500. Reward peaked at 21 then regressed to 19 (Q4 decline). Roll=9.37 deg,
+pitch=12.07 deg. Surrogate=1.2e-05 (even smaller than 700-iter measurement of 3.4e-05).
+z range saturated at [-1.0, 1.0]. Encoder gradient declining in Q4.
+
+Systematic code review of reward and constraint implementations confirmed both are
+theoretically correct: reward math verified numerically (episode reward prediction matches
+observed values), constraint budget transformations correct, cost GAE correct, timing of
+overshoot detection correct. Reward function (min_laplacian) was also validated -- all three
+variants (sum_laplacian, min_laplacian, smooth_min_laplacian) were previously tried and
+min_laplacian gives the best roll/pitch balance. Plateau is NOT reward-driven.
+
+Root cause analysis of the plateau identified a critical information gap: joint actuator
+parameters (stiffness, damping, effort limit) are domain-randomized with massive ranges
+(Kp: 3x, Kd: 10x, effort: 1.4x) but were completely absent from the 19D privileged
+observation vector. The encoder literally cannot distinguish Kp=40 from Kp=120 environments.
+An action optimal for Kp=40 (aggressive, compensating for sluggish joints) causes overshoot
+and torque violation at Kp=120. This directly causes advantage cancellation across DR-diverse
+environments (surrogate -> 0), which in turn starves the encoder of gradient signal.
+
+This is inconsistent with standard practice: RMA (Kumar 2021) and HORA (Qi 2023) include
+motor strength, joint damping, and friction in their privileged observations.
+
+Also removed CoG x/y for both main and buoy bodies (4D total): +-0.01m offset range creates
+negligible torque (0.26Nm vs 6-10Nm effort limit). Only CoG z retained (dominates roll/pitch).
+
+### Changed
+- `mdp/observations.py`: `_hydro_privileged_info()` returns 3D (volume, CoG_z, CoB_z) instead
+  of 5D (removed CoG_x, CoG_y). `compute_privileged_obs()` adds joint_stiffness (1D),
+  joint_damping (1D), joint_effort_limits (1D) read from Isaac Lab ArticulationData. Total
+  privileged: 19D -> 18D.
+- `config.py`: `state_space` 19 -> 18. Docstring updated.
+- `agents/rsl_rl_ppo_cfg.py`: `privileged_dim` 19 -> 18.
+- `encoder/actor_critic_encoder.py`: Architecture docstring 272D -> 271D.
+- `encoder/actor_critic_encoder_constrained.py`: Architecture docstring 272D -> 271D.
+
+### Notes
+- Checkpoint incompatible with previous runs (privileged dim changed). Must start fresh.
+- Joint stiffness/damping values read directly from `_robot.data.joint_stiffness` and
+  `_robot.data.joint_damping` (populated by Isaac Lab after `write_joint_*_to_sim()` calls
+  in DR). No additional buffers needed.
+- Both ALBC joints share the same DR'd stiffness/damping (scalar broadcast), so only one
+  joint's value is included (index [0]).
+- Other missing DR params (linear/quadratic damping, friction, latency) have smaller ranges
+  or are inferable from proprio history. Joint actuator params are highest priority.
+- Secondary concern identified but not addressed: encoder receives 271D input where only 18D
+  (privileged) is unique vs what actor already sees. Low signal-to-noise for encoder gradient.
+  HORA Phase 1 uses privileged-only encoder input. May need architectural change later.
+
 ## [2026-03-21] Encoder update strengthening: multi-step encoder + relaxed grad clip
 
 ### Context

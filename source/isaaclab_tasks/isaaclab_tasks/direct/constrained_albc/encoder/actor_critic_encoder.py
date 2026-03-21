@@ -9,9 +9,9 @@ This module provides the encoder-based actor-critic network:
     - ActorCriticEncoder: Base encoder network (Phase 1 teacher training)
 
 Architecture:
-    Encoder: cat([policy_obs, hist_flat, privileged]) = 272D -> MLP -> tanh -> z (13D)
+    Encoder: cat([policy_obs, hist_flat, privileged]) = 271D -> MLP -> tanh -> z (13D)
     Actor:   cat([policy_obs, hist_flat, z]) = 266D -> MLP -> actions
-    Critic:  cat([policy_obs, hist_flat, privileged]) = 272D -> MLP -> value (1D)
+    Critic:  cat([policy_obs, hist_flat, privileged]) = 271D -> MLP -> value (1D)
 
     proprio_hist (N, 30, 8) is flattened to (N, 240) and concatenated directly.
     No embedding module -- the encoder/actor/critic MLPs learn from raw history.
@@ -45,9 +45,9 @@ class ActorCriticEncoder(nn.Module):
     Flattened proprioception history is concatenated to encoder, actor, and critic.
 
     Architecture:
-        Encoder: cat([policy_obs, hist_flat, privileged]) -> MLP -> tanh -> z
-        Actor:   cat([policy_obs, hist_flat, z]) -> MLP -> actions
-        Critic:  cat([policy_obs, hist_flat, privileged]) -> MLP -> value (asymmetric)
+        Encoder: cat([policy_obs, hist_flat, privileged]) = 271D -> MLP -> tanh -> z
+        Actor:   cat([policy_obs, hist_flat, z]) = 266D -> MLP -> actions
+        Critic:  cat([policy_obs, hist_flat, privileged]) = 271D -> MLP -> value (asymmetric)
 
     Encoder gradient flows only from actor loss (critic doesn't use z).
     """

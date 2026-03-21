@@ -29,16 +29,17 @@ if TYPE_CHECKING:
 
 
 def _hydro_privileged_info(hydro: HydrodynamicsModel) -> torch.Tensor:
-    """Pack hydrodynamic parameters into a 5D privileged observation vector.
+    """Pack hydrodynamic parameters into a 3D privileged observation vector.
 
-    Only includes z-components of CoG/CoB (x/y are negligible for roll/pitch control).
+    Only z-components of CoG/CoB: x/y offsets are +-0.01m (negligible torque
+    contribution vs 6-10Nm effort limits). z-component dominates roll/pitch dynamics.
 
-    Returns: (num_envs, 5) = [volume(1), r_cg_xyz(3), r_cb_z(1)].
+    Returns: (num_envs, 3) = [volume(1), r_cg_z(1), r_cb_z(1)].
     """
     return torch.cat(
         [
             hydro.volume.unsqueeze(-1),
-            hydro.center_of_gravity,
+            hydro.center_of_gravity[:, 2:3],  # z-component only
             hydro.center_of_buoyancy[:, 2:3],  # z-component only
         ],
         dim=-1,
@@ -89,16 +90,21 @@ def compute_privileged_obs(
 ) -> torch.Tensor:
     """Compute privileged observations for asymmetric training.
 
-    Returns privileged info containing hydrostatic + dynamics + added mass parameters:
-        - Main body hydro (5D): volume, r_cg_xyz (3), r_cb_z (1)
-        - Buoy body hydro (5D): volume, r_cg_xyz (3), r_cb_z (1)
-        - Main body inertia (2D): Ixx, Iyy (roll/pitch only, Izz excluded)
+    Returns privileged info containing hydrostatic + dynamics + actuator parameters:
+        - Main body hydro (3D): volume, r_cg_z, r_cb_z
+        - Buoy body hydro (3D): volume, r_cg_z, r_cb_z
+        - Main body inertia (2D): Ixx, Iyy (roll/pitch only)
         - Buoy inertia (2D): Ixx, Iyy
         - Payload (4D): mass, cog_offset (3)
         - Main body added mass surge (1D)
+        - Joint stiffness (1D): PD Kp (DR range 40-120, 3x)
+        - Joint damping (1D): PD Kd (DR range 0.5-5.0, 10x)
+        - Joint effort limit (1D): max torque (DR range 0.7-1.0 x 9.5Nm)
 
-    Total: 19D (14D base + 4D payload + 1D added mass).
-    Removed from previous 20D: buoy added mass surge (1D, zero encoder sensitivity).
+    Total: 18D.
+    Changes from 19D: removed CoG x/y (+-0.01m, negligible), added joint actuator
+    params (stiffness/damping/effort_limit) which have the largest DR ranges and
+    directly determine control response but were previously invisible to the encoder.
 
     Args:
         env: The ALBC environment instance.
@@ -107,8 +113,8 @@ def compute_privileged_obs(
         Privileged observation tensor of shape (num_envs, state_space).
     """
     priv_obs = [
-        _hydro_privileged_info(env._hydro),  # 5D: volume, CoG_xyz, CoB_z
-        _hydro_privileged_info(env._buoy_hydro),  # 5D: volume, CoG_xyz, CoB_z
+        _hydro_privileged_info(env._hydro),  # 3D: volume, CoG_z, CoB_z
+        _hydro_privileged_info(env._buoy_hydro),  # 3D: volume, CoG_z, CoB_z
     ]
 
     # Inertia: Ixx/Iyy only (Izz irrelevant for roll/pitch attitude control).
@@ -124,7 +130,14 @@ def compute_privileged_obs(
     priv_obs.append(payload_priv)  # 4D: mass, cog_offset_xyz
 
     # Main body surge added mass: effective inertia = I_rigid + M_added (1D).
-    # Buoy added mass surge excluded (zero encoder sensitivity across all runs).
     priv_obs.append(env._hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1))  # 1D: main M_a surge
+
+    # Joint actuator parameters: critical DR params previously missing from privileged obs.
+    # Both ALBC joints share the same DR'd value (scalar per env, broadcast to 2 joints).
+    # Read from Isaac Lab's ArticulationData (updated by write_joint_*_to_sim).
+    jid = env._albc_joint_ids[0]
+    priv_obs.append(env._robot.data.joint_stiffness[:, jid : jid + 1])  # 1D: Kp
+    priv_obs.append(env._robot.data.joint_damping[:, jid : jid + 1])  # 1D: Kd
+    priv_obs.append(env._robot.data.joint_effort_limits[:, jid : jid + 1])  # 1D: effort limit
 
     return torch.cat(priv_obs, dim=-1)

@@ -60,7 +60,7 @@ class _EncoderPolicyCfg(RslRlPpoActorCriticCfg):
     encoder_activation: str = "elu"
     encoder_obs_normalization: bool = True
     policy_obs_dim: int = 13
-    privileged_dim: int = 19
+    privileged_dim: int = 18
     z_bounds_coef: float = 0.0
     z_bounds_soft_bound: float = 0.85
     proprio_history_len: int = 30
