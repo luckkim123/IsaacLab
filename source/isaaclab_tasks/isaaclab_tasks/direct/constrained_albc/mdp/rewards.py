@@ -50,9 +50,11 @@ class ALBCRewardCfg:
     command_type: str = "quadratic"
     """Reward type: "quadratic" = -(e_r^2 + e_p^2),
     "laplacian" = exp(-|e|/sigma) per axis summed,
-    "min_laplacian" = exp(-|e|/sigma) per axis min (worst-axis drives reward).
-    Laplacian has stronger gradient near zero (opposite of quadratic).
-    min_laplacian prevents the better axis from dominating reward gradient."""
+    "min_laplacian" = exp(-|e|/sigma) per axis min (worst-axis drives reward),
+    "smooth_min_laplacian" = soft-min via LogSumExp (alpha=5, differentiable).
+    smooth_min_laplacian gives ~70% gradient to worse axis, ~30% to better axis,
+    preventing gradient oscillation when axes are close while maintaining
+    worst-axis focus at large disparity."""
 
     command_sigma: float = 0.15
     """Laplacian scale parameter (rad). Controls reward sharpness near zero.
@@ -197,6 +199,14 @@ def command_reward(
         sigma: Laplacian scale parameter (rad). Only used for laplacian types.
     """
     err_rp = env._attitude_error[:, :2]
+    if command_type == "smooth_min_laplacian":
+        per_axis = torch.exp(-err_rp.abs() / sigma)
+        # Soft-min via negative LogSumExp: differentiable min approximation.
+        # alpha=5: ~70% gradient to worse axis, ~30% to better axis.
+        # Preserves min_laplacian's worst-axis focus at large disparity while
+        # providing smooth gradient when axes are close (prevents oscillation).
+        alpha = 5.0
+        return -torch.logsumexp(-alpha * per_axis, dim=-1) / alpha
     if command_type == "min_laplacian":
         per_axis = torch.exp(-err_rp.abs() / sigma)
         return per_axis.min(dim=-1).values

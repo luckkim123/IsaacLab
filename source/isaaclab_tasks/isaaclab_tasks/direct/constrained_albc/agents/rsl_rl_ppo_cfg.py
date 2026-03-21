@@ -156,7 +156,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
     min_std: float = 0.2
     """Minimum action standard deviation. Clamped after TRPO step (outside
     trust region optimization). Prevents exploration collapse without consuming
-    KL budget. Matches hero_agent PPO floor (~0.18)."""
+    KL budget. Noise floor also helps maintain roll/pitch axis balance."""
 
     # Entropy bonus
     entropy_coef: float = 0.0
@@ -192,10 +192,11 @@ class RslRlConstraintTRPOAlgorithmCfg:
     are reverted. 0.016 = max_kl * line_search_kl_margin (same budget as policy step)."""
 
     # Encoder update
-    num_encoder_epochs: int = 1
-    """Number of encoder gradient steps per iteration. Must stay at 1: multi-step
-    causes uncontrolled KL divergence (encoder changes z -> distribution shift
-    not bounded by TRPO trust region). Recovery mode fix is the real encoder fix."""
+    num_encoder_epochs: int = 3
+    """Number of encoder gradient steps per iteration. Increased to 3: KL gating
+    (max_encoder_kl=0.016) reverts encoder if distribution shift exceeds budget,
+    making multi-step safe. Addresses encoder-actor update imbalance (critic gets
+    20 steps/iter, encoder was getting only 1)."""
 
     encoder_lr: float = 3e-4
     """Encoder Adam learning rate. Matches pre-mod C-TRPO value; higher values

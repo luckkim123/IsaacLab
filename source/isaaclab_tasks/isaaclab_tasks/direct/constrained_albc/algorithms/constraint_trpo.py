@@ -918,7 +918,7 @@ class ConstraintTRPO:
             # Single backward: encoder_optimizer only steps encoder params,
             # so actor/critic grads are computed but not applied
             total_loss.backward()
-            nn.utils.clip_grad_norm_(self._encoder_params, max_norm=0.2)
+            nn.utils.clip_grad_norm_(self._encoder_params, max_norm=0.5)
             self.encoder_optimizer.step()
 
             # Fix 2: KL gating -- revert if encoder step caused excessive KL shift

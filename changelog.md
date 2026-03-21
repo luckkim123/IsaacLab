@@ -4,6 +4,48 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-21] Encoder update strengthening: multi-step encoder + relaxed grad clip
+
+### Context
+Training run `2026-03-21_19-59-33` (z_bounds_coef=0.0) plateaued at roll=8.7 deg, pitch=12.5 deg,
+reward=18 after ~1010 iter. Deep analysis revealed:
+
+1. **Plateau root cause is NOT reward function**: Policy uses full KL budget (107%) every iteration
+   in 100% safe mode, but reward doesn't improve. The optimization landscape is flat at this point.
+2. **Encoder-actor update imbalance**: Critic gets 20 SGD steps/iter, actor gets 1 TRPO step,
+   encoder gets only 1 SGD step. Encoder gradient comes ONLY from actor loss (critic is asymmetric,
+   uses privileged directly, not z). This creates encoder-actor coordination deadlock at plateau.
+3. **smooth_min_laplacian FAILED (reverted)**: Attempted to replace min_laplacian with soft-min
+   (LogSumExp alpha=5) to fix gradient oscillation between roll/pitch axes. Result: made axis
+   asymmetry WORSE (roll=4.76, pitch=23.46 at 500 iter). At large disparity, smooth_min ~= hard min
+   (92.8%/7.2% gradient split at roll=5/pitch=23). The early gradient sharing let the easy axis
+   (roll) converge faster, widening the gap. Roll/pitch asymmetry is physical, not reward-driven.
+4. **min_std=0.15 FAILED (reverted)**: Lower noise floor (0.2->0.15) accelerated axis asymmetry
+   by enabling faster convergence on the easy axis. Noise actually helps maintain axis balance.
+5. **eapo_target_entropy=0.3 reverted to 0.5**: Coupled with min_std revert.
+
+### Added
+- `mdp/rewards.py`: `smooth_min_laplacian` command_type (LogSumExp soft-min, alpha=5). Kept in
+  code for future use but not active (config uses `min_laplacian`).
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `num_encoder_epochs` 1->3 with KL gating safety
+  (max_encoder_kl=0.016 reverts encoder if distribution shift exceeds budget). Addresses
+  encoder-actor update imbalance (critic 20 steps vs encoder 1 step per iteration).
+- `algorithms/constraint_trpo.py`: Encoder gradient clip max_norm 0.2->0.5. Previous 0.2 was
+  5x more restrictive than value function clip (1.0). With KL gating as primary safety, clip
+  is secondary defense and can be relaxed.
+
+### Notes
+- Roll/pitch axis asymmetry is physical/structural, not reward-driven. Both laplacian(sum),
+  min_laplacian, and smooth_min_laplacian show the same pattern (roll converges faster).
+  The 2-DOF arm may have different authority for roll vs pitch correction.
+- min_std=0.2 noise floor serves dual purpose: exploration AND axis balance maintenance.
+  Lowering it breaks the balance even though it seems like it should help fine-tuning.
+- `num_encoder_epochs` comment "must stay at 1" was outdated -- written before KL gating
+  (Fix 2, constraint_trpo.py:925-939) was added. Multi-step is now safe with KL gating.
+- hero_agent `rsl_rl_ppo_cfg.py` z_bounds_coef still at 1.0 (desync from constrained_albc 0.0)
+
 ## [2026-03-21] Disable z_bounds_loss -- false saturation diagnosis
 
 ### Context
