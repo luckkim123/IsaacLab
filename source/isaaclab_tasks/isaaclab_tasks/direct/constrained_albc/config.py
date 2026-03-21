@@ -302,7 +302,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
             ConstraintTermCfg(
                 func=joint_velocity_limit_cost,
                 params={"limit_rad_per_s": 4.189},  # 40 RPM (Dynamixel XW540 no-load)
-                budget=0.05,
+                budget=0.10,
                 name="joint_vel_limit",
             ),
             ConstraintTermCfg(

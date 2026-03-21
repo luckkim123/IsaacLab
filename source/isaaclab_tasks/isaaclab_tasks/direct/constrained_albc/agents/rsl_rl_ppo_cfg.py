@@ -124,20 +124,22 @@ class RslRlConstraintTRPOAlgorithmCfg:
     line_search_kl_margin: float = 1.5
 
     # C-TRPO barrier parameters
-    beta: float = 0.05
+    beta: float = 0.02
     """Barrier coefficient weighting D_phi relative to D_KL.
 
-    Increased from 0.01 to 0.05: at beta=0.01, barrier penalty was negligible
-    (0.0004 * cost_surr^2 at margin=5) compared to reward surrogate O(0.1-1.0),
-    so policy only "felt" the barrier when margin < 1 -- too late to prevent
-    recovery entry."""
+    Reduced from 0.05 to 0.02: with margin_min=0.1 (phi_pp max=100), max barrier
+    gradient = 0.02 * 100 * surr^2 = 2*surr^2. At margin=1: 0.02 * 1 * surr^2 =
+    0.02*surr^2 (gentle far from boundary). Combined with recovery exclusion fix
+    (barrier stays active through mode transitions), this creates smooth gradient
+    proportional to reward surrogate (~0.1)."""
 
-    recovery_threshold_frac: float = 0.6
+    recovery_threshold_frac: float = 0.4
     """Fraction of budget: if cost_return < budget * frac, exit recovery mode.
 
-    Widened from 0.8 to 0.6: narrower hysteresis (0.8) allowed rapid safe->recovery
-    cycling when a single recovery step pushed cost just below 0.8*d_k. Wider band
-    keeps policy in recovery longer, allowing cost to drop further before switching."""
+    Reduced from 0.6 to 0.4: with d_k=10 (joint_vel_limit budget doubled),
+    recovery exits when cost < 4.0. Combined with the smooth barrier fix (barrier
+    stays active through mode transitions), recovery should be rare and short.
+    Lower threshold means faster exit from recovery -> less attitude damage."""
 
     ema_cost_alpha: float = 0.3
     """EMA smoothing factor for mean_cost_returns used in margin computation.

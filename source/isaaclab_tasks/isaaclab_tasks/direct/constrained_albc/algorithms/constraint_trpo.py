@@ -421,14 +421,16 @@ class ConstraintTRPO:
         return (ratio.unsqueeze(-1) * cost_advantages).mean(dim=0)
 
     def _compute_barrier_penalty(self, cost_surrogates: torch.Tensor) -> torch.Tensor:
-        """Compute linearized barrier divergence for safe-mode constraints.
+        """Compute linearized barrier divergence for positive-margin constraints.
 
-        For each feasible, safe-mode constraint k:
+        For each constraint k with positive margin (d_k - J_C_k > 0):
             penalty_k = beta * phi''(margin_k) * A_C_k^2
         where phi''(m) = 1/m^2 is the log-barrier second derivative.
 
-        Uses masked tensor ops instead of per-k loop. Only safe-mode
-        constraints (positive margin and not in recovery) contribute.
+        Uses masked tensor ops instead of per-k loop. Barrier stays active for
+        ALL positive-margin constraints regardless of recovery mode. This prevents
+        gradient discontinuity at mode transitions (500:1 jump when barrier was
+        excluded during recovery).
 
         Note on re-parametrization: the paper's Bregman divergence (Eq. 7) is
             D_phi = (1/2) * (1/t) * phi''(m) * delta^2
@@ -436,13 +438,12 @@ class ConstraintTRPO:
         into beta for simplicity, so: beta_code = beta_paper / (2 * t).
         When comparing to paper hyperparameters, account for this relation.
         """
-        recovery = torch.tensor(self._in_recovery, device=self.device)
-        safe_mask = (self._margins > 0) & ~recovery
+        safe_mask = self._margins > 0
         if not safe_mask.any():
             return torch.tensor(0.0, device=self.device)
-        # Clamp margin to prevent barrier singularity when margin is small positive
-        # but recovery mode hasn't triggered yet (margin in (0, ~0.01) gap).
-        margin_safe = self._margins.clamp(min=0.01)
+        # Clamp margin to cap phi_pp at 100 (was 10,000 with min=0.01).
+        # With beta=0.02: max barrier gradient = 0.02 * 100 * surr^2 = 2*surr^2.
+        margin_safe = self._margins.clamp(min=0.1)
         phi_pp = 1.0 / margin_safe.pow(2)
         return self.beta * (safe_mask * phi_pp * cost_surrogates.pow(2)).sum()
 

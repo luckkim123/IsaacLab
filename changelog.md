@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-21] Recovery cycling fix: smooth barrier gradient at mode transitions
+
+### Context
+Run `2026-03-21_16-45-28` (1063+ iter, barrier fix applied) exhibited periodic oscillation in
+all metrics with ~64 iter period. Attitude error oscillated 6-19 deg (roll) and 12-25 deg (pitch).
+
+Root cause: joint_vel_limit constraint budget d_k=5.0 was too tight. Cost return oscillated
+2.0-5.3, hitting d_k=5.0 and entering recovery mode every ~64 iterations. During recovery,
+barrier penalty was excluded (`safe_mask = (margins > 0) & ~recovery`), causing a 500:1 gradient
+magnitude discontinuity at mode transitions: barrier gradient phi_pp=10000 * beta=0.05 * surr^2
+= 500*surr^2 in safe mode vs 1*surr in recovery. This binary switching created a deterministic
+limit cycle.
+
+Fix: remove recovery exclusion from barrier mask so barrier stays active through mode transitions.
+Combined with margin_min increase (0.01->0.1 to cap phi_pp at 100), beta reduction (0.05->0.02),
+and budget doubling (d_k 5->10), the gradient discontinuity at mode boundaries is reduced from
+500:1 to ~2:1 (additive recovery cost only).
+
+### Changed
+- `constraint_trpo.py`: Changed `safe_mask = (margins > 0) & ~recovery` to `safe_mask = margins > 0`
+  -- barrier stays active for all positive-margin constraints regardless of recovery mode
+- `constraint_trpo.py`: Increased margin_min clamp from 0.01 to 0.1 (phi_pp max: 10000 -> 100)
+- `config.py`: Doubled joint_vel_limit budget from 0.05 to 0.10 (d_k: 5.0 -> 10.0)
+- `rsl_rl_ppo_cfg.py`: Reduced beta from 0.05 to 0.02 (max barrier gradient: 2*surr^2)
+- `rsl_rl_ppo_cfg.py`: Reduced recovery_threshold_frac from 0.6 to 0.4 (faster recovery exit)
+
+### Notes
+- Analysis confirmed joint_vel_limit triggered 105/122 recovery entries (86%)
+- barrier_penalty max=0.656 (spikes at iter 222, 296) overwhelmed reward surrogate (~0.1)
+- train-analyze skill updated (outside isaaclab repo) with oscillation detection,
+  mode switching summary, and barrier penalty display
+- Dry run needed: 50 iter, 64 envs to verify smooth barrier behavior before full training
+
 ## [2026-03-21] Barrier penalty bug fix: structurally zero gradient
 
 ### Context
