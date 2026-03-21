@@ -152,6 +152,7 @@ class ConstraintEncoderRunner(OnPolicyRunner):
                 "margins": self.alg._margins,
                 "ema_cost_returns": self.alg._ema_cost_returns,
                 "ema_initialized": self.alg._ema_initialized,
+                "lambda_k": self.alg._lambda_k,
             },
         )
 
@@ -173,7 +174,9 @@ class ConstraintEncoderRunner(OnPolicyRunner):
             if "ema_cost_returns" in state:
                 self.alg._ema_cost_returns = state["ema_cost_returns"].to(self.device)
                 self.alg._ema_initialized = state["ema_initialized"]
-            logger.info("Restored barrier state from checkpoint")
+            if "lambda_k" in state:
+                self.alg._lambda_k = state["lambda_k"].to(self.device)
+            logger.info("Restored constraint state from checkpoint")
 
         # Restore encoder optimizer state for seamless resume (BUG-1 fix)
         if load_optimizer and getattr(self.alg, "encoder_optimizer", None) is not None:
@@ -218,8 +221,13 @@ class ConstraintEncoderRunner(OnPolicyRunner):
             metrics[f"Constraint/in_recovery_{suffix}"] = alg._last_in_recovery[k]
             metrics[f"Constraint/d_k_{suffix}"] = alg.d_k[k].item()
 
+        # Per-constraint Lagrangian multiplier
+        for k in range(K):
+            suffix = self._constraint_names[k] if k < len(self._constraint_names) else str(k)
+            metrics[f"Constraint/lambda_{suffix}"] = alg._lambda_k[k].item()
+
         # Aggregate metrics
-        metrics["Constraint/barrier_penalty"] = alg._last_barrier_penalty
+        metrics["Constraint/lagrangian_penalty"] = alg._last_lagrangian_penalty
         metrics["Constraint/mode"] = float(alg._last_mode)
 
         # Line search (policy update metric)

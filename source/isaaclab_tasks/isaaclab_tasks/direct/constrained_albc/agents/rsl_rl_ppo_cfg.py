@@ -123,23 +123,20 @@ class RslRlConstraintTRPOAlgorithmCfg:
     cost_lam: float = 0.95
     line_search_kl_margin: float = 1.5
 
-    # C-TRPO barrier parameters
+    # Lagrangian constraint parameters
     beta: float = 0.02
-    """Barrier coefficient weighting D_phi relative to D_KL.
-
-    Reduced from 0.05 to 0.02: with margin_min=0.1 (phi_pp max=100), max barrier
-    gradient = 0.02 * 100 * surr^2 = 2*surr^2. At margin=1: 0.02 * 1 * surr^2 =
-    0.02*surr^2 (gentle far from boundary). Combined with recovery exclusion fix
-    (barrier stays active through mode transitions), this creates smooth gradient
-    proportional to reward surrogate (~0.1)."""
+    """Deprecated. Barrier removed, replaced by Lagrangian. Kept for compat."""
 
     recovery_threshold_frac: float = 0.4
-    """Fraction of budget: if cost_return < budget * frac, exit recovery mode.
+    """Deprecated. Recovery mode removed. Kept for compat."""
 
-    Reduced from 0.6 to 0.4: with d_k=10 (joint_vel_limit budget doubled),
-    recovery exits when cost < 4.0. Combined with the smooth barrier fix (barrier
-    stays active through mode transitions), recovery should be rare and short.
-    Lower threshold means faster exit from recovery -> less attitude damage."""
+    lambda_lr: float = 0.035
+    """Dual ascent step size for Lagrangian multipliers.
+    lambda_k += lr * (J_C_k - d_k) per iteration. OmniSafe standard default."""
+
+    lambda_max: float = 0.5
+    """Maximum Lagrangian multiplier. Caps constraint gradient at ~50% of
+    reward gradient O(1). Ensures reward optimization remains primary."""
 
     ema_cost_alpha: float = 0.3
     """EMA smoothing factor for mean_cost_returns used in margin computation.

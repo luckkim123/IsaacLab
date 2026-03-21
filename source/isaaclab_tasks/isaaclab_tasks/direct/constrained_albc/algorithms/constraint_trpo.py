@@ -3,40 +3,30 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""C-TRPO: Barrier-based Trust Region for Constrained Policy Optimization.
+"""Constrained TRPO with Lagrangian constraint enforcement.
 
-Implements C-TRPO (Muller et al., ICML 2025, arXiv:2411.02957) Option C,
-barrier-only mode (no recovery mode switching):
-    1. Barrier-augmented objective + KL-only trust region
-    2. Option C (surrogate divergence): barrier curvature in objective gradient
-       only; FVP uses pure KL Hessian (no barrier in Fisher matrix)
+TRPO policy optimization with adaptive Lagrangian multipliers for constraint
+satisfaction. Based on C-TRPO (Muller et al., ICML 2025) but replaces the
+quadratic barrier penalty with linear Lagrangian cost surrogates.
 
-Recovery mode was removed to eliminate safe/recovery oscillation that caused
-cost return cycling and reward regression. The barrier penalty alone provides
-continuous gradient pressure proportional to 1/margin^2, which strengthens
-as costs approach budget and prevents violation without binary mode switching.
+The quadratic barrier (beta * phi_pp * cost_surr^2) had two structural flaws:
+    1. Vanishing gradient: dB/dtheta = 2*S*dS/dtheta -> 0 when S = E[A_cost] ~ 0
+       (well-calibrated cost critic makes cost advantages zero-mean)
+    2. safe_mask zeroed out violated constraints, providing no recovery gradient
+
+The Lagrangian penalty (lambda_k * cost_surr) fixes both:
+    - Linear term: gradient = lambda_k * E[A_cost * dlog_pi/dtheta], nonzero
+      per-sample even when batch mean E[A_cost] = 0
+    - No masking: lambda_k grows via dual ascent for violated constraints,
+      providing continuous pressure proportional to violation magnitude
+    - lambda_max caps constraint gradient to protect reward priority
 
 Key design decisions:
-    - No Lagrangian dual variables: lambda completely removed. Barrier function
-      naturally enforces constraints by distorting the trust region geometry --
-      steps become more conservative near constraint boundaries.
-    - Barrier-only: no recovery mode. All constraints use barrier penalty
-      regardless of whether margin is positive or negative. When margin <= 0.1,
-      phi_pp caps at 100 (margin clamped to 0.1).
-    - No detached-std cost ratio needed: in C-TRPO, cost only affects trust
-      region geometry (via barrier in the objective gradient). There is no
-      lambda * cost_surrogate term, so cost gradient never directly pushes
-      std toward zero.
-    - Cost advantage normalization maintained: per-constraint standardization
-      (NORBC Sec IV-B) equalizes gradient contribution across constraints.
-    - LS-gated encoder updates preserved: when line search fails, both actor
-      and encoder are frozen to prevent desync.
-    - Noise floor (min_std=0.2): primary exploration maintenance mechanism.
-      Applied after TRPO step, outside trust region -- does not consume KL budget.
-
-The algorithm maintains the same interface as RSL-RL PPO (init_storage, act,
-process_env_step, compute_returns, update) so it can be used as a drop-in
-replacement in the OnPolicyRunner.
+    - Adaptive lambda via dual ascent: lambda_k += lr * (J_C_k - d_k)
+    - lambda_max = 0.5: constraint gradient <= 50% of reward gradient O(1)
+    - Cost advantage standardization preserved (NORBC Sec IV-B)
+    - LS-gated encoder updates: when line search fails, both actor and encoder frozen
+    - Noise floor (min_std): primary exploration maintenance, outside trust region
 
 Reference:
     Muller et al., "Truly Constrained TRPO", ICML 2025, arXiv:2411.02957.
@@ -94,9 +84,11 @@ class ConstraintTRPO:
         cost_lam: float = 0.95,
         # Line search acceptance threshold
         line_search_kl_margin: float = 1.5,
-        # C-TRPO barrier parameters
-        beta: float = 0.01,
-        recovery_threshold_frac: float = 0.8,
+        # Lagrangian constraint parameters
+        beta: float = 0.01,  # deprecated (barrier removed), kept for compat
+        recovery_threshold_frac: float = 0.8,  # deprecated, kept for compat
+        lambda_lr: float = 0.035,
+        lambda_max: float = 0.5,
         ema_cost_alpha: float = 0.3,
         # Encoder z bounds
         z_bounds_coef: float = 0.0,
@@ -164,8 +156,10 @@ class ConstraintTRPO:
         self.eapo_tau_max = eapo_tau_max
         self._cached_entropy_tau = eapo_tau_init
 
-        # C-TRPO barrier parameters (barrier-only, no recovery mode)
-        self.beta = beta
+        # Lagrangian multipliers (adaptive dual variables)
+        self._lambda_k = torch.zeros(num_constraints, device=device)
+        self._lambda_lr = lambda_lr
+        self._lambda_max = lambda_max
         self._margins = torch.zeros(num_constraints, device=device)
 
         # B1: EMA smoothing on mean_cost_returns to prevent phantom mode switches.
@@ -176,13 +170,13 @@ class ConstraintTRPO:
         self._ema_initialized = False
 
         # Initialize monitoring attributes (read by ConstraintEncoderRunner before first update)
-        self._cached_barrier_penalty = 0.0
+        self._cached_lagrangian_penalty = 0.0
         self._last_cost_returns = [0.0] * num_constraints
         self._last_violations = [0.0] * num_constraints
         self._last_line_search_success = 0.0
         self._last_margins = [0.0] * num_constraints
         self._last_in_recovery = [0.0] * num_constraints
-        self._last_barrier_penalty = 0.0
+        self._last_lagrangian_penalty = 0.0
         self._last_mode = 0
         self._cached_mean_entropy = 0.0
         self._cached_surrogate_loss = 0.0
@@ -413,32 +407,28 @@ class ConstraintTRPO:
         """
         return (ratio.unsqueeze(-1) * cost_advantages).mean(dim=0)
 
-    def _compute_barrier_penalty(self, cost_surrogates: torch.Tensor) -> torch.Tensor:
-        """Compute linearized barrier divergence for positive-margin constraints.
+    def _compute_lagrangian_penalty(self, cost_surrogates_std: torch.Tensor) -> torch.Tensor:
+        """Linear Lagrangian penalty: sum_k lambda_k * E[ratio * A_cost_k_std].
 
-        For each constraint k with positive margin (d_k - J_C_k > 0):
-            penalty_k = beta * phi''(margin_k) * A_C_k^2
-        where phi''(m) = 1/m^2 is the log-barrier second derivative.
+        Gradient = lambda_k * E[A_cost_std * d_log_pi/d_theta] -- nonzero per-sample
+        even when batch mean E[A_cost] = 0 (fixes quadratic barrier vanishing gradient).
 
-        Uses masked tensor ops instead of per-k loop. Barrier stays active for
-        ALL positive-margin constraints regardless of recovery mode. This prevents
-        gradient discontinuity at mode transitions (500:1 jump when barrier was
-        excluded during recovery).
-
-        Note on re-parametrization: the paper's Bregman divergence (Eq. 7) is
-            D_phi = (1/2) * (1/t) * phi''(m) * delta^2
-        where t is the barrier parameter. We absorb both the 1/2 and 1/t factors
-        into beta for simplicity, so: beta_code = beta_paper / (2 * t).
-        When comparing to paper hyperparameters, account for this relation.
+        lambda_k adapted via dual ascent in _update_lambda():
+        - Starts at 0 (reward-first learning)
+        - Grows proportionally to constraint violation
+        - Capped at lambda_max to protect reward gradient priority
         """
-        safe_mask = self._margins > 0
-        if not safe_mask.any():
-            return torch.tensor(0.0, device=self.device)
-        # Clamp margin to cap phi_pp at 100 (was 10,000 with min=0.01).
-        # With beta=0.02: max barrier gradient = 0.02 * 100 * surr^2 = 2*surr^2.
-        margin_safe = self._margins.clamp(min=0.1)
-        phi_pp = 1.0 / margin_safe.pow(2)
-        return self.beta * (safe_mask * phi_pp * cost_surrogates.pow(2)).sum()
+        return (self._lambda_k * cost_surrogates_std).sum()
+
+    def _update_lambda(self, mean_cost_returns: torch.Tensor) -> None:
+        """Dual gradient ascent on Lagrangian multipliers.
+
+        lambda_k += lr * (J_C_k - d_k). Positive violation increases lambda.
+        Clamped to [0, lambda_max] to keep reward gradient dominant.
+        """
+        with torch.no_grad():
+            violation = mean_cost_returns - self.d_k
+            self._lambda_k = (self._lambda_k + self._lambda_lr * violation).clamp(0.0, self._lambda_max)
 
     # ==================================================================
     # TRPO Core
@@ -602,11 +592,7 @@ class ConstraintTRPO:
 
         # Cost storage flatten
         cost_returns_flat = self.storage.cost_returns.flatten(0, 1).clone()  # (B, K)
-        cost_advantages_raw_flat = self.storage.cost_advantages_raw.flatten(0, 1).clone()  # (B, K) raw
-        # Per-constraint raw std for scale normalization in barrier penalty.
-        # Ensures barrier magnitude is driven by margin (phi_pp), not raw cost scale
-        # differences between binary (O(1)) and continuous (O(0.5)) constraints.
-        raw_cost_std = cost_advantages_raw_flat.std(dim=0).clamp(min=1e-8)  # (K,)
+        cost_advantages_std_flat = self.storage.cost_advantages.flatten(0, 1).clone()  # (B, K) standardized
 
         batch_size = obs_flat.batch_size[0]
 
@@ -627,6 +613,7 @@ class ConstraintTRPO:
                 1 - self._ema_alpha
             ) * self._ema_cost_returns + self._ema_alpha * mean_cost_returns
         self._compute_margins(self._ema_cost_returns)
+        self._update_lambda(self._ema_cost_returns)
 
         # Compute violations for logging
         violations = (mean_cost_returns - self.d_k).tolist()
@@ -653,15 +640,14 @@ class ConstraintTRPO:
             ratio = torch.exp(log_prob - old_lp_sq)
             # Reward + EAPO entropy advantage
             reward_surr = -(soft_adv * ratio).mean()
-            # Barrier penalty for all constraints with positive margin
-            cost_surrs_raw = self._compute_cost_surrogates(ratio, cost_advantages_raw_flat)
-            cost_surrs_normed = cost_surrs_raw / raw_cost_std
-            bp = self._compute_barrier_penalty(cost_surrs_normed)
-            self._cached_barrier_penalty = bp.item()
+            # Lagrangian constraint penalty (linear in cost surrogate)
+            cost_surrs_std = self._compute_cost_surrogates(ratio, cost_advantages_std_flat)
+            lp = self._compute_lagrangian_penalty(cost_surrs_std)
+            self._cached_lagrangian_penalty = lp.item()
             # Entropy bonus
             entropy_bonus = -self.entropy_coef * self.policy.entropy.mean()
             self._cached_mean_entropy = self.policy.entropy.mean().item()
-            return reward_surr + bp + entropy_bonus
+            return reward_surr + lp + entropy_bonus
 
         ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate)
 
@@ -718,14 +704,14 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         # Store monitoring metrics (read by ConstraintEncoderRunner)
         # ------------------------------------------------------------------
-        barrier_penalty_val = self._cached_barrier_penalty
+        lagrangian_val = self._cached_lagrangian_penalty
         self._last_cost_returns = mean_cost_returns.tolist()
         self._last_violations = violations
         self._last_line_search_success = float(ls_success)
         self._last_margins = self._margins.tolist()
-        self._last_in_recovery = [0.0] * self.num_constraints  # No recovery mode
-        self._last_barrier_penalty = barrier_penalty_val
-        self._last_mode = 0  # Always safe (barrier-only)
+        self._last_in_recovery = [0.0] * self.num_constraints
+        self._last_lagrangian_penalty = lagrangian_val
+        self._last_mode = 0
 
         # Clear storage
         self.storage.clear()
@@ -735,7 +721,7 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         loss_dict: dict[str, float] = {
             "value_function": mean_value_loss,
-            "barrier_penalty": barrier_penalty_val,
+            "lagrangian_penalty": lagrangian_val,
             "kl": mean_kl,
             "cost_value": mean_cost_value_loss,
             "mode": float(self._last_mode),
