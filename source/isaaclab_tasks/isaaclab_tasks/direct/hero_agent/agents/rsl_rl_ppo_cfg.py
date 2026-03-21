@@ -64,8 +64,8 @@ class _RslRlPpoEncoderBaseCfg(_HeroAgentPolicyCfg):
     encoder_obs_normalization: bool = True
     policy_obs_dim: int = 13
     privileged_dim: int = 19
-    z_bounds_coef: float = 0.3
-    z_bounds_soft_bound: float = 0.9
+    z_bounds_coef: float = 1.0
+    z_bounds_soft_bound: float = 0.85
     proprio_history_len: int = 30
     proprio_feature_dim: int = 8
 

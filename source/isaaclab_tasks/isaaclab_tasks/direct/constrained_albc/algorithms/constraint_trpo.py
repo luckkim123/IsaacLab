@@ -97,7 +97,7 @@ class ConstraintTRPO:
         recovery_threshold_frac: float = 0.8,
         ema_cost_alpha: float = 0.3,
         # Encoder z bounds
-        z_bounds_coef: float = 0.3,
+        z_bounds_coef: float = 0.0,
         # Encoder update
         num_encoder_epochs: int = 1,
         encoder_lr: float = 3e-4,

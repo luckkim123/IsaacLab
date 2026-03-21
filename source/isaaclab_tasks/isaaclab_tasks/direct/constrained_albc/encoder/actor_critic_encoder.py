@@ -66,8 +66,8 @@ class ActorCriticEncoder(nn.Module):
         encoder_latent_dim: int = 13,
         encoder_activation: str = "elu",
         encoder_obs_normalization: bool = False,
-        z_bounds_coef: float = 0.1,
-        z_bounds_soft_bound: float = 0.9,
+        z_bounds_coef: float = 0.0,
+        z_bounds_soft_bound: float = 0.85,
         # Actor-Critic parameters
         actor_obs_normalization: bool = False,
         critic_obs_normalization: bool = False,

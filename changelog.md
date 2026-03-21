@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-21] Disable z_bounds_loss -- false saturation diagnosis
+
+### Context
+Analyzed run `2026-03-21_17-20-58` (z_bounds_coef=0.3, 1388 iter): encoder z_range [-0.97, 0.95]
+triggered SAT diagnostic, enc_grad decayed 0.15->0.02, pitch plateaued at 13.38 deg. Initial
+hypothesis was encoder gradient death from tanh saturation.
+
+Attempted fix: z_bounds_coef 0.3->1.0 (run `2026-03-21_19-33-03`). Result: z_std dropped from
+0.71 to 0.34 (encoder using only 34% of latent range), z_range still triggered SAT at [-0.95, 0.94].
+Pitch improved to 12.15 deg at 537 iter but at the cost of severely constrained encoder expressiveness.
+
+Key realization: the SAT diagnostic is a **false positive**. With 4096 envs x 13 dims = 53,248 tanh
+outputs per step, the batch min/max naturally reaches +-0.95 even with a healthy z_std=0.34 distribution.
+This is normal tail statistics, not saturation. True saturation would show z_std near 1.0 (bimodal at
+boundaries) and enc_grad < 1e-4. Neither condition holds here.
+
+z_bounds_loss is borrowed from HORA (which used sigmoid activation where saturation is more severe).
+With tanh (gradient=0.75 at z=0.5, vs sigmoid gradient=0.25), the anti-saturation penalty is
+unnecessary and actively harms encoder expressiveness by compressing the latent distribution.
+
+Also identified cost_return oscillation as structural recovery mode cycling (mean_cycle=159 iter),
+not DR randomness. The safe->recovery->safe hysteresis (recovery_threshold_frac=0.4, joint_torque
+entering recovery at cost=20, exiting at cost<8) creates deterministic ~159 iter oscillation periods.
+
+### Changed
+- `constrained_albc/agents/rsl_rl_ppo_cfg.py`: z_bounds_coef 0.3 -> 0.0 (policy and algorithm cfg)
+- `constrained_albc/agents/rsl_rl_ppo_cfg.py`: z_bounds_soft_bound 0.9 -> 0.85 (no effect when coef=0)
+- `constrained_albc/algorithms/constraint_trpo.py`: z_bounds_coef default 0.3 -> 0.0
+- `constrained_albc/encoder/actor_critic_encoder.py`: z_bounds_coef default 0.1 -> 0.0, soft_bound 0.9 -> 0.85
+- `hero_agent/agents/rsl_rl_ppo_cfg.py`: z_bounds_coef 0.3 -> 1.0, soft_bound 0.9 -> 0.85 (synced but hero_agent not actively used)
+
+### Notes
+- hero_agent z_bounds_coef set to 1.0 (not 0.0) -- was changed first before the false-positive analysis. Will sync to 0.0 if this approach works.
+- Improved SAT diagnostic should use "fraction of z values with |z| > 0.9" instead of batch min/max
+- Cost return cycling is structural (recovery hysteresis), not a bug. May need recovery_threshold_frac tuning (currently 0.4) or budget adjustment
+
 ## [2026-03-21] Recovery cycling fix: smooth barrier gradient at mode transitions
 
 ### Context
