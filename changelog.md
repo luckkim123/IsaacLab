@@ -52,6 +52,11 @@ negligible torque (0.26Nm vs 6-10Nm effort limit). Only CoG z retained (dominate
   joint's value is included (index [0]).
 - Other missing DR params (linear/quadratic damping, friction, latency) have smaller ranges
   or are inferable from proprio history. Joint actuator params are highest priority.
+- Early results (run `2026-03-21_23-04-17`, 391 iter): roll=7.63 deg (improved from ~15 deg
+  at same iter in previous run), pitch=15.82 deg (similar), recovery=6% (improved from 14%).
+  However surrogate=4.9e-06 (still near zero), z_std=0.98 (saturated). Privileged obs fix
+  alone may be insufficient -- encoder gradient path through 271D input remains problematic.
+  Continue monitoring to 500-700 iter for definitive comparison.
 - Secondary concern identified but not addressed: encoder receives 271D input where only 18D
   (privileged) is unique vs what actor already sees. Low signal-to-noise for encoder gradient.
   HORA Phase 1 uses privileged-only encoder input. May need architectural change later.
