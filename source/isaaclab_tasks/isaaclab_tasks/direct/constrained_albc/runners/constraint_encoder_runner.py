@@ -149,7 +149,6 @@ class ConstraintEncoderRunner(OnPolicyRunner):
             path,
             "barrier_state.pt",
             {
-                "in_recovery": self.alg._in_recovery,
                 "margins": self.alg._margins,
                 "ema_cost_returns": self.alg._ema_cost_returns,
                 "ema_initialized": self.alg._ema_initialized,
@@ -170,9 +169,7 @@ class ConstraintEncoderRunner(OnPolicyRunner):
 
         state = self._load_aux_state(path, "barrier_state.pt", self.device)
         if state is not None:
-            self.alg._in_recovery = state["in_recovery"]
             self.alg._margins = state["margins"].to(self.device)
-            # Restore EMA state (added in B1 fix; backward-compatible with old checkpoints)
             if "ema_cost_returns" in state:
                 self.alg._ema_cost_returns = state["ema_cost_returns"].to(self.device)
                 self.alg._ema_initialized = state["ema_initialized"]
