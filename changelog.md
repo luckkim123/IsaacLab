@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-22] Remove C-TRPO recovery mode + privileged-only encoder analysis
+
+### Context
+Run `2026-03-21_23-58-32` (privileged-only encoder, 23D) analyzed at 1244 and 1930 iter.
+
+At 1244 iter: reward=21.4, roll=8.1 deg, pitch=10.6 deg, cr_vel=4.02, cr_torque=13.17.
+Compared to 19D/276D-encoder run at same iter: 3x better reward, 2x better roll, z_std=0.94
+(vs 0.65), act_size=0.94 (vs 1.11). joint_vel_limit cost return 3x lower (2.49 vs 7.19 @1200).
+Privileged-only encoder confirmed to help encoder quality and cost reduction.
+
+At 1930 iter: reward dropped to 19.89, attitude error regressed (roll=9.68, pitch=11.19).
+Cost returns showed "sawtooth" cycling: rise -> recovery mode triggers -> cost drops sharply ->
+exits recovery -> reward optimization resumes -> cost rises again. Joint_torque triggered
+recovery 179/179 times (100%). act_size shrank from 0.94 to 0.81 as the policy became
+increasingly conservative through repeated recovery cycles. Surrogate turned negative (-1.7e-05).
+
+Root cause: C-TRPO recovery mode creates a binary safe/recovery oscillation. In safe mode
+the policy optimizes reward (larger actions), increasing costs. When cost exceeds budget,
+recovery mode minimizes cost (smaller actions), but then exits recovery when cost drops below
+threshold, and the cycle repeats. The policy can never find a stable equilibrium -- it
+oscillates between "optimize reward" and "minimize cost" phases indefinitely.
+
+Decision: Remove recovery mode entirely. Keep barrier penalty as the only constraint mechanism.
+Barrier provides continuous gradient proportional to 1/margin^2 without binary switching.
+Cost monitoring (cost critic, GAE, margin tracking) preserved for logging.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Removed recovery mode (73 net lines deleted). Removed
+  `_in_recovery` state tracking, `recovery_mask` construction, `recovery_cost` term in
+  surrogate, `recovery_cost_fn` in line search (cost non-regression check), recovery
+  gradient in encoder update. Surrogate now: `reward_surr + barrier_penalty + entropy_bonus`.
+  Line search checks only KL + reward improvement. `_last_mode` always 0 (safe).
+  `_handle_critic_dim_mismatch` renamed to `_handle_dim_mismatch` in encoder module.
+
+### Notes
+- Barrier penalty with beta=0.02 gives weak gradient at large margins (phi_pp=0.02 at m=7).
+  May need to increase beta if constraints are violated without recovery mode as backstop.
+- Cost critic and cost GAE computation still present (barrier needs cost advantages).
+- `recovery_threshold_frac` parameter no longer used but kept in config for compatibility.
+- Previous run checkpoint incompatible (encoder dim change + algorithm structure change).
+
 ## [2026-03-21] Encoder input: privileged-only (HORA Phase 1 style)
 
 ### Context
