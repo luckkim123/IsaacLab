@@ -10,7 +10,7 @@ cost values V_C_k(s) for K constraints. The cost critic uses the same asymmetric
 input path as the reward critic: cat([policy_obs, hist_flat, privileged]).
 
 Architecture:
-    Encoder:     cat([policy_obs, hist_flat, privileged]) = 276D -> MLP -> tanh -> z (13D)
+    Encoder:     privileged (23D) -> MLP -> tanh -> z (13D)
     Actor:       cat([policy_obs, hist_flat, z]) = 266D -> MLP -> actions
     Critic:      cat([policy_obs, hist_flat, privileged]) = 276D -> MLP -> value (1D)
     Cost Critic: cat([policy_obs, hist_flat, privileged]) = 276D -> MLP -> cost values (K)
@@ -105,6 +105,6 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
                         state_dict[cost_prefix + k] = v
 
             # Detect input dimension mismatch (reuse parent helper)
-            self._handle_critic_dim_mismatch(state_dict, cost_prefix)
+            self._handle_dim_mismatch(state_dict, cost_prefix)
 
         return super().load_state_dict(state_dict, strict=strict)

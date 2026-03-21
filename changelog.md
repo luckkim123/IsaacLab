@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-21] Encoder input: privileged-only (HORA Phase 1 style)
+
+### Context
+Run `2026-03-21_23-28-54` (23D privileged, enc_epochs=3, z_bounds=0.0) analyzed at 321 iter.
+Performance: reward=21.41, roll=7.22 deg, pitch=12.55 deg. Compared to the 19D run
+(`17-20-58`) at the same iteration count, the 23D run shows 3x better reward (7.19 -> 21.41)
+and 2x better roll (15 -> 7 deg). However, the run plateaued at ~iter 150 (55% mark).
+
+Key findings from analysis:
+- C-TRPO barrier penalty is negligible (7.3e-06) and provides no meaningful gradient for cost
+  reduction. The barrier is designed to prevent budget VIOLATION, not minimize costs. With
+  margins of 3-7, phi_pp = 1/m^2 yields penalty weight ~0.02, 1000x weaker than reward gradient.
+- Encoder auxiliary loss was considered but withdrawn: the encoder input already contains
+  privileged directly (276D input includes 23D privileged), making reconstruction trivial.
+  The fundamental issue is the actor doesn't NEED z badly enough (253D direct input).
+- Root cause of weak encoder gradient: encoder input is [policy_obs(13), hist_flat(240),
+  privileged(23)] = 276D. hist_flat (240D, 87% of input) dominates the first layer gradient,
+  causing the encoder to respond primarily to history (redundant with actor's direct input)
+  rather than privileged info (the unique contribution).
+
+Solution: change encoder input to privileged-only (23D), matching HORA Phase 1 architecture.
+This ensures z encodes ONLY DR parameters, and the actor must use z to access privileged info.
+
+Also renamed `_handle_critic_dim_mismatch` to `_handle_dim_mismatch` and added encoder
+dimension mismatch handling for backward-compatible checkpoint loading.
+
+### Changed
+- `encoder/actor_critic_encoder.py`: Encoder input changed from cat([policy_obs, hist_flat,
+  privileged]) (276D) to privileged-only (23D). Affects `__init__` (encoder_input_dim),
+  `_encode()` (input construction), `update_normalization()` (encoder normalizer input).
+  `_handle_critic_dim_mismatch` renamed to `_handle_dim_mismatch` with added encoder prefix
+  support. `load_state_dict` now also checks encoder dimension mismatch.
+- `encoder/actor_critic_encoder_constrained.py`: Architecture docstring updated (encoder
+  input 276D -> 23D). `_handle_critic_dim_mismatch` call updated to `_handle_dim_mismatch`.
+
+### Notes
+- Checkpoint incompatible with previous runs (encoder first layer shape changes from
+  (256, 276) to (256, 23)). `_handle_dim_mismatch` auto-reinitializes on load.
+- Actor/critic/cost_critic architectures unchanged -- only encoder input path modified.
+- This change reduces encoder parameter count significantly (first layer: 276*256=70656 ->
+  23*256=5888 params, 12x reduction).
+- C-TRPO barrier and reward function (min_laplacian) kept unchanged for this experiment.
+  Isolating the encoder input change to measure its impact independently.
+
 ## [2026-03-21] Expand privileged obs to 23D -- add damping + body mass + constraint cost analysis
 
 ### Context

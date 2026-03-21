@@ -9,12 +9,16 @@ This module provides the encoder-based actor-critic network:
     - ActorCriticEncoder: Base encoder network (Phase 1 teacher training)
 
 Architecture:
-    Encoder: cat([policy_obs, hist_flat, privileged]) = 276D -> MLP -> tanh -> z (13D)
+    Encoder: privileged (23D) -> MLP -> tanh -> z (13D)
     Actor:   cat([policy_obs, hist_flat, z]) = 266D -> MLP -> actions
     Critic:  cat([policy_obs, hist_flat, privileged]) = 276D -> MLP -> value (1D)
 
+    The encoder takes ONLY privileged info as input (HORA Phase 1 style).
+    This forces the actor to use z for DR-specific adaptation, since z is the
+    only path through which privileged information reaches the actor.
+
     proprio_hist (N, 30, 8) is flattened to (N, 240) and concatenated directly.
-    No embedding module -- the encoder/actor/critic MLPs learn from raw history.
+    No embedding module -- the actor/critic MLPs learn from raw history.
 
 Reference:
     - HORA: Heuristic-Free Online Robust Adaptation (Qi et al., 2023)
@@ -42,10 +46,11 @@ class ActorCriticEncoder(nn.Module):
     """ActorCritic with extrinsics encoder for HORA Phase 1 teacher policy.
 
     The encoder compresses privileged information into a bounded latent z (tanh).
-    Flattened proprioception history is concatenated to encoder, actor, and critic.
+    Encoder input is privileged-only (HORA Phase 1 style), ensuring z encodes
+    DR parameters rather than redundant policy_obs/history information.
 
     Architecture:
-        Encoder: cat([policy_obs, hist_flat, privileged]) = 276D -> MLP -> tanh -> z
+        Encoder: privileged (23D) -> MLP -> tanh -> z (13D)
         Actor:   cat([policy_obs, hist_flat, z]) = 266D -> MLP -> actions
         Critic:  cat([policy_obs, hist_flat, privileged]) = 276D -> MLP -> value (asymmetric)
 
@@ -128,8 +133,8 @@ class ActorCriticEncoder(nn.Module):
             self._hist_flat_dim,
         )
 
-        # --- Encoder MLP: [policy_obs, hist_flat, privileged] -> tanh -> z ---
-        encoder_input_dim = policy_obs_dim + self._hist_flat_dim + privileged_dim
+        # --- Encoder MLP: privileged -> tanh -> z (HORA Phase 1 style) ---
+        encoder_input_dim = privileged_dim
 
         self.encoder_obs_normalization = encoder_obs_normalization
         self.encoder_obs_normalizer = (
@@ -207,11 +212,9 @@ class ActorCriticEncoder(nn.Module):
     def _encode(self, obs: TensorDict, *, store_z: bool = False) -> torch.Tensor:
         """Encode privileged info into latent z.
 
-        encoder(normalize(cat([policy_obs, hist_flat, privileged]))) -> z (tanh bounded)
+        encoder(normalize(privileged)) -> z (tanh bounded)
         """
-        encoder_input = torch.cat(
-            [obs[self._policy_obs_key], self._get_hist_flat(obs), obs[self._privileged_key]], dim=-1
-        )
+        encoder_input = obs[self._privileged_key]
         z = self.encoder(self.encoder_obs_normalizer(encoder_input))
         if store_z:
             self._last_z = z
@@ -275,10 +278,7 @@ class ActorCriticEncoder(nn.Module):
     def update_normalization(self, obs: TensorDict) -> None:
         """Update observation normalization statistics."""
         if self.encoder_obs_normalization:
-            encoder_input = torch.cat(
-                [obs[self._policy_obs_key], self._get_hist_flat(obs), obs[self._privileged_key]], dim=-1
-            )
-            self.encoder_obs_normalizer.update(encoder_input)  # type: ignore[union-attr]
+            self.encoder_obs_normalizer.update(obs[self._privileged_key])  # type: ignore[union-attr]
 
         if self.actor_obs_normalization:
             with torch.no_grad():
@@ -288,8 +288,8 @@ class ActorCriticEncoder(nn.Module):
             critic_input = self._get_critic_obs(obs)
             self.critic_obs_normalizer.update(critic_input)  # type: ignore[union-attr]
 
-    def _handle_critic_dim_mismatch(self, state_dict: dict, prefix: str) -> None:
-        """Reinitialize critic if checkpoint input dimension doesn't match current model."""
+    def _handle_dim_mismatch(self, state_dict: dict, prefix: str) -> None:
+        """Reinitialize module if checkpoint input dimension doesn't match current model."""
         weight_keys = sorted(
             [k for k in state_dict if k.startswith(prefix) and k.endswith(".weight")],
             key=lambda k: int(k.removeprefix(prefix).split(".")[0]),
@@ -299,7 +299,10 @@ class ActorCriticEncoder(nn.Module):
         first_key = weight_keys[0]
         ckpt_input_dim = state_dict[first_key].shape[1]
 
-        if prefix == "critic.":
+        if prefix == "encoder.":
+            current_module = self.encoder
+            expected_dim = self.privileged_dim
+        elif prefix == "critic.":
             current_module = self.critic
             expected_dim = self.num_critic_obs
         elif prefix == "cost_critic." and hasattr(self, "cost_critic"):
@@ -331,8 +334,9 @@ class ActorCriticEncoder(nn.Module):
                 for k, v in self.encoder_obs_normalizer.state_dict().items():
                     state_dict[prefix + k] = v
 
-        # Detect critic input dimension mismatch (symmetric <-> asymmetric checkpoint)
-        self._handle_critic_dim_mismatch(state_dict, "critic.")
+        # Detect input dimension mismatches (encoder: privileged-only change, critic: symmetric <-> asymmetric)
+        self._handle_dim_mismatch(state_dict, "encoder.")
+        self._handle_dim_mismatch(state_dict, "critic.")
 
         # Filter out unknown keys from old checkpoints
         current_keys = set(self.state_dict().keys())
