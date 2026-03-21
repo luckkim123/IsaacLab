@@ -5,22 +5,24 @@
 
 """C-TRPO: Barrier-based Trust Region for Constrained Policy Optimization.
 
-Implements C-TRPO (Muller et al., ICML 2025, arXiv:2411.02957) Option C
-with per-constraint blend (RC3 fix):
-    1. Safe mode: barrier-augmented objective + KL-only trust region
-    2. Blend mode: reward + barrier(safe) + cost_min(violated) per constraint
-    3. Option C (surrogate divergence): barrier curvature in objective gradient
+Implements C-TRPO (Muller et al., ICML 2025, arXiv:2411.02957) Option C,
+barrier-only mode (no recovery mode switching):
+    1. Barrier-augmented objective + KL-only trust region
+    2. Option C (surrogate divergence): barrier curvature in objective gradient
        only; FVP uses pure KL Hessian (no barrier in Fisher matrix)
+
+Recovery mode was removed to eliminate safe/recovery oscillation that caused
+cost return cycling and reward regression. The barrier penalty alone provides
+continuous gradient pressure proportional to 1/margin^2, which strengthens
+as costs approach budget and prevents violation without binary mode switching.
 
 Key design decisions:
     - No Lagrangian dual variables: lambda completely removed. Barrier function
       naturally enforces constraints by distorting the trust region geometry --
       steps become more conservative near constraint boundaries.
-    - Safe/recovery mode per constraint: each constraint independently tracks
-      its margin (d_k - J_C_k). Feasible constraints use barrier penalty;
-      infeasible constraints trigger recovery mode (cost minimization).
-    - Hysteresis in mode switching: recovery exits only when cost drops below
-      recovery_threshold_frac * budget, preventing oscillation at the boundary.
+    - Barrier-only: no recovery mode. All constraints use barrier penalty
+      regardless of whether margin is positive or negative. When margin <= 0.1,
+      phi_pp caps at 100 (margin clamped to 0.1).
     - No detached-std cost ratio needed: in C-TRPO, cost only affects trust
       region geometry (via barrier in the objective gradient). There is no
       lambda * cost_surrogate term, so cost gradient never directly pushes
@@ -162,10 +164,8 @@ class ConstraintTRPO:
         self.eapo_tau_max = eapo_tau_max
         self._cached_entropy_tau = eapo_tau_init
 
-        # C-TRPO barrier parameters
+        # C-TRPO barrier parameters (barrier-only, no recovery mode)
         self.beta = beta
-        self.recovery_threshold_frac = recovery_threshold_frac
-        self._in_recovery = [False] * num_constraints
         self._margins = torch.zeros(num_constraints, device=device)
 
         # B1: EMA smoothing on mean_cost_returns to prevent phantom mode switches.
@@ -394,19 +394,12 @@ class ConstraintTRPO:
     # ==================================================================
 
     def _compute_margins(self, mean_cost_returns: torch.Tensor) -> None:
-        """Update per-constraint margins and recovery mode flags.
+        """Update per-constraint margins.
 
         Args:
             mean_cost_returns: Mean discounted cost return per constraint, shape (K,).
         """
         self._margins = self.d_k - mean_cost_returns
-        # Recovery mode transitions: 3-way hysteresis per constraint
-        for k in range(self.num_constraints):
-            if self._margins[k] <= 0:
-                self._in_recovery[k] = True
-            elif mean_cost_returns[k] < self.d_k[k] * self.recovery_threshold_frac:
-                self._in_recovery[k] = False
-            # else: hysteresis - keep current mode
 
     def _compute_cost_surrogates(self, ratio: torch.Tensor, cost_advantages: torch.Tensor) -> torch.Tensor:
         """Compute per-constraint cost surrogates in a single vectorized op.
@@ -551,29 +544,16 @@ class ConstraintTRPO:
         step_dir: torch.Tensor,
         old_loss: torch.Tensor,
         surrogate_fn: object,
-        recovery_cost_fn: object = None,
     ) -> bool:
-        """Backtracking line search shared by safe and blend modes.
+        """Backtracking line search.
 
         Accepts a step when:
             1. Surrogate improvement > 0
             2. KL divergence <= max_kl * margin
-            3. Recovery cost non-regression (if recovery_cost_fn provided)
-
-        Args:
-            surrogate_fn: No-arg callable returning the surrogate loss scalar.
-            recovery_cost_fn: Optional no-arg callable returning recovery cost.
-                When provided, steps that worsen recovery cost are rejected.
         """
         old_params = self._get_policy_params_flat()
         step_size = 1.0
         kl_limit = self.max_kl * self.line_search_kl_margin
-
-        # Baseline recovery cost with old params
-        old_rc = None
-        if recovery_cost_fn is not None:
-            with torch.no_grad():
-                old_rc = recovery_cost_fn()
 
         for _ in range(self.line_search_max_backtracks):
             self._set_policy_params_flat(old_params + step_size * step_dir)
@@ -581,13 +561,6 @@ class ConstraintTRPO:
             with torch.no_grad():
                 new_loss = surrogate_fn()
                 kl = self._kl_divergence(obs, old_mu, old_sigma)
-
-                # Cost non-regression: reject if recovery constraints worsened
-                if recovery_cost_fn is not None:
-                    new_rc = recovery_cost_fn()
-                    if new_rc > old_rc + 1e-6:
-                        step_size *= self.line_search_shrink_factor
-                        continue
 
             if (old_loss - new_loss) > 0 and kl <= kl_limit:
                 return True
@@ -629,7 +602,6 @@ class ConstraintTRPO:
 
         # Cost storage flatten
         cost_returns_flat = self.storage.cost_returns.flatten(0, 1).clone()  # (B, K)
-        cost_advantages_flat = self.storage.cost_advantages.flatten(0, 1).clone()  # (B, K) standardized
         cost_advantages_raw_flat = self.storage.cost_advantages_raw.flatten(0, 1).clone()  # (B, K) raw
         # Per-constraint raw std for scale normalization in barrier penalty.
         # Ensures barrier magnitude is driven by margin (phi_pp), not raw cost scale
@@ -656,26 +628,17 @@ class ConstraintTRPO:
             ) * self._ema_cost_returns + self._ema_alpha * mean_cost_returns
         self._compute_margins(self._ema_cost_returns)
 
-        any_recovery = any(self._in_recovery)
-        all_recovery = all(self._in_recovery)
-
         # Compute violations for logging
         violations = (mean_cost_returns - self.d_k).tolist()
 
         # ------------------------------------------------------------------
         # 2. TRPO policy update (full-batch, single step)
         # ------------------------------------------------------------------
-        # Determine mode: if ANY constraint is in recovery, do recovery step.
-        # Recovery takes priority since feasibility must be restored before
-        # reward optimization can proceed meaningfully.
-        #
-        # Per-constraint blend (RC3 fix): reward gradient is always active.
-        # Violated constraints add cost minimization; safe constraints use barrier.
-        # This prevents "any-recovery" from killing reward when only one constraint
-        # is violated, avoiding irreversible attitude damage during recovery.
+        # Pure barrier-based: reward + barrier penalty for all constraints.
+        # No recovery mode switching — barrier provides continuous gradient
+        # pressure that strengthens as costs approach budget.
         old_lp_sq = old_log_prob_flat.squeeze(-1)
         adv_sq = advantages_flat.squeeze(-1)
-        recovery_mask = torch.tensor(self._in_recovery, dtype=torch.float32, device=self.device)
 
         # EAPO: soft advantage = task + tau * entropy advantage
         if self.eapo_enabled:
@@ -688,36 +651,19 @@ class ConstraintTRPO:
             self.policy.act(obs_flat)
             log_prob = self.policy.get_actions_log_prob(actions_flat)
             ratio = torch.exp(log_prob - old_lp_sq)
-            # Reward + EAPO entropy advantage (always active)
+            # Reward + EAPO entropy advantage
             reward_surr = -(soft_adv * ratio).mean()
-            # Barrier penalty (safe constraints only): use raw cost advantages
-            # so barrier gradient is non-zero (standardized E[A_cost]=0 -> zero gradient)
+            # Barrier penalty for all constraints with positive margin
             cost_surrs_raw = self._compute_cost_surrogates(ratio, cost_advantages_raw_flat)
-            cost_surrs_normed = cost_surrs_raw / raw_cost_std  # scale-normalize
+            cost_surrs_normed = cost_surrs_raw / raw_cost_std
             bp = self._compute_barrier_penalty(cost_surrs_normed)
             self._cached_barrier_penalty = bp.item()
-            # Recovery cost (violated constraints only): use standardized for balanced gradients
-            cost_surrs_std = self._compute_cost_surrogates(ratio, cost_advantages_flat)
-            recovery_cost = (recovery_mask * cost_surrs_std).sum()
-            # Entropy bonus: maximize entropy (negative in loss = maximize)
+            # Entropy bonus
             entropy_bonus = -self.entropy_coef * self.policy.entropy.mean()
             self._cached_mean_entropy = self.policy.entropy.mean().item()
-            return reward_surr + bp + recovery_cost + entropy_bonus
+            return reward_surr + bp + entropy_bonus
 
-        # Cost non-regression check: reject line search steps that worsen
-        # recovery constraints (prevents reward improvement from masking cost regression)
-        recovery_cost_fn = None
-        if any_recovery:
-
-            def recovery_cost_fn() -> torch.Tensor:
-                self.policy.act(obs_flat)
-                log_prob = self.policy.get_actions_log_prob(actions_flat)
-                ratio = torch.exp(log_prob - old_lp_sq)
-                cost_surrs = self._compute_cost_surrogates(ratio, cost_advantages_flat)
-                return (recovery_mask * cost_surrs).sum()
-
-        mode_name = "blend" if any_recovery else "safe"
-        ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate, mode_name, recovery_cost_fn)
+        ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate)
 
         # Noise floor: applied after TRPO step (outside trust region optimization).
         # Does not consume KL budget or distort natural gradient direction.
@@ -756,8 +702,6 @@ class ConstraintTRPO:
                 old_mu_flat=old_mu_flat,
                 old_sigma_flat=old_sigma_flat,
                 pre_encoder_kl=pre_encoder_kl,
-                recovery_mask=recovery_mask if any_recovery else None,
-                cost_advantages_flat=cost_advantages_flat if any_recovery else None,
             )
 
         # Compute KL after full update for logging (single measurement)
@@ -779,9 +723,9 @@ class ConstraintTRPO:
         self._last_violations = violations
         self._last_line_search_success = float(ls_success)
         self._last_margins = self._margins.tolist()
-        self._last_in_recovery = [float(r) for r in self._in_recovery]
+        self._last_in_recovery = [0.0] * self.num_constraints  # No recovery mode
         self._last_barrier_penalty = barrier_penalty_val
-        self._last_mode = 2 if all_recovery else (1 if any_recovery else 0)
+        self._last_mode = 0  # Always safe (barrier-only)
 
         # Clear storage
         self.storage.clear()
@@ -815,18 +759,8 @@ class ConstraintTRPO:
         old_mu_flat: torch.Tensor,
         old_sigma_flat: torch.Tensor,
         surrogate_fn: object,
-        mode_name: str,
-        recovery_cost_fn: object = None,
     ) -> bool:
-        """Execute a single TRPO natural-gradient step.
-
-        Args:
-            surrogate_fn: No-arg callable returning the surrogate loss scalar.
-                Called with grad for gradient extraction; under torch.no_grad()
-                for line search evaluation.
-            mode_name: "safe" or "blend" (for warning messages only).
-            recovery_cost_fn: Optional callable for cost non-regression check.
-        """
+        """Execute a single TRPO natural-gradient step."""
         # 1. Compute loss + flat gradient
         loss = surrogate_fn()
         self._cached_surrogate_loss = loss.item()
@@ -839,13 +773,13 @@ class ConstraintTRPO:
         shs = 0.5 * nat_grad.dot(g)
 
         if shs <= 0 or not torch.isfinite(shs):
-            logger.warning("TRPO %s: shs=%.6e non-positive or non-finite, skipping", mode_name, shs.item())
+            logger.warning("TRPO: shs=%.6e non-positive or non-finite, skipping", shs.item())
             return False
 
         step_dir = -torch.sqrt(self.max_kl / shs) * nat_grad
 
         if not torch.isfinite(step_dir).all():
-            logger.warning("TRPO %s: step_dir contains NaN/Inf, skipping", mode_name)
+            logger.warning("TRPO: step_dir contains NaN/Inf, skipping")
             return False
 
         # 4. Line search
@@ -853,7 +787,7 @@ class ConstraintTRPO:
             old_loss = surrogate_fn()
 
         return self._line_search(
-            obs_flat, old_mu_flat, old_sigma_flat, step_dir, old_loss, surrogate_fn, recovery_cost_fn
+            obs_flat, old_mu_flat, old_sigma_flat, step_dir, old_loss, surrogate_fn
         )
 
     def _update_encoder(
@@ -865,8 +799,6 @@ class ConstraintTRPO:
         old_mu_flat: torch.Tensor | None = None,
         old_sigma_flat: torch.Tensor | None = None,
         pre_encoder_kl: float = 0.0,
-        recovery_mask: torch.Tensor | None = None,
-        cost_advantages_flat: torch.Tensor | None = None,
     ) -> float:
         """Multi-step encoder update with fresh forward passes.
 
@@ -897,11 +829,6 @@ class ConstraintTRPO:
             log_prob = self.policy.get_actions_log_prob(actions_flat)
             ratio = torch.exp(log_prob - old_log_prob_flat.squeeze(-1))
             total_loss = -(advantages_flat.squeeze(-1) * ratio).mean()
-
-            # Per-blend: encoder also receives recovery cost gradient
-            if recovery_mask is not None and recovery_mask.any():
-                cost_surrs = self._compute_cost_surrogates(ratio, cost_advantages_flat)
-                total_loss = total_loss + (recovery_mask * cost_surrs).sum()
 
             # Add z_bounds loss (same forward pass, shared z tensor)
             if hasattr(self.policy, "z_bounds_loss"):
