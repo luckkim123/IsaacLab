@@ -93,7 +93,11 @@ class RslRlConstraintTRPOAlgorithmCfg:
     class_name: str = "ALBCConstraintTRPO"
 
     # TRPO parameters
-    max_kl: float = 0.01
+    max_kl: float = 0.002
+    """KL trust region size. Scaled for 2D action space: 0.01 * (2/12) ≈ 0.002.
+    Standard 0.01 assumes ~12D actions (locomotion). With 2D, per-dim KL budget
+    is 6x larger, causing σ to decay 6x faster. 0.002 normalizes per-dim dynamics
+    to match the reference paper's 12D behavior."""
     cg_iters: int = 10
     cg_damping: float = 0.1
     line_search_max_backtracks: int = 10
@@ -144,10 +148,10 @@ class RslRlConstraintTRPOAlgorithmCfg:
     (constant upward pressure with no counteracting reward gradient)."""
 
     # Post-encoder KL gating
-    max_encoder_kl: float = 0.016
+    max_encoder_kl: float = 0.003
     """Maximum additional KL divergence allowed from encoder update. If an encoder
     step causes KL to exceed pre_encoder_kl + max_encoder_kl, the encoder params
-    are reverted. 0.016 = max_kl * line_search_kl_margin (same budget as policy step)."""
+    are reverted. Derived: max_kl * line_search_kl_margin = 0.002 * 1.5 = 0.003."""
 
     # Encoder update
     num_encoder_epochs: int = 3

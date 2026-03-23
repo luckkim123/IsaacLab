@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-23] Scale max_kl for 2D action space: 0.01 -> 0.002
+
+### Context
+After fixing entropy_coef=0 and barrier_alpha=0.02, training run 2026-03-23_22-03-54
+showed a new problem: noise_std collapsed to min_std=0.2 by iter 50 (entropy=-0.38
+COLLAPSED). Roll error improved to 7 deg then rebounded to 22 deg -- premature
+convergence to a suboptimal policy.
+
+Analysis of Gaussian policy score function: `dlogpi/dsigma = ((a-mu)^2 - sigma^2) / sigma^3`.
+This is self-correcting (sigma finds equilibrium where advantage-weighted action
+spread matches noise level). However, with 2D action space vs reference paper's 12D:
+- KL per dim = max_kl/d. At max_kl=0.01: 0.005/dim (2D) vs 0.00083/dim (12D)
+- sigma can change 6x faster per TRPO step in our 2D setup
+- Additionally, barrier_alpha=0.02 (now 15x stronger) pushes sigma down when noisy
+  actions violate constraints, adding extra downward pressure
+
+Solution: scale max_kl proportionally to action dimensionality. 0.01 * (2/12) = 0.002.
+This gives the same per-dimension KL budget as the reference paper's 12D locomotion
+setup, preventing premature sigma collapse while maintaining the same per-dim dynamics.
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `max_kl` 0.01 -> 0.002. Scaled for 2D action space
+  to match 12D per-dim KL budget from reference paper.
+- `agents/rsl_rl_ppo_cfg.py`: `max_encoder_kl` 0.016 -> 0.003. Proportionally
+  scaled (max_kl * line_search_kl_margin = 0.002 * 1.5).
+- `algorithms/constraint_trpo.py`: `max_kl` default 0.01 -> 0.002 (sync).
+
+### Notes
+- Constraint enforcement (barrier_alpha=0.02) confirmed working: joint_torque
+  15.31 (under dk=20), joint_vel_limit 9.01 (near dk=10), yaw_vel 41.83
+  (under dk=78.5). All 3 previously violated constraints now near/within budget.
+- DORAEMON still in backup mode (success=0.22). Will need to rebuild curriculum
+  after sigma decay stabilizes.
+- mu learning will also slow down (5x) -- this is the trade-off. Monitor whether
+  attitude error convergence speed is acceptable.
+
 ## [2026-03-23] Fix noise_std runaway: entropy_coef=0, barrier_alpha=0.02
 
 ### Context

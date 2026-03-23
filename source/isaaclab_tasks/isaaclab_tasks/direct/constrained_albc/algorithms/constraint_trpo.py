@@ -48,7 +48,7 @@ class ConstraintTRPO:
         self,
         policy: nn.Module,
         # TRPO parameters
-        max_kl: float = 0.01,
+        max_kl: float = 0.002,
         cg_iters: int = 10,
         cg_damping: float = 0.1,
         line_search_max_backtracks: int = 10,
