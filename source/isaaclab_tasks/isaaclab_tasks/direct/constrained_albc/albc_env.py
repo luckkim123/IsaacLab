@@ -131,6 +131,7 @@ class ALBCEnv(DirectRLEnv):
         self._init_joints()
         self._init_task_and_rewards()
         self._init_state_buffers()
+        self._init_doraemon()
 
         # Cache constraint config (avoids getattr on every _get_rewards call)
         self._constraints_cfg = getattr(self.cfg, "constraints", None)
@@ -325,6 +326,27 @@ class ALBCEnv(DirectRLEnv):
         else:
             self._action_history = None
             self._action_latency = None
+
+    def _init_doraemon(self) -> None:
+        """Initialize DORAEMON adaptive DR scheduler if enabled."""
+        doraemon_cfg = getattr(self.cfg, "doraemon", None)
+        if doraemon_cfg is not None and doraemon_cfg.enable:
+            from .doraemon import NDIMS, DoraemonScheduler
+
+            self._doraemon = DoraemonScheduler(doraemon_cfg, self.device)
+            self._doraemon_ndims = NDIMS
+        else:
+            self._doraemon = None
+            self._doraemon_ndims = 0
+
+        if self._doraemon is not None:
+            ndims = self._doraemon_ndims
+            self._episode_dr_xi = torch.zeros(self.num_envs, ndims, device=self.device)
+            self._episode_dr_log_probs = torch.zeros(self.num_envs, device=self.device)
+            self._episode_return_accum = torch.zeros(self.num_envs, device=self.device)
+            self._settling_window = 50  # 1 second at 50Hz control
+            self._settling_errors = torch.zeros(self.num_envs, self._settling_window, device=self.device)
+            self._settling_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
     @property
     def _perturb_cycle(self) -> int:
@@ -678,6 +700,14 @@ class ALBCEnv(DirectRLEnv):
         if self._constraints_cfg is not None:
             self.extras["costs"] = compute_all_costs(self._robot, self, self._constraints_cfg)
 
+        # DORAEMON: accumulate episode return and settling error
+        if self._doraemon is not None:
+            self._episode_return_accum += reward
+            err = torch.linalg.norm(self._attitude_error[:, :2], dim=-1)
+            idx = self._settling_idx % self._settling_window
+            self._settling_errors.scatter_(1, idx.unsqueeze(1), err.unsqueeze(1))
+            self._settling_idx += 1
+
         # Update overshoot buffer AFTER constraint computation (so overshoot_cost reads prev step)
         self._prev_attitude_error_rp[:] = self._attitude_error[:, :2]
 
@@ -864,7 +894,22 @@ class ALBCEnv(DirectRLEnv):
         self._reset_task_and_state(env_ids_)
 
     def _log_and_reset_rewards(self, env_ids: torch.Tensor) -> None:
-        """Collect episode metrics and reset accumulators."""
+        """Collect episode metrics, record DORAEMON episodes, and reset accumulators."""
+        # Record completed episodes to DORAEMON buffer before resetting
+        if self._doraemon is not None and len(env_ids) > 0:
+            current_threshold = self._doraemon._current_threshold_deg
+            threshold_rad = torch.deg2rad(torch.tensor(current_threshold, device=self.device))
+            filled = self._settling_idx[env_ids].clamp(max=self._settling_window).float()
+            mean_settling_err = self._settling_errors[env_ids].sum(dim=-1) / filled.clamp(min=1.0)
+            success = (mean_settling_err < threshold_rad).float()
+
+            self._doraemon.record_episodes(
+                xi=self._episode_dr_xi[env_ids],
+                returns=self._episode_return_accum[env_ids],
+                success=success,
+                log_probs=self._episode_dr_log_probs[env_ids],
+            )
+
         reward_sums = self._reward_manager.reset(env_ids)
         self.extras["log"] = self._collect_episode_metrics(env_ids, reward_sums)
 
@@ -932,9 +977,23 @@ class ALBCEnv(DirectRLEnv):
         # Store for _reset_task_and_state (joint gains/friction)
         self._current_dr_sampler = dr
 
-        randomize_hydrodynamics(env=self, env_ids=env_ids, dr=dr)
+        # DORAEMON: sample from Beta distribution for curriculum-managed parameters
+        sampled: dict[str, torch.Tensor] | None = None
+        if self._doraemon is not None:
+            from .doraemon import PARAM_SPECS
+
+            n = len(env_ids)
+            xi_physical, log_probs = self._doraemon.sample(n)
+            sampled = {spec.name: xi_physical[:, i] for i, spec in enumerate(PARAM_SPECS)}
+            self._episode_dr_xi[env_ids] = xi_physical
+            self._episode_dr_log_probs[env_ids] = log_probs
+            self._episode_return_accum[env_ids] = 0.0
+            self._settling_errors[env_ids] = 0.0
+            self._settling_idx[env_ids] = 0
+
+        randomize_hydrodynamics(env=self, env_ids=env_ids, dr=dr, sampled=sampled)
         randomize_body_mass(env=self, env_ids=env_ids, dr=dr)
-        randomize_payload(env=self, env_ids=env_ids, dr=dr)
+        randomize_payload(env=self, env_ids=env_ids, dr=dr, sampled=sampled)
 
         has_ocean_current = any(v > 0 for v in self.cfg.ocean_current.max_velocity)
         if has_ocean_current:

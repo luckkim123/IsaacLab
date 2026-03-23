@@ -131,23 +131,33 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         if self._should_log:
             self._log_constraint_metrics(iteration)
 
+        # DORAEMON: update DR distribution based on episode statistics
+        raw_env = self.env.unwrapped
+        if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
+            metrics = raw_env._doraemon.step()
+            if self._should_log:
+                prefixed = {f"DORAEMON/{k}": v for k, v in metrics.items()}
+                flush_metrics(self.writer, prefixed, iteration, self.logger_type)
+
     # ------------------------------------------------------------------
     # Checkpoint save/load
     # ------------------------------------------------------------------
 
     def save(self, path: str, infos: dict | None = None) -> None:
-        """Save model checkpoint and encoder optimizer."""
+        """Save model checkpoint, encoder optimizer, and DORAEMON state."""
         super().save(path, infos)
-
-        # Log barrier has no persistent state (adaptive thresholds are recomputed
-        # each iteration from current cost returns).
 
         # Save encoder optimizer state for seamless resume
         if getattr(self.alg, "encoder_optimizer", None) is not None:
             self._save_aux_state(path, "encoder_optimizer.pt", self.alg.encoder_optimizer.state_dict())
 
+        # Save DORAEMON distribution state
+        raw_env = self.env.unwrapped
+        if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
+            self._save_aux_state(path, "doraemon_state.pt", raw_env._doraemon.state_dict())
+
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
-        """Load model checkpoint and encoder optimizer if available."""
+        """Load model checkpoint, encoder optimizer, and DORAEMON state if available."""
         infos = super().load(path, load_optimizer, map_location)
 
         # Restore encoder optimizer state for seamless resume
@@ -156,6 +166,14 @@ class ConstraintEncoderRunner(OnPolicyRunner):
             if enc_opt_state is not None:
                 self.alg.encoder_optimizer.load_state_dict(enc_opt_state)
                 logger.info("Restored encoder optimizer state from checkpoint")
+
+        # Restore DORAEMON distribution state
+        raw_env = self.env.unwrapped
+        if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
+            doraemon_state = self._load_aux_state(path, "doraemon_state.pt", self.device)
+            if doraemon_state is not None:
+                raw_env._doraemon.load_state_dict(doraemon_state)
+                logger.info("Restored DORAEMON distribution state from checkpoint")
 
         return infos
 

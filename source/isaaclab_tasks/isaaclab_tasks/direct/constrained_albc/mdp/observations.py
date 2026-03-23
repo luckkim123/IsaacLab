@@ -103,8 +103,13 @@ def compute_privileged_obs(
         - Main body linear damping roll, pitch (2D): DR 0.5-1.5 scale (3x)
         - Main body quadratic damping roll, pitch (2D): DR 0.5-1.5 scale (3x)
         - Body mass (1D): DR 0.9-1.1 scale (1.22x)
+        - Action latency (1D): 0-4 physics steps delay
+        - Joint static friction (1D): Coulomb friction coefficient
+        - Joint viscous friction (1D): viscous friction coefficient
+        - Yaw quadratic damping (1D): yaw-axis quadratic damping
+        - Water density (1D): water density in kg/m^3
 
-    Total: 23D.
+    Total: 28D.
 
     Args:
         env: The ALBC environment instance.
@@ -149,5 +154,26 @@ def compute_privileged_obs(
     # determines buoyancy-gravity ratio F_bu/W = rho*V*g / (m*g) = rho*V/m.
     # Volume without mass cannot determine equilibrium buoyancy.
     priv_obs.append(env._hydro.body_mass.unsqueeze(-1))  # 1D: main body mass
+
+    # Action latency (1D): per-env delay in physics steps (0-4).
+    # Directly affects closed-loop phase margin (~40% of 50Hz control period at max).
+    if env._action_latency is not None:
+        priv_obs.append(env._action_latency.float().unsqueeze(-1))  # 1D
+    else:
+        priv_obs.append(torch.zeros(env.num_envs, 1, device=env.device))  # 1D: zero when disabled
+
+    # Joint friction: static (Coulomb) and viscous coefficients.
+    # Both ALBC joints share the same DR'd value; read from first joint.
+    jid = env._albc_joint_ids[0]
+    priv_obs.append(env._robot.data.joint_friction_coeff[:, jid : jid + 1])  # 1D: static friction
+    priv_obs.append(env._robot.data.joint_viscous_friction_coeff[:, jid : jid + 1])  # 1D: viscous friction
+
+    # Yaw quadratic damping (1D): independently DR'd from roll/pitch.
+    # Relevant for yaw_velocity constraint (ALBC cannot generate yaw torque).
+    priv_obs.append(env._hydro.quadratic_damping[:, 5:6])  # 1D: yaw axis
+
+    # Water density (1D): DR range 995-1025 kg/m^3.
+    # Affects buoyancy and hydrodynamic forces. DORAEMON curriculum target.
+    priv_obs.append(env._hydro.water_density.unsqueeze(-1))  # 1D
 
     return torch.cat(priv_obs, dim=-1)

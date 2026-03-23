@@ -60,6 +60,57 @@ def _rand_uniform_range(
     return torch.rand(shape, device=device) * (hi - lo) + lo
 
 
+def _sample_or_uniform(
+    key: str,
+    sampled: dict[str, torch.Tensor] | None,
+    shape: tuple | int,
+    range_tuple: tuple[float, float],
+    device: str | torch.device,
+    broadcast_dim: int | None = None,
+) -> torch.Tensor:
+    """Return DORAEMON-sampled value if available, otherwise uniform random.
+
+    Args:
+        key: DORAEMON parameter key to look up.
+        sampled: Optional dict of DORAEMON-sampled values (per-env scalars).
+        shape: Output tensor shape (used for uniform fallback).
+        range_tuple: (low, high) for uniform fallback.
+        device: Torch device.
+        broadcast_dim: If set, expand the sampled scalar along this dimension.
+    """
+    if sampled and key in sampled:
+        val = sampled[key]
+        if broadcast_dim is not None:
+            val = val.unsqueeze(-1).expand(-1, broadcast_dim)
+        return val
+    return _rand_uniform_range(shape, range_tuple, device)
+
+
+def _apply_xyz_offset_with_doraemon(
+    target: torch.Tensor,
+    env_ids: torch.Tensor,
+    base: torch.Tensor,
+    x_range: tuple[float, float],
+    y_range: tuple[float, float],
+    z_range: tuple[float, float],
+    z_key: str,
+    sampled: dict[str, torch.Tensor] | None,
+    device: str | torch.device,
+) -> None:
+    """Apply XYZ offsets with optional DORAEMON override on Z axis.
+
+    XY axes always use uniform random offsets. Z axis uses the DORAEMON-sampled
+    value if available (keyed by ``z_key``), otherwise uniform random.
+    """
+    num = len(env_ids)
+    target[env_ids, 0] = base[0] + _rand_uniform_range(num, x_range, device)
+    target[env_ids, 1] = base[1] + _rand_uniform_range(num, y_range, device)
+    if sampled and z_key in sampled:
+        target[env_ids, 2] = base[2] + sampled[z_key]
+    else:
+        target[env_ids, 2] = base[2] + _rand_uniform_range(num, z_range, device)
+
+
 # -----------------------------------------------------------------------------
 # DRSampler: bundles DR config for domain randomization
 # -----------------------------------------------------------------------------
@@ -166,6 +217,7 @@ def _randomize_hydro_model(
     hydro: HydrodynamicsModel,
     env_ids: torch.Tensor,
     dr: DRSampler,
+    sampled: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Apply domain randomization to a hydrodynamics model.
 
@@ -173,21 +225,27 @@ def _randomize_hydro_model(
         hydro: The hydrodynamics model to randomize.
         env_ids: Environment indices to randomize.
         dr: DRSampler with config.
+        sampled: Optional DORAEMON-sampled values (overrides uniform for matched keys).
     """
     n = dr.num_envs
     cfg = dr.cfg
     base = _get_hydro_base(hydro)
+    device = dr.device
 
-    # Added mass (scale each of 6 DOF)
-    am_scales = dr.get(cfg.added_mass_scale, shape=(n, 6))
+    # Added mass (scale each of 6 DOF). DORAEMON samples a single scale, broadcast to 6 DOF.
+    am_scales = _sample_or_uniform("added_mass_scale", sampled, (n, 6), cfg.added_mass_scale, device, broadcast_dim=6)
     hydro.added_mass_matrix[env_ids] = torch.diag_embed(base.added_mass.unsqueeze(0) * am_scales)
 
-    # Linear damping
-    ld_scales = dr.get(cfg.linear_damping_scale, shape=(n, 6))
+    # Linear damping. DORAEMON samples a single scale, broadcast to 6 DOF.
+    ld_scales = _sample_or_uniform(
+        "linear_damping_scale", sampled, (n, 6), cfg.linear_damping_scale, device, broadcast_dim=6
+    )
     hydro.linear_damping[env_ids] = base.linear_damping.unsqueeze(0) * ld_scales
 
-    # Quadratic damping
-    qd_scales = dr.get(cfg.quadratic_damping_scale, shape=(n, 6))
+    # Quadratic damping. DORAEMON samples a single scale, broadcast to 6 DOF.
+    qd_scales = _sample_or_uniform(
+        "quadratic_damping_scale", sampled, (n, 6), cfg.quadratic_damping_scale, device, broadcast_dim=6
+    )
     hydro.quadratic_damping[env_ids] = base.quadratic_damping.unsqueeze(0) * qd_scales
 
     # Yaw-specific quadratic damping override (index 5 = yaw)
@@ -199,29 +257,35 @@ def _randomize_hydro_model(
     vol_scales = dr.get(cfg.volume_scale)
     hydro.volume[env_ids] = base.volume * vol_scales
 
-    # Water density
-    hydro.water_density[env_ids] = dr.get(cfg.water_density_range)
+    # Water density (DORAEMON target: absolute value, not scale)
+    hydro.water_density[env_ids] = _sample_or_uniform("water_density", sampled, n, cfg.water_density_range, device)
 
     hydro.update_buoyancy_force(env_ids)
 
-    # Center of Buoyancy (offset from base)
-    dr.sample_xyz_offset(
+    # Center of Buoyancy (offset from base). Z axis uses DORAEMON if available.
+    _apply_xyz_offset_with_doraemon(
         hydro.center_of_buoyancy,
         env_ids,
         base.cob,
         cfg.cob_offset_x,
         cfg.cob_offset_y,
         cfg.cob_offset_z,
+        "cob_offset_z",
+        sampled,
+        device,
     )
 
-    # Center of Gravity (offset from base)
-    dr.sample_xyz_offset(
+    # Center of Gravity (offset from base). Z axis uses DORAEMON if available.
+    _apply_xyz_offset_with_doraemon(
         hydro.center_of_gravity,
         env_ids,
         base.cog,
         cfg.cog_offset_x,
         cfg.cog_offset_y,
         cfg.cog_offset_z,
+        "cog_offset_z",
+        sampled,
+        device,
     )
 
     # Rigid body inertia
@@ -248,6 +312,7 @@ def randomize_hydrodynamics(
     env: ALBCEnv,
     env_ids: torch.Tensor | None,
     dr: DRSampler,
+    sampled: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Randomize hydrodynamic parameters for main body and buoy.
 
@@ -255,16 +320,17 @@ def randomize_hydrodynamics(
         env: The ALBC environment instance.
         env_ids: Environment indices to randomize. If None, randomizes all.
         dr: DRSampler with config.
+        sampled: Optional DORAEMON-sampled values.
     """
     env_ids = _ensure_env_ids(env, env_ids)
 
     # Main body hydrodynamics
     if hasattr(env, "_hydro"):
-        _randomize_hydro_model(env._hydro, env_ids, dr)
+        _randomize_hydro_model(env._hydro, env_ids, dr, sampled)
 
     # Buoy (link3) hydrodynamics
     if hasattr(env, "_buoy_hydro"):
-        _randomize_hydro_model(env._buoy_hydro, env_ids, dr)
+        _randomize_hydro_model(env._buoy_hydro, env_ids, dr, sampled)
 
 
 def randomize_ocean_current(
@@ -497,6 +563,7 @@ def randomize_payload(
     env: ALBCEnv,
     env_ids: torch.Tensor | None,
     dr: DRSampler,
+    sampled: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Randomize payload parameters (mass, attachment offset, CoG offset).
 
@@ -506,6 +573,7 @@ def randomize_payload(
         env: The ALBC environment instance.
         env_ids: Environment indices to randomize. If None, randomizes all.
         dr: DRSampler with config.
+        sampled: Optional DORAEMON-sampled values.
     """
     env_ids = _ensure_env_ids(env, env_ids)
 
@@ -516,8 +584,8 @@ def randomize_payload(
     device = env.device
     cfg = dr.cfg
 
-    # Randomize mass
-    env._payload_mass[env_ids] = dr.get(cfg.payload_mass_range)
+    # Randomize mass (DORAEMON target)
+    env._payload_mass[env_ids] = _sample_or_uniform("payload_mass", sampled, num_reset, cfg.payload_mass_range, device)
 
     # Reset attachment offset to fixed default (no randomization)
     base_offset = torch.tensor(env.cfg.payload_attachment_offset, device=device, dtype=torch.float32)

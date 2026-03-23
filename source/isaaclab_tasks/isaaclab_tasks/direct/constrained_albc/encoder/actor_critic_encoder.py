@@ -185,14 +185,14 @@ class ActorCriticEncoder(nn.Module):
 
     @staticmethod
     def _build_fixed_encoder_normalizer(dim: int) -> nn.Module:
-        """Build fixed normalization for 23D privileged encoder input.
+        """Build fixed normalization for 28D privileged encoder input.
 
         Mean and std computed analytically from DR config distributions.
         For uniform U(a,b): mean = (a+b)/2, std = (b-a)/sqrt(12).
         For scaled values (base * U(lo,hi)): mean = base*(lo+hi)/2, std = base*(hi-lo)/sqrt(12).
         For disk-uniform (radius R): mean = 0, std = R/2.
 
-        Privileged obs order (23D):
+        Privileged obs order (28D):
             [0-2]   main hydro: volume, CoG_z, CoB_z
             [3-5]   buoy hydro: volume, CoG_z, CoB_z
             [6-7]   main inertia: Ixx, Iyy
@@ -205,6 +205,11 @@ class ActorCriticEncoder(nn.Module):
             [18-19] main linear damping roll, pitch
             [20-21] main quadratic damping roll, pitch
             [22]    main body mass
+            [23]    action latency (physics steps)
+            [24]    joint static friction
+            [25]    joint viscous friction
+            [26]    yaw quadratic damping
+            [27]    water density (kg/m^3)
         """
         s12 = math.sqrt(12.0)
 
@@ -233,6 +238,11 @@ class ActorCriticEncoder(nn.Module):
             1.0,                       # [20] main quad_damp roll: 1.0 * mean(U(0.5,1.5))
             1.0,                       # [21] main quad_damp pitch: same
             9.18,                      # [22] body mass: 9.18 * mean(U(0.9,1.1))
+            2.0,                       # [23] action latency: mean(U(0,4)) = 2.0
+            0.015,                     # [24] joint static friction: mean(U(0,0.03)) = 0.015
+            0.1,                       # [25] joint viscous friction: mean(U(0,0.2)) = 0.1
+            1.0,                       # [26] yaw quad_damp: 1.0 * mean(U(0.5,1.5)) = 1.0
+            1010.0,                    # [27] water density: mean(U(995,1025)) = 1010
         ])
 
         std = torch.tensor([
@@ -259,18 +269,23 @@ class ActorCriticEncoder(nn.Module):
             1.0 * 1.0 / s12,           # [20] main quad_damp roll (scale range 1.0)
             1.0 * 1.0 / s12,           # [21] main quad_damp pitch
             9.18 * 0.2 / s12,          # [22] body mass (scale range 0.2)
+            4.0 / s12,                 # [23] action latency (range 4)
+            0.03 / s12,                # [24] joint static friction (range 0.03)
+            0.2 / s12,                 # [25] joint viscous friction (range 0.2)
+            1.0 * 1.0 / s12,           # [26] yaw quad_damp (scale range 1.0)
+            30.0 / s12,                # [27] water density (range 30)
         ])
         # fmt: on
 
-        if dim != 23:
+        if dim != 28:
             logger.warning(
-                "Fixed encoder normalizer expects 23D privileged obs, got %d. Falling back to EmpiricalNormalization.",
+                "Fixed encoder normalizer expects 28D privileged obs, got %d. Falling back to EmpiricalNormalization.",
                 dim,
             )
             return EmpiricalNormalization(dim)
 
         normalizer = _FixedNormalization(mean, std)
-        logger.info("Encoder using fixed normalization (23D, analytical DR stats)")
+        logger.info("Encoder using fixed normalization (28D, analytical DR stats)")
         return normalizer
 
     def reset(self, _dones: torch.Tensor | None = None) -> None:

@@ -4,6 +4,59 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-23] DORAEMON DR curriculum + privileged obs expansion (23D -> 28D)
+
+### Context
+NORBC paper analysis revealed that the paper uses terrain curriculum for progressive
+task difficulty, while our constrained ALBC had no equivalent mechanism. Domain
+randomization parameters for "environment-like" factors (payload, hydrodynamic
+properties) were applied at full range from iteration 0, potentially overwhelming
+early policy learning.
+
+Ported DORAEMON (Domain Randomization via Entropy Maximization, ICLR 2024) from
+hero_agent to constrained_albc. DORAEMON uses Beta distributions over DR parameters,
+maximizing entropy (distribution width) subject to policy success rate >= 50%.
+This provides an adaptive curriculum: starts narrow around nominal, expands as
+policy improves, contracts if success rate drops.
+
+Additionally, gap analysis of privileged observations identified 5 DR'd parameters
+not visible to the encoder. Most impactful: action latency (0-4 steps, affects 40%
+of 50Hz control period) and water density (DORAEMON curriculum target that encoder
+cannot adapt to if not observed).
+
+### Added
+- `constrained_albc/doraemon.py`: DORAEMON scheduler ported from hero_agent with
+  7 curriculum-managed parameters (payload_mass, added_mass_scale, linear_damping_scale,
+  quadratic_damping_scale, water_density, cog_offset_z, cob_offset_z). Success
+  threshold fixed at 10 deg (no annealing). Ranges match current DomainRandomizationCfg.
+
+### Changed
+- `config.py`: Added `doraemon: DoraemonCfg` field (enabled by default), updated
+  state_space 23 -> 28 for expanded privileged obs.
+- `mdp/events.py`: Added `_sample_or_uniform()` and `_apply_xyz_offset_with_doraemon()`
+  helpers. `_randomize_hydro_model()`, `randomize_hydrodynamics()`, `randomize_payload()`
+  now accept optional `sampled` dict for DORAEMON override of uniform sampling.
+- `albc_env.py`: Added `_init_doraemon()` (scheduler + tracking buffers), settling error
+  accumulation in `_get_rewards()`, episode recording in `_log_and_reset_rewards()`,
+  DORAEMON sampling in `_reset_physics()`.
+- `mdp/observations.py`: Extended privileged obs from 23D to 28D with action_latency(1D),
+  joint_static_friction(1D), joint_viscous_friction(1D), yaw_quadratic_damping(1D),
+  water_density(1D).
+- `encoder/actor_critic_encoder.py`: Updated fixed normalizer from 23D to 28D with
+  analytical mean/std for all 28 dimensions.
+- `runners/constraint_encoder_runner.py`: Added DORAEMON step() call in log(),
+  doraemon_state.pt save/load in checkpoint methods.
+- `agents/rsl_rl_ppo_cfg.py`: Updated privileged_dim 23 -> 28.
+
+### Notes
+- Non-DORAEMON DR parameters (joint gains, effort limits, friction, initial pose) remain
+  fixed uniform as before. DORAEMON only manages "environment-like" parameters.
+- Encoder dimension change (23->28) breaks checkpoint compatibility. New checkpoints
+  will auto-reinitialize encoder via existing dim mismatch handling.
+- CoG/CoB xy offsets intentionally not added to privileged obs (+-0.01m, negligible
+  vs 6-10Nm effort limits). Only z-components included (dominate roll/pitch dynamics).
+- Perturbation forces not in privileged obs (per-step stochastic, not episode-level).
+
 ## [2026-03-23] Constraint enforcement: Lagrangian -> Log Barrier (Modified IPO)
 
 ### Context
