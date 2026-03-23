@@ -12,7 +12,7 @@ adaptive constraint thresholding for initial infeasibility.
 Key design decisions:
     - Log barrier: -sum_k log(d_k^i - J_hat_C_k) / t (always-on constraint gradient)
     - Adaptive thresholding: d_k^i = max(d_k, J_C_k + alpha * d_k) for infeasible starts
-    - Raw cost advantages (no standardization): barrier margin requires actual cost units
+    - Per-constraint cost advantage standardization (NORBC Sec IV-B): equalizes gradient scale
     - LS-gated encoder updates: when line search fails, both actor and encoder frozen
     - Noise floor (min_std): primary exploration maintenance, outside trust region
     - Multi-step encoder with KL gating: prevents encoder-induced distribution shift
@@ -161,7 +161,6 @@ class ConstraintTRPO:
                 self._policy_params.append(param)
 
         self._value_params = value_params
-        self._base_value_lr = value_lr  # B2: saved for LR gating
         self.value_optimizer = optim.Adam(value_params, lr=value_lr)
         self._has_encoder_params = len(encoder_params) > 0
         self.encoder_lr = encoder_lr
@@ -297,7 +296,7 @@ class ConstraintTRPO:
             self.storage.cost_returns[step] = advantage + self.storage.cost_values[step]
         self.storage.cost_advantages = self.storage.cost_returns - self.storage.cost_values
 
-        # Sanitize non-finite values (barrier needs finite raw advantages).
+        # Sanitize non-finite values before standardization.
         finite_mask = torch.isfinite(self.storage.cost_advantages).all(dim=(0, 1))  # (K,)
         bad_constraints = ~finite_mask
         if bad_constraints.any():
@@ -487,7 +486,14 @@ class ConstraintTRPO:
 
         # Cost storage flatten
         cost_returns_flat = self.storage.cost_returns.flatten(0, 1).clone()  # (B, K)
-        cost_advantages_flat = self.storage.cost_advantages.flatten(0, 1).clone()  # (B, K) raw
+        cost_advantages_flat = self.storage.cost_advantages.flatten(0, 1).clone()  # (B, K)
+
+        # Per-constraint cost advantage standardization (NORBC Sec IV-B).
+        # Equalizes gradient magnitude across constraints so barrier 1/margin_k
+        # provides proximity-based prioritization only.
+        ca_mean = cost_advantages_flat.mean(dim=0, keepdim=True)  # (1, K)
+        ca_std = cost_advantages_flat.std(dim=0, keepdim=True)  # (1, K)
+        cost_advantages_flat = (cost_advantages_flat - ca_mean) / (ca_std + 1e-8)
 
         batch_size = obs_flat.batch_size[0]
 
@@ -564,7 +570,7 @@ class ConstraintTRPO:
         # 4. Value function update (pure MSE)
         # ------------------------------------------------------------------
         mean_value_loss, mean_cost_value_loss = self._update_values(
-            obs_flat, returns_flat, cost_returns_flat, batch_size, actor_updated=ls_success
+            obs_flat, returns_flat, cost_returns_flat, batch_size
         )
 
         # ------------------------------------------------------------------
@@ -694,21 +700,11 @@ class ConstraintTRPO:
         returns_flat: torch.Tensor,
         cost_returns_flat: torch.Tensor,
         batch_size: int,
-        actor_updated: bool = True,
     ) -> tuple[float, float]:
-        """Update value functions (reward + cost) via MSE.
-
-        B2: When actor is frozen (actor_updated=False), cost critic LR is reduced
-        10x to prevent lambda oscillation from cost value drift.
-        """
+        """Update value functions (reward + cost) via MSE."""
         mean_value_loss = 0.0
         mean_cost_value_loss = 0.0
         num_value_updates = 0
-
-        # B2: Reduce value LR when actor is frozen to slow cost critic drift
-        if not actor_updated:
-            for pg in self.value_optimizer.param_groups:
-                pg["lr"] = self._base_value_lr * 0.1
 
         for _epoch in range(self.num_learning_epochs):
             indices = torch.randperm(batch_size, device=self.device)
@@ -747,11 +743,6 @@ class ConstraintTRPO:
         if num_value_updates > 0:
             mean_value_loss /= num_value_updates
             mean_cost_value_loss /= num_value_updates
-
-        # B2: Restore value LR after update
-        if not actor_updated:
-            for pg in self.value_optimizer.param_groups:
-                pg["lr"] = self._base_value_lr
 
         return mean_value_loss, mean_cost_value_loss
 

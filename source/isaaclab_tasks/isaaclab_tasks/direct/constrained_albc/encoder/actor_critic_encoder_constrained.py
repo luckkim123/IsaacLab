@@ -22,7 +22,6 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 import torch
-import torch.nn.functional as F
 from rsl_rl.networks import MLP
 
 from .actor_critic_encoder import ActorCriticEncoder
@@ -72,10 +71,10 @@ class ActorCriticEncoderConstrained(ActorCriticEncoder):
         Uses the same asymmetric critic input: cat([policy_obs, hist_flat, privileged]).
 
         Returns:
-            Cost values (ReLU activated, non-negative). Shape: (batch, K).
+            Cost value predictions. Shape: (batch, K).
         """
         critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))  # type: ignore[operator]
-        return F.relu(self.cost_critic(critic_obs))
+        return self.cost_critic(critic_obs)
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
         """Load with backward compatibility for checkpoints without cost_critic or K/dim mismatch."""

@@ -57,6 +57,54 @@ Design decisions:
 - Watch barrier_margin metrics in TB to verify constraint proximity tracking.
 - barrier_t and barrier_alpha may need tuning after first run results.
 
+## [2026-03-23] Modified IPO code review: restore standardization, remove Lagrangian remnants
+
+### Context
+Systematic comparison of NORBC paper's Modified IPO algorithm (Eq 8-11, Algorithm 1)
+against `constraint_trpo.py` implementation. Verified all core elements are correctly
+implemented: d_k conversion, adaptive thresholding, log barrier surrogate, TRPO natural
+gradient, multi-head cost critic, cost GAE.
+
+Identified three issues in additional elements not from the paper:
+
+1. **Cost advantage standardization incorrectly removed**: Previous session (100e7996)
+   removed per-constraint standardization claiming "barrier margin requires actual cost
+   units". This was wrong -- barrier_base (d_k - J_C_k) is in raw units regardless of
+   advantage standardization. Standardization equalizes gradient magnitude across constraints
+   so barrier 1/margin_k provides proximity-based prioritization only. Restored.
+
+2. **B2 Value LR Gating**: Reduced value optimizer LR to 10% when line search failed.
+   Comment says "prevent lambda oscillation from cost value drift" -- but log barrier has
+   no lambda. This was a Lagrangian remnant. Also affected reward critic unnecessarily
+   (shared optimizer). Could create negative feedback loop: LS failure -> slow value
+   learning -> poor advantages -> more LS failures. Removed.
+
+3. **Cost critic output ReLU**: Applied F.relu() to cost critic output to enforce
+   non-negativity. Zero gradient region at initialization could slow early learning.
+   Non-negativity is already handled by cost return clamp(min=0) on training targets.
+   Removed. Decision documented in memory for potential revisiting.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Restored per-constraint cost advantage standardization
+  (NORBC Sec IV-B). `(A_C_k - mean_k) / (std_k + 1e-8)` per constraint k.
+- `algorithms/constraint_trpo.py`: Updated module docstring and comments to reflect
+  standardization restoration.
+- `encoder/actor_critic_encoder_constrained.py`: Removed `F.relu()` from `evaluate_costs()`
+  output. Cost critic now returns raw MLP output.
+
+### Removed
+- `algorithms/constraint_trpo.py`: B2 value LR gating (`_base_value_lr` field,
+  `actor_updated` parameter, LR reduction/restoration logic). Lagrangian remnant
+  inapplicable to log barrier.
+- `encoder/actor_critic_encoder_constrained.py`: Unused `import torch.nn.functional as F`.
+
+### Notes
+- Cost return `clamp(min=0.0)` retained (line 504, 739): theoretically correct defense
+  against GAE approximation errors producing negative returns for non-negative quantities.
+- Cost critic ReLU removal is unverified experimentally. If cost critic outputs persistently
+  negative values during training, consider restoring ReLU or using Softplus.
+- Current training run uses old Lagrangian code. New run needed to test all changes.
+
 ## [2026-03-23] Encoder activation: tanh -> softsign (gradient vanishing fix)
 
 ### Context
