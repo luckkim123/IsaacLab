@@ -55,7 +55,7 @@ class _EncoderPolicyCfg(RslRlPpoActorCriticCfg):
     critic_hidden_dims: list[int] = [256, 128, 64]
     activation: str = "elu"
     # Encoder
-    encoder_hidden_dims: list[int] = [256, 128, 64]
+    encoder_hidden_dims: list[int] = [128, 64]
     encoder_latent_dim: int = 13
     encoder_activation: str = "elu"
     encoder_obs_normalization: bool = True

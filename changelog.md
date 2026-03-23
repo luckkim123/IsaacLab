@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-23] P0 encoder saturation fix: weight_decay + architecture reduction
+
+### Context
+Training run `2026-03-23_12-47-29` (306 iter) showed encoder z saturation within 30 iterations:
+z_range reached [-1.0, 1.0], z_std=0.97 (bimodal at boundaries), enc_grad=0.0009 (gradient
+death). noise_std collapsed to min_std floor (0.2) by iter 60. Attitude errors plateaued at
+roll=11.3 deg, pitch=22.4 deg. All Lagrangian lambdas = 0 (constraints not violated but
+attitude tracking too poor to matter).
+
+Root cause analysis identified cascading failure: encoder saturation -> noise collapse -> attitude
+plateau. Two contributing factors in encoder:
+1. weight_decay=1e-5 too weak (hero_agent fix was 1e-4, 10x stronger)
+2. Encoder [256,128,64] severely over-parameterized for 23D privileged input (48,141 params,
+   2,093x input dimension). ELU hidden layers allow unbounded pre-activation growth through
+   3 layers, causing rapid tanh saturation.
+
+Previous z_bounds_loss false-positive analysis (2026-03-21) was for z_std=0.71 with batch
+min/max at +-0.97 (tail statistics). Current z_std=0.97 + enc_grad=0.0009 is genuine saturation,
+matching the criteria defined in that same entry: "True saturation would show z_std near 1.0
+(bimodal at boundaries) and enc_grad < 1e-4."
+
+EAPO removal (2026-03-22 session) also contributed to noise collapse: previous run with EAPO
+maintained noise_std=0.33, current run without EAPO collapsed to floor (0.20).
+
+### Changed
+- `algorithms/constraint_trpo.py`: Encoder optimizer weight_decay 1e-5 -> 1e-4 (10x increase,
+  matching hero_agent fix from 2026-03-03). Stronger L2 regularization constrains encoder weight
+  magnitudes, reducing pre-activation scale at tanh output layer.
+- `agents/rsl_rl_ppo_cfg.py`: encoder_hidden_dims [256,128,64] -> [128,64] (3-layer to 2-layer,
+  48,141 -> 12,173 params, 4x reduction). HORA reference uses 2-layer encoder for similar
+  dimensionality. Reduces over-parameterization ratio from 2,093x to 529x.
+
+### Notes
+- Checkpoint incompatible: encoder first layer shape changes (256,23) -> (128,23). Must start fresh.
+- Constraint analysis: all 6 constraints within budget (lambda=0). Constraint system working
+  correctly but irrelevant while attitude tracking is this poor.
+- Future consideration: constraint budget relaxation + reward sigma increase (sigma=0.15 gives
+  near-zero gradient at 20+ deg error). Deferred until encoder fix is validated.
+- noise_std collapse (0.2 floor) may need separate fix (min_std increase or EAPO restoration)
+  if weight_decay + architecture changes don't indirectly help.
+
 ## [2026-03-23] Code restructuring and simplification (2 sessions)
 
 ### Context

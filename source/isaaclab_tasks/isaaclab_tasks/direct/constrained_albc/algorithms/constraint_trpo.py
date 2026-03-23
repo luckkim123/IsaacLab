@@ -167,7 +167,7 @@ class ConstraintTRPO:
         self.encoder_lr = encoder_lr
         if self._has_encoder_params:
             self._encoder_params = encoder_params
-            self.encoder_optimizer = optim.Adam(encoder_params, lr=encoder_lr, weight_decay=1e-5)
+            self.encoder_optimizer = optim.Adam(encoder_params, lr=encoder_lr, weight_decay=1e-4)
         else:
             self._encoder_params = []
             self.encoder_optimizer = None
