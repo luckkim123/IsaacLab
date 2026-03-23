@@ -65,6 +65,16 @@ class DoraemonCfg:
     min_episodes: int = 200
     """Minimum episodes before first DORAEMON update."""
 
+    traversability_tau_deg: float = 2.0
+    """Sigmoid temperature for soft traversability (degrees). Controls transition
+    sharpness around success threshold. At tau=2, success transitions from ~1.0
+    at threshold-4 deg to ~0.0 at threshold+4 deg."""
+
+    min_ess_ratio: float = 0.05
+    """Minimum ESS/buffer_size ratio. If post-optimization ESS falls below this,
+    the update is reverted to prevent unreliable IS estimates from corrupting
+    the distribution."""
+
     param_overrides: dict[str, tuple[float, float]] = {}
     """Per-parameter bound overrides as {name: (min_bound, max_bound)}.
     Use to tighten or shift DORAEMON bounds for specific environments.
@@ -476,6 +486,33 @@ class DoraemonScheduler:
         metrics["kl_step"] = self.dist.kl_divergence(prev_dist)
         metrics["backup_count"] = float(self._backup_count)
 
+        # ESS validation: revert if IS estimator quality is too low
+        ess, ess_ratio = self._compute_ess(xi, prev_dist, n)
+        metrics["ess"] = ess
+        metrics["ess_ratio"] = ess_ratio
+        if ess < self.cfg.min_ess_ratio * n:
+            self.dist = prev_dist
+            metrics["reverted"] = 1.0
+            metrics["entropy_after"] = self.dist.entropy()
+            metrics["kl_step"] = 0.0
+            logger.warning(
+                "[DORAEMON] Reverted: ESS=%.0f (%.1f%% of %d)",
+                ess,
+                100 * ess_ratio,
+                n,
+            )
+
+        # Per-parameter sensitivity: Pearson correlation with success
+        for i, spec in enumerate(self.dist.params):
+            xi_i = xi[:, i]
+            xi_mean, s_mean = xi_i.mean(), success.mean()
+            cov = ((xi_i - xi_mean) * (success - s_mean)).mean()
+            xi_std, s_std = xi_i.std(), success.std()
+            if xi_std > 1e-8 and s_std > 1e-8:
+                metrics[f"sensitivity/{spec.name}"] = (cov / (xi_std * s_std)).item()
+            else:
+                metrics[f"sensitivity/{spec.name}"] = 0.0
+
         # Per-parameter distribution stats
         param_stats = self.dist.get_stats()
         for k, v in param_stats.items():
@@ -496,6 +533,25 @@ class DoraemonScheduler:
         self._current_threshold_deg = cfg.success_threshold_deg + t * (
             cfg.success_threshold_deg_final - cfg.success_threshold_deg
         )
+
+    def _compute_ess(
+        self,
+        xi: torch.Tensor,
+        prev_dist: BetaDistribution,
+        n: int,
+    ) -> tuple[float, float]:
+        """Compute Effective Sample Size between current and previous distribution.
+
+        Returns:
+            (ess, ess_ratio): ESS value and ESS/n ratio.
+        """
+        new_lp = self.dist.log_prob(xi)
+        old_lp = prev_dist.log_prob(xi)
+        log_ratio = new_lp - old_lp
+        weights = torch.exp(log_ratio - log_ratio.max())
+        weights = weights / weights.sum()
+        ess = (1.0 / (weights**2).sum()).item()
+        return ess, ess / max(n, 1)
 
     def _estimate_success_rate(
         self,

@@ -18,6 +18,8 @@ force calculations.
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 import isaaclab.sim as sim_utils
@@ -901,7 +903,10 @@ class ALBCEnv(DirectRLEnv):
             threshold_rad = torch.deg2rad(torch.tensor(current_threshold, device=self.device))
             filled = self._settling_idx[env_ids].clamp(max=self._settling_window).float()
             mean_settling_err = self._settling_errors[env_ids].sum(dim=-1) / filled.clamp(min=1.0)
-            success = (mean_settling_err < threshold_rad).float()
+            # Soft traversability: sigmoid gives smooth [0,1] instead of binary {0,1}.
+            # Improves IS estimator gradient for scipy trust-constr optimizer.
+            tau_rad = math.radians(self._doraemon.cfg.traversability_tau_deg)
+            success = torch.sigmoid(-(mean_settling_err - threshold_rad) / tau_rad)
 
             self._doraemon.record_episodes(
                 xi=self._episode_dr_xi[env_ids],

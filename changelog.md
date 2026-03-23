@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-23] DORAEMON IS estimator improvements: soft traversability, ESS monitoring, sensitivity
+
+### Context
+Compared NORBC paper's particle filter terrain curriculum against current DORAEMON
+implementation. Key insight: NORBC uses continuous traversability Tr in [0,1] with a
+desirability window [0.5, 0.9], while DORAEMON used binary success {0,1}. Binary
+success causes discontinuous constraint surface for the scipy trust-constr optimizer
+(10.1 deg failure = 60 deg catastrophic failure). Additionally, IS estimator quality
+was never validated -- ESS could silently degrade to 1 (single episode dominates),
+and there was no way to diagnose which DR parameters drive training difficulty.
+
+Three targeted improvements applied to constrained_albc DORAEMON only (hero_agent
+unchanged -- improvements to be ported after validation).
+
+### Changed
+- `constrained_albc/doraemon.py`: Added `traversability_tau_deg` (default 2.0 deg) and
+  `min_ess_ratio` (default 0.05) config fields. Added `_compute_ess()` method for
+  post-optimization IS quality validation. In `step()`: ESS check reverts distribution
+  update if ESS < 5% of buffer size. Per-parameter Pearson sensitivity correlation
+  (`sensitivity/{param_name}`) logged for all 7 DORAEMON parameters.
+- `constrained_albc/albc_env.py`: Added `import math`. Replaced binary success
+  `(err < threshold).float()` with soft sigmoid `sigmoid(-(err - threshold) / tau)`
+  for continuous traversability [0, 1]. tau = 2 deg gives transition from ~1.0 at
+  threshold-4 deg to ~0.0 at threshold+4 deg.
+
+### Notes
+- Desirability window upper bound (Tr <= 0.9) deemed unnecessary -- entropy maximization
+  implicitly handles "too easy" by expanding distribution until SR drops toward alpha.
+- Particle filter approach rejected for 7D (curse of dimensionality). Beta distributions
+  are more sample-efficient but cannot model parameter correlations.
+- Sensitivity logging enables future correlation-aware improvements if independent Beta
+  proves insufficient (|rho| > 0.3 indicates a dominant parameter).
+
 ## [2026-03-23] DORAEMON DR curriculum + privileged obs expansion (23D -> 28D)
 
 ### Context
