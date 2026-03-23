@@ -606,11 +606,8 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         return {
             "value_function": mean_value_loss,
-            "barrier_penalty": self._last_barrier_penalty,
             "kl": mean_kl,
             "cost_value": mean_cost_value_loss,
-            "adv_raw_std": adv_raw_std.item(),
-            "surrogate": self._last_surrogate_loss,
         }
 
     # ==================================================================

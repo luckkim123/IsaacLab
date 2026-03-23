@@ -4,6 +4,51 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-23] WandB logging dedup + train-analyze skill update
+
+### Context
+Changelog analysis revealed progress history, then prepared for next training run by
+cleaning up WandB logging duplicates and updating the train-analyze skill to match
+the current constrained ALBC architecture. Key issues: (1) barrier_penalty logged
+twice (Loss/ via loss_dict and Constraint/ via runner), (2) train-analyze skill
+referenced dead metrics (Lagrangian, recovery mode, EAPO, energy/smoothness rewards)
+and lacked coverage of new features (DORAEMON, TRPO diagnostics, entropy bonus).
+
+### Changed
+- `algorithms/constraint_trpo.py`: Removed `barrier_penalty`, `surrogate`, `adv_raw_std`
+  from update() return dict. These were logged under Loss/ by parent OnPolicyRunner,
+  duplicating Constraint/barrier_penalty and TRPO/ metrics. Final Loss/ section: only
+  `value_function`, `kl`, `cost_value` (3 clean items).
+- `train-analyze/analyze_training.py` (skill, non-git): Major update to match current
+  logging structure:
+  - ANOMALY_RULES: `Loss/entropy` -> `Policy/entropy`, removed `lagrangian_penalty`,
+    z saturation threshold relaxed -0.95 -> -0.98 (softsign has wider z distribution)
+  - TIER 1: entropy source `Policy/entropy`, added `entropy_bonus`
+  - TIER 2: Removed Mode Switching section (recovery mode deleted). Added TRPO Step
+    Quality (shs, step_norm, grad_norm, backtracks, val_grad, enc_grad) and DORAEMON
+    (success_rate, entropy, ess_ratio, mode + quartile trends)
+  - TIER 3: Removed dead refs (cost_surrogate, z_bounds, kl_trpo, energy, smoothness,
+    penalty_scale). Added DORAEMON sensitivity auto-discovery from TB tags
+  - Diagnosis: Removed `_check_mode_cycling`, added `_check_doraemon_ess_low`
+  - Constraint margin key: `Constraint/margin_*` -> `Constraint/barrier_margin_*`
+  - Plot panels: Removed recovery overlay, added DORAEMON Curriculum + TRPO Line Search
+    panels, updated Encoder Learning panel to use TRPO/encoder_grad_norm
+- `train-analyze/tslib.py` (skill, non-git): Added `Policy/entropy`, `TRPO/step_norm`,
+  `DORAEMON/success_rate` to KEY_METRICS. Added TRPO/DORAEMON lag pairs. Updated HMM
+  binary_tags from `Constraint/mode` to `Policy/line_search_success`, `DORAEMON/reverted`.
+
+### Removed
+- `algorithms/constraint_trpo.py`: 3 redundant loss_dict entries (barrier_penalty,
+  surrogate, adv_raw_std)
+- `analyze_training.py`: `_check_mode_cycling()` function, Mode Switching TIER 2 section,
+  Plot 1 recovery mode overlay, all Lagrangian/recovery references
+
+### Notes
+- Verified with latest run (2026-03-23_19-59-08): all tiers render correctly, DORAEMON
+  and TRPO sections populate with real data
+- noise_std=8.30 CEILING anomaly detected in latest run -- entropy_coef=0.01 too strong
+  for new entropy bonus feature. Needs tuning before next training run
+
 ## [2026-03-23] TRPO step quality diagnostic logging
 
 ### Context
