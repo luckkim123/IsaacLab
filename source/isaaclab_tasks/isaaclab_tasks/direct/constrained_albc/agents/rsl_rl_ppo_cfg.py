@@ -135,6 +135,11 @@ class RslRlConstraintTRPOAlgorithmCfg:
     trust region optimization). Prevents exploration collapse without consuming
     KL budget."""
 
+    entropy_coef: float = 0.01
+    """Entropy regularization coefficient for TRPO surrogate. Adds upward
+    pressure on action std, preventing premature noise collapse before
+    min_std floor. Set 0.0 to disable. PPO standard: 0.01."""
+
     # Post-encoder KL gating
     max_encoder_kl: float = 0.016
     """Maximum additional KL divergence allowed from encoder update. If an encoder

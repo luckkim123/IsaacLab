@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-23] C-TRPO entropy bonus: prevent premature noise collapse
+
+### Context
+Analyzed 4 reference papers (NORBC, Mini Cheetah, ANYmal locomotion) on noise
+policy in RL for robotics. All papers use state-independent learnable std
+(nn.Parameter(log_std)) with entropy bonus in the policy loss. The current
+C-TRPO implementation had NO entropy coefficient -- the surrogate was purely
+reward_surr + barrier with zero upward pressure on action std.
+
+Training run 2026-03-23_18-59-00 at 1387 iterations confirmed the issue:
+noise_std hit the min_std floor (0.2) by iteration ~200 and remained there for
+1200+ iterations. Despite good reward (20.56) and 100% line search success,
+exploration was effectively frozen. 3 constraints (joint_torque, joint_vel_limit,
+yaw_vel) exceeded budgets with barrier_penalty negative (-0.19), indicating
+adaptive thresholding kept barriers inactive.
+
+Key mathematical insight: in TRPO, entropy bonus changes the gradient direction
+g but NOT the Fisher matrix F. The natural gradient F^{-1}g incorporates
+entropy-increasing direction while KL trust region controls step size. This
+makes entropy_coef less sensitive to tuning than in PPO.
+
+### Added
+- `algorithms/constraint_trpo.py`: `entropy_coef` parameter (default 0.0 for
+  backward compatibility), `_last_entropy_bonus` monitoring attribute. Entropy
+  bonus `-entropy_coef * mean_entropy` added to surrogate objective.
+- `agents/rsl_rl_ppo_cfg.py`: `entropy_coef: float = 0.01` config field in
+  RslRlConstraintTRPOAlgorithmCfg. Matches standard PPO default.
+- `runners/constraint_encoder_runner.py`: `Policy/entropy_bonus` metric logging.
+
+### Notes
+- Rejected alternatives: adaptive entropy (SAC-style, too complex for first
+  iteration), DORAEMON-linked entropy (ad-hoc coupling), min_std increase
+  (no gradient signal), state-dependent noise (overkill for 2D actions).
+- Entropy bonus magnitude at std=0.2: ~0.008, vs barrier ~0.2 per constraint,
+  vs reward surrogate ~O(1). Constraint safety maintained.
+- Existing checkpoints fully compatible (entropy_coef is config, not state_dict).
+
 ## [2026-03-23] DORAEMON IS estimator improvements: soft traversability, ESS monitoring, sensitivity
 
 ### Context

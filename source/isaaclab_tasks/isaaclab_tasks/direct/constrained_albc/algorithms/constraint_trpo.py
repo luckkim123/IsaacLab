@@ -78,6 +78,8 @@ class ConstraintTRPO:
         encoder_lr: float = 3e-4,
         # Noise floor (exploration maintenance)
         min_std: float = 0.2,
+        # Entropy regularization
+        entropy_coef: float = 0.0,
         # Post-encoder KL gating
         max_encoder_kl: float = 0.016,
         # Device
@@ -115,6 +117,7 @@ class ConstraintTRPO:
         self.line_search_kl_margin = line_search_kl_margin
         self.num_encoder_epochs = num_encoder_epochs
         self.min_std = min_std
+        self._entropy_coef = entropy_coef
         self.max_encoder_kl = max_encoder_kl
 
         # Log barrier parameters (Modified IPO)
@@ -128,6 +131,7 @@ class ConstraintTRPO:
         self._last_line_search_success = 0.0
         self._last_barrier_penalty = 0.0
         self._last_mean_entropy = 0.0
+        self._last_entropy_bonus = 0.0
         self._last_surrogate_loss = 0.0
         self._last_pre_encoder_kl = 0.0
 
@@ -533,8 +537,12 @@ class ConstraintTRPO:
             margin = barrier_base - cost_surrs  # (K,)
             barrier = -torch.log(margin.clamp(min=1e-8)).sum() / self._barrier_t
             self._last_barrier_penalty = barrier.item()
-            self._last_mean_entropy = self.policy.entropy.mean().item()
-            return reward_surr + barrier
+            # Entropy bonus: maximize entropy (negative in minimization objective)
+            mean_entropy = self.policy.entropy.mean()
+            self._last_mean_entropy = mean_entropy.item()
+            entropy_bonus = -self._entropy_coef * mean_entropy
+            self._last_entropy_bonus = entropy_bonus.item()
+            return reward_surr + barrier + entropy_bonus
 
         ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate)
 
