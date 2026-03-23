@@ -4,6 +4,37 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-23] Reward architecture: exponential command + torque penalty
+
+### Context
+Analyzed reward functions from 4 reference papers to identify gaps in current
+constrained ALBC reward design. Paper 1 (base paper) uses a 3-term reward:
+command tracking (exponential), joint torque penalty, and action smoothness.
+Current code only had 2 terms (command + smoothness) with min_laplacian kernel.
+Two changes needed: (1) switch command reward to exponential form (Gaussian kernel)
+for better precision near zero, (2) add joint torque penalty for energy efficiency.
+
+### Added
+- `mdp/rewards.py`: `joint_torque_penalty()` function -- `mean(tau^2)` for ALBC joints
+  using PhysX computed_torque. dt-scaled, default weight=-0.001.
+- `mdp/rewards.py`: `"exponential"` command_type -- `exp(-e_r^2/sigma^2) + exp(-e_p^2/sigma^2)`,
+  per-axis Gaussian sum. Bounded [0, 2], matches paper 1 Appendix A form.
+- `ALBCRewardCfg`: `torque_weight` field (default -0.001)
+
+### Changed
+- `config.py`: Default reward config: command_type `"min_laplacian"` -> `"exponential"`,
+  smoothness_weight `-0.1` -> `-0.5`, added `torque_weight=-0.001`
+- `albc_env.py`: `_build_reward_terms()` registers torque term when weight != 0
+- `mdp/__init__.py`: Added `joint_torque_penalty` to exports
+
+### Notes
+- Torque weight intentionally small (-0.001): tau^2 scale is large (~90 for 9.5Nm motor).
+  Monitor Episode_Reward/torque in WandB and adjust if needed.
+- Paper 1's mass scaling (k_tau * m_bar/m) not implemented -- DR body_mass variation
+  is only +-10%, effect negligible. Can add if robot mass changes significantly.
+- Exponential kernel sigma=0.15 rad (~8.6 deg) retained. At sigma, reward per axis = 1/e ~ 0.37.
+- Previous laplacian/min_laplacian types preserved for ablation experiments.
+
 ## [2026-03-23] WandB logging dedup + train-analyze skill update
 
 ### Context

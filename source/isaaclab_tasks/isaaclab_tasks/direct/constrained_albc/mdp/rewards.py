@@ -8,9 +8,10 @@
 Provides reward configuration, a lightweight reward manager, and reward
 functions for ALBC (joint-based attitude control) training.
 
-2-term reward architecture:
-    1. command    (+): attitude tracking (quadratic or laplacian), dt-scaled
+3-term reward architecture:
+    1. command    (+): attitude tracking (exponential, quadratic, or laplacian), dt-scaled
     2. smoothness (-): mean(da^2) + mean(d2a^2), dt-scaled
+    3. torque     (-): mean(tau^2) joint torque penalty, dt-scaled
 
 Plus: termination_penalty (one-time, NOT dt-scaled).
 """
@@ -38,30 +39,36 @@ if TYPE_CHECKING:
 
 @configclass
 class ALBCRewardCfg:
-    """ALBC reward configuration: 2-term architecture.
+    """ALBC reward configuration: 3-term architecture.
 
     Active terms (all dt-scaled):
-        command    (+5.0): attitude tracking (quadratic or laplacian)
-        smoothness (-0.1): mean(da^2) + mean(d2a^2) action smoothness
+        command    (+5.0): attitude tracking (exponential, quadratic, or laplacian)
+        smoothness (-0.5): mean(da^2) + mean(d2a^2) action smoothness
+        torque     (-0.001): mean(tau^2) joint torque penalty
     """
 
     # Command tracking reward
     command_weight: float = 5.0
-    command_type: str = "quadratic"
-    """Reward type: "quadratic" = -(e_r^2 + e_p^2),
-    "laplacian" = exp(-|e|/sigma) per axis summed,
-    "min_laplacian" = exp(-|e|/sigma) per axis min (worst-axis drives reward),
-    "smooth_min_laplacian" = soft-min via LogSumExp (alpha=5, differentiable).
-    smooth_min_laplacian gives ~70% gradient to worse axis, ~30% to better axis,
-    preventing gradient oscillation when axes are close while maintaining
-    worst-axis focus at large disparity."""
+    command_type: str = "exponential"
+    """Reward type:
+    "exponential" = exp(-e_r^2/sigma^2) + exp(-e_p^2/sigma^2), per-axis Gaussian sum.
+        Bounded [0, 2]. Precise near zero, smooth gradient everywhere.
+    "quadratic" = -(e_r^2 + e_p^2). Gradient weakens near zero.
+    "laplacian" = exp(-|e|/sigma) per axis summed.
+    "min_laplacian" = exp(-|e|/sigma) per axis min (worst-axis drives reward).
+    "smooth_min_laplacian" = soft-min via LogSumExp (alpha=5, differentiable)."""
 
     command_sigma: float = 0.15
-    """Laplacian scale parameter (rad). Controls reward sharpness near zero.
+    """Scale parameter (rad). For exponential: Gaussian width. For laplacian: 1/e width.
     Smaller sigma = sharper peak = stronger near-zero gradient."""
 
     # Action smoothness: first + second order action difference
     smoothness_weight: float = -0.5
+
+    # Joint torque penalty: penalizes computed torque magnitude
+    torque_weight: float = -0.001
+    """Joint torque penalty weight. Encourages energy efficiency by minimizing
+    motor torque usage. Small magnitude to avoid interfering with tracking."""
 
     # -- Meta fields (not reward terms) --
     termination_penalty: float = -10.0
@@ -175,36 +182,36 @@ class RewardManager:
 
 
 # =============================================================================
-# Reward Functions (2-term architecture)
+# Reward Functions (3-term architecture)
 # =============================================================================
 
 
 def command_reward(
     _robot: Articulation,
     env: ALBCEnv,
-    command_type: str = "quadratic",
+    command_type: str = "exponential",
     sigma: float = 0.15,
     **_kwargs,
 ) -> torch.Tensor:
     """Attitude tracking reward with selectable kernel.
 
+    Exponential: exp(-e_r^2/sigma^2) + exp(-e_p^2/sigma^2). Per-axis Gaussian sum.
+        Bounded [0, 2]. Gradient strongest at e~sigma, smooth everywhere.
     Quadratic: -(e_r^2 + e_p^2). Gradient = -2e, weakens near zero.
     Laplacian: exp(-|e|/sigma) per axis, summed. Gradient increases near zero.
-    Min-Laplacian: exp(-|e|/sigma) per axis, min. Worst axis drives reward,
-        preventing the better axis from dominating gradient signal.
+    Min-Laplacian: exp(-|e|/sigma) per axis, min. Worst axis drives reward.
 
     Args:
         env: Environment instance (provides _attitude_error).
-        command_type: "quadratic", "laplacian", or "min_laplacian".
-        sigma: Laplacian scale parameter (rad). Only used for laplacian types.
+        command_type: "exponential", "quadratic", "laplacian", or "min_laplacian".
+        sigma: Scale parameter (rad). Gaussian width for exponential, 1/e width for laplacian.
     """
     err_rp = env._attitude_error[:, :2]
+    if command_type == "exponential":
+        # Per-axis Gaussian: exp(-e^2/sigma^2), summed. Output in [0, 2].
+        return torch.exp(-err_rp[:, 0] ** 2 / sigma**2) + torch.exp(-err_rp[:, 1] ** 2 / sigma**2)
     if command_type == "smooth_min_laplacian":
         per_axis = torch.exp(-err_rp.abs() / sigma)
-        # Soft-min via negative LogSumExp: differentiable min approximation.
-        # alpha=5: ~70% gradient to worse axis, ~30% to better axis.
-        # Preserves min_laplacian's worst-axis focus at large disparity while
-        # providing smooth gradient when axes are close (prevents oscillation).
         alpha = 5.0
         return -torch.logsumexp(-alpha * per_axis, dim=-1) / alpha
     if command_type == "min_laplacian":
@@ -231,3 +238,20 @@ def action_smoothness_penalty(
     da = env._actions - env._prev_actions
     d2a = env._actions - 2.0 * env._prev_actions + env._prev_prev_actions
     return torch.mean(da**2, dim=-1) + torch.mean(d2a**2, dim=-1)
+
+
+def joint_torque_penalty(
+    _robot: Articulation,
+    env: ALBCEnv,
+    **_kwargs,
+) -> torch.Tensor:
+    """Joint torque penalty: mean(tau^2) for ALBC joints.
+
+    Penalizes motor torque usage to improve energy efficiency and reduce
+    mechanical stress. Uses PhysX computed torque (actual torque applied
+    by the implicit PD actuator).
+
+    dt-scaled. Use with negative weight.
+    """
+    torque = _robot.data.computed_torque[:, env._albc_joint_ids]
+    return torch.mean(torque**2, dim=-1)

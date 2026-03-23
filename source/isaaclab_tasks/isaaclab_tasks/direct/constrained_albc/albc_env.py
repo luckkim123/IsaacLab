@@ -38,6 +38,7 @@ from .mdp import (
     compute_all_costs,
     compute_policy_obs,
     compute_privileged_obs,
+    joint_torque_penalty,
 )
 from .mdp.events import (
     DRSampler,
@@ -244,9 +245,10 @@ class ALBCEnv(DirectRLEnv):
     def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
         """Build the reward terms dict. Override in subclasses to add/modify terms.
 
-        2-term architecture:
-            1. command    (+): attitude tracking (quadratic or laplacian), dt-scaled
+        3-term architecture:
+            1. command    (+): attitude tracking (exponential, quadratic, or laplacian), dt-scaled
             2. smoothness (-): mean(da^2) + mean(d2a^2), dt-scaled
+            3. torque     (-): mean(tau^2) joint torque penalty, dt-scaled
         """
         rcfg = self.cfg.reward
         terms: dict[str, RewardTermCfg] = {
@@ -263,6 +265,11 @@ class ALBCEnv(DirectRLEnv):
             terms["smoothness"] = RewardTermCfg(
                 func=action_smoothness_penalty,
                 weight=rcfg.smoothness_weight,
+            )
+        if rcfg.torque_weight != 0.0:
+            terms["torque"] = RewardTermCfg(
+                func=joint_torque_penalty,
+                weight=rcfg.torque_weight,
             )
         return terms
 
