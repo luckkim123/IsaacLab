@@ -34,25 +34,41 @@ for better precision near zero, (2) add joint torque penalty for energy efficien
   is only +-10%, effect negligible. Can add if robot mass changes significantly.
 - Previous laplacian/min_laplacian types preserved for ablation experiments.
 
-## [2026-03-23] Per-axis sigma for roll/pitch asymmetry in command reward
+## [2026-03-23] Command reward: sigma -> direct coefficient + k_c scaling
 
 ### Context
-Pitch control is empirically harder than roll for the ALBC mechanism. At convergence,
-pitch error is consistently ~2x larger than roll error. Physical causes: (1) restoring
-torque asymmetry (T_b_roll ~ cos(pitch)*sin(roll) vs T_b_pitch ~ sin(pitch)),
-(2) configuration-dependent inertia via parallel axis theorem -- the 2-link arm's
-forward reach creates larger pitch-axis inertia variation. Paper 1 also uses per-axis
-coefficients (1.0 for vxy, 1.5 for wz) for the same reason. Changed from single
-`command_sigma` to per-axis `command_sigma_roll`/`command_sigma_pitch`.
+Training with per-axis sigma (sigma_roll=0.15/0.30, then 0.50/0.50) revealed two
+issues: (1) sigma parametrization inherited from Laplacian kernel is poorly suited
+for Gaussian -- same sigma produces much narrower effective width (exp(-9) vs exp(-3)
+at 3*sigma), causing gradient dead zones at initial errors (30-45 deg). (2) k_c=5.0
+too small for bounded exponential output [0,2] -- paper uses k_c=200 (20x quadratic).
+
+Paper analysis showed the exponential form has NO sigma: `exp(-e^2) + exp(-1.5*e^2)`.
+Direct coefficient in exponent. The 1.5 coefficient on the harder axis (yaw rate /
+pitch) demands tighter precision, not wider reach. With large k_c, gradient is
+amplified everywhere so tighter coefficient doesn't cause dead zones.
+
+Failed experiment: sigma_roll=0.15, sigma_pitch=0.30 caused gradient imbalance --
+pitch got all learning signal (sigma=0.30 alive at 30 deg), roll starved (sigma=0.15
+dead at 30 deg). Roll went to 45 deg while pitch dropped to 2 deg. Root cause: small
+k_c couldn't compensate for the gradient reach difference.
 
 ### Changed
-- `mdp/rewards.py`: `ALBCRewardCfg.command_sigma` split into `command_sigma_roll` (0.15)
-  and `command_sigma_pitch` (0.30). sigma_pitch = 2x sigma_roll matches observed error ratio.
-- `mdp/rewards.py`: `command_reward()` function signature `sigma` -> `sigma_roll` + `sigma_pitch`.
-  All kernel types (exponential, laplacian, min_laplacian, smooth_min_laplacian) updated
-  to use per-axis sigma via tensor broadcast.
-- `albc_env.py`: `_build_reward_terms()` params dict updated to pass both sigma values.
-- `config.py`: Default reward config updated with `command_sigma_roll=0.15, command_sigma_pitch=0.30`.
+- `mdp/rewards.py`: Replaced sigma parametrization with direct coefficient form.
+  `command_sigma_roll/pitch` -> `command_coeff_roll` (1.0) / `command_coeff_pitch` (1.5).
+  Formula: `exp(-cr*e_r^2) + exp(-cp*e_p^2)`. Matches paper exactly.
+- `mdp/rewards.py`: `command_weight` 5.0 -> 100.0 (paper pattern: 20x for exponential).
+- `mdp/rewards.py`: `smoothness_weight` -0.5 -> -5.0 (scaled 10x to maintain relative
+  influence vs 20x command increase).
+- `albc_env.py`: params dict updated: `sigma_roll/pitch` -> `coeff_roll/pitch`.
+- `config.py`: Default reward config updated with all new values.
+
+### Notes
+- torque_weight kept at -0.001: command:torque ratio ~4000:1, similar to paper (~20000:1).
+  Torque penalty is soft regularizer; hard limit handled by effort_limit_cost constraint.
+- Laplacian/min_laplacian kernels also updated to use coefficient form for consistency.
+- coeff_pitch=1.5 means tighter tracking for pitch (harder axis), following paper's
+  approach of demanding MORE precision from the harder axis, not less.
 
 ## [2026-03-23] WandB logging dedup + train-analyze skill update
 

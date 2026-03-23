@@ -257,8 +257,8 @@ class ALBCEnv(DirectRLEnv):
                 weight=rcfg.command_weight,
                 params={
                     "command_type": rcfg.command_type,
-                    "sigma_roll": rcfg.command_sigma_roll,
-                    "sigma_pitch": rcfg.command_sigma_pitch,
+                    "coeff_roll": rcfg.command_coeff_roll,
+                    "coeff_pitch": rcfg.command_coeff_pitch,
                 },
             ),
         }

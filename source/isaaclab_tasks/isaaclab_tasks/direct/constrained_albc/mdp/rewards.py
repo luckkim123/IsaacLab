@@ -42,32 +42,38 @@ class ALBCRewardCfg:
     """ALBC reward configuration: 3-term architecture.
 
     Active terms (all dt-scaled):
-        command    (+5.0): attitude tracking (exponential, quadratic, or laplacian)
-        smoothness (-0.5): mean(da^2) + mean(d2a^2) action smoothness
+        command    (+100.0): attitude tracking (exponential, quadratic, or laplacian)
+        smoothness (-5.0): mean(da^2) + mean(d2a^2) action smoothness
         torque     (-0.001): mean(tau^2) joint torque penalty
+
+    Exponential command reward uses direct coefficient form (no sigma) following
+    the paper: exp(-cr*e_r^2) + exp(-cp*e_p^2). Large k_c (100) required because
+    exponential output is bounded [0, 2], unlike quadratic which is unbounded.
     """
 
     # Command tracking reward
-    command_weight: float = 5.0
+    command_weight: float = 100.0
     command_type: str = "exponential"
     """Reward type:
-    "exponential" = exp(-e_r^2/sr^2) + exp(-e_p^2/sp^2), per-axis Gaussian sum.
-        Bounded [0, 2]. Per-axis sigma for roll/pitch asymmetry.
+    "exponential" = exp(-cr*e_r^2) + exp(-cp*e_p^2), per-axis Gaussian sum.
+        Bounded [0, 2]. Direct coefficient form (no sigma). Large k_c required
+        because output is bounded, unlike quadratic which is unbounded.
     "quadratic" = -(e_r^2 + e_p^2). Gradient weakens near zero.
     "laplacian" = exp(-|e|/sigma) per axis summed.
     "min_laplacian" = exp(-|e|/sigma) per axis min (worst-axis drives reward).
     "smooth_min_laplacian" = soft-min via LogSumExp (alpha=5, differentiable)."""
 
-    command_sigma_roll: float = 0.15
-    """Roll axis scale parameter (rad). Gaussian width for exponential, 1/e width for laplacian."""
+    command_coeff_roll: float = 1.0
+    """Roll axis coefficient in exponent. exp(-cr * e_r^2).
+    1.0 = paper default (no scaling). Equivalent to sigma=1.0."""
 
-    command_sigma_pitch: float = 0.30
-    """Pitch axis scale parameter (rad). Larger than roll because pitch control is
-    harder (configuration-dependent inertia asymmetry via parallel axis theorem).
-    Empirically pitch error converges ~2x larger than roll."""
+    command_coeff_pitch: float = 1.5
+    """Pitch axis coefficient in exponent. exp(-cp * e_p^2).
+    1.5 = tighter tracking for harder axis (paper's approach for yaw rate).
+    Equivalent to sigma=1/sqrt(1.5)~=0.816."""
 
     # Action smoothness: first + second order action difference
-    smoothness_weight: float = -0.5
+    smoothness_weight: float = -5.0
 
     # Joint torque penalty: penalizes computed torque magnitude
     torque_weight: float = -0.001
@@ -194,41 +200,39 @@ def command_reward(
     _robot: Articulation,
     env: ALBCEnv,
     command_type: str = "exponential",
-    sigma_roll: float = 0.15,
-    sigma_pitch: float = 0.30,
+    coeff_roll: float = 1.0,
+    coeff_pitch: float = 1.5,
     **_kwargs,
 ) -> torch.Tensor:
-    """Attitude tracking reward with selectable kernel and per-axis sigma.
+    """Attitude tracking reward with selectable kernel.
 
-    Per-axis sigma accounts for pitch being harder to control than roll
-    (configuration-dependent inertia asymmetry). Larger sigma_pitch provides
-    wider reward gradient for the harder axis.
-
-    Exponential: exp(-e_r^2/sr^2) + exp(-e_p^2/sp^2). Per-axis Gaussian sum.
-        Bounded [0, 2]. Gradient strongest at e~sigma, smooth everywhere.
+    Exponential (paper form): exp(-cr*e_r^2) + exp(-cp*e_p^2).
+        Per-axis Gaussian sum. Bounded [0, 2]. Direct coefficient form --
+        larger coefficient = tighter tracking (stronger near-zero gradient).
+        Paper uses 1.0 for easy axis, 1.5 for harder axis.
     Quadratic: -(e_r^2 + e_p^2). Gradient = -2e, weakens near zero.
-    Laplacian: exp(-|e_r|/sr) + exp(-|e_p|/sp). Per-axis summed.
-    Min-Laplacian: min(exp(-|e_r|/sr), exp(-|e_p|/sp)). Worst axis drives reward.
+    Laplacian: exp(-cr*|e_r|) + exp(-cp*|e_p|). Per-axis summed.
+    Min-Laplacian: min(exp(-cr*|e_r|), exp(-cp*|e_p|)). Worst axis drives reward.
 
     Args:
         env: Environment instance (provides _attitude_error).
         command_type: "exponential", "quadratic", "laplacian", or "min_laplacian".
-        sigma_roll: Roll axis scale parameter (rad).
-        sigma_pitch: Pitch axis scale parameter (rad).
+        coeff_roll: Roll axis coefficient in exponent.
+        coeff_pitch: Pitch axis coefficient in exponent.
     """
     err_rp = env._attitude_error[:, :2]
     if command_type == "exponential":
-        return torch.exp(-err_rp[:, 0] ** 2 / sigma_roll**2) + torch.exp(-err_rp[:, 1] ** 2 / sigma_pitch**2)
-    sigma = torch.tensor([sigma_roll, sigma_pitch], device=err_rp.device)
+        return torch.exp(-coeff_roll * err_rp[:, 0] ** 2) + torch.exp(-coeff_pitch * err_rp[:, 1] ** 2)
+    coeff = torch.tensor([coeff_roll, coeff_pitch], device=err_rp.device)
     if command_type == "smooth_min_laplacian":
-        per_axis = torch.exp(-err_rp.abs() / sigma)
+        per_axis = torch.exp(-coeff * err_rp.abs())
         alpha = 5.0
         return -torch.logsumexp(-alpha * per_axis, dim=-1) / alpha
     if command_type == "min_laplacian":
-        per_axis = torch.exp(-err_rp.abs() / sigma)
+        per_axis = torch.exp(-coeff * err_rp.abs())
         return per_axis.min(dim=-1).values
     if command_type == "laplacian":
-        return torch.exp(-err_rp.abs() / sigma).sum(dim=-1)
+        return torch.exp(-coeff * err_rp.abs()).sum(dim=-1)
     return -(err_rp[:, 0] ** 2 + err_rp[:, 1] ** 2)
 
 
