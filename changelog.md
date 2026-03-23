@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-23] TRPO step quality diagnostic logging
+
+### Context
+Analyzed 4 papers on learning rate strategies for constrained RL locomotion
+(NORBC, ANYmal, Mini Cheetah, Teacher-Student DAgger). All papers agree:
+(1) TRPO actor needs no fixed LR (trust region + natural gradient + line search
+provides adaptive step size), (2) critic uses fixed LR (3e-4 to 1e-3) with no
+scheduling, (3) curriculum design is more effective than LR tuning for learning
+speed control. Current C-TRPO implementation matches all paper consensus -- no LR
+changes needed.
+
+However, TRPO step quality and optimizer dynamics had zero diagnostic visibility.
+Cannot distinguish "TRPO step accepted but tiny" from "TRPO step accepted and
+large", or diagnose encoder/value gradient health. Added 6 passive diagnostic
+metrics at zero computational cost (all values already computed but discarded).
+
+### Added
+- `algorithms/constraint_trpo.py`: 6 diagnostic attributes (`_last_trpo_shs`,
+  `_last_trpo_step_norm`, `_last_trpo_grad_norm`, `_last_line_search_backtracks`,
+  `_last_value_grad_norm`, `_last_encoder_grad_norm`). Captures Fisher curvature,
+  parameter displacement, gradient norms, and backtrack counts from existing
+  computations (clip_grad_norm_ return values were previously discarded).
+- `runners/constraint_encoder_runner.py`: 6 `TRPO/*` metrics logged to
+  TensorBoard/WandB (shs, step_norm, grad_norm, line_search_backtracks,
+  value_grad_norm, encoder_grad_norm).
+
+### Notes
+- No config changes, no behavior changes, no additional computation
+- Encoder LR decay considered but rejected: KL gating (max_encoder_kl=0.016)
+  already provides implicit adaptive scheduling. Need diagnostic data before
+  any LR tuning.
+
 ## [2026-03-23] C-TRPO entropy bonus: prevent premature noise collapse
 
 ### Context

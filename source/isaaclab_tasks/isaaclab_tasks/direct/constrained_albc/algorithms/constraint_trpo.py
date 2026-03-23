@@ -135,6 +135,14 @@ class ConstraintTRPO:
         self._last_surrogate_loss = 0.0
         self._last_pre_encoder_kl = 0.0
 
+        # TRPO step quality diagnostics
+        self._last_trpo_shs = 0.0
+        self._last_trpo_step_norm = 0.0
+        self._last_trpo_grad_norm = 0.0
+        self._last_line_search_backtracks = 0
+        self._last_value_grad_norm = 0.0
+        self._last_encoder_grad_norm = 0.0
+
         if cost_gamma >= 1.0:
             raise ValueError(f"cost_gamma must be < 1.0, got {cost_gamma}")
 
@@ -443,7 +451,7 @@ class ConstraintTRPO:
         step_size = 1.0
         kl_limit = self.max_kl * self.line_search_kl_margin
 
-        for _ in range(self.line_search_max_backtracks):
+        for i in range(self.line_search_max_backtracks):
             self._set_policy_params_flat(old_params + step_size * step_dir)
 
             with torch.no_grad():
@@ -451,10 +459,12 @@ class ConstraintTRPO:
                 kl = self._kl_divergence(obs, old_mu, old_sigma)
 
             if (old_loss - new_loss) > 0 and kl <= kl_limit:
+                self._last_line_search_backtracks = i
                 return True
 
             step_size *= self.line_search_shrink_factor
 
+        self._last_line_search_backtracks = self.line_search_max_backtracks
         self._set_policy_params_flat(old_params)
         return False
 
@@ -619,18 +629,22 @@ class ConstraintTRPO:
         loss = surrogate_fn()
         self._last_surrogate_loss = loss.item()
         g = self._flat_grad(loss, self._policy_params, retain_graph=False)
+        self._last_trpo_grad_norm = g.norm().item()
 
         # 2. Natural gradient via conjugate gradient: x = F^{-1} g
         nat_grad = self._conjugate_gradient(obs_flat, old_mu_flat, old_sigma_flat, g)
 
         # 3. Step size: sqrt(2 * max_kl / (g^T F^{-1} g))
         shs = 0.5 * nat_grad.dot(g)
+        self._last_trpo_shs = shs.item() if torch.isfinite(shs) else 0.0
 
         if shs <= 0 or not torch.isfinite(shs):
             logger.warning("TRPO: shs=%.6e non-positive or non-finite, skipping", shs.item())
+            self._last_trpo_step_norm = 0.0
             return False
 
         step_dir = -torch.sqrt(self.max_kl / shs) * nat_grad
+        self._last_trpo_step_norm = step_dir.norm().item()
 
         if not torch.isfinite(step_dir).all():
             logger.warning("TRPO: step_dir contains NaN/Inf, skipping")
@@ -682,7 +696,8 @@ class ConstraintTRPO:
                 continue
 
             total_loss.backward()
-            nn.utils.clip_grad_norm_(self._encoder_params, max_norm=1.0)
+            enc_grad_norm = nn.utils.clip_grad_norm_(self._encoder_params, max_norm=1.0)
+            self._last_encoder_grad_norm = enc_grad_norm.item()
             self.encoder_optimizer.step()
 
             # KL gating: revert if encoder step caused excessive KL shift
@@ -712,6 +727,7 @@ class ConstraintTRPO:
         """Update value functions (reward + cost) via MSE."""
         mean_value_loss = 0.0
         mean_cost_value_loss = 0.0
+        mean_value_grad_norm = 0.0
         num_value_updates = 0
 
         for _epoch in range(self.num_learning_epochs):
@@ -741,8 +757,9 @@ class ConstraintTRPO:
 
                 self.value_optimizer.zero_grad()
                 total_value_loss.backward()
-                nn.utils.clip_grad_norm_(self._value_params, self.max_grad_norm)
+                val_grad_norm = nn.utils.clip_grad_norm_(self._value_params, self.max_grad_norm)
                 self.value_optimizer.step()
+                mean_value_grad_norm += val_grad_norm.item()
 
                 mean_value_loss += value_loss.item()
                 mean_cost_value_loss += cost_value_loss.item()
@@ -751,6 +768,8 @@ class ConstraintTRPO:
         if num_value_updates > 0:
             mean_value_loss /= num_value_updates
             mean_cost_value_loss /= num_value_updates
+            mean_value_grad_norm /= num_value_updates
+        self._last_value_grad_norm = mean_value_grad_norm
 
         return mean_value_loss, mean_cost_value_loss
 

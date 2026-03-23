@@ -211,4 +211,12 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         metrics["Policy/entropy_bonus"] = alg._last_entropy_bonus
         metrics["Policy/pre_encoder_kl"] = alg._last_pre_encoder_kl
 
+        # TRPO step quality diagnostics
+        metrics["TRPO/shs"] = alg._last_trpo_shs
+        metrics["TRPO/step_norm"] = alg._last_trpo_step_norm
+        metrics["TRPO/grad_norm"] = alg._last_trpo_grad_norm
+        metrics["TRPO/line_search_backtracks"] = float(alg._last_line_search_backtracks)
+        metrics["TRPO/value_grad_norm"] = alg._last_value_grad_norm
+        metrics["TRPO/encoder_grad_norm"] = alg._last_encoder_grad_norm
+
         flush_metrics(self.writer, metrics, iteration, self.logger_type)
