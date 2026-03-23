@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""ActorCriticEncoder with multi-head cost value function for constrained RL (IPO).
+"""ActorCriticEncoder with multi-head cost value function for constrained RL.
 
 Extends ActorCriticEncoder with a cost critic head that predicts per-constraint
 cost values V_C_k(s) for K constraints. The cost critic uses the same asymmetric
@@ -34,10 +34,10 @@ if TYPE_CHECKING:
 
 
 class ActorCriticEncoderConstrained(ActorCriticEncoder):
-    """ActorCriticEncoder extended with cost value heads for IPO constraints.
+    """ActorCriticEncoder extended with cost value heads for constrained RL.
 
     The cost critic outputs K values (one per constraint), used by
-    ConstraintTRPO for cost GAE and barrier loss computation.
+    ConstraintTRPO for cost GAE and Lagrangian penalty computation.
     """
 
     def __init__(

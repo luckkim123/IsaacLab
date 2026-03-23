@@ -10,7 +10,6 @@ from .logging import (
     flush_metrics,
     log_dr_metrics,
     log_encoder_metrics,
-    unwrap_env,
 )
 
 __all__ = [
@@ -18,5 +17,4 @@ __all__ = [
     "flush_metrics",
     "log_dr_metrics",
     "log_encoder_metrics",
-    "unwrap_env",
 ]

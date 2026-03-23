@@ -6,20 +6,8 @@
 """Constrained TRPO with Lagrangian constraint enforcement.
 
 TRPO policy optimization with adaptive Lagrangian multipliers for constraint
-satisfaction. Based on C-TRPO (Muller et al., ICML 2025) but replaces the
-quadratic barrier penalty with linear Lagrangian cost surrogates.
-
-The quadratic barrier (beta * phi_pp * cost_surr^2) had two structural flaws:
-    1. Vanishing gradient: dB/dtheta = 2*S*dS/dtheta -> 0 when S = E[A_cost] ~ 0
-       (well-calibrated cost critic makes cost advantages zero-mean)
-    2. safe_mask zeroed out violated constraints, providing no recovery gradient
-
-The Lagrangian penalty (lambda_k * cost_surr) fixes both:
-    - Linear term: gradient = lambda_k * E[A_cost * dlog_pi/dtheta], nonzero
-      per-sample even when batch mean E[A_cost] = 0
-    - No masking: lambda_k grows via dual ascent for violated constraints,
-      providing continuous pressure proportional to violation magnitude
-    - lambda_max caps constraint gradient to protect reward priority
+satisfaction. Based on C-TRPO (Muller et al., ICML 2025) with linear
+Lagrangian cost surrogates for constraint enforcement.
 
 Key design decisions:
     - Adaptive lambda via dual ascent: lambda_k += lr * (J_C_k - d_k)
@@ -27,6 +15,7 @@ Key design decisions:
     - Cost advantage standardization preserved (NORBC Sec IV-B)
     - LS-gated encoder updates: when line search fails, both actor and encoder frozen
     - Noise floor (min_std): primary exploration maintenance, outside trust region
+    - Multi-step encoder with KL gating: prevents encoder-induced distribution shift
 
 Reference:
     Muller et al., "Truly Constrained TRPO", ICML 2025, arXiv:2411.02957.
@@ -37,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 
 import torch
 import torch.nn as nn
@@ -48,14 +38,10 @@ logger = logging.getLogger(__name__)
 
 
 class ConstraintTRPO:
-    """C-TRPO: Barrier-based trust region for constrained policy optimization.
+    """Lagrangian-based constrained TRPO for policy optimization.
 
-    Key differences from Lagrangian TRPO:
-        - No lambda dual variables; barrier penalty replaces Lagrangian
-        - Safe mode: reward + barrier penalty objective, KL-only trust region
-        - Blend mode: reward always active + cost minimization for violated
-          constraints + barrier for safe constraints (RC3 per-constraint blend)
-        - Option C: barrier curvature in gradient only, FVP is pure KL
+    Uses adaptive Lagrangian multipliers (dual ascent) for constraint
+    enforcement with TRPO natural gradient for the policy update.
     """
 
     def __init__(
@@ -85,28 +71,14 @@ class ConstraintTRPO:
         # Line search acceptance threshold
         line_search_kl_margin: float = 1.5,
         # Lagrangian constraint parameters
-        beta: float = 0.01,  # deprecated (barrier removed), kept for compat
-        recovery_threshold_frac: float = 0.8,  # deprecated, kept for compat
         lambda_lr: float = 0.035,
         lambda_max: float = 0.5,
-        ema_cost_alpha: float = 0.3,
-        # Encoder z bounds
-        z_bounds_coef: float = 0.0,
         # Encoder update
         num_encoder_epochs: int = 1,
         encoder_lr: float = 3e-4,
         # Noise floor (exploration maintenance)
         min_std: float = 0.2,
-        # Entropy bonus
-        entropy_coef: float = 0.0,
-        # EAPO parameters
-        eapo_enabled: bool = False,
-        eapo_tau_init: float = 0.01,
-        eapo_target_entropy: float = 0.5,
-        eapo_tau_lr: float = 0.001,
-        eapo_tau_min: float = 0.001,
-        eapo_tau_max: float = 0.5,
-        # Post-encoder KL gating (Fix 2: prevents encoder-induced KL violation)
+        # Post-encoder KL gating
         max_encoder_kl: float = 0.016,
         # Device
         device: str = "cpu",
@@ -141,45 +113,22 @@ class ConstraintTRPO:
         self.cost_gamma = cost_gamma
         self.cost_lam = cost_lam
         self.line_search_kl_margin = line_search_kl_margin
-        self.z_bounds_coef = z_bounds_coef
         self.num_encoder_epochs = num_encoder_epochs
         self.min_std = min_std
-        self.entropy_coef = entropy_coef
         self.max_encoder_kl = max_encoder_kl
-
-        # EAPO state
-        self.eapo_enabled = eapo_enabled
-        self.eapo_tau = eapo_tau_init
-        self.eapo_target_entropy = eapo_target_entropy
-        self.eapo_tau_lr = eapo_tau_lr
-        self.eapo_tau_min = eapo_tau_min
-        self.eapo_tau_max = eapo_tau_max
-        self._cached_entropy_tau = eapo_tau_init
 
         # Lagrangian multipliers (adaptive dual variables)
         self._lambda_k = torch.zeros(num_constraints, device=device)
         self._lambda_lr = lambda_lr
         self._lambda_max = lambda_max
-        self._margins = torch.zeros(num_constraints, device=device)
 
-        # B1: EMA smoothing on mean_cost_returns to prevent phantom mode switches.
-        # When cost critic updates without actor change, raw mean_cost_returns can
-        # jump, causing spurious mode transitions. EMA damps this noise.
-        self._ema_cost_returns = torch.zeros(num_constraints, device=device)
-        self._ema_alpha = ema_cost_alpha
-        self._ema_initialized = False
-
-        # Initialize monitoring attributes (read by ConstraintEncoderRunner before first update)
-        self._cached_lagrangian_penalty = 0.0
+        # Monitoring attributes (read by ConstraintEncoderRunner before first update)
         self._last_cost_returns = [0.0] * num_constraints
         self._last_violations = [0.0] * num_constraints
         self._last_line_search_success = 0.0
-        self._last_margins = [0.0] * num_constraints
-        self._last_in_recovery = [0.0] * num_constraints
         self._last_lagrangian_penalty = 0.0
-        self._last_mode = 0
-        self._cached_mean_entropy = 0.0
-        self._cached_surrogate_loss = 0.0
+        self._last_mean_entropy = 0.0
+        self._last_surrogate_loss = 0.0
         self._last_pre_encoder_kl = 0.0
 
         if cost_gamma >= 1.0:
@@ -223,7 +172,7 @@ class ConstraintTRPO:
             self._encoder_params = []
             self.encoder_optimizer = None
         logger.info(
-            "ConstraintTRPO (C-TRPO): %d actor params (TRPO), %d encoder params (Adam), %d value params (Adam)",
+            "ConstraintTRPO: %d actor params (TRPO), %d encoder params (Adam), %d value params (Adam)",
             len(self._policy_params),
             len(encoder_params),
             len(value_params),
@@ -271,10 +220,8 @@ class ConstraintTRPO:
         self.storage.cost_values = torch.zeros(T, N, K, device=self.device)
         self.storage.cost_returns = torch.zeros(T, N, K, device=self.device)
         self.storage.cost_advantages = torch.zeros(T, N, K, device=self.device)
-        self.storage.cost_advantages_raw = torch.zeros(T, N, K, device=self.device)
-
-        if self.eapo_enabled:
-            self.storage.entropy_advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+        # Pre-allocated zero costs buffer (avoids per-step GPU allocation in process_env_step)
+        self._zero_costs = torch.zeros(N, K, device=self.device)
 
     def act(self, obs: TensorDict) -> torch.Tensor:
         if self.policy.is_recurrent:
@@ -312,7 +259,7 @@ class ConstraintTRPO:
 
         # Store costs from environment
         step = self.storage.step
-        costs = extras.get("costs", torch.zeros(self.storage.num_envs, self.num_constraints, device=self.device))
+        costs = extras.get("costs", self._zero_costs)
 
         # Bootstrap cost values on time outs (same logic as reward bootstrapping)
         if "time_outs" in extras:
@@ -335,9 +282,6 @@ class ConstraintTRPO:
         last_cost_values = self.policy.evaluate_costs(obs).detach()
         self._compute_cost_returns(last_cost_values)
 
-        if self.eapo_enabled:
-            self._compute_entropy_advantages()
-
     def _compute_cost_returns(self, last_cost_values: torch.Tensor) -> None:
         """Compute cost GAE returns for all constraints simultaneously."""
         T = self.storage.num_transitions_per_env
@@ -354,46 +298,20 @@ class ConstraintTRPO:
         self.storage.cost_advantages = self.storage.cost_returns - self.storage.cost_values
 
         # Per-constraint cost advantage standardization (NORBC Sec IV-B).
-        for k in range(self.num_constraints):
-            if not torch.isfinite(self.storage.cost_advantages[:, :, k]).all():
-                logger.warning("Non-finite cost advantages for constraint %d, zeroing.", k)
-                self.storage.cost_advantages[:, :, k] = 0.0
-
-        # Store raw (unstandardized) cost advantages for barrier penalty.
-        # Standardized advantages have E[A_cost] = 0, making barrier gradient
-        # structurally zero (cost_surr = mean(ratio * A) = 0 at ratio=1).
-        # Barrier needs the actual cost change signal to repel from boundaries.
-        self.storage.cost_advantages_raw = self.storage.cost_advantages.clone()
+        finite_mask = torch.isfinite(self.storage.cost_advantages).all(dim=(0, 1))  # (K,)
+        bad_constraints = ~finite_mask
+        if bad_constraints.any():
+            bad_ids = bad_constraints.nonzero(as_tuple=True)[0]
+            logger.warning("Non-finite cost advantages for constraints %s, zeroing.", bad_ids.tolist())
+            self.storage.cost_advantages[:, :, bad_constraints] = 0.0
 
         mean = self.storage.cost_advantages.mean(dim=(0, 1), keepdim=True)
         std = self.storage.cost_advantages.std(dim=(0, 1), keepdim=True)
         self.storage.cost_advantages = (self.storage.cost_advantages - mean) / (std + 1e-8)
 
-    def _compute_entropy_advantages(self) -> None:
-        """Compute per-sample entropy advantages for EAPO.
-
-        Uses -log_prob as entropy signal. With state-independent log_std,
-        no entropy critic needed -- batch normalization as baseline.
-        """
-        entropy_signal = -self.storage.actions_log_prob  # (T, N, 1)
-        ea_mean = entropy_signal.mean()
-        ea_std = entropy_signal.std()
-        if ea_std > 1e-8:
-            self.storage.entropy_advantages = (entropy_signal - ea_mean) / ea_std
-        else:
-            self.storage.entropy_advantages = torch.zeros_like(entropy_signal)
-
     # ==================================================================
-    # C-TRPO Barrier
+    # Lagrangian Constraint Enforcement
     # ==================================================================
-
-    def _compute_margins(self, mean_cost_returns: torch.Tensor) -> None:
-        """Update per-constraint margins.
-
-        Args:
-            mean_cost_returns: Mean discounted cost return per constraint, shape (K,).
-        """
-        self._margins = self.d_k - mean_cost_returns
 
     def _compute_cost_surrogates(self, ratio: torch.Tensor, cost_advantages: torch.Tensor) -> torch.Tensor:
         """Compute per-constraint cost surrogates in a single vectorized op.
@@ -411,7 +329,7 @@ class ConstraintTRPO:
         """Linear Lagrangian penalty: sum_k lambda_k * E[ratio * A_cost_k_std].
 
         Gradient = lambda_k * E[A_cost_std * d_log_pi/d_theta] -- nonzero per-sample
-        even when batch mean E[A_cost] = 0 (fixes quadratic barrier vanishing gradient).
+        even when batch mean E[A_cost] = 0.
 
         lambda_k adapted via dual ascent in _update_lambda():
         - Starts at 0 (reward-first learning)
@@ -477,9 +395,8 @@ class ConstraintTRPO:
     ) -> torch.Tensor:
         """Compute F @ v without forming F, using double backprop on KL.
 
-        Option C core: FVP uses pure KL Hessian only. Barrier curvature
-        is NOT included in the Fisher matrix -- it only affects the objective
-        gradient. This keeps the CG solver stable and well-conditioned.
+        FVP uses pure KL Hessian only. Constraint curvature is NOT included
+        in the Fisher matrix -- it only affects the objective gradient.
         """
         # Forward pass to get current distribution
         self.policy.act(obs)
@@ -533,7 +450,7 @@ class ConstraintTRPO:
         old_sigma: torch.Tensor,
         step_dir: torch.Tensor,
         old_loss: torch.Tensor,
-        surrogate_fn: object,
+        surrogate_fn: Callable[[], torch.Tensor],
     ) -> bool:
         """Backtracking line search.
 
@@ -565,11 +482,11 @@ class ConstraintTRPO:
     # ==================================================================
 
     def update(self) -> dict[str, float]:
-        """Execute one iteration of C-TRPO update.
+        """Execute one iteration of constrained TRPO update.
 
         Update order:
-            1. Compute margins + determine safe/recovery mode per constraint
-            2. TRPO policy update (safe or recovery, full-batch)
+            1. Update Lagrangian multipliers via dual ascent
+            2. TRPO policy update (reward + Lagrangian penalty, full-batch)
             3. Encoder update (gated on line search success)
             4. Value function update (pure MSE)
         """
@@ -596,24 +513,15 @@ class ConstraintTRPO:
 
         batch_size = obs_flat.batch_size[0]
 
-        # Mean cost returns (computed once, needed for margins + logging)
+        # Mean cost returns (computed once, needed for lambda update + logging)
         # Clamp to non-negative: cost value errors can make GAE return negative,
-        # which would inflate barrier margin (d_k - (-X) = d_k + X).
+        # which would inflate violation (d_k - (-X) = d_k + X).
         mean_cost_returns = cost_returns_flat.mean(dim=0).clamp(min=0.0)  # (K,)
 
         # ------------------------------------------------------------------
-        # 1. Compute margins and determine safe/recovery mode
+        # 1. Update Lagrangian multipliers (dual ascent on raw cost returns)
         # ------------------------------------------------------------------
-        # B1: EMA smoothing to prevent phantom mode switches from cost critic drift.
-        if not self._ema_initialized:
-            self._ema_cost_returns = mean_cost_returns.clone()
-            self._ema_initialized = True
-        else:
-            self._ema_cost_returns = (
-                1 - self._ema_alpha
-            ) * self._ema_cost_returns + self._ema_alpha * mean_cost_returns
-        self._compute_margins(self._ema_cost_returns)
-        self._update_lambda(self._ema_cost_returns)
+        self._update_lambda(mean_cost_returns)
 
         # Compute violations for logging
         violations = (mean_cost_returns - self.d_k).tolist()
@@ -621,66 +529,39 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         # 2. TRPO policy update (full-batch, single step)
         # ------------------------------------------------------------------
-        # Pure barrier-based: reward + barrier penalty for all constraints.
-        # No recovery mode switching — barrier provides continuous gradient
-        # pressure that strengthens as costs approach budget.
         old_lp_sq = old_log_prob_flat.squeeze(-1)
         adv_sq = advantages_flat.squeeze(-1)
-
-        # EAPO: soft advantage = task + tau * entropy advantage
-        if self.eapo_enabled:
-            entropy_adv_flat = self.storage.entropy_advantages.flatten(0, 1).clone().squeeze(-1)
-            soft_adv = adv_sq + self.eapo_tau * entropy_adv_flat
-        else:
-            soft_adv = adv_sq
 
         def surrogate() -> torch.Tensor:
             self.policy.act(obs_flat)
             log_prob = self.policy.get_actions_log_prob(actions_flat)
             ratio = torch.exp(log_prob - old_lp_sq)
-            # Reward + EAPO entropy advantage
-            reward_surr = -(soft_adv * ratio).mean()
-            # Lagrangian constraint penalty (linear in cost surrogate)
+            # Reward surrogate
+            reward_surr = -(adv_sq * ratio).mean()
+            # Lagrangian constraint penalty
             cost_surrs_std = self._compute_cost_surrogates(ratio, cost_advantages_std_flat)
             lp = self._compute_lagrangian_penalty(cost_surrs_std)
-            self._cached_lagrangian_penalty = lp.item()
-            # Entropy bonus
-            entropy_bonus = -self.entropy_coef * self.policy.entropy.mean()
-            self._cached_mean_entropy = self.policy.entropy.mean().item()
-            return reward_surr + lp + entropy_bonus
+            self._last_lagrangian_penalty = lp.item()
+            self._last_mean_entropy = self.policy.entropy.mean().item()
+            return reward_surr + lp
 
         ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate)
 
         # Noise floor: applied after TRPO step (outside trust region optimization).
-        # Does not consume KL budget or distort natural gradient direction.
-        # Prevents exploration collapse that entropy_coef failed to stabilize
-        # (entropy in surrogate competes with reward for single KL budget step).
         min_log_std = math.log(self.min_std)
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=min_log_std)
 
-        # EAPO: Adaptive tau (SAC v2 dual gradient, outside trust region)
-        if self.eapo_enabled:
-            with torch.no_grad():
-                self.policy.act(obs_flat)
-                current_entropy = self.policy.entropy.mean().item()
-                # Dual gradient: tau increases when H < target
-                self.eapo_tau -= self.eapo_tau_lr * (current_entropy - self.eapo_target_entropy)
-                self.eapo_tau = max(self.eapo_tau_min, min(self.eapo_tau_max, self.eapo_tau))
-            self._cached_entropy_tau = self.eapo_tau
-            self._cached_mean_entropy = current_entropy
-
         # ------------------------------------------------------------------
         # 3. Encoder update (gated on ls_success)
         # ------------------------------------------------------------------
-        # Fix 2: Measure pre-encoder KL for gating encoder-induced distribution shift
+        # Measure pre-encoder KL for gating encoder-induced distribution shift
         with torch.no_grad():
             pre_encoder_kl = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
         self._last_pre_encoder_kl = pre_encoder_kl
 
-        mean_z_bounds_loss = 0.0
         if self.encoder_optimizer is not None and ls_success:
-            mean_z_bounds_loss = self._update_encoder(
+            self._update_encoder(
                 obs_flat,
                 advantages_flat,
                 old_log_prob_flat,
@@ -704,14 +585,9 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         # Store monitoring metrics (read by ConstraintEncoderRunner)
         # ------------------------------------------------------------------
-        lagrangian_val = self._cached_lagrangian_penalty
         self._last_cost_returns = mean_cost_returns.tolist()
         self._last_violations = violations
         self._last_line_search_success = float(ls_success)
-        self._last_margins = self._margins.tolist()
-        self._last_in_recovery = [0.0] * self.num_constraints
-        self._last_lagrangian_penalty = lagrangian_val
-        self._last_mode = 0
 
         # Clear storage
         self.storage.clear()
@@ -719,24 +595,17 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         # Return loss dict
         # ------------------------------------------------------------------
-        loss_dict: dict[str, float] = {
+        return {
             "value_function": mean_value_loss,
-            "lagrangian_penalty": lagrangian_val,
+            "lagrangian_penalty": self._last_lagrangian_penalty,
             "kl": mean_kl,
             "cost_value": mean_cost_value_loss,
-            "mode": float(self._last_mode),
             "adv_raw_std": adv_raw_std.item(),
-            "surrogate": self._cached_surrogate_loss,
+            "surrogate": self._last_surrogate_loss,
         }
-        if hasattr(self.policy, "z_bounds_loss"):
-            loss_dict["z_bounds"] = mean_z_bounds_loss
-        if self.eapo_enabled:
-            loss_dict["entropy_tau"] = self._cached_entropy_tau
-
-        return loss_dict
 
     # ==================================================================
-    # Internal: Unified TRPO step (safe or blend via callables)
+    # Internal: TRPO step
     # ==================================================================
 
     def _trpo_step(
@@ -744,12 +613,12 @@ class ConstraintTRPO:
         obs_flat: TensorDict,
         old_mu_flat: torch.Tensor,
         old_sigma_flat: torch.Tensor,
-        surrogate_fn: object,
+        surrogate_fn: Callable[[], torch.Tensor],
     ) -> bool:
         """Execute a single TRPO natural-gradient step."""
         # 1. Compute loss + flat gradient
         loss = surrogate_fn()
-        self._cached_surrogate_loss = loss.item()
+        self._last_surrogate_loss = loss.item()
         g = self._flat_grad(loss, self._policy_params, retain_graph=False)
 
         # 2. Natural gradient via conjugate gradient: x = F^{-1} g
@@ -772,9 +641,7 @@ class ConstraintTRPO:
         with torch.no_grad():
             old_loss = surrogate_fn()
 
-        return self._line_search(
-            obs_flat, old_mu_flat, old_sigma_flat, step_dir, old_loss, surrogate_fn
-        )
+        return self._line_search(obs_flat, old_mu_flat, old_sigma_flat, step_dir, old_loss, surrogate_fn)
 
     def _update_encoder(
         self,
@@ -785,26 +652,20 @@ class ConstraintTRPO:
         old_mu_flat: torch.Tensor | None = None,
         old_sigma_flat: torch.Tensor | None = None,
         pre_encoder_kl: float = 0.0,
-    ) -> float:
+    ) -> None:
         """Multi-step encoder update with fresh forward passes.
 
-        TRPO does a single full-batch policy step, while PPO does ~20 mini-batch
-        updates (5 epochs x 4 batches). The encoder in PPO gets 20 gradient steps
-        per iteration; without compensation, the C-TRPO encoder would get only 1.
+        Runs num_encoder_epochs fresh forward/backward passes through the
+        encoder. Actor params are frozen (only encoder_optimizer steps).
 
-        This method runs num_encoder_epochs fresh forward/backward passes through
-        the encoder, each time recomputing the reward surrogate and z_bounds loss.
-        The actor params are frozen (only encoder_optimizer steps), so this is safe.
-
-        Fix 2: After each encoder step, checks if the resulting KL divergence
-        exceeds pre_encoder_kl + max_encoder_kl. If so, reverts encoder params
-        and stops early to prevent encoder-induced distribution shift.
+        KL gating: after each encoder step, checks if the resulting KL
+        divergence exceeds pre_encoder_kl + max_encoder_kl. If so, reverts
+        encoder params and stops early.
         """
-        mean_z_bounds_loss = 0.0
         kl_gating = self.max_encoder_kl > 0 and old_mu_flat is not None and old_sigma_flat is not None
 
         for _epoch in range(self.num_encoder_epochs):
-            # Save encoder state for potential rollback (Fix 2)
+            # Save encoder state for potential rollback
             if kl_gating:
                 saved_state = {n: p.data.clone() for n, p in self.policy.named_parameters() if n.startswith("encoder")}
 
@@ -816,25 +677,16 @@ class ConstraintTRPO:
             ratio = torch.exp(log_prob - old_log_prob_flat.squeeze(-1))
             total_loss = -(advantages_flat.squeeze(-1) * ratio).mean()
 
-            # Add z_bounds loss (same forward pass, shared z tensor)
-            if hasattr(self.policy, "z_bounds_loss"):
-                z_b_loss = self.policy.z_bounds_loss()
-                mean_z_bounds_loss = z_b_loss.item()
-                if z_b_loss.requires_grad:
-                    total_loss = total_loss + z_b_loss
-
             # Guard against NaN/Inf loss propagating to encoder params
             if not torch.isfinite(total_loss):
                 logger.warning("Encoder loss non-finite (%.4e), skipping epoch %d", total_loss.item(), _epoch)
                 continue
 
-            # Single backward: encoder_optimizer only steps encoder params,
-            # so actor/critic grads are computed but not applied
             total_loss.backward()
             nn.utils.clip_grad_norm_(self._encoder_params, max_norm=0.5)
             self.encoder_optimizer.step()
 
-            # Fix 2: KL gating -- revert if encoder step caused excessive KL shift
+            # KL gating: revert if encoder step caused excessive KL shift
             if kl_gating:
                 with torch.no_grad():
                     post_kl = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
@@ -851,8 +703,6 @@ class ConstraintTRPO:
                     )
                     break
 
-        return mean_z_bounds_loss
-
     def _update_values(
         self,
         obs_flat: TensorDict,
@@ -864,7 +714,7 @@ class ConstraintTRPO:
         """Update value functions (reward + cost) via MSE.
 
         B2: When actor is frozen (actor_updated=False), cost critic LR is reduced
-        10x to prevent phantom mode switches from cost value drift.
+        10x to prevent lambda oscillation from cost value drift.
         """
         mean_value_loss = 0.0
         mean_cost_value_loss = 0.0
@@ -896,8 +746,6 @@ class ConstraintTRPO:
                 cost_value_pred = self.policy.evaluate_costs(obs_mb)
                 target = cost_returns_mb.clamp(min=0.0)
                 per_k_mse = (target - cost_value_pred).pow(2).mean(dim=0)  # (K,)
-                # Guard for edge-case budgets: with default cost_gamma=0.99, min d_k=1.0
-                # so d_k^2>=1.0 and the clamp never activates. Kept as defensive bound.
                 cost_value_loss = (per_k_mse / self.d_k.pow(2).clamp(min=0.01)).mean()
 
                 total_value_loss = self.value_loss_coef * value_loss + self.cost_value_loss_coef * cost_value_loss
@@ -928,4 +776,9 @@ class ConstraintTRPO:
 
     def set_max_iterations(self, max_iterations: int) -> None:
         """Interface compatibility with ConstraintEncoderRunner."""
-        logger.info("[ConstraintTRPO] Lagrangian mode, lambda_lr=%.4f, lambda_max=%.2f, max_iterations=%d", self._lambda_lr, self._lambda_max, max_iterations)
+        logger.info(
+            "[ConstraintTRPO] Lagrangian mode, lambda_lr=%.4f, lambda_max=%.2f, max_iterations=%d",
+            self._lambda_lr,
+            self._lambda_max,
+            max_iterations,
+        )

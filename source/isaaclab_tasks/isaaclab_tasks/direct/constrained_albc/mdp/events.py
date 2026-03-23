@@ -48,25 +48,16 @@ def _ensure_env_ids(env: ALBCEnv, env_ids: torch.Tensor | None) -> torch.Tensor:
     return env_ids
 
 
-def _rand_uniform(
-    shape: tuple | int,
-    low: float,
-    high: float,
-    device: str | torch.device,
-) -> torch.Tensor:
-    """Generate uniform random values in [low, high]."""
-    if isinstance(shape, int):
-        shape = (shape,)
-    return torch.rand(shape, device=device) * (high - low) + low
-
-
 def _rand_uniform_range(
     shape: tuple | int,
     range_tuple: tuple[float, float],
     device: str | torch.device,
 ) -> torch.Tensor:
-    """Generate uniform random values from a (low, high) tuple."""
-    return _rand_uniform(shape, range_tuple[0], range_tuple[1], device)
+    """Generate uniform random values in [low, high] from a (low, high) tuple."""
+    if isinstance(shape, int):
+        shape = (shape,)
+    lo, hi = range_tuple
+    return torch.rand(shape, device=device) * (hi - lo) + lo
 
 
 # -----------------------------------------------------------------------------

@@ -4,6 +4,53 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-23] Code restructuring and simplification (2 sessions)
+
+### Context
+Previous session (2026-03-22) removed EAPO, z_bounds, EMA smoothing, recovery mode, margins,
+entropy_coef and related logic (~268 lines across 5 files). This session continues cleanup:
+restructuring stale references, removing dead code, and running code simplifier (3 parallel
+review agents: reuse, quality, efficiency). 22 issues found, 8 fixed, rest skipped with rationale
+(cross-package dedup out of scope, CUDA race condition false positive, KL measurements at
+different time points not redundant).
+
+### Changed
+- `__init__.py`: Removed `ConstrainedALBCEncoderEnvCfg` backward-compat alias. Gym registration
+  now points directly to `ALBCEnvCfg`.
+- `config.py`: Removed `ConstrainedALBCEncoderEnvCfg = ALBCEnvCfg` alias (last line). Updated
+  "C-TRPO / IPO" section comment to "C-TRPO".
+- `albc_env.py`: Replaced 4 "IPO" comment references with "constraint"/"C-TRPO". Added
+  `_constraints_cfg` cache in `__init__` (avoids `getattr` on every `_get_rewards` call).
+  Added `_perturb_cycle` property (eliminates duplicate `max(1, interval + duration)` in
+  `_init_state_buffers` and `_reset_perturbation_buffers`). Pre-allocated `_env_idx` tensor
+  (avoids per-step `torch.arange` GPU allocation in `_get_delayed_actions`).
+- `constraints.py`: Updated `ALBCConstraintCfg` docstring "IPO pipeline" -> "C-TRPO pipeline".
+- `constraint_trpo.py`: Updated docstring (removed barrier comparison text). Added `Callable`
+  import. Fixed `surrogate_fn: object` -> `Callable[[], torch.Tensor]` (2 methods). Merged
+  redundant `_cached_lagrangian_penalty`/`_cached_mean_entropy`/`_cached_surrogate_loss` into
+  `_last_*` attributes (single canonical name). Pre-allocated `_zero_costs` buffer in
+  `init_storage` (avoids per-step `torch.zeros` GPU allocation in `process_env_step`).
+  Vectorized finiteness check in `_compute_cost_returns` (K separate GPU reductions -> 1).
+- `constraint_encoder_runner.py`: Updated `alg._cached_mean_entropy` -> `alg._last_mean_entropy`.
+- `events.py`: Inlined `_rand_uniform` into `_rand_uniform_range` (removed dead helper layer).
+- `agents/rsl_rl_ppo_cfg.py`: Updated docstrings (barrier -> Lagrangian references).
+
+### Removed
+- `utils/logging.py`: Deleted `unwrap_env()` function (exported but never imported anywhere
+  in constrained_albc). Updated module docstring.
+- `utils/__init__.py`: Removed `unwrap_env` from imports and `__all__`.
+- `config.py`: Deleted `ConstrainedALBCEncoderEnvCfg` backward-compat alias.
+- `events.py`: Deleted `_rand_uniform` (only called from `_rand_uniform_range`).
+
+### Notes
+- Code reuse review found 3 identical functions between constrained_albc and hero_agent
+  (flush_metrics, log_dr_metrics, log_encoder_metrics). Not extracted to shared module
+  because hero_agent is out of scope per user instruction.
+- Efficiency review found `euler_xyz_from_quat` called 3-4 times per step on same quaternion,
+  and duplicate `_get_critic_obs` in `act()`. Both require structural refactoring -- deferred.
+- `barrier_state.pt` fallback in `load()` intentionally kept for old checkpoint compatibility.
+- All changes pass ruff check + ruff format (13 files).
+
 ## [2026-03-22] Remove C-TRPO recovery mode + privileged-only encoder analysis
 
 ### Context
@@ -446,533 +493,50 @@ Analysis of run `2026-03-20_16-40-57` (650+ iter, post-stability-fix) revealed:
 - When both axes reach ~5 deg, rewards become balanced and fine convergence activates naturally
 - joint_torque cost still diverging (cr=18.85, dk=20.0) -- monitor but not yet critical
 
-## [2026-03-20] C-TRPO training stability: entropy bonus, encoder KL gating, yaw_vel budget, surrogate logging
+## [2026-03-20 Summary] Code review marathon + stabilization fixes (11 sessions)
 
 ### Context
-Analysis of run `2026-03-20_14-01-34` (1000+ iter) identified 4 linked stability issues:
-(1) Noise std monotonically decayed 1.0->0.15 because TRPO has no entropy bonus -- the natural
-gradient always reduces std (tighter distribution = higher expected reward for current mean).
-This caused roll/pitch "axis alternation" (one axis converges, other collapses). (2) Encoder
-updates change z (actor input), shifting the conditional distribution `pi(a|s,z)` beyond the
-trust region. Logged KL reached 0.02-0.10 (2-10x the 0.015 target), with step 375-384 KL
-spike directly draining yaw_vel margin. (3) yaw_vel budget=0.35 (d_k=35, ~20 deg/s) too tight
-for passive yaw dynamics. (4) surrogate loss not logged, hindering gradient debugging.
+Intensive code review and stabilization day. Started with comprehensive simplification (forked
+constrained_albc package from hero_agent, reduced from ~7000 to ~4900 lines by removing unused
+features). Then 6 targeted code reviews found 3 critical bugs (prev_actions_obs causal violation,
+effort_limit_cost per-joint masking, joint DR running in debug mode) plus encoder optimizer resume
+bug, barrier singularity, and 5 theoretical fixes. Stabilization work: Laplacian reward (replaces
+quadratic for near-zero gradient), min_laplacian (worst-axis focus), noise floor (0.25->0.01),
+EAPO entropy advantages, EMA cost smoothing (B1), value LR gating (B2), per-constraint blend
+mode, entropy bonus, encoder KL gating, yaw_vel budget relaxation. Removed PBRS progress reward
+(redundant). Removed constrained_encoder_base from hero_agent (4 files deleted, 10 edited).
 
 ### Changed
-- `algorithms/constraint_trpo.py`: Fix 1 -- entropy bonus `-entropy_coef * H(pi)` added to
-  `surrogate()` closure. Counteracts TRPO's inherent std-reduction bias. `entropy_coef=0.005`
-  (matching RSL-RL PPO default). Only in surrogate, not encoder update (log_std not encoder param).
-- `algorithms/constraint_trpo.py`: Fix 2 -- Pre-encoder KL measured after noise floor clamp.
-  `_update_encoder()` gains KL gating: after each encoder step, if KL exceeds
-  `pre_encoder_kl + max_encoder_kl` (default 0.016), encoder params are reverted and epoch stops.
-  Prevents encoder-induced distribution shift from violating trust region.
-- `algorithms/constraint_trpo.py`: Fix 4 -- `_trpo_step()` caches `loss.item()` for surrogate
-  logging. Added `entropy`, `surrogate`, `pre_encoder_kl` to `loss_dict` (auto-logged as
-  `Loss/entropy`, `Loss/surrogate`, `Loss/pre_encoder_kl` by OnPolicyRunner).
-- `config.py`: Fix 3 -- yaw_vel budget 0.35 -> 0.785 (d_k=78.5, ~45 deg/s).
-- `agents/rsl_rl_ppo_cfg.py`: Added `entropy_coef=0.005` and `max_encoder_kl=0.016` to
-  `RslRlConstraintTRPOAlgorithmCfg`.
-- `runners/constraint_encoder_runner.py`: Added `Policy/entropy` and `Policy/pre_encoder_kl`
-  to constraint metrics logging.
-
-## [2026-03-20] C-TRPO per-constraint blend: fix recovery damage to attitude performance
-
-### Context
-Post-B1/B2 analysis of run 2026-03-20_13-21-52 (571 iter) revealed that while phantom mode
-oscillation was resolved, recovery mode caused irreversible step-wise attitude degradation.
-When yaw_vel triggered recovery, ALL reward optimization halted (reward gradient = 0) for
-44+ iterations. Since yaw_vel and attitude control are orthogonal, cost reduction during
-recovery provided zero benefit to attitude -- but removing reward gradient caused pitch error
-to jump from 5-7 deg to 13-18 deg in staircase pattern, never fully recovering.
-
-Additionally, encoder was updated with reward-only objective during recovery while actor used
-cost-only -- directional mismatch caused z drift (z_std +39%), z_bounds_loss 15x spike, and
-KL explosion to 0.13 (vs normal 0.01) from encoder-driven distribution shift.
-
-Solution: per-constraint blend replaces binary if/else with unified surrogate
-`reward + barrier(safe) + cost(violated)`. Reward gradient never turns off. Line search
-gains cost non-regression check to prevent reward improvement from masking cost worsening.
-Encoder objective aligned with actor (includes recovery cost when in blend mode).
-
-### Changed
-- `algorithms/constraint_trpo.py`: Replaced binary `if any_recovery / else` (lines 599-623)
-  with unified surrogate: `reward_surr + barrier_penalty + recovery_cost`. Reward always active;
-  recovery constraints add cost minimization gradient without killing reward optimization.
-- `algorithms/constraint_trpo.py`: `_line_search()` gains `recovery_cost_fn` parameter. When
-  provided, steps where recovery cost worsens (new_rc > old_rc + 1e-6) are rejected, preventing
-  reward improvement from masking cost regression in the total surrogate.
-- `algorithms/constraint_trpo.py`: `_trpo_step()` passes `recovery_cost_fn` through to
-  `_line_search()`. Mode name changes from "recovery" to "blend".
-- `algorithms/constraint_trpo.py`: `_update_encoder()` gains `recovery_mask` and
-  `cost_advantages_flat` parameters. During blend mode, encoder objective includes recovery cost
-  term, aligning encoder and actor gradient directions (fixes z drift root cause).
-
-### Notes
-- `_compute_barrier_penalty()` unchanged: already uses `safe_mask = (margins>0) & ~recovery`
-- `_compute_margins()`, `_in_recovery` hysteresis logic preserved
-- Noise floor (0.01) unchanged -- already fixed in prior session
-- No new config parameters needed
-- Verification criteria: pitch error recovery < 2 deg after blend episodes, KL < 0.05,
-  z_std expansion < 10% during blend, cost_return_yaw_vel decreasing during blend
-
-## [2026-03-20] 5-7 deg convergence plateau fix: Laplacian reward + noise floor + overshoot relaxation
-
-### Context
-`Isaac-Constrained-ALBC-Encoder-v0` training plateaued at 5-7 deg attitude error (target: 3 deg).
-Root cause analysis identified 3 primary causes working together:
-
-1. **Quadratic reward gradient dies near zero** (CRITICAL): gradient = -2e, so at 5 deg the
-   reward improvement for 5->3 deg is only 0.000243/step -- barely above smoothness penalty noise.
-2. **Action noise floor std=0.25 blocks precision** (CRITICAL): `min_log_std = log(0.25)` gave
-   1.2 deg/step noise (40% of 3 deg target). Policy reached the floor at ~100 iterations and
-   couldn't reduce std further despite 2400 more iterations of training.
-3. **Overshoot constraint too tight for fine convergence** (HIGH): threshold=0.035 rad (2 deg)
-   triggered recovery mode during normal fine-correction oscillation at 5-7 deg, halting all
-   reward optimization.
-
-Implemented Phase 1 (Exp 3A + 1A) and Phase 2 (Exp 2) simultaneously:
-- Laplacian reward: gradient = (1/sigma)*exp(-|e|/sigma), INCREASES near zero (4.71/rad at 3 deg
-  vs quadratic's 0.10/rad). Per-axis kernel with sigma=0.15.
-- Noise floor 0.25 -> 0.01: per-step noise drops from 1.2 deg to 0.048 deg. KL constraint
-  (max_kl=0.01) already prevents std collapse, making the floor redundant.
-- Overshoot threshold 2 deg -> 5 deg, budget 0.10 -> 0.20: allows fine correction without
-  triggering recovery mode.
-
-Phase 3 (perturbation torque 0.4->0.2 Nm) and Phase 4 (observation noise halving) deferred --
-apply only if Phase 1+2 insufficient.
-
-### Changed
-- `mdp/rewards.py`: `command_reward()` accepts `command_type` ("quadratic" or "laplacian") and
-  `sigma` params. Laplacian mode: `exp(-|e_i|/sigma)` per axis, summed. `ALBCRewardCfg` gained
-  `command_type` and `command_sigma` fields (defaults: "quadratic", 0.15).
-- `config.py`: Reward default changed to `command_type="laplacian"`, `command_sigma=0.15`.
-  Overshoot constraint: threshold 0.035 -> 0.087 rad (~5 deg), budget 0.10 -> 0.20.
-- `algorithms/constraint_trpo.py`: `min_log_std` changed from `log(0.25)` to `log(0.01)`.
-  std floor from 0.25 to 0.01 (per-step noise 1.2 deg -> 0.048 deg).
-- `albc_env.py`: `_build_reward_terms()` passes `command_type` and `sigma` from config to
-  `command_reward` via `RewardTermCfg.params`.
-
-### Notes
-- Deferred experiments (config-only changes, no code needed):
-  - Exp 4: `perturbation_torque_range (0.0, 0.2)` -- if 3 deg infeasible under max perturbation
-  - Exp 5: observation noise std halved -- if SNR too low at 3 deg (sim2real impact to consider)
-- Verification: `Episode/attitude_error_mean < 0.052 rad`, `Policy/action_std` freely decreasing
-  below 0.25, `Constraint/mode` safe(0) ratio > 70%.
-
-## [2026-03-20] Remove constrained_encoder_base code from hero_agent
-
-### Context
-All constrained RL code has been fully migrated to `constrained_albc/` package.
-This session removes the remaining constrained_encoder_base references from
-hero_agent to eliminate dead imports and prevent runtime confusion between the
-two packages. 4 files deleted, 10 files edited, ruff check clean.
-
-### Changed
-- `base_env.py`: Removed `compute_all_costs` import, constraint cost computation block,
-  `_prev_attitude_error_rp` buffer (init + 3 reset/update sites), `_check_dr_infeasibility()`
-  method and its call site, `log_dr_infeasibility` import.
-- `config.py`: Removed constraint imports (ALBCConstraintCfg, ConstraintTermCfg, 6 cost functions).
-  Deleted `HeroAgentConstrainedEncoderEnvCfg` class (~70 lines).
-- `agents/rsl_rl_ppo_cfg.py`: Removed ConstraintTRPO/ConstraintEncoderRunner/
-  ActorCriticEncoderConstrained imports and module registrations. Deleted 3 config classes
-  (RslRlConstraintTRPOAlgorithmCfg, RslRlPpoActorCriticEncoderConstrainedCfg,
-  HeroAgentConstrainedEncoderRunnerCfg, ~95 lines).
-- `__init__.py`: Removed gym.register for Isaac-HeroAgent-Constrained-Encoder-Base-v0,
-  config import, and __all__ entry.
-- `encoder/__init__.py`, `agents/__init__.py`, `runners/__init__.py`,
-  `algorithms/__init__.py`, `mdp/__init__.py`: Removed all constrained-related imports/exports.
-- `utils/logging.py`: Deleted `log_dr_infeasibility()` and `_get_dr_infeasibility_logger()`.
-- `utils/__init__.py`: Removed `log_dr_infeasibility` from imports and __all__.
-- `runners/base_runner.py`: Removed ConstraintTRPO reference in docstring comment.
+- `algorithms/constraint_trpo.py`: Full evolution through 11 sessions. Final state: barrier-based
+  C-TRPO with unified surrogate (reward + barrier + recovery cost). EMA smoothing on cost returns,
+  value LR gating on actor freeze, encoder KL gating (max_encoder_kl=0.016), min_std noise floor
+  (0.01), entropy_coef (0.005->0.001), EAPO soft advantages, isfinite guard on encoder loss,
+  barrier margin clamp (min=0.01), **_kwargs for RSL-RL compat, cost GAE dones shape fix.
+- `config.py`: Merged 4-class hierarchy to single ALBCEnvCfg. Laplacian reward (sigma=0.15).
+  Overshoot threshold 0.035->0.087, budget 0.10->0.20. yaw_vel budget 0.35->0.785.
+  Removed dead enable_payload field. Budget D_k vs d_k documentation added.
+- `albc_env.py`: Simplified from ~1200 to ~1000 lines. Key fixes: _prev_actions_obs causal
+  violation, _prev_joint_pos timing, control_dt (physics_dt -> step_dt). Extracted helper
+  methods. Joint DR gated on rand_cfg.enable. Payload always computed.
+- `mdp/rewards.py`: 3-term -> 2-term (removed PBRS). Added laplacian/min_laplacian/smooth_min
+  command types. ALBCRewardCfg reduced from 10 to 5 fields.
+- `mdp/constraints.py`: effort_limit per-joint comparison, overshoot per-axis conjunction,
+  removed dead cost_type field. Removed 5 unused cost functions.
+- `mdp/events.py`: DRSampler simplified, DORAEMON removed, payload xy-norm clamp, inertia
+  fallback warning.
+- `encoder/`: DRY fix (_encode delegation), no-grad normalization update (262K pass savings),
+  softplus->ReLU on cost critic, restored load_state_dict backward compat, z_bounds_loss device
+  fix. Removed no-history mode, symmetric critic, sigmoid activation. 465+131 -> 295+78 lines.
+- `runners/`: Flattened 3-level to single ConstraintEncoderRunner. Encoder optimizer checkpoint.
+  EMA state persistence. ALBC-prefixed namespace registration. Dict-based auto-sync fix.
+- `agents/rsl_rl_ppo_cfg.py`: Config hierarchy flattened. Added EAPO, EMA, entropy, KL gating
+  params. ALBC-prefixed runner module names.
 
 ### Removed
-- `encoder/actor_critic_encoder_constrained.py`: Constrained encoder network (4.5KB)
-- `algorithms/constraint_trpo.py`: C-TRPO algorithm (42KB)
-- `runners/constraint_encoder_runner.py`: Constrained encoder runner (6.4KB)
-- `mdp/constraints.py`: Constraint cost functions (12.5KB)
-
-## [2026-03-20] C-TRPO mode oscillation fix: EMA smoothing + cost critic LR gating
-
-### Context
-C-TRPO training exhibited rapid mode oscillation (loss/mode flipping 0<->1 every
-5-10 iterations in later training). Root cause analysis identified 5 layers:
-- RC1 (HIGH): Cost critic decoupling -- `_update_values()` runs 20 gradient steps
-  regardless of actor update success. When actor is frozen (ls_success=False), cost
-  critic drifts, changing margin without policy change -> "phantom" mode switches.
-- RC2 (HIGH): Weak barrier beta=0.01 -- barrier penalty negligible until margin < 1.
-- RC3 (MEDIUM): Hard binary mode switch with no continuous interpolation.
-- RC4 (MEDIUM): Narrow hysteresis band (0.8) allowing rapid safe<->recovery cycling.
-- RC5 (LOW): Binary constraint volatility (minor with 4096-env averaging).
-
-Implemented Approach B (B1 + B2, ~30 lines) targeting RC1, plus Approach A tuning
-targeting RC2 + RC4. Approach C (soft mode transition, ~120 lines) reserved as
-follow-up if oscillation persists.
-
-### Changed
-- `algorithms/constraint_trpo.py`: B1 -- EMA smoothing (alpha=0.3) on mean_cost_returns
-  before margin computation. `_compute_margins()` now receives smoothed values instead
-  of raw per-iteration cost returns. ~3-iteration lag, sufficient for real violation
-  detection while filtering single-iteration cost value jumps.
-- `algorithms/constraint_trpo.py`: B2 -- Cost critic LR gated on actor update success.
-  When `ls_success=False`, value optimizer LR reduced to 10% of base LR. Prevents
-  cost critic from drifting while actor is frozen, eliminating the primary source of
-  phantom mode switches. LR restored after `_update_values()` completes.
-- `agents/rsl_rl_ppo_cfg.py`: Added `ema_cost_alpha=0.3` parameter. Updated `beta`
-  default 0.01->0.05 (5x barrier strengthening). Updated `recovery_threshold_frac`
-  default 0.8->0.6 (wider hysteresis band).
-- `runners/constraint_encoder_runner.py`: EMA state (ema_cost_returns, ema_initialized)
-  persisted in barrier_state.pt checkpoint. Backward-compatible with old checkpoints
-  (missing EMA keys handled gracefully). Added per-constraint `ema_cost_return` metric
-  to WandB/TensorBoard logging for monitoring smoothed vs raw cost returns.
-
-### Notes
-- B3 (adaptive beta based on min margin) is designed but not implemented -- add if
-  beta=0.05 proves insufficient after B1+B2 stabilize mode switching.
-- Approach C (soft mode transition with sigmoid alpha_k blending) is the structural
-  solution if oscillation fundamentally persists. ~120 lines, replaces binary
-  safe/recovery with continuous interpolation. Reserved as follow-up.
-- Verification: run with same config, check Loss/mode switch period > 30 iters in
-  step 100-300 range, Constraint/cost_return stable near d_k, Policy/line_search_success > 70%.
-
-## [2026-03-20] Remove PBRS progress reward (redundant with quadratic command)
-
-### Context
-Analysis of reward structure revealed that `progress_reward` (PBRS: prev_potential -
-gamma * potential) is redundant with `command_reward` (quadratic: -(roll_err^2 + pitch_err^2)).
-Both derive from the same attitude_error variable, producing identical gradient directions.
-
-Key findings from mathematical analysis:
-- PBRS telescopes to initial minus discounted final error (path-independent),
-  while command integrates error over entire trajectory (path-dependent).
-  However, for stabilization tasks with monotonic error decrease, both produce
-  mirror-image WandB curves with no independent learning signal.
-- PBRS theorem (Ng et al. 1999) guarantees progress does not change optimal policy.
-- Progress was NOT dt-scaled, making it ~2x stronger per step than command --
-  effectively dominating the reward signal while adding no new information.
-- C-TRPO uses full-batch natural gradient, so the "early training value function
-  noise" argument for PBRS is weaker than in PPO.
-
-Dry run verified: 2 iterations, 4 envs, headless -- clean execution with only
-command + smoothness reward terms logged.
-
-### Removed
-- `mdp/rewards.py`: Deleted `progress_reward()` function and `progress_weight`/`progress_gamma`
-  fields from `ALBCRewardCfg`. Reward architecture simplified from 3-term to 2-term.
-- `albc_env.py`: Removed `_potentials` and `_prev_potentials` buffers (only used by progress).
-  Renamed `_update_potentials()` to `_update_attitude_error()` (simpler, reflects actual purpose).
-  Removed progress term construction in `_build_reward_terms()`.
-  Removed potential initialization/reset in `_reset_task_and_state()`.
-- `config.py`: Removed `progress_weight=2.0` from `ALBCRewardCfg` instantiation.
-- `mdp/__init__.py`: Removed `progress_reward` from imports and `__all__`.
-
-## [2026-03-20] config.py code review: dead fields, barrier singularity, documentation
-
-### Context
-Post-simplification code review of `config.py` plus cross-referenced issues in
-`constraint_trpo.py`. 8 verified issues found (3 exploration agents, false positives
-filtered). Issues 1-4 in config.py (dead field, undocumented budget scaling, magic numbers,
-missing validation); Issues 5-8 in constraint_trpo.py (barrier near-singularity, any-recovery
-design, kwargs absorption, dead clamp guard). Issue 4 (DR range validation) skipped as low ROI.
-
-Key finding: barrier penalty has a singularity gap -- when margin is small positive (0, ~0.01)
-but recovery mode hasn't triggered (threshold is margin <= 0), phi_pp = 1/m^2 can reach 1e6,
-causing explosive gradients. Clamping margin to min=0.01 caps phi_pp at 1e4 (barrier penalty
-~100 with beta=0.01 and cost_surrogate=0.1).
-
-### Changed
-- `config.py`: Added budget D_k vs d_k documentation. Per-step budget D_k is scaled to
-  discounted d_k = D_k / (1 - cost_gamma) = D_k * 100 by the algorithm. This relationship
-  was undocumented, making budget tuning non-obvious.
-- `config.py`: Added inline unit comments for constraint magic numbers: `1.396` -> `# ~80 deg`,
-  `4.189` -> `# 40 RPM (Dynamixel XW540 no-load)`.
-- `algorithms/constraint_trpo.py`: Added design note comment on "any-recovery" policy trade-off
-  at lines 569-578. Documents that per-constraint blend is a known alternative but adds
-  complexity with shared trust region interaction.
-
-### Fixed
-- `algorithms/constraint_trpo.py`: Barrier margin clamped to min=0.01 in
-  `_compute_barrier_penalty()`. Prevents phi_pp explosion when margin is small positive but
-  recovery hasn't triggered. Old: `1/(m^2 + 1e-8)` -> New: `1/max(m, 0.01)^2`.
-- `algorithms/constraint_trpo.py`: `**_kwargs` now logs ignored kwargs at debug level instead
-  of silently absorbing. Aids diagnosis when RSL-RL passes unexpected parameters.
-- `algorithms/constraint_trpo.py`: Added comment explaining d_k^2 clamp (min=0.01) is a
-  defensive guard that never activates with default cost_gamma=0.99 (min d_k=1.0).
-
-### Removed
-- `config.py`: Deleted dead `enable_payload: bool = True` field. Payload is always initialized
-  and computed unconditionally since the simplification removed its conditional logic.
-
-## [2026-03-20] MDP code review: 3 critical bugs + 5 theoretical fixes
-
-### Context
-Systematic code review of Constrained ALBC MDP modules (rewards.py, constraints.py,
-observations.py, events.py, albc_env.py) using 3 parallel code-explorer agents.
-Identified 3 critical bugs, 7 theoretical issues, 7 design items, and 6 minor items.
-Fixed all critical bugs and 5 of 7 theoretical issues in this session.
-
-BUG-1 root cause: `_update_action_buffers()` stored `self._actions` (current step a_t)
-into `_prev_actions_obs` instead of `self._prev_actions` (a_{t-1}). This caused a causal
-violation -- policy obs[11:13] contained the current action, while encoder proprio history
-correctly used the previous action. Temporal inconsistency between policy and encoder.
-
-BUG-2: `effort_limit_cost` compared `max(torques)` against `max(limits)` instead of
-per-joint comparison. When joints have different DR'd limits, a violation on the weaker
-joint could be masked by the stronger joint's higher limit.
-
-BUG-3: Joint gain/friction randomization ran unconditionally even with `rand_cfg.enable=False`
-(debug/eval mode). Comment claimed "ranges collapse to defaults" but actual DR ranges were
-wide (Kp 40-120, Kd 0.5-5.0), so debug envs had randomized actuator properties.
-
-### Fixed
-- `albc_env.py`: BUG-1 -- `_prev_actions_obs` now stores `_prev_actions` (a_{t-1}) instead
-  of `_actions` (a_t). Both sliced and full-clone paths corrected.
-- `mdp/constraints.py`: BUG-2 -- `effort_limit_cost` uses per-joint comparison
-  `(computed.abs() > limits).any(dim=-1)` instead of `max(dim=-1)` reduction on both sides.
-- `albc_env.py`: BUG-3 -- Joint actuator DR (gains, effort limits, friction) wrapped in
-  `if rand_cfg.enable:` guard. Debug/eval envs now keep default actuator properties.
-- `mdp/constraints.py`: THEO-1 -- `overshoot_cost` checks `prev.abs() > threshold` (departure
-  magnitude) instead of `curr.abs() > threshold` (landing magnitude). Catches small overshoots
-  where zero crossing lands below threshold (e.g., prev=+0.04rad -> curr=-0.01rad).
-
-### Changed
-- `albc_env.py`: THEO-3 -- `_get_attitude_error()` returns cached `self._attitude_error` instead
-  of recomputing. Safe because `_get_rewards()` -> `_update_potentials()` always runs first in
-  Isaac Lab's step order (line 393 before 410 in direct_rl_env.py). Eliminates duplicate
-  `compute_attitude_error()` call per step.
-- `mdp/events.py`: THEO-6 -- Payload restoring moment clamp uses horizontal (xy) norm instead
-  of 3D norm. Roll/pitch restoring moment depends only on horizontal offset; Z-component payload
-  was being over-constrained.
-- `mdp/events.py`: THEO-7 -- `_HydroBaseCache.inertia` fallback (0.5 * added_mass[3:6]) now
-  emits `logger.warning()` when `rigid_body_inertia` is None. Added `import logging`.
-
-### Removed
-- `mdp/constraints.py`: THEO-2 -- Removed dead `cost_type` field from `ConstraintTermCfg`.
-  Never read by `compute_all_costs()` or `constraint_trpo.py`. Removed `cost_type="average"`
-  from `yaw_velocity_cost` term in `config.py`. Updated module docstring.
-
-### Notes
-- THEO-4 (PBRS L2 norm vs quadratic gradient mismatch): Not fixed -- reward landscape change
-  would require full retraining. Documented only.
-- THEO-5 (yaw in obs but not in reward): Not fixed -- obs dimension change affects encoder/actor
-  architecture. Separate task.
-- DES-1~7 and M-1~6: Out of scope (no functional impact). Documented in review plan.
-
-## [2026-03-20] Full package code review: encoder optimizer resume + NaN guard
-
-### Context
-Systematic code review of entire constrained_albc package (6 review areas: agents,
-encoder, algorithms, mdp, config+env, runners+utils). Found 1 confirmed bug
-(encoder optimizer state not saved on checkpoint), 2 theoretical concerns (recovery
-drops reward globally, standardization-barrier inverse variance), and 2 design issues
-(unused cost_type field, missing isfinite guard on encoder loss).
-
-BUG-1 root cause: `self.optimizer = self.value_optimizer` alias (constraint_trpo.py:210)
-means OnPolicyRunner.save() only persists value_optimizer state_dict. The separate
-`encoder_optimizer` (Adam with lr=3e-4, wd=1e-5) loses momentum (exp_avg, exp_avg_sq)
-on resume, causing a transient gradient magnitude spike as Adam re-estimates statistics.
-
-### Fixed
-- `runners/constraint_encoder_runner.py`: Save/load `encoder_optimizer.pt` alongside
-  `barrier_state.pt` in checkpoint. Uses existing `_save_aux_state`/`_load_aux_state`
-  helpers. Load respects `load_optimizer` flag (skip during eval/play).
-- `algorithms/constraint_trpo.py`: Added `torch.isfinite(total_loss)` guard before
-  `.backward()` in `_update_encoder()`. NaN/Inf loss skips the epoch with warning
-  instead of corrupting encoder parameters irreversibly.
-
-### Notes
-- THEORY-1 (recovery drops reward surrogate globally): conservative valid choice per
-  C-TRPO paper (Muller et al. Sec 4.1). Monitor reward stalls during recovery.
-- THEORY-2 (standardization-barrier inverse variance): tight constraints get stronger
-  barrier (arguably correct). Undocumented interaction, monitor per-constraint magnitude.
-- DESIGN-1 (cost_type field in ConstraintTermCfg): dead field, never consumed by
-  algorithm. Deferred cleanup.
-
-## [2026-03-20] Constrained ALBC encoder code review: DRY, perf, backward compat
-
-### Context
-Code review of constrained_albc encoder directory (`actor_critic_encoder.py`,
-`actor_critic_encoder_constrained.py`) after the simplification session. Found 7 issues
-(5 required code changes, 2 already fixed). Key findings: (1) `_encode()` defined but
-never called -- `_get_combined_obs()` duplicated its logic inline (DRY violation from
-simplification that inlined `_build_encoder_input()` but forgot to delegate). (2)
-`update_normalization()` ran encoder forward pass with grad tracking on every env step
-(262K unnecessary grad-enabled passes per iteration). (3) `load_state_dict()` had all
-backward compatibility stripped, causing silent partial loads on architecture mismatch.
-(4) softplus on cost critic biased gradient for near-zero costs. (5) z_bounds_loss
-returned CPU tensor on fallback path.
-
-### Changed
-- `encoder/actor_critic_encoder.py`: `_get_combined_obs()` now delegates to `_encode()`
-  instead of duplicating encoder forward-pass logic inline (DRY fix).
-- `encoder/actor_critic_encoder.py`: `update_normalization()` wraps encoder call in
-  `torch.no_grad()` and only runs when `actor_obs_normalization=True`. Saves 262K
-  unnecessary grad-tracked encoder passes per iteration (4096 envs x 64 steps).
-- `encoder/actor_critic_encoder_constrained.py`: Cost critic activation `F.softplus()`
-  -> `F.relu()`. softplus required x -> -inf for zero output (gradient vanishing for
-  healthy constraints); ReLU allows exact zero with finite MLP values.
-
-### Fixed
-- `encoder/actor_critic_encoder.py`: `z_bounds_loss()` device fallback uses
-  `next(self.parameters()).device` instead of hardcoded "cpu" when `_last_z is None`.
-- `encoder/actor_critic_encoder.py`: Restored `_handle_critic_dim_mismatch()` and full
-  `load_state_dict()` with backward compatibility: encoder_obs_normalizer injection for
-  old checkpoints, critic input dim mismatch detection + reinitialization, unknown key
-  filtering with logging, missing essential key warnings.
-- `encoder/actor_critic_encoder_constrained.py`: Restored `load_state_dict()` override
-  with cost_critic handling: K mismatch detection (different num_constraints), input dim
-  mismatch via parent `_handle_critic_dim_mismatch()`, missing cost_critic key injection.
-
-### Notes
-- MEDIUM-3 (num_encoder_epochs default=5) and LOW-2 (dead encoder_output_activation
-  config field) already fixed in prior sessions
-- Agent-reported "missing encoder gradient from cost surrogate" verified as by-design
-  (encoder role is information compression, cost avoidance is actor's responsibility)
-
-## [2026-03-20] albc_env.py code review: _prev_joint_pos timing + control_dt fix
-
-### Context
-Code review of `albc_env.py` (1016 lines) identified 2 bugs and 1 question requiring
-user confirmation. BUG-1: `_prev_joint_pos` was set in `_reset_action_buffers()` (during
-`_reset_framework` phase) but joint positions are subsequently changed by
-`_reset_task_and_state()` (equilibrium/random init). This injected a false delta (~0.5 rad)
-into `_accumulated_rotation` on the first step after reset, skewing IPO constraint budget.
-BUG-2: `control_dt` used `physics_dt` instead of `step_dt` -- latent bug currently masked
-by `decimation=1` but would cause position_delta underestimation if decimation changed.
-BUG-3: encoder weight_decay 1e-5 vs hero_agent's 1e-4 -- deferred to user confirmation.
-
-### Fixed
-- `albc_env.py`: Added `_prev_joint_pos` re-sync at end of `_reset_task_and_state()` after
-  joint positions are set to equilibrium/random. Prevents false delta in
-  `_accumulated_rotation` (IPO constraint) on first post-reset step.
-- `albc_env.py`: Changed `control_dt = self.physics_dt * ...` to `self.step_dt * ...`.
-  Latent bug -- no behavioral change at current `decimation=1`, but correct for any value.
-
-### Notes
-- BUG-3 (encoder weight_decay 1e-5 in constraint_trpo.py vs 1e-4 in hero_agent) pending
-  user confirmation on whether the difference is intentional.
-- 10 additional items verified correct (VERIFY-1~6, DESIGN-1~3, MINOR-1~2).
-
-## [2026-03-20] Constrained ALBC algorithms code review + runtime integration fixes
-
-### Context
-Executed constrained ALBC algorithms code review plan targeting mathematical correctness
-and latent bugs. Plan identified 3 fixes (overshoot_cost cross-axis false positive,
-num_encoder_epochs default mismatch, barrier beta docstring). During dry run verification,
-5 additional runtime integration bugs were discovered that prevented the constrained_albc
-task from running at all -- the previous simplification session removed compatibility shims
-that were actually load-bearing, and the auto-sync mechanism was silently broken.
-
-Root cause of runtime failures: (1) hero_agent and constrained_albc registered identical
-class names into `_runner_module` namespace; alphabetical import order caused hero_agent to
-overwrite constrained_albc's classes. (2) `train.py` `_RUNNER_MAP` only had hero_agent
-paths. (3) Runner auto-sync used `hasattr()` on plain dicts (from `to_dict()`), silently
-skipping the `num_constraints` sync. (4) RSL-RL `OnPolicyRunner` expected `rnd` and
-`multi_gpu_cfg` attributes. (5) `storage.dones` shape was `(T,N,1)` not `(T,N)`.
-
-Dry run verified: 5 iterations of `Isaac-Constrained-ALBC-Encoder-v0` with 64 envs
-completed successfully after all fixes.
-
-### Fixed
-- `mdp/constraints.py`: `overshoot_cost` per-axis conjunction -- sign flip and magnitude
-  now checked on the SAME axis. Previously `any(dim=-1)` for sign flip and `max(dim=-1)`
-  for magnitude could match different axes, triggering false positive overshoot cost.
-- `algorithms/constraint_trpo.py`: `num_encoder_epochs` default 5 -> 1 to match config.
-  Default=5 would cause stale importance sampling ratio when instantiated without config.
-- `algorithms/constraint_trpo.py`: Barrier beta docstring now documents re-parametrization
-  `beta_code = beta_paper / (2*t)` absorbing the 1/2 and 1/t factors.
-- `algorithms/constraint_trpo.py`: Added `**_kwargs` to `__init__()` for RSL-RL
-  `multi_gpu_cfg` compatibility, and `self.rnd = None` for `OnPolicyRunner.learn()` line 84.
-- `algorithms/constraint_trpo.py`: Fixed `_compute_cost_returns` dones shape -- added
-  `.squeeze(-1)` before `unsqueeze(-1)` to handle `(T,N,1)` storage dones.
-- `agents/rsl_rl_ppo_cfg.py`: ALBC-prefixed `_runner_module` registration names
-  (`ALBCConstraintEncoderRunner`, `ALBCConstraintTRPO`, `ALBCActorCriticEncoderConstrained`)
-  to avoid namespace collision with hero_agent's identically-named registrations.
-- `runners/constraint_encoder_runner.py`: Changed `num_constraints` auto-sync from
-  `hasattr()`/attribute access to dict key access (`in`/`[]`). `train_cfg` is a plain dict
-  from `agent_cfg.to_dict()`, so `hasattr()` always returned False, silently skipping sync.
-- `scripts/.../train.py`: Added `ALBCConstraintEncoderRunner` to `_RUNNER_MAP` pointing
-  to `constrained_albc.runners.ConstraintEncoderRunner`.
-
-### Notes
-- Previous simplification session removed `**kwargs`, `self.rnd = None`, and `hasattr`
-  guards from `ConstraintTRPO` (commit cbd2dd24) -- these were actually required for
-  RSL-RL `OnPolicyRunner` compatibility when not running through hero_agent's BaseRunner.
-- hero_agent's `ConstraintEncoderRunner` has the same `hasattr()` auto-sync bug but was
-  masked because hero_agent's `BaseRunner` chain handles the initialization differently.
-- The `num_encoder_epochs` default mismatch existed since the C-TRPO migration (2026-03-17)
-  but was never triggered because config always provided the value explicitly.
-
-## [2026-03-20] Constrained ALBC code review fixes
-
-### Context
-Post-simplification code review of constrained ALBC found 8 issues. Three required
-code changes (Fix 1, 5, 8); five are design issues documented for future work.
-Fix 8 (num_encoder_epochs default) was already applied in the simplification session.
-
-### Fixed
-- `algorithms/constraint_trpo.py`: Initialize 8 `_last_*` / `_cached_*` monitoring
-  attributes in `__init__()`. Without initialization, `ConstraintEncoderRunner` calling
-  `_log_constraint_metrics()` before first `update()` would raise `AttributeError`.
-  Also fixes `_cached_barrier_penalty` missing when first iteration enters recovery mode.
-- `utils/logging.py`: Fixed `log_encoder_metrics` docstring claiming "Metrics kept (3)"
-  when the function actually logs 5 metrics (z_mean, z_std, z_min, z_max, grad_norm).
-
-### Notes
-- Issues 2 (any-recovery mode), 4 (KL distribution overwrite), 6 (encode/get_combined_obs
-  duplication), 7 (log_encoder_metrics env.get_observations() cost) documented as design
-  issues for future work. No code changes needed -- current behavior is correct.
-
-## [2026-03-20] Constrained ALBC algorithm simplification (10-step plan)
-
-### Context
-Comprehensive simplification of the `constrained_albc/` package across 10 sessions on 2026-03-20.
-The codebase (23 files, ~7,000 lines) had accumulated complexity from being forked from hero_agent
-and supporting multiple unused features. Only 1 task is registered (`Isaac-Constrained-ALBC-Encoder-v0`),
-but the code supported 4 config levels, optional DORAEMON DR, TDE observation, legacy encoder modes,
-and backward checkpoint compatibility. Goal: remove all unused code paths so root cause analysis is
-straightforward when problems occur. Final package: ~4,900 lines (~2,100 lines removed, ~30% reduction).
-
-### Added
-- `constrained_albc/` package (23 files): Extracted from hero_agent as standalone C-TRPO + encoder
-  constrained RL. Registered as `Isaac-Constrained-ALBC-Encoder-v0`. Zero runtime dependency on hero_agent.
-
-### Changed
-- `config.py`: Merged 4-class hierarchy (`ALBCEnvCfg` + `ALBCTrainEnvCfg` + `ALBCEncoderTrainEnvCfg`
-  + `ConstrainedALBCEncoderEnvCfg`) into single `ALBCEnvCfg`. All fields at final production values.
-  `DomainRandomizationCfg` removed `fixed_pose()`/`half_strength()` classmethods and buoy perturbation fields.
-  Backward-compat alias `ConstrainedALBCEncoderEnvCfg = ALBCEnvCfg` for gym registration.
-- `albc_env.py`: Removed `enable_payload` conditional (always True), `_payload_enabled` property,
-  `state_space` vs `enable_payload` validation. Payload wrench always computed (no None checks).
-  Extracted `_collect_termination_metrics()`, `_collect_dynamics_metrics()`, `_reset_action_buffers()`,
-  `_reset_perturbation_buffers()` from monolithic methods. Removed DR infeasibility logging.
-- `mdp/observations.py`: Removed `state_space >= 18/19` guards (always 19). Payload and added mass
-  always included in privileged obs.
-- `mdp/rewards.py`: Reduced `ALBCRewardCfg` from 10 to 5 fields. Removed penalty curriculum, settling/
-  energy rewards, laplacian command branch. `RewardManager` simplified.
-- `mdp/events.py`: `DRSampler.get()` simplified: removed `_key` string parameter and `**_kwargs`.
-  All 14 call sites updated. Removed DORAEMON integration from `_DRSampler`.
-- `mdp/constraints.py`: Removed `joint_torque_cost` alias and 5 unused cost functions.
-- `encoder/actor_critic_encoder.py`: Removed no-history mode, symmetric critic, sigmoid activation,
-  backward-compat `load_state_dict()` (key filtering, dim mismatch handling). 465 -> 295 lines.
-- `encoder/actor_critic_encoder_constrained.py`: Removed `load_state_dict()` override with K-mismatch
-  and input-dim-mismatch handling. 131 -> 78 lines.
-- `algorithms/constraint_trpo.py`: Removed `**kwargs` catch-all, `self.rnd = None`, 3 `hasattr`
-  guards around `evaluate_costs()`, 3 standalone surrogate methods (inlined as closures), entropy_coef
-  (dead code). Vectorized cost GAE. 1043 -> 780 lines.
-- `runners/`: Flattened 3-level hierarchy (`BaseRunner` -> `EncoderRunner` -> `ConstraintEncoderRunner`)
-  to single `ConstraintEncoderRunner(OnPolicyRunner)`. Removed DORAEMON scheduling, noise floor/LR
-  methods. Deleted `base_runner.py` and `encoder_runner.py`.
-- `agents/rsl_rl_ppo_cfg.py`: Removed `asymmetric_critic`, `encoder_output_activation` from policy
-  config (unused by encoder). Flattened 3-level config hierarchy to 2-level.
-- `utils/logging.py`: Removed `log_dr_infeasibility()`, `_get_dr_infeasibility_logger()`,
-  `connect_encoder_to_env()`.
-
-### Removed
-- `doraemon.py`: Deleted entirely (728 lines, unused adaptive DR scheduler).
-- `runners/base_runner.py`, `runners/encoder_runner.py`: Deleted (merged into ConstraintEncoderRunner).
-- `encoder/history_tcn.py`: Deleted (HistoryTCN replaced by raw flatten concat for TRPO OOM fix).
-- Dead code: penalty curriculum, settling/energy rewards, laplacian command, TDE obs, buoy perturbation,
-  symmetric critic, sigmoid activation, backward-compat checkpoint loading, DORAEMON integration.
+- `doraemon.py` (728 lines), `runners/base_runner.py`, `runners/encoder_runner.py`,
+  `encoder/history_tcn.py`, hero_agent constrained files (4 files, ~65KB total).
+- Dead code: penalty curriculum, settling/energy rewards, TDE obs, buoy perturbation,
+  backward-compat checkpoint loading, DORAEMON integration, PBRS progress reward.
 
 ### Notes
 - ruff check + ruff format clean across entire package (13 files)

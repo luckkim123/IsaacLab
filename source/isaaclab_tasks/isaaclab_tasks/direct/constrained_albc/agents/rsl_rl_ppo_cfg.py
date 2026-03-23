@@ -6,7 +6,7 @@
 """RSL-RL PPO agent configurations for constrained ALBC environments.
 
 Provides runner configurations for constrained encoder training:
-    - ConstrainedALBCEncoderRunnerCfg: C-TRPO barrier-based constrained encoder
+    - ConstrainedALBCEncoderRunnerCfg: Lagrangian-based constrained TRPO with encoder
 
 For evaluation, use CLI overrides instead of separate config classes:
     --max_iterations 100 --save_interval 25
@@ -61,8 +61,6 @@ class _EncoderPolicyCfg(RslRlPpoActorCriticCfg):
     encoder_obs_normalization: bool = True
     policy_obs_dim: int = 13
     privileged_dim: int = 23
-    z_bounds_coef: float = 0.0
-    z_bounds_soft_bound: float = 0.85
     proprio_history_len: int = 30
     proprio_feature_dim: int = 8
 
@@ -83,13 +81,10 @@ class RslRlPpoActorCriticEncoderConstrainedCfg(_EncoderPolicyCfg):
 
 @configclass
 class RslRlConstraintTRPOAlgorithmCfg:
-    """Algorithm configuration for ConstraintTRPO (C-TRPO barrier-based trust region).
+    """Algorithm configuration for ConstraintTRPO (Lagrangian-based constrained TRPO).
 
-    Implements C-TRPO (Muller et al., ICML 2025, arXiv:2411.02957):
-        - No Lagrangian dual variables (lambda removed)
-        - Safe mode: barrier-augmented objective + KL-only trust region
-        - Recovery mode: cost minimization with standard TRPO trust region
-        - Option C: barrier curvature in objective gradient only, FVP stays KL-only
+    Uses adaptive Lagrangian multipliers (dual ascent) for constraint enforcement
+    with TRPO natural gradient for the policy update.
 
     These fields are forwarded as kwargs to ConstraintTRPO.__init__().
     The class_name tells the runner to instantiate ConstraintTRPO instead of PPO.
@@ -124,65 +119,21 @@ class RslRlConstraintTRPOAlgorithmCfg:
     line_search_kl_margin: float = 1.5
 
     # Lagrangian constraint parameters
-    beta: float = 0.02
-    """Deprecated. Barrier removed, replaced by Lagrangian. Kept for compat."""
-
-    recovery_threshold_frac: float = 0.4
-    """Deprecated. Recovery mode removed. Kept for compat."""
-
     lambda_lr: float = 0.035
     """Dual ascent step size for Lagrangian multipliers.
-    lambda_k += lr * (J_C_k - d_k) per iteration. OmniSafe standard default."""
+    lambda_k += lr * (J_C_k - d_k) per iteration."""
 
     lambda_max: float = 0.5
     """Maximum Lagrangian multiplier. Caps constraint gradient at ~50% of
     reward gradient O(1). Ensures reward optimization remains primary."""
 
-    ema_cost_alpha: float = 0.3
-    """EMA smoothing factor for mean_cost_returns used in margin computation.
-
-    Prevents phantom mode switches caused by cost critic drift when the actor is
-    frozen (line search failure). alpha=0.3 gives ~3-iteration lag, which is fast
-    enough to detect real constraint violations while filtering single-iteration
-    cost value jumps."""
-
-    # Encoder z bounds
-    z_bounds_coef: float = 0.0
-
     # Noise floor (exploration maintenance)
     min_std: float = 0.2
     """Minimum action standard deviation. Clamped after TRPO step (outside
     trust region optimization). Prevents exploration collapse without consuming
-    KL budget. Noise floor also helps maintain roll/pitch axis balance."""
+    KL budget."""
 
-    # Entropy bonus
-    entropy_coef: float = 0.0
-    """Entropy bonus coefficient. Set to 0.0: entropy in TRPO surrogate is
-    structurally unstable (competes with reward for single KL budget step).
-    Exploration maintained via min_std floor instead."""
-
-    # EAPO: Entropy Advantage Policy Optimization (arXiv:2407.18143)
-    eapo_enabled: bool = True
-    """Enable EAPO entropy advantage in surrogate. Replaces entropy_coef
-    (keep entropy_coef=0.0 when active)."""
-
-    eapo_tau_init: float = 0.01
-    """Initial entropy temperature. Adaptive via SAC v2 dual gradient."""
-
-    eapo_target_entropy: float = 0.5
-    """Target entropy (2D action). std~0.34 per dim -> H~0.5.
-    Above floor (std=0.2, H=-0.39) but allows convergence."""
-
-    eapo_tau_lr: float = 0.001
-    """Dual variable learning rate for tau adaptation."""
-
-    eapo_tau_min: float = 0.001
-    """Minimum tau to prevent zero entropy pressure."""
-
-    eapo_tau_max: float = 0.5
-    """Maximum tau to prevent entropy dominating reward."""
-
-    # Post-encoder KL gating (Fix 2: prevents encoder-induced KL violation)
+    # Post-encoder KL gating
     max_encoder_kl: float = 0.016
     """Maximum additional KL divergence allowed from encoder update. If an encoder
     step causes KL to exceed pre_encoder_kl + max_encoder_kl, the encoder params
@@ -190,14 +141,11 @@ class RslRlConstraintTRPOAlgorithmCfg:
 
     # Encoder update
     num_encoder_epochs: int = 3
-    """Number of encoder gradient steps per iteration. Increased to 3: KL gating
-    (max_encoder_kl=0.016) reverts encoder if distribution shift exceeds budget,
-    making multi-step safe. Addresses encoder-actor update imbalance (critic gets
-    20 steps/iter, encoder was getting only 1)."""
+    """Number of encoder gradient steps per iteration. KL gating (max_encoder_kl)
+    reverts encoder if distribution shift exceeds budget, making multi-step safe."""
 
     encoder_lr: float = 3e-4
-    """Encoder Adam learning rate. Matches pre-mod C-TRPO value; higher values
-    (1e-3) caused excessive distribution shift even with 1 epoch."""
+    """Encoder Adam learning rate."""
 
 
 # =============================================================================
@@ -207,10 +155,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
 
 @configclass
 class ConstrainedALBCEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
-    """Runner configuration for constrained encoder training (C-TRPO barrier).
-
-    Uses ConstraintEncoderRunner: encoder metrics + barrier state.
-    """
+    """Runner configuration for constrained encoder training (Lagrangian TRPO)."""
 
     class_name: str = "ALBCConstraintEncoderRunner"
     seed = 30

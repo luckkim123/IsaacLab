@@ -274,7 +274,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     )
 
     # ==========================================================================
-    # Constraints (C-TRPO / IPO)
+    # Constraints (C-TRPO)
     # ==========================================================================
     # Budget values are per-step raw budgets D_k. The algorithm transforms them to
     # discounted budgets d_k = D_k / (1 - cost_gamma). With cost_gamma=0.99 (default),
@@ -319,7 +319,3 @@ class ALBCEnvCfg(DirectRLEnvCfg):
             ),
         ],
     )
-
-
-# Backwards-compatible alias for gym registration and external references
-ConstrainedALBCEncoderEnvCfg = ALBCEnvCfg

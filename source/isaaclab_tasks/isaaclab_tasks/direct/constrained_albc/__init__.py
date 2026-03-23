@@ -17,7 +17,6 @@ import gymnasium as gym
 from .albc_env import ALBCEnv
 from .config import (
     ALBCEnvCfg,
-    ConstrainedALBCEncoderEnvCfg,
     DomainRandomizationCfg,
 )
 
@@ -30,7 +29,7 @@ gym.register(
     entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.config:ConstrainedALBCEncoderEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.config:ALBCEnvCfg",
         "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ConstrainedALBCEncoderRunnerCfg",
     },
 )

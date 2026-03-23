@@ -57,7 +57,7 @@ class ConstraintTermCfg:
 
 @configclass
 class ALBCConstraintCfg:
-    """Configuration for ALBC constraint costs in IPO pipeline.
+    """Configuration for ALBC constraint costs in C-TRPO pipeline.
 
     Uses a registry pattern: ``terms`` is a list of ConstraintTermCfg.
     ``num_constraints`` and ``constraint_budgets`` are derived properties.

@@ -71,8 +71,6 @@ class ActorCriticEncoder(nn.Module):
         encoder_latent_dim: int = 13,
         encoder_activation: str = "elu",
         encoder_obs_normalization: bool = False,
-        z_bounds_coef: float = 0.0,
-        z_bounds_soft_bound: float = 0.85,
         # Actor-Critic parameters
         actor_obs_normalization: bool = False,
         critic_obs_normalization: bool = False,
@@ -94,12 +92,6 @@ class ActorCriticEncoder(nn.Module):
         self.policy_obs_dim = policy_obs_dim
         self.privileged_dim = privileged_dim
         self.encoder_latent_dim = encoder_latent_dim
-        self.z_bounds_coef = z_bounds_coef
-        self.z_bounds_soft_bound = z_bounds_soft_bound
-
-        # Last encoded z (retained with grad for z_bounds_loss computation)
-        self._last_z: torch.Tensor | None = None
-
         # --- Parse obs_groups: require exactly 3 keys [policy_obs, privileged, proprio_hist] ---
         policy_groups = obs_groups["policy"]
         if len(policy_groups) != 3:
@@ -209,34 +201,19 @@ class ActorCriticEncoder(nn.Module):
         """
         return obs[self._proprio_hist_key].flatten(start_dim=1)
 
-    def _encode(self, obs: TensorDict, *, store_z: bool = False) -> torch.Tensor:
+    def _encode(self, obs: TensorDict) -> torch.Tensor:
         """Encode privileged info into latent z.
 
         encoder(normalize(privileged)) -> z (tanh bounded)
         """
         encoder_input = obs[self._privileged_key]
-        z = self.encoder(self.encoder_obs_normalizer(encoder_input))
-        if store_z:
-            self._last_z = z
-        return z
+        return self.encoder(self.encoder_obs_normalizer(encoder_input))
 
-    def z_bounds_loss(self) -> torch.Tensor:
-        """Compute soft quadratic penalty when |z| exceeds z_bounds_soft_bound.
-
-        Returns zero tensor if z_bounds_coef is 0 or _last_z is not available.
-        """
-        if self.z_bounds_coef <= 0.0 or self._last_z is None:
-            device = self._last_z.device if self._last_z is not None else next(self.parameters()).device
-            return torch.tensor(0.0, device=device)
-        z = self._last_z
-        excess = torch.clamp_min(z.abs() - self.z_bounds_soft_bound, 0.0)
-        return self.z_bounds_coef * excess.pow(2).sum(dim=-1).mean()
-
-    def _get_combined_obs(self, obs: TensorDict, *, store_z: bool = False) -> torch.Tensor:
+    def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
         """Combined observation for actor: cat([policy_obs, hist_flat, z])."""
         policy_obs = obs[self._policy_obs_key]
         hist_flat = self._get_hist_flat(obs)
-        z = self._encode(obs, store_z=store_z)
+        z = self._encode(obs)
         return torch.cat([policy_obs, hist_flat, z], dim=-1)
 
     def _get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
@@ -255,7 +232,7 @@ class ActorCriticEncoder(nn.Module):
 
     def act(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
         """Sample an action from the policy distribution."""
-        actor_obs = self.actor_obs_normalizer(self._get_combined_obs(obs, store_z=True))  # type: ignore[operator]
+        actor_obs = self.actor_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
         self._update_distribution(actor_obs)
         assert self.distribution is not None
         return self.distribution.sample()

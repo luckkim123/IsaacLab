@@ -3,11 +3,10 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Consolidated logging and environment utilities for constrained ALBC.
+"""Consolidated logging utilities for constrained ALBC.
 
-Provides all TB/WandB metric functions and environment helpers:
+Provides all TB/WandB metric functions:
     - flush_metrics: Core logging utilities
-    - unwrap_env: Environment unwrapping helper
     - log_dr_metrics: Domain randomization parameters
     - log_encoder_metrics: Encoder z health
 """
@@ -77,29 +76,6 @@ def _get_wandb() -> Any | None:
         return wandb
     except ImportError:
         return None
-
-
-# =============================================================================
-# Environment Utilities
-# =============================================================================
-
-
-def unwrap_env(env: Any) -> Any:
-    """Unwrap environment through wrapper chain to get the raw Isaac Lab env.
-
-    Handles the common case where ``gym.Env.unwrapped`` returns ``self``
-    (preventing infinite loops).
-
-    Args:
-        env: Potentially wrapped environment.
-
-    Returns:
-        The innermost (raw) environment.
-    """
-    raw = env
-    while hasattr(raw, "unwrapped") and raw is not raw.unwrapped:
-        raw = raw.unwrapped
-    return raw
 
 
 # =============================================================================

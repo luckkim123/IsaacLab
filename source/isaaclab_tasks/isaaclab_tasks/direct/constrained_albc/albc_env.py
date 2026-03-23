@@ -132,6 +132,9 @@ class ALBCEnv(DirectRLEnv):
         self._init_task_and_rewards()
         self._init_state_buffers()
 
+        # Cache constraint config (avoids getattr on every _get_rewards call)
+        self._constraints_cfg = getattr(self.cfg, "constraints", None)
+
         # Per-condition termination flags (for diagnostics logging)
         self._term_too_fast = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._term_bad_state = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -268,7 +271,7 @@ class ALBCEnv(DirectRLEnv):
         self._prev_prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
         self._prev_actions_obs = torch.zeros(self.num_envs, 2, device=self.device)
 
-        # Accumulated rotation tracking (for IPO constraint)
+        # Accumulated rotation tracking (for constraint)
         self._accumulated_rotation = torch.zeros(self.num_envs, 2, device=self.device)
         self._prev_joint_pos = torch.zeros(self.num_envs, 2, device=self.device)
 
@@ -293,9 +296,7 @@ class ALBCEnv(DirectRLEnv):
         # Random perturbation buffers (Tan et al. 2018)
         self._perturb_forces = torch.zeros(self.num_envs, 3, device=self.device)
         self._perturb_torques = torch.zeros(self.num_envs, 3, device=self.device)
-        rand_cfg = self.cfg.randomization
-        perturb_cycle = max(1, rand_cfg.perturbation_interval + rand_cfg.perturbation_duration)
-        self._perturb_timer = torch.randint(0, perturb_cycle, (self.num_envs,), device=self.device)
+        self._perturb_timer = torch.randint(0, self._perturb_cycle, (self.num_envs,), device=self.device)
 
         # Proprioception history buffer (ring buffer for temporal conv encoder)
         self._proprio_history_len = self.cfg.proprio_history_len
@@ -309,7 +310,11 @@ class ALBCEnv(DirectRLEnv):
         else:
             self._proprio_hist = None
 
+        # Pre-allocated index tensor for action latency gathering (avoids per-step allocation)
+        self._env_idx = torch.arange(self.num_envs, device=self.device)
+
         # Action latency buffer (ring buffer for delayed action application)
+        rand_cfg = self.cfg.randomization
         max_latency = rand_cfg.action_latency_range[1]
         self._max_action_latency = max_latency
         if max_latency > 0:
@@ -320,6 +325,12 @@ class ALBCEnv(DirectRLEnv):
         else:
             self._action_history = None
             self._action_latency = None
+
+    @property
+    def _perturb_cycle(self) -> int:
+        """Perturbation event cycle length (interval + duration), minimum 1."""
+        rand_cfg = self.cfg.randomization
+        return max(1, rand_cfg.perturbation_interval + rand_cfg.perturbation_duration)
 
     # ------------------------------------------------------------------
     # Attitude task methods
@@ -442,8 +453,7 @@ class ALBCEnv(DirectRLEnv):
         self._action_history[:, 0] = actions
 
         # Read delayed actions using per-env latency as index
-        env_idx = torch.arange(self.num_envs, device=self.device)
-        return self._action_history[env_idx, self._action_latency]
+        return self._action_history[self._env_idx, self._action_latency]
 
     def _apply_perturbation_cycle(
         self,
@@ -524,7 +534,7 @@ class ALBCEnv(DirectRLEnv):
         self._update_proprio_hist()
         self._update_action_buffers(actions)
 
-        # Accumulate joint rotation delta (for IPO constraint)
+        # Accumulate joint rotation delta (for constraint)
         joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
         delta = joint_pos - self._prev_joint_pos
         delta = torch.atan2(torch.sin(delta), torch.cos(delta))  # wrap to [-pi, pi]
@@ -664,10 +674,9 @@ class ALBCEnv(DirectRLEnv):
         if self.cfg.reward.termination_penalty != 0.0:
             reward += self.reset_terminated * self.cfg.reward.termination_penalty
 
-        # Compute constraint costs for IPO pipeline (if constraints configured)
-        constraints_cfg = getattr(self.cfg, "constraints", None)
-        if constraints_cfg is not None:
-            self.extras["costs"] = compute_all_costs(self._robot, self, constraints_cfg)
+        # Compute constraint costs for C-TRPO (if constraints configured)
+        if self._constraints_cfg is not None:
+            self.extras["costs"] = compute_all_costs(self._robot, self, self._constraints_cfg)
 
         # Update overshoot buffer AFTER constraint computation (so overshoot_cost reads prev step)
         self._prev_attitude_error_rp[:] = self._attitude_error[:, :2]
@@ -900,11 +909,9 @@ class ALBCEnv(DirectRLEnv):
 
     def _reset_perturbation_buffers(self, env_ids: torch.Tensor) -> None:
         """Zero perturbation forces/torques and randomize timer phase."""
-        rand_cfg = self.cfg.randomization
-        perturb_cycle = max(1, rand_cfg.perturbation_interval + rand_cfg.perturbation_duration)
         self._perturb_forces[env_ids] = 0.0
         self._perturb_torques[env_ids] = 0.0
-        self._perturb_timer[env_ids] = torch.randint(0, perturb_cycle, (len(env_ids),), device=self.device)
+        self._perturb_timer[env_ids] = torch.randint(0, self._perturb_cycle, (len(env_ids),), device=self.device)
 
     def _reset_physics(self, env_ids: torch.Tensor) -> None:
         """Reset hydrodynamics, payload, and apply domain randomization."""
@@ -977,7 +984,7 @@ class ALBCEnv(DirectRLEnv):
         # Re-sync _prev_joint_pos after joint positions were changed above.
         # Without this, the first _pre_physics_step() sees a false delta between
         # the post-reset joint_pos and the stale pre-reset _prev_joint_pos,
-        # injecting a spurious offset into _accumulated_rotation (IPO constraint).
+        # injecting a spurious offset into _accumulated_rotation.
         self._prev_joint_pos[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
 
     def _set_debug_vis_impl(self, debug_vis: bool):
