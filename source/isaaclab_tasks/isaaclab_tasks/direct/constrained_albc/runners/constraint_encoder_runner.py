@@ -7,7 +7,7 @@
 
 Flat subclass of OnPolicyRunner that combines:
     - HORA Phase 1 encoder metrics logging (if encoder present)
-    - Lagrangian constraint state persistence and per-constraint metrics
+    - Log-barrier constraint metrics (Modified IPO)
     - Auto-sync of num_constraints from env config
 """
 
@@ -25,11 +25,11 @@ logger = logging.getLogger(__name__)
 
 
 class ConstraintEncoderRunner(OnPolicyRunner):
-    """OnPolicyRunner with encoder metrics and Lagrangian constraint support.
+    """OnPolicyRunner with encoder metrics and log-barrier constraint support.
 
     Provides:
         - Encoder metrics: z latent statistics, gradient norms (when encoder present)
-        - Constraint state persistence: save/load Lagrangian multipliers
+        - Constraint metrics: barrier margins, penalty (Modified IPO)
         - Auto-sync: num_constraints from env config to algorithm/policy config
     """
 
@@ -136,31 +136,19 @@ class ConstraintEncoderRunner(OnPolicyRunner):
     # ------------------------------------------------------------------
 
     def save(self, path: str, infos: dict | None = None) -> None:
-        """Save model checkpoint with constraint state and encoder optimizer."""
+        """Save model checkpoint and encoder optimizer."""
         super().save(path, infos)
 
-        self._save_aux_state(
-            path,
-            "constraint_state.pt",
-            {"lambda_k": self.alg._lambda_k},
-        )
+        # Log barrier has no persistent state (adaptive thresholds are recomputed
+        # each iteration from current cost returns).
 
         # Save encoder optimizer state for seamless resume
         if getattr(self.alg, "encoder_optimizer", None) is not None:
             self._save_aux_state(path, "encoder_optimizer.pt", self.alg.encoder_optimizer.state_dict())
 
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
-        """Load model checkpoint, constraint state, and encoder optimizer if available."""
+        """Load model checkpoint and encoder optimizer if available."""
         infos = super().load(path, load_optimizer, map_location)
-
-        # Try new name first, fall back to old name for backward compat
-        state = self._load_aux_state(path, "constraint_state.pt", self.device)
-        if state is None:
-            state = self._load_aux_state(path, "barrier_state.pt", self.device)
-        if state is not None:
-            if "lambda_k" in state:
-                self.alg._lambda_k = state["lambda_k"].to(self.device)
-            logger.info("Restored constraint state from checkpoint")
 
         # Restore encoder optimizer state for seamless resume
         if load_optimizer and getattr(self.alg, "encoder_optimizer", None) is not None:
@@ -178,8 +166,8 @@ class ConstraintEncoderRunner(OnPolicyRunner):
     def _log_constraint_metrics(self, iteration: int) -> None:
         """Log constraint metrics to TensorBoard/WandB.
 
-        Logs per-constraint: cost_return, violation, d_k, lambda_k.
-        Also logs aggregate lagrangian penalty and policy diagnostics.
+        Logs per-constraint: cost_return, violation, d_k, barrier_margin.
+        Also logs aggregate barrier penalty and policy diagnostics.
         """
         alg = self.alg
         if not hasattr(alg, "num_constraints"):
@@ -188,16 +176,16 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         K = alg.num_constraints
         metrics: dict[str, float] = {}
 
-        # Per-constraint: cost_return, violation, d_k, lambda_k
+        # Per-constraint: cost_return, violation, d_k, barrier_margin
         for k in range(K):
             suffix = self._constraint_names[k] if k < len(self._constraint_names) else str(k)
             metrics[f"Constraint/violation_{suffix}"] = alg._last_violations[k]
             metrics[f"Constraint/cost_return_{suffix}"] = alg._last_cost_returns[k]
             metrics[f"Constraint/d_k_{suffix}"] = alg.d_k[k].item()
-            metrics[f"Constraint/lambda_{suffix}"] = alg._lambda_k[k].item()
+            metrics[f"Constraint/barrier_margin_{suffix}"] = alg._last_barrier_margins[k]
 
         # Aggregate metrics
-        metrics["Constraint/lagrangian_penalty"] = alg._last_lagrangian_penalty
+        metrics["Constraint/barrier_penalty"] = alg._last_barrier_penalty
 
         # Policy diagnostics
         metrics["Policy/line_search_success"] = alg._last_line_search_success

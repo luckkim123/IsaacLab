@@ -3,23 +3,23 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Constrained TRPO with Lagrangian constraint enforcement.
+"""Constrained TRPO with log-barrier constraint enforcement (Modified IPO).
 
-TRPO policy optimization with adaptive Lagrangian multipliers for constraint
-satisfaction. Based on C-TRPO (Muller et al., ICML 2025) with linear
-Lagrangian cost surrogates for constraint enforcement.
+TRPO policy optimization with log-barrier interior-point method for constraint
+satisfaction. Based on Modified IPO (Kim et al., NORBC, IROS 2024) with
+adaptive constraint thresholding for initial infeasibility.
 
 Key design decisions:
-    - Adaptive lambda via dual ascent: lambda_k += lr * (J_C_k - d_k)
-    - lambda_max = 0.5: constraint gradient <= 50% of reward gradient O(1)
-    - Cost advantage standardization preserved (NORBC Sec IV-B)
+    - Log barrier: -sum_k log(d_k^i - J_hat_C_k) / t (always-on constraint gradient)
+    - Adaptive thresholding: d_k^i = max(d_k, J_C_k + alpha * d_k) for infeasible starts
+    - Raw cost advantages (no standardization): barrier margin requires actual cost units
     - LS-gated encoder updates: when line search fails, both actor and encoder frozen
     - Noise floor (min_std): primary exploration maintenance, outside trust region
     - Multi-step encoder with KL gating: prevents encoder-induced distribution shift
 
 Reference:
+    Kim et al., "NORBC", IROS 2024 (Modified IPO, cost critic, value loss).
     Muller et al., "Truly Constrained TRPO", ICML 2025, arXiv:2411.02957.
-    Kim et al., "NORBC", IROS 2024 (cost critic, value loss structure).
 """
 
 from __future__ import annotations
@@ -38,10 +38,10 @@ logger = logging.getLogger(__name__)
 
 
 class ConstraintTRPO:
-    """Lagrangian-based constrained TRPO for policy optimization.
+    """Log-barrier constrained TRPO for policy optimization (Modified IPO).
 
-    Uses adaptive Lagrangian multipliers (dual ascent) for constraint
-    enforcement with TRPO natural gradient for the policy update.
+    Uses log-barrier interior-point method with adaptive thresholding for
+    constraint enforcement, combined with TRPO natural gradient for policy update.
     """
 
     def __init__(
@@ -70,9 +70,9 @@ class ConstraintTRPO:
         cost_lam: float = 0.95,
         # Line search acceptance threshold
         line_search_kl_margin: float = 1.5,
-        # Lagrangian constraint parameters
-        lambda_lr: float = 0.035,
-        lambda_max: float = 0.5,
+        # Log barrier constraint parameters (Modified IPO)
+        barrier_t: float = 50.0,
+        barrier_alpha: float = 0.3,
         # Encoder update
         num_encoder_epochs: int = 1,
         encoder_lr: float = 3e-4,
@@ -117,16 +117,16 @@ class ConstraintTRPO:
         self.min_std = min_std
         self.max_encoder_kl = max_encoder_kl
 
-        # Lagrangian multipliers (adaptive dual variables)
-        self._lambda_k = torch.zeros(num_constraints, device=device)
-        self._lambda_lr = lambda_lr
-        self._lambda_max = lambda_max
+        # Log barrier parameters (Modified IPO)
+        self._barrier_t = barrier_t
+        self._barrier_alpha = barrier_alpha
 
         # Monitoring attributes (read by ConstraintEncoderRunner before first update)
         self._last_cost_returns = [0.0] * num_constraints
         self._last_violations = [0.0] * num_constraints
+        self._last_barrier_margins = [0.0] * num_constraints
         self._last_line_search_success = 0.0
-        self._last_lagrangian_penalty = 0.0
+        self._last_barrier_penalty = 0.0
         self._last_mean_entropy = 0.0
         self._last_surrogate_loss = 0.0
         self._last_pre_encoder_kl = 0.0
@@ -297,7 +297,7 @@ class ConstraintTRPO:
             self.storage.cost_returns[step] = advantage + self.storage.cost_values[step]
         self.storage.cost_advantages = self.storage.cost_returns - self.storage.cost_values
 
-        # Per-constraint cost advantage standardization (NORBC Sec IV-B).
+        # Sanitize non-finite values (barrier needs finite raw advantages).
         finite_mask = torch.isfinite(self.storage.cost_advantages).all(dim=(0, 1))  # (K,)
         bad_constraints = ~finite_mask
         if bad_constraints.any():
@@ -305,48 +305,26 @@ class ConstraintTRPO:
             logger.warning("Non-finite cost advantages for constraints %s, zeroing.", bad_ids.tolist())
             self.storage.cost_advantages[:, :, bad_constraints] = 0.0
 
-        mean = self.storage.cost_advantages.mean(dim=(0, 1), keepdim=True)
-        std = self.storage.cost_advantages.std(dim=(0, 1), keepdim=True)
-        self.storage.cost_advantages = (self.storage.cost_advantages - mean) / (std + 1e-8)
-
     # ==================================================================
-    # Lagrangian Constraint Enforcement
+    # Log Barrier Constraint Enforcement (Modified IPO)
     # ==================================================================
 
-    def _compute_cost_surrogates(self, ratio: torch.Tensor, cost_advantages: torch.Tensor) -> torch.Tensor:
-        """Compute per-constraint cost surrogates in a single vectorized op.
+    def _compute_adaptive_thresholds(self, mean_cost_returns: torch.Tensor) -> torch.Tensor:
+        """Compute adaptive constraint thresholds for log barrier.
+
+        d_k^i = max(d_k, J_C_k + alpha * d_k)
+
+        When cost exceeds budget, the threshold is relaxed to keep the
+        log barrier computable. As the policy improves, thresholds
+        converge to the original budgets d_k.
 
         Args:
-            ratio: Importance sampling ratio pi/pi_old, shape (B,).
-            cost_advantages: Per-constraint advantages, shape (B, K).
+            mean_cost_returns: Current mean cost returns, shape (K,).
 
         Returns:
-            Cost surrogates, shape (K,).
+            Adaptive thresholds, shape (K,).
         """
-        return (ratio.unsqueeze(-1) * cost_advantages).mean(dim=0)
-
-    def _compute_lagrangian_penalty(self, cost_surrogates_std: torch.Tensor) -> torch.Tensor:
-        """Linear Lagrangian penalty: sum_k lambda_k * E[ratio * A_cost_k_std].
-
-        Gradient = lambda_k * E[A_cost_std * d_log_pi/d_theta] -- nonzero per-sample
-        even when batch mean E[A_cost] = 0.
-
-        lambda_k adapted via dual ascent in _update_lambda():
-        - Starts at 0 (reward-first learning)
-        - Grows proportionally to constraint violation
-        - Capped at lambda_max to protect reward gradient priority
-        """
-        return (self._lambda_k * cost_surrogates_std).sum()
-
-    def _update_lambda(self, mean_cost_returns: torch.Tensor) -> None:
-        """Dual gradient ascent on Lagrangian multipliers.
-
-        lambda_k += lr * (J_C_k - d_k). Positive violation increases lambda.
-        Clamped to [0, lambda_max] to keep reward gradient dominant.
-        """
-        with torch.no_grad():
-            violation = mean_cost_returns - self.d_k
-            self._lambda_k = (self._lambda_k + self._lambda_lr * violation).clamp(0.0, self._lambda_max)
+        return torch.max(self.d_k, mean_cost_returns + self._barrier_alpha * self.d_k)
 
     # ==================================================================
     # TRPO Core
@@ -485,8 +463,8 @@ class ConstraintTRPO:
         """Execute one iteration of constrained TRPO update.
 
         Update order:
-            1. Update Lagrangian multipliers via dual ascent
-            2. TRPO policy update (reward + Lagrangian penalty, full-batch)
+            1. Compute adaptive barrier thresholds
+            2. TRPO policy update (reward + log barrier, full-batch)
             3. Encoder update (gated on line search success)
             4. Value function update (pure MSE)
         """
@@ -509,22 +487,25 @@ class ConstraintTRPO:
 
         # Cost storage flatten
         cost_returns_flat = self.storage.cost_returns.flatten(0, 1).clone()  # (B, K)
-        cost_advantages_std_flat = self.storage.cost_advantages.flatten(0, 1).clone()  # (B, K) standardized
+        cost_advantages_flat = self.storage.cost_advantages.flatten(0, 1).clone()  # (B, K) raw
 
         batch_size = obs_flat.batch_size[0]
 
-        # Mean cost returns (computed once, needed for lambda update + logging)
+        # Mean cost returns (computed once, needed for barrier + logging)
         # Clamp to non-negative: cost value errors can make GAE return negative,
-        # which would inflate violation (d_k - (-X) = d_k + X).
+        # which would inflate the barrier margin.
         mean_cost_returns = cost_returns_flat.mean(dim=0).clamp(min=0.0)  # (K,)
 
         # ------------------------------------------------------------------
-        # 1. Update Lagrangian multipliers (dual ascent on raw cost returns)
+        # 1. Compute adaptive barrier thresholds
         # ------------------------------------------------------------------
-        self._update_lambda(mean_cost_returns)
+        adaptive_d_k = self._compute_adaptive_thresholds(mean_cost_returns)
 
-        # Compute violations for logging
+        # Compute violations and barrier margins for logging
         violations = (mean_cost_returns - self.d_k).tolist()
+        with torch.no_grad():
+            static_margins = (adaptive_d_k - mean_cost_returns).tolist()
+        self._last_barrier_margins = static_margins
 
         # ------------------------------------------------------------------
         # 2. TRPO policy update (full-batch, single step)
@@ -532,18 +513,22 @@ class ConstraintTRPO:
         old_lp_sq = old_log_prob_flat.squeeze(-1)
         adv_sq = advantages_flat.squeeze(-1)
 
+        # Detach constants for the barrier (only cost_surrs depend on theta)
+        barrier_base = adaptive_d_k - mean_cost_returns  # (K,) static part of margin
+
         def surrogate() -> torch.Tensor:
             self.policy.act(obs_flat)
             log_prob = self.policy.get_actions_log_prob(actions_flat)
             ratio = torch.exp(log_prob - old_lp_sq)
-            # Reward surrogate
+            # Reward surrogate (minimization: negative improvement)
             reward_surr = -(adv_sq * ratio).mean()
-            # Lagrangian constraint penalty
-            cost_surrs_std = self._compute_cost_surrogates(ratio, cost_advantages_std_flat)
-            lp = self._compute_lagrangian_penalty(cost_surrs_std)
-            self._last_lagrangian_penalty = lp.item()
+            # Log barrier: minimize -sum_k log(margin_k) / t
+            cost_surrs = (ratio.unsqueeze(-1) * cost_advantages_flat).mean(dim=0)  # (K,)
+            margin = barrier_base - cost_surrs  # (K,)
+            barrier = -torch.log(margin.clamp(min=1e-8)).sum() / self._barrier_t
+            self._last_barrier_penalty = barrier.item()
             self._last_mean_entropy = self.policy.entropy.mean().item()
-            return reward_surr + lp
+            return reward_surr + barrier
 
         ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate)
 
@@ -597,7 +582,7 @@ class ConstraintTRPO:
         # ------------------------------------------------------------------
         return {
             "value_function": mean_value_loss,
-            "lagrangian_penalty": self._last_lagrangian_penalty,
+            "barrier_penalty": self._last_barrier_penalty,
             "kl": mean_kl,
             "cost_value": mean_cost_value_loss,
             "adv_raw_std": adv_raw_std.item(),
@@ -777,8 +762,8 @@ class ConstraintTRPO:
     def set_max_iterations(self, max_iterations: int) -> None:
         """Interface compatibility with ConstraintEncoderRunner."""
         logger.info(
-            "[ConstraintTRPO] Lagrangian mode, lambda_lr=%.4f, lambda_max=%.2f, max_iterations=%d",
-            self._lambda_lr,
-            self._lambda_max,
+            "[ConstraintTRPO] IPO barrier mode, barrier_t=%.1f, barrier_alpha=%.2f, max_iterations=%d",
+            self._barrier_t,
+            self._barrier_alpha,
             max_iterations,
         )

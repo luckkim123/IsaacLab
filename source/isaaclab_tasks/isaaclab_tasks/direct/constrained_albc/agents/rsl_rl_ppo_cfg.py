@@ -81,10 +81,10 @@ class RslRlPpoActorCriticEncoderConstrainedCfg(_EncoderPolicyCfg):
 
 @configclass
 class RslRlConstraintTRPOAlgorithmCfg:
-    """Algorithm configuration for ConstraintTRPO (Lagrangian-based constrained TRPO).
+    """Algorithm configuration for ConstraintTRPO (Modified IPO with TRPO optimizer).
 
-    Uses adaptive Lagrangian multipliers (dual ascent) for constraint enforcement
-    with TRPO natural gradient for the policy update.
+    Uses log-barrier interior-point method with adaptive thresholding for
+    constraint enforcement, combined with TRPO natural gradient for policy update.
 
     These fields are forwarded as kwargs to ConstraintTRPO.__init__().
     The class_name tells the runner to instantiate ConstraintTRPO instead of PPO.
@@ -118,14 +118,16 @@ class RslRlConstraintTRPOAlgorithmCfg:
     cost_lam: float = 0.95
     line_search_kl_margin: float = 1.5
 
-    # Lagrangian constraint parameters
-    lambda_lr: float = 0.035
-    """Dual ascent step size for Lagrangian multipliers.
-    lambda_k += lr * (J_C_k - d_k) per iteration."""
+    # Log barrier constraint parameters (Modified IPO)
+    barrier_t: float = 50.0
+    """Barrier steepness parameter. Higher t = barrier activates only near boundary.
+    Barrier coefficient per constraint: 1/(t * margin). At t=50 with margin=1.29,
+    constraint gradient is ~1.5% of reward gradient O(1)."""
 
-    lambda_max: float = 0.5
-    """Maximum Lagrangian multiplier. Caps constraint gradient at ~50% of
-    reward gradient O(1). Ensures reward optimization remains primary."""
+    barrier_alpha: float = 0.3
+    """Adaptive threshold expansion coefficient. When cost exceeds budget,
+    threshold is relaxed: d_k^i = max(d_k, J_C_k + alpha * d_k). Ensures
+    log barrier is computable even during initial constraint violations."""
 
     # Noise floor (exploration maintenance)
     min_std: float = 0.2

@@ -4,6 +4,59 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-23] Constraint enforcement: Lagrangian -> Log Barrier (Modified IPO)
+
+### Context
+Training analysis at 1136 iterations showed policy plateau: reward unchanged from
+iter 253 (16.55 -> 16.60), pitch plateau since ~60% (15.16 deg), noise_std at floor
+(0.20) since iter 40. Encoder is healthy (z_std=0.69, no saturation), constraints
+not yet violated. All Lagrangian multipliers (lambda_k) were at zero because no
+constraint was violated, meaning the policy was optimizing pure reward with zero
+constraint gradient -- effectively unconstrained TRPO.
+
+Compared with NORBC paper's Modified IPO which uses log barrier: the key difference
+is that the barrier provides always-on, non-zero constraint gradient proportional to
+proximity to the budget boundary (coefficient = 1/(t * margin)), unlike Lagrangian
+which drops to zero when constraints are satisfied. This provides richer gradient
+signal to the policy, potentially helping mu improvement by giving the TRPO natural
+gradient more diverse gradient directions beyond pure reward.
+
+Design decisions:
+- barrier_t=50: At the closest constraint (joint_vel_limit, margin=1.29),
+  barrier gradient is ~1.5% of reward gradient O(1). Conservative start.
+- barrier_alpha=0.3: Adaptive threshold expansion ensures log barrier is computable
+  even during initial constraint violations (d_k^i = max(d_k, J_C_k + 0.3*d_k)).
+- Cost advantage standardization removed: barrier margin requires actual cost units
+  (d_k, J_C_k, cost_surrogate all in same scale). Barrier's 1/(t*margin) coefficient
+  provides natural per-constraint scaling.
+- Reward advantage standardization kept: TRPO step size (max_kl) requires O(1) scale.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Replaced Lagrangian dual ascent (lambda_k, lambda_lr,
+  lambda_max) with log barrier interior-point method. Removed `_update_lambda()`,
+  `_compute_lagrangian_penalty()`, `_compute_cost_surrogates()`. Added
+  `_compute_adaptive_thresholds()`. Barrier computed inside `surrogate()` closure:
+  margin = (adaptive_d_k - J_C_k_old) - cost_surrs; barrier = -log(margin)/t.
+  Gradient flows through autograd: theta -> ratio -> cost_surrs -> margin -> barrier.
+- `algorithms/constraint_trpo.py`: Removed cost advantage standardization (lines 308-310).
+  Raw cost advantages used for correct barrier margin units.
+- `agents/rsl_rl_ppo_cfg.py`: Replaced `lambda_lr=0.035`, `lambda_max=0.5` with
+  `barrier_t=50.0`, `barrier_alpha=0.3`. Updated docstrings.
+- `runners/constraint_encoder_runner.py`: Checkpoint save/load simplified (barrier is
+  stateless -- adaptive thresholds recomputed each iteration, no lambda_k to persist).
+  Logging: `lambda_k` -> `barrier_margin`, `lagrangian_penalty` -> `barrier_penalty`.
+
+### Removed
+- Lagrangian multiplier state (`_lambda_k`, dual ascent update, `_lambda_lr`, `_lambda_max`)
+- Cost advantage standardization (NORBC Sec IV-B) -- unnecessary with barrier's natural scaling
+- `constraint_state.pt` checkpoint save/load (barrier has no persistent state)
+
+### Notes
+- Checkpoint incompatible: new algorithm has no lambda_k state. Fresh start required.
+- Training run with softsign+barrier should show non-zero constraint gradient from iter 1.
+- Watch barrier_margin metrics in TB to verify constraint proximity tracking.
+- barrier_t and barrier_alpha may need tuning after first run results.
+
 ## [2026-03-23] Encoder activation: tanh -> softsign (gradient vanishing fix)
 
 ### Context
