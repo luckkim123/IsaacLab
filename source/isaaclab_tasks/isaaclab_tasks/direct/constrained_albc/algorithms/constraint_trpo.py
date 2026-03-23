@@ -167,7 +167,7 @@ class ConstraintTRPO:
         self.encoder_lr = encoder_lr
         if self._has_encoder_params:
             self._encoder_params = encoder_params
-            self.encoder_optimizer = optim.Adam(encoder_params, lr=encoder_lr, weight_decay=1e-4)
+            self.encoder_optimizer = optim.Adam(encoder_params, lr=encoder_lr, weight_decay=1e-5)
         else:
             self._encoder_params = []
             self.encoder_optimizer = None
@@ -683,7 +683,7 @@ class ConstraintTRPO:
                 continue
 
             total_loss.backward()
-            nn.utils.clip_grad_norm_(self._encoder_params, max_norm=0.5)
+            nn.utils.clip_grad_norm_(self._encoder_params, max_norm=1.0)
             self.encoder_optimizer.step()
 
             # KL gating: revert if encoder step caused excessive KL shift

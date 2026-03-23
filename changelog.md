@@ -4,6 +4,48 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-23] Encoder activation: tanh -> softsign (gradient vanishing fix)
+
+### Context
+Three-run comparison experiment confirmed encoder saturation as root cause of training
+plateau. Slower saturation (run3, fixed norm) correlated with: faster pitch improvement
+(16.4 vs 28.3 deg @iter100), more stable reward (no regression), active Lagrangian
+enforcement (lambda_joint_vel=0.364 vs 0 in saturated runs), and sustained action
+magnitude (1.05 vs 0.85 shrinkage in saturated run1).
+
+tanh gradient decays exponentially: at pre-activation x=3, gradient=0.01; at x=5, ~0.
+Once saturated, encoder cannot recover. All prior fixes (weight_decay, architecture
+reduction, fixed normalization) slowed but did not prevent saturation.
+
+softsign(x) = x/(1+|x|) has same range (-1, 1) but gradient decays algebraically:
+1/(1+|x|)^2. At x=3, gradient=0.063 (6x better than tanh). Gradient never reaches 0,
+eliminating the self-reinforcing saturation trap.
+
+RSL-RL `resolve_nn_activation` does not support "softsign" (hardcoded dict of 8
+activations). Solution: MLP `last_activation=None` + manual `F.softsign()` in `_encode()`.
+
+Also restored weight_decay to 1e-5 (was raised to 1e-4 specifically for tanh saturation
+prevention -- unnecessary with softsign) and relaxed encoder grad clip 0.5 -> 1.0
+(matching value function clip; current gradients 0.003-0.022 never triggered the 0.5
+clip, but softsign may produce larger gradients).
+
+### Changed
+- `encoder/actor_critic_encoder.py`: Encoder MLP `last_activation="tanh"` -> `None`.
+  `_encode()` now applies `torch.nn.functional.softsign(x)` after MLP forward pass.
+  Docstrings updated (tanh -> softsign throughout).
+- `algorithms/constraint_trpo.py`: Encoder optimizer weight_decay 1e-4 -> 1e-5
+  (restored to pre-tanh-fix level). Encoder grad clip max_norm 0.5 -> 1.0 (matching
+  value function clip, relaxed for softsign's healthier gradients).
+
+### Notes
+- Checkpoint incompatible: MLP Sequential structure loses Tanh module at end. Fresh start.
+- Phase 2 (adapt_tconv) compatible: z range still (-1, 1), same bounded output.
+- softsign approaches boundaries slower than tanh (softsign(1.83)=0.65 vs tanh(1.83)=0.95).
+  Encoder will use a wider distribution of z values rather than clustering near boundaries.
+- Three prior runs this session: run1 (WD=1e-5 emp, instant saturation), run2 (WD=1e-4 emp,
+  100-iter saturation), run3 (WD=1e-4 fix, 200-iter saturation but still progressing).
+  All showed z_std > 0.87 by iter 200. Softsign eliminates this pattern entirely.
+
 ## [2026-03-23] P0 encoder saturation fix: weight_decay + architecture reduction
 
 ### Context

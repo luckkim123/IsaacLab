@@ -9,7 +9,7 @@ This module provides the encoder-based actor-critic network:
     - ActorCriticEncoder: Base encoder network (Phase 1 teacher training)
 
 Architecture:
-    Encoder: privileged (23D) -> MLP -> tanh -> z (13D)
+    Encoder: privileged (23D) -> MLP -> softsign -> z (13D)
     Actor:   cat([policy_obs, hist_flat, z]) = 266D -> MLP -> actions
     Critic:  cat([policy_obs, hist_flat, privileged]) = 276D -> MLP -> value (1D)
 
@@ -58,12 +58,12 @@ class _FixedNormalization(nn.Module):
 class ActorCriticEncoder(nn.Module):
     """ActorCritic with extrinsics encoder for HORA Phase 1 teacher policy.
 
-    The encoder compresses privileged information into a bounded latent z (tanh).
+    The encoder compresses privileged information into a bounded latent z (softsign).
     Encoder input is privileged-only (HORA Phase 1 style), ensuring z encodes
     DR parameters rather than redundant policy_obs/history information.
 
     Architecture:
-        Encoder: privileged (23D) -> MLP -> tanh -> z (13D)
+        Encoder: privileged (23D) -> MLP -> softsign -> z (13D)
         Actor:   cat([policy_obs, hist_flat, z]) = 266D -> MLP -> actions
         Critic:  cat([policy_obs, hist_flat, privileged]) = 276D -> MLP -> value (asymmetric)
 
@@ -138,7 +138,7 @@ class ActorCriticEncoder(nn.Module):
             self._hist_flat_dim,
         )
 
-        # --- Encoder MLP: privileged -> tanh -> z (HORA Phase 1 style) ---
+        # --- Encoder MLP: privileged -> softsign -> z (HORA Phase 1 style) ---
         encoder_input_dim = privileged_dim
 
         self.encoder_obs_normalization = encoder_obs_normalization
@@ -152,7 +152,7 @@ class ActorCriticEncoder(nn.Module):
             encoder_latent_dim,
             list(encoder_hidden_dims),
             encoder_activation,
-            last_activation="tanh",
+            last_activation=None,
         )
         logger.info("Encoder MLP (%dD input): %s", encoder_input_dim, self.encoder)
 
@@ -308,10 +308,11 @@ class ActorCriticEncoder(nn.Module):
     def _encode(self, obs: TensorDict) -> torch.Tensor:
         """Encode privileged info into latent z.
 
-        encoder(normalize(privileged)) -> z (tanh bounded)
+        encoder(normalize(privileged)) -> softsign -> z in (-1, 1)
         """
         encoder_input = obs[self._privileged_key]
-        return self.encoder(self.encoder_obs_normalizer(encoder_input))
+        x = self.encoder(self.encoder_obs_normalizer(encoder_input))
+        return torch.nn.functional.softsign(x)
 
     def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
         """Combined observation for actor: cat([policy_obs, hist_flat, z])."""
