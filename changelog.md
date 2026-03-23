@@ -45,6 +45,41 @@ maintained noise_std=0.33, current run without EAPO collapsed to floor (0.20).
 - noise_std collapse (0.2 floor) may need separate fix (min_std increase or EAPO restoration)
   if weight_decay + architecture changes don't indirectly help.
 
+## [2026-03-23] Replace encoder EmpiricalNormalization with fixed analytical normalization
+
+### Context
+Training run `2026-03-23_13-12-59` (P0 fix applied: WD=1e-4, [128,64]) showed encoder
+saturation delayed from 30 to ~100 iterations but not prevented (z_std=0.93 at iter 200).
+During analysis, questioned the need for EmpiricalNormalization on the encoder input:
+1. With 4096 environments, first batch already gives <2% estimation error -- empirical
+   tracking adds no value over analytical computation.
+2. All 23 privileged dimensions come from DR parameters with known distributions (uniform
+   ranges, disk-uniform for payload xy). Mean and std are analytically computable.
+3. EmpiricalNormalization adds unnecessary state (running mean/var buffers) and update()
+   calls that serve no purpose when the distribution is known a priori.
+
+Decision: replace with fixed normalization using pre-computed mean/std from DR config
+parameters and nominal asset values (HeroAgentHydrodynamicsCfg, HeroAgentBuoyHydrodynamicsCfg).
+
+### Added
+- `encoder/actor_critic_encoder.py`: `_FixedNormalization` module (registered buffer mean/std,
+  `forward = (x - mean) / std`). `_build_fixed_encoder_normalizer()` static method computes
+  analytical mean/std for all 23 privileged dimensions from DR config distributions.
+  Fallback to EmpiricalNormalization if dim != 23.
+
+### Changed
+- `encoder/actor_critic_encoder.py`: Encoder normalizer initialization now calls
+  `_build_fixed_encoder_normalizer()` instead of `EmpiricalNormalization(dim)`.
+  `update_normalization()` no longer updates encoder normalizer (fixed values, no update needed).
+
+### Notes
+- Analytical stats computed from: uniform U(a,b) mean=(a+b)/2, std=(b-a)/sqrt(12);
+  disk-uniform (R=0.1) std=R/2=0.05; scaled values base*U(lo,hi).
+- Nominal values from HeroAgentHydrodynamicsCfg (main body mass 9.18kg, volume 0.009m^3,
+  etc.) and HeroAgentBuoyHydrodynamicsCfg (buoy mass 0.93kg, volume 0.00268m^3).
+- This change alone does not fix encoder saturation -- the normalization was already stable
+  with 4096 envs. It removes unnecessary complexity and runtime state tracking.
+
 ## [2026-03-23] Code restructuring and simplification (2 sessions)
 
 ### Context
