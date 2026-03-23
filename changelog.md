@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-23] Command reward tuning: coefficient form, k_c revert, c=5/7.5
+
+### Context
+Iterative tuning of exponential command reward through multiple experiments:
+
+1. **sigma->coefficient** (7028fe4f): Replaced exp(-e^2/sigma^2) with paper's direct
+   form exp(-c*e^2). Set c_roll=1.0, c_pitch=1.5, k_c=100, smoothness=-5.0.
+   Result: c=1.0 too wide (76% reward at 30 deg error), k_c=100 caused dynamics
+   instability (noise_std=4.26 CEILING, act_size=1.40, jnt_vel=3.88). Advantage
+   normalization in TRPO means k_c scaling doesn't improve learning signal, only
+   breaks term balance.
+
+2. **k_c revert + c=16/24**: Reverted k_c=5, smoothness=-0.5. Set c=16 (peak at
+   10 deg). Result: pitch dropped to 3 deg but roll stuck at 43 deg. Root cause:
+   sum structure `exp(-cr*e_r^2) + exp(-cp*e_p^2)` allows one-axis optimization --
+   agent gets 0.94 from pitch alone, equalizing only gives 0.99 (5% gain, not
+   worth moving the arm).
+
+3. **c=5/7.5 (final)**: Lower c gives wider reach. At 43 deg roll, reward=0.06
+   (alive). Equalizing to 10 deg/10 deg gives total 1.74 vs 1.04 (67% improvement)
+   -- strong incentive to balance both axes. 1.5x pitch ratio maintained.
+
+### Changed
+- `mdp/rewards.py`: sigma parametrization removed. Direct coefficient form:
+  `command_coeff_roll` (5.0), `command_coeff_pitch` (7.5). command_weight=5.0,
+  smoothness_weight=-0.5 (both reverted from 100/-5.0).
+- `albc_env.py`: params dict `sigma_roll/pitch` -> `coeff_roll/pitch`.
+- `config.py`: Updated defaults to c_roll=5.0, c_pitch=7.5.
+- `runners/constraint_encoder_runner.py`: Added `TRPO/surrogate_loss` logging
+  (was computed but not logged after dedup cleanup).
+
+### Notes
+- Key lesson: k_c scaling is ineffective with advantage normalization (TRPO/PPO).
+  Only changes reward term balance, not learning signal strength.
+- Gaussian fundamental limit: can't have both reach (low c) and precision (high c).
+  Laplacian exp(-c|e|) has both (max gradient at zero, wider reach), but keeping
+  exponential per user decision. May revisit if c=5/7.5 insufficient.
+- c=5 equivalent to sigma~=0.45. Gradient peak at 14 deg, 50% reward at 21 deg.
+
 ## [2026-03-23] Reward architecture: exponential command + torque penalty
 
 ### Context

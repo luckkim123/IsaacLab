@@ -42,38 +42,35 @@ class ALBCRewardCfg:
     """ALBC reward configuration: 3-term architecture.
 
     Active terms (all dt-scaled):
-        command    (+100.0): attitude tracking (exponential, quadratic, or laplacian)
-        smoothness (-5.0): mean(da^2) + mean(d2a^2) action smoothness
+        command    (+5.0): attitude tracking (exponential, quadratic, or laplacian)
+        smoothness (-0.5): mean(da^2) + mean(d2a^2) action smoothness
         torque     (-0.001): mean(tau^2) joint torque penalty
-
-    Exponential command reward uses direct coefficient form (no sigma) following
-    the paper: exp(-cr*e_r^2) + exp(-cp*e_p^2). Large k_c (100) required because
-    exponential output is bounded [0, 2], unlike quadratic which is unbounded.
     """
 
     # Command tracking reward
-    command_weight: float = 100.0
+    command_weight: float = 5.0
     command_type: str = "exponential"
     """Reward type:
     "exponential" = exp(-cr*e_r^2) + exp(-cp*e_p^2), per-axis Gaussian sum.
-        Bounded [0, 2]. Direct coefficient form (no sigma). Large k_c required
-        because output is bounded, unlike quadratic which is unbounded.
+        Bounded [0, 2]. Direct coefficient controls Gaussian width.
+        c = 1/sigma^2. Larger c = tighter (stronger gradient near zero, shorter reach).
     "quadratic" = -(e_r^2 + e_p^2). Gradient weakens near zero.
-    "laplacian" = exp(-|e|/sigma) per axis summed.
-    "min_laplacian" = exp(-|e|/sigma) per axis min (worst-axis drives reward).
+    "laplacian" = exp(-cr*|e_r|) + exp(-cp*|e_p|). Per-axis summed.
+    "min_laplacian" = min per axis. Worst axis drives reward.
     "smooth_min_laplacian" = soft-min via LogSumExp (alpha=5, differentiable)."""
 
-    command_coeff_roll: float = 1.0
+    command_coeff_roll: float = 5.0
     """Roll axis coefficient in exponent. exp(-cr * e_r^2).
-    1.0 = paper default (no scaling). Equivalent to sigma=1.0."""
+    c=5: gradient peak at ~14 deg, reward 50% at ~21 deg.
+    Reach alive at 43 deg (reward=0.06), strong equalization incentive."""
 
-    command_coeff_pitch: float = 1.5
+    command_coeff_pitch: float = 7.5
     """Pitch axis coefficient in exponent. exp(-cp * e_p^2).
-    1.5 = tighter tracking for harder axis (paper's approach for yaw rate).
-    Equivalent to sigma=1/sqrt(1.5)~=0.816."""
+    c=7.5: 1.5x roll coefficient (paper pattern for harder axis).
+    Gradient peak at ~12 deg, reward 50% at ~17 deg."""
 
     # Action smoothness: first + second order action difference
-    smoothness_weight: float = -5.0
+    smoothness_weight: float = -0.5
 
     # Joint torque penalty: penalizes computed torque magnitude
     torque_weight: float = -0.001
@@ -200,8 +197,8 @@ def command_reward(
     _robot: Articulation,
     env: ALBCEnv,
     command_type: str = "exponential",
-    coeff_roll: float = 1.0,
-    coeff_pitch: float = 1.5,
+    coeff_roll: float = 5.0,
+    coeff_pitch: float = 7.5,
     **_kwargs,
 ) -> torch.Tensor:
     """Attitude tracking reward with selectable kernel.
