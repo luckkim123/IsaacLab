@@ -72,7 +72,7 @@ class ConstraintTRPO:
         line_search_kl_margin: float = 1.5,
         # Log barrier constraint parameters (Modified IPO)
         barrier_t: float = 50.0,
-        barrier_alpha: float = 0.3,
+        barrier_alpha: float = 0.02,
         # Encoder update
         num_encoder_epochs: int = 1,
         encoder_lr: float = 3e-4,

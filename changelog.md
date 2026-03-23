@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-23] Fix noise_std runaway: entropy_coef=0, barrier_alpha=0.02
+
+### Context
+Deep analysis of constrained ALBC training run 2026-03-23_21-29-11 revealed
+noise_std runaway (1.0 -> 3.95 over 664 iters, trend ^^^^). Root cause analysis:
+
+1. **entropy_coef=0.01 drives noise_std up**: Entropy bonus gradient on log_std is
+   a constant -0.01 (in minimization), pushing std upward every iteration. During
+   reward plateau (since iter ~200), reward advantage ~0, so no counteracting
+   downward gradient on log_std. No max_std clamp exists. Result: unbounded growth.
+
+2. **barrier_alpha=0.3 vs paper's 0.02**: Our alpha was 15x larger than NORBC
+   Section IV-B-1 recommendation. With alpha=0.3, barrier_base = 0.3*d_k when
+   violating, giving weak gradient 1/(50*0.3*d_k). For joint_vel_limit: gradient
+   = 0.0067 (0.7% of reward). Paper's alpha=0.02 gives gradient = 0.10 (10% of
+   reward). The 15x weaker barrier couldn't correct constraint violations.
+
+Observed effects: 3/6 constraints violated (joint_torque 2.6x, joint_vel_limit
+3.1x, yaw_vel 1.4x over budget). DORAEMON in permanent backup mode (success=0.28
+< alpha=0.5). Roll error re-increased in Q3-Q4 as noise drowned out policy mean.
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `entropy_coef` 0.01 -> 0.0. min_std=0.2 floor
+  provides sufficient exploration maintenance without entropy bonus pressure.
+- `agents/rsl_rl_ppo_cfg.py`: `barrier_alpha` 0.3 -> 0.02. Matches NORBC paper
+  recommendation. 15x stronger barrier gradient for constraint correction.
+- `algorithms/constraint_trpo.py`: `barrier_alpha` default 0.3 -> 0.02 (sync).
+- Updated docstrings for barrier_t, barrier_alpha, entropy_coef with correct
+  numerical examples and rationale.
+
+### Notes
+- barrier formula itself is correct (matches NORBC Section IV-B exactly):
+  `d_k^i = max(d_k, J_C_k + alpha*d_k)`, `barrier = -log(margin)/t`
+- yaw_vel constraint kept (NORBC stability requirement) despite ALBC having no
+  yaw torque authority. Budget may need adjustment if it still diverges.
+- DORAEMON state collapsed (entropy=-12.58) during this run. After fix,
+  curriculum will rebuild from near-nominal DR distribution.
+- Potential secondary issue: cost advantage standardization (lines 508-510)
+  equalizes gradient across all 6 constraints, diluting correction signal for
+  the 3 violating ones. Monitor after this fix.
+
 ## [2026-03-23] Command reward tuning: coefficient form, k_c revert, c=5/7.5
 
 ### Context

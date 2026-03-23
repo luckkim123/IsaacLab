@@ -121,13 +121,15 @@ class RslRlConstraintTRPOAlgorithmCfg:
     # Log barrier constraint parameters (Modified IPO)
     barrier_t: float = 50.0
     """Barrier steepness parameter. Higher t = barrier activates only near boundary.
-    Barrier coefficient per constraint: 1/(t * margin). At t=50 with margin=1.29,
-    constraint gradient is ~1.5% of reward gradient O(1)."""
+    Barrier coefficient per constraint: 1/(t * margin). At t=50 with alpha=0.02,
+    barrier gradient for joint_vel_limit (d_k=10): 1/(50*0.2)=0.10 per step."""
 
-    barrier_alpha: float = 0.3
-    """Adaptive threshold expansion coefficient. When cost exceeds budget,
-    threshold is relaxed: d_k^i = max(d_k, J_C_k + alpha * d_k). Ensures
-    log barrier is computable even during initial constraint violations."""
+    barrier_alpha: float = 0.02
+    """Adaptive threshold expansion coefficient (NORBC Section IV-B-1).
+    d_k^i = max(d_k, J_C_k + alpha * d_k). Paper recommends alpha=0.02:
+    too small -> updates too small/slow, too large -> constraint violations
+    persist due to weak barrier gradient. At alpha=0.02, barrier_base = 0.02*d_k
+    when violating, giving gradient 1/(t*0.02*d_k) per constraint."""
 
     # Noise floor (exploration maintenance)
     min_std: float = 0.2
@@ -135,10 +137,11 @@ class RslRlConstraintTRPOAlgorithmCfg:
     trust region optimization). Prevents exploration collapse without consuming
     KL budget."""
 
-    entropy_coef: float = 0.01
-    """Entropy regularization coefficient for TRPO surrogate. Adds upward
-    pressure on action std, preventing premature noise collapse before
-    min_std floor. Set 0.0 to disable. PPO standard: 0.01."""
+    entropy_coef: float = 0.0
+    """Entropy regularization coefficient for TRPO surrogate. Disabled (0.0)
+    because min_std=0.2 floor provides sufficient exploration maintenance.
+    With fixed entropy_coef > 0, reward plateau causes noise_std runaway
+    (constant upward pressure with no counteracting reward gradient)."""
 
     # Post-encoder KL gating
     max_encoder_kl: float = 0.016
