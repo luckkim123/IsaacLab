@@ -51,16 +51,20 @@ class ALBCRewardCfg:
     command_weight: float = 5.0
     command_type: str = "exponential"
     """Reward type:
-    "exponential" = exp(-e_r^2/sigma^2) + exp(-e_p^2/sigma^2), per-axis Gaussian sum.
-        Bounded [0, 2]. Precise near zero, smooth gradient everywhere.
+    "exponential" = exp(-e_r^2/sr^2) + exp(-e_p^2/sp^2), per-axis Gaussian sum.
+        Bounded [0, 2]. Per-axis sigma for roll/pitch asymmetry.
     "quadratic" = -(e_r^2 + e_p^2). Gradient weakens near zero.
     "laplacian" = exp(-|e|/sigma) per axis summed.
     "min_laplacian" = exp(-|e|/sigma) per axis min (worst-axis drives reward).
     "smooth_min_laplacian" = soft-min via LogSumExp (alpha=5, differentiable)."""
 
-    command_sigma: float = 0.15
-    """Scale parameter (rad). For exponential: Gaussian width. For laplacian: 1/e width.
-    Smaller sigma = sharper peak = stronger near-zero gradient."""
+    command_sigma_roll: float = 0.15
+    """Roll axis scale parameter (rad). Gaussian width for exponential, 1/e width for laplacian."""
+
+    command_sigma_pitch: float = 0.30
+    """Pitch axis scale parameter (rad). Larger than roll because pitch control is
+    harder (configuration-dependent inertia asymmetry via parallel axis theorem).
+    Empirically pitch error converges ~2x larger than roll."""
 
     # Action smoothness: first + second order action difference
     smoothness_weight: float = -0.5
@@ -190,26 +194,32 @@ def command_reward(
     _robot: Articulation,
     env: ALBCEnv,
     command_type: str = "exponential",
-    sigma: float = 0.15,
+    sigma_roll: float = 0.15,
+    sigma_pitch: float = 0.30,
     **_kwargs,
 ) -> torch.Tensor:
-    """Attitude tracking reward with selectable kernel.
+    """Attitude tracking reward with selectable kernel and per-axis sigma.
 
-    Exponential: exp(-e_r^2/sigma^2) + exp(-e_p^2/sigma^2). Per-axis Gaussian sum.
+    Per-axis sigma accounts for pitch being harder to control than roll
+    (configuration-dependent inertia asymmetry). Larger sigma_pitch provides
+    wider reward gradient for the harder axis.
+
+    Exponential: exp(-e_r^2/sr^2) + exp(-e_p^2/sp^2). Per-axis Gaussian sum.
         Bounded [0, 2]. Gradient strongest at e~sigma, smooth everywhere.
     Quadratic: -(e_r^2 + e_p^2). Gradient = -2e, weakens near zero.
-    Laplacian: exp(-|e|/sigma) per axis, summed. Gradient increases near zero.
-    Min-Laplacian: exp(-|e|/sigma) per axis, min. Worst axis drives reward.
+    Laplacian: exp(-|e_r|/sr) + exp(-|e_p|/sp). Per-axis summed.
+    Min-Laplacian: min(exp(-|e_r|/sr), exp(-|e_p|/sp)). Worst axis drives reward.
 
     Args:
         env: Environment instance (provides _attitude_error).
         command_type: "exponential", "quadratic", "laplacian", or "min_laplacian".
-        sigma: Scale parameter (rad). Gaussian width for exponential, 1/e width for laplacian.
+        sigma_roll: Roll axis scale parameter (rad).
+        sigma_pitch: Pitch axis scale parameter (rad).
     """
     err_rp = env._attitude_error[:, :2]
     if command_type == "exponential":
-        # Per-axis Gaussian: exp(-e^2/sigma^2), summed. Output in [0, 2].
-        return torch.exp(-err_rp[:, 0] ** 2 / sigma**2) + torch.exp(-err_rp[:, 1] ** 2 / sigma**2)
+        return torch.exp(-err_rp[:, 0] ** 2 / sigma_roll**2) + torch.exp(-err_rp[:, 1] ** 2 / sigma_pitch**2)
+    sigma = torch.tensor([sigma_roll, sigma_pitch], device=err_rp.device)
     if command_type == "smooth_min_laplacian":
         per_axis = torch.exp(-err_rp.abs() / sigma)
         alpha = 5.0

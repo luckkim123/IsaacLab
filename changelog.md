@@ -32,8 +32,27 @@ for better precision near zero, (2) add joint torque penalty for energy efficien
   Monitor Episode_Reward/torque in WandB and adjust if needed.
 - Paper 1's mass scaling (k_tau * m_bar/m) not implemented -- DR body_mass variation
   is only +-10%, effect negligible. Can add if robot mass changes significantly.
-- Exponential kernel sigma=0.15 rad (~8.6 deg) retained. At sigma, reward per axis = 1/e ~ 0.37.
 - Previous laplacian/min_laplacian types preserved for ablation experiments.
+
+## [2026-03-23] Per-axis sigma for roll/pitch asymmetry in command reward
+
+### Context
+Pitch control is empirically harder than roll for the ALBC mechanism. At convergence,
+pitch error is consistently ~2x larger than roll error. Physical causes: (1) restoring
+torque asymmetry (T_b_roll ~ cos(pitch)*sin(roll) vs T_b_pitch ~ sin(pitch)),
+(2) configuration-dependent inertia via parallel axis theorem -- the 2-link arm's
+forward reach creates larger pitch-axis inertia variation. Paper 1 also uses per-axis
+coefficients (1.0 for vxy, 1.5 for wz) for the same reason. Changed from single
+`command_sigma` to per-axis `command_sigma_roll`/`command_sigma_pitch`.
+
+### Changed
+- `mdp/rewards.py`: `ALBCRewardCfg.command_sigma` split into `command_sigma_roll` (0.15)
+  and `command_sigma_pitch` (0.30). sigma_pitch = 2x sigma_roll matches observed error ratio.
+- `mdp/rewards.py`: `command_reward()` function signature `sigma` -> `sigma_roll` + `sigma_pitch`.
+  All kernel types (exponential, laplacian, min_laplacian, smooth_min_laplacian) updated
+  to use per-axis sigma via tensor broadcast.
+- `albc_env.py`: `_build_reward_terms()` params dict updated to pass both sigma values.
+- `config.py`: Default reward config updated with `command_sigma_roll=0.15, command_sigma_pitch=0.30`.
 
 ## [2026-03-23] WandB logging dedup + train-analyze skill update
 

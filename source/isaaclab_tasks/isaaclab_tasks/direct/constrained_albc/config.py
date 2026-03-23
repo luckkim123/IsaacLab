@@ -231,7 +231,8 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     # smoothness replaces joint_osc constraint (fixed weight avoids lambda competition).
     reward: ALBCRewardCfg = ALBCRewardCfg(
         command_type="exponential",
-        command_sigma=0.15,
+        command_sigma_roll=0.15,
+        command_sigma_pitch=0.30,
         smoothness_weight=-0.5,
         torque_weight=-0.001,
     )
