@@ -4,6 +4,59 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-24] Decouple sigma from TRPO + remove yaw_quad_damp from privileged obs
+
+### Context
+Analysis of training run `2026-03-23_22-21-42` (2500 iter) revealed two structural
+problems causing a mutually-reinforcing death spiral:
+
+1. **noise_std floor lock**: log_std was in TRPO's `_policy_params`, competing with mu
+   for KL budget. In 2D action space, sigma's KL consumption was ~33% (vs ~4-8% in 12D
+   locomotion papers). TRPO natural gradient preferentially reduced sigma (cheaper in KL
+   units), collapsing noise_std to 0.2 floor by iter ~250 and killing exploration for the
+   remaining 2250 iterations.
+
+2. **Encoder yaw domination**: z sweep analysis showed 13/13 encoder z dimensions
+   dominated by yaw_quad_damp (range 1.37-1.85), a parameter ALBC cannot act on (no yaw
+   control authority). Joint stiffness, body mass, main volume all showed range < 0.03
+   (effectively flat). The encoder was a 13D yaw-damping classifier, wasting all latent
+   capacity on non-actionable information.
+
+Paper analysis (NORAC, Lee2020, Hwangbo2019, Ji2022) confirmed: (a) all 4 papers include
+only actionable information in privileged obs, (b) 3/4 use TRPO but with 12-16D actions
+where sigma KL impact is much smaller, (c) Ji2022's choice of PPO for concurrent training
+indirectly supports sigma decoupling from trust region.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Moved `log_std` from `_policy_params` (TRPO natural
+  gradient) to new `_std_params` group with separate Adam optimizer (lr=1e-4). Sigma now
+  follows the score-function equilibrium `dlogpi/dsigma = ((a-mu)^2 - sigma^2)/sigma^3`
+  without consuming KL budget. Post-TRPO baseline re-snapshot ensures IS ratio starts at
+  1.0 for sigma update. Barrier term included for constraint feedback to sigma.
+  `torch.autograd.grad` used to avoid wasteful actor/encoder gradient computation.
+- `agents/rsl_rl_ppo_cfg.py`: Added `std_lr: float = 1e-4` config field. Changed
+  `privileged_dim` 28 -> 27.
+- `config.py`: `state_space` 28 -> 27. Updated docstrings (privileged 28D -> 27D).
+- `mdp/observations.py`: Removed yaw quadratic damping (1D) from privileged obs.
+  `compute_privileged_obs()` now returns 27D. Docstring updated.
+- `encoder/actor_critic_encoder.py`: `_build_fixed_encoder_normalizer()` updated from
+  28D to 27D. Removed yaw_quad_damp mean/std entries (index [26]). Dim guard 28 -> 27.
+- `runners/constraint_encoder_runner.py`: Added `std_optimizer.pt` save/load in
+  checkpoint methods, following same pattern as encoder_optimizer.
+
+### Notes
+- Checkpoint incompatible: both changes break compatibility. Fresh start required.
+  `_handle_dim_mismatch` auto-reinitializes encoder on 27D load.
+- yaw_vel constraint unaffected: cost function reads angular velocity from sim state
+  directly, not from privileged obs. yaw_damping_scale DR still applied to physics model.
+- DORAEMON safe: no dimension indexing in doraemon.py (operates at physics level only).
+- max_std clamp intentionally omitted: current problem is floor-stuck sigma, not runaway.
+- Dry run verified: 10 iter, 64 envs, headless. noise_std=1.00 stable (previously
+  collapsed within first iterations). Ruff check/format clean.
+- Sigma update NOT gated on ls_success: sigma should adapt independently of TRPO step.
+- Key design: re-snapshot post-TRPO log_prob as sigma baseline so ratio=1.0, avoiding
+  IS contamination from mu change. Gradient is vanilla PG + barrier for sigma only.
+
 ## [2026-03-23] Scale max_kl for 2D action space: 0.01 -> 0.002
 
 ### Context
