@@ -34,7 +34,6 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from rsl_rl.networks import MLP, EmpiricalNormalization
 from torch.distributions import Normal
 
@@ -156,20 +155,6 @@ class ActorCriticEncoder(nn.Module):
             last_activation=None,
         )
         logger.info("Encoder MLP (%dD input): %s", encoder_input_dim, self.encoder)
-
-        # --- Decoder MLP: z -> privileged reconstruction (auxiliary loss) ---
-        decoder_hidden_dims = list(reversed(encoder_hidden_dims))
-        self.decoder = MLP(
-            encoder_latent_dim,
-            encoder_input_dim,
-            decoder_hidden_dims,
-            encoder_activation,
-            last_activation=None,
-        )
-        logger.info("Decoder MLP (%dD -> %dD): %s", encoder_latent_dim, encoder_input_dim, self.decoder)
-
-        # Last encoded z (retained with grad for reconstruction_loss)
-        self._last_z: torch.Tensor | None = None
 
         # --- Actor MLP: [policy_obs, hist_flat, z] -> actions ---
         num_actor_obs = policy_obs_dim + self._hist_flat_dim + encoder_latent_dim
@@ -337,26 +322,10 @@ class ActorCriticEncoder(nn.Module):
         """Encode privileged info into latent z.
 
         encoder(normalize(privileged)) -> softsign -> z in (-1, 1)
-        Stores z as _last_z (with grad) for reconstruction_loss().
         """
         encoder_input = obs[self._privileged_key]
         x = self.encoder(self.encoder_obs_normalizer(encoder_input))
-        z = torch.nn.functional.softsign(x)
-        self._last_z = z
-        return z
-
-    def reconstruction_loss(self, obs: TensorDict) -> torch.Tensor:
-        """MSE reconstruction loss: decoder(z) vs normalized privileged obs.
-
-        Provides advantage-independent gradient to the encoder, preventing
-        encoder gradient death when the policy converges (advantages -> 0).
-        """
-        if self._last_z is None:
-            return torch.tensor(0.0, device=next(self.parameters()).device)
-        recon = self.decoder(self._last_z)
-        with torch.no_grad():
-            target = self.encoder_obs_normalizer(obs[self._privileged_key])
-        return F.mse_loss(recon, target)
+        return torch.nn.functional.softsign(x)
 
     def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
         """Combined observation for actor: cat([policy_obs, hist_flat, z])."""

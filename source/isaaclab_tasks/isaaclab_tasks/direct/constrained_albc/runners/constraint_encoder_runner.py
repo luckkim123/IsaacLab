@@ -230,6 +230,5 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         metrics["TRPO/value_grad_norm"] = alg._last_value_grad_norm
         metrics["TRPO/encoder_grad_norm"] = alg._last_encoder_grad_norm
         metrics["TRPO/surrogate_loss"] = alg._last_surrogate_loss
-        metrics["Encoder/recon_loss"] = alg._last_recon_loss
 
         flush_metrics(self.writer, metrics, iteration, self.logger_type)

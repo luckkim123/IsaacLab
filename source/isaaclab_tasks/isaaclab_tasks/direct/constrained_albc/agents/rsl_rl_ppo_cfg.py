@@ -169,11 +169,6 @@ class RslRlConstraintTRPOAlgorithmCfg:
     """Encoder Adam learning rate. Raised from 3e-4 to match prior successful run
     (2026-03-17) where encoder_lr=1e-3 produced healthy enc_grad growth (0.003->0.056)."""
 
-    recon_loss_coef: float = 1.0
-    """Reconstruction auxiliary loss coefficient. Decoder(z) -> privileged_obs MSE.
-    Provides advantage-independent gradient to encoder, preventing gradient death
-    when the policy converges and advantages approach zero."""
-
 
 # =============================================================================
 # Runner Configuration
