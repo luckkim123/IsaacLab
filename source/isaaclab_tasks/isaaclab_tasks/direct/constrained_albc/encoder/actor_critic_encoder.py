@@ -185,7 +185,7 @@ class ActorCriticEncoder(nn.Module):
 
     @staticmethod
     def _build_fixed_encoder_normalizer(dim: int) -> nn.Module:
-        """Build fixed normalization for 28D privileged encoder input.
+        """Build fixed normalization for 27D privileged encoder input.
 
         Mean and std computed analytically from DR config distributions.
         For uniform U(a,b): mean = (a+b)/2, std = (b-a)/sqrt(12).
@@ -241,8 +241,7 @@ class ActorCriticEncoder(nn.Module):
             2.0,                       # [23] action latency: mean(U(0,4)) = 2.0
             0.015,                     # [24] joint static friction: mean(U(0,0.03)) = 0.015
             0.1,                       # [25] joint viscous friction: mean(U(0,0.2)) = 0.1
-            1.0,                       # [26] yaw quad_damp: 1.0 * mean(U(0.5,1.5)) = 1.0
-            1010.0,                    # [27] water density: mean(U(995,1025)) = 1010
+            1010.0,                    # [26] water density: mean(U(995,1025)) = 1010
         ])
 
         std = torch.tensor([
@@ -272,20 +271,19 @@ class ActorCriticEncoder(nn.Module):
             4.0 / s12,                 # [23] action latency (range 4)
             0.03 / s12,                # [24] joint static friction (range 0.03)
             0.2 / s12,                 # [25] joint viscous friction (range 0.2)
-            1.0 * 1.0 / s12,           # [26] yaw quad_damp (scale range 1.0)
-            30.0 / s12,                # [27] water density (range 30)
+            30.0 / s12,                # [26] water density (range 30)
         ])
         # fmt: on
 
-        if dim != 28:
+        if dim != 27:
             logger.warning(
-                "Fixed encoder normalizer expects 28D privileged obs, got %d. Falling back to EmpiricalNormalization.",
+                "Fixed encoder normalizer expects 27D privileged obs, got %d. Falling back to EmpiricalNormalization.",
                 dim,
             )
             return EmpiricalNormalization(dim)
 
         normalizer = _FixedNormalization(mean, std)
-        logger.info("Encoder using fixed normalization (28D, analytical DR stats)")
+        logger.info("Encoder using fixed normalization (27D, analytical DR stats)")
         return normalizer
 
     def reset(self, _dones: torch.Tensor | None = None) -> None:

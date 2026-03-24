@@ -60,7 +60,7 @@ class _EncoderPolicyCfg(RslRlPpoActorCriticCfg):
     encoder_activation: str = "elu"
     encoder_obs_normalization: bool = True
     policy_obs_dim: int = 13
-    privileged_dim: int = 28
+    privileged_dim: int = 27
     proprio_history_len: int = 30
     proprio_feature_dim: int = 8
 
@@ -137,9 +137,13 @@ class RslRlConstraintTRPOAlgorithmCfg:
 
     # Noise floor (exploration maintenance)
     min_std: float = 0.2
-    """Minimum action standard deviation. Clamped after TRPO step (outside
-    trust region optimization). Prevents exploration collapse without consuming
-    KL budget."""
+    """Minimum action standard deviation. Clamped after both TRPO and Adam steps."""
+
+    std_lr: float = 1e-4
+    """Learning rate for separate log_std Adam optimizer. log_std is decoupled
+    from TRPO natural gradient so sigma follows the score-function equilibrium
+    (dlogpi/dsigma = ((a-mu)^2 - sigma^2) / sigma^3) without consuming KL budget.
+    Conservative value (1/3 of encoder_lr) to prevent sigma oscillation."""
 
     entropy_coef: float = 0.0
     """Entropy regularization coefficient for TRPO surrogate. Disabled (0.0)

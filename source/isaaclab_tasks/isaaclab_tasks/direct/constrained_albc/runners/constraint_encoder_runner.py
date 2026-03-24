@@ -151,6 +151,10 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         if getattr(self.alg, "encoder_optimizer", None) is not None:
             self._save_aux_state(path, "encoder_optimizer.pt", self.alg.encoder_optimizer.state_dict())
 
+        # Save std optimizer state for seamless resume
+        if getattr(self.alg, "std_optimizer", None) is not None:
+            self._save_aux_state(path, "std_optimizer.pt", self.alg.std_optimizer.state_dict())
+
         # Save DORAEMON distribution state
         raw_env = self.env.unwrapped
         if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
@@ -166,6 +170,13 @@ class ConstraintEncoderRunner(OnPolicyRunner):
             if enc_opt_state is not None:
                 self.alg.encoder_optimizer.load_state_dict(enc_opt_state)
                 logger.info("Restored encoder optimizer state from checkpoint")
+
+        # Restore std optimizer state for seamless resume
+        if load_optimizer and getattr(self.alg, "std_optimizer", None) is not None:
+            std_opt_state = self._load_aux_state(path, "std_optimizer.pt", self.device)
+            if std_opt_state is not None:
+                self.alg.std_optimizer.load_state_dict(std_opt_state)
+                logger.info("Restored std optimizer state from checkpoint")
 
         # Restore DORAEMON distribution state
         raw_env = self.env.unwrapped

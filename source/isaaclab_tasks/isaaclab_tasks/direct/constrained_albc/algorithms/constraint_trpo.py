@@ -76,8 +76,9 @@ class ConstraintTRPO:
         # Encoder update
         num_encoder_epochs: int = 1,
         encoder_lr: float = 3e-4,
-        # Noise floor (exploration maintenance)
+        # Noise floor and sigma optimizer
         min_std: float = 0.2,
+        std_lr: float = 1e-4,
         # Entropy regularization
         entropy_coef: float = 0.0,
         # Post-encoder KL gating
@@ -117,6 +118,7 @@ class ConstraintTRPO:
         self.line_search_kl_margin = line_search_kl_margin
         self.num_encoder_epochs = num_encoder_epochs
         self.min_std = min_std
+        self.std_lr = std_lr
         self._entropy_coef = entropy_coef
         self.max_encoder_kl = max_encoder_kl
 
@@ -155,20 +157,25 @@ class ConstraintTRPO:
 
         # Separate parameter groups:
         # - Actor params: TRPO natural gradient (no optimizer)
+        # - Std params: separate Adam (sigma follows score-function equilibrium)
         # - Encoder params: separate Adam (indirect distribution influence)
         # - Value params (critic + cost_critic): Adam optimizer
         value_params = []
         encoder_params = []
-        self._policy_params = []  # Actor-only for TRPO
+        std_params = []
+        self._policy_params = []  # Actor MLP weights only (TRPO)
 
         encoder_prefixes = ("encoder",)
         for name, param in self.policy.named_parameters():
             is_value = name.startswith("critic") or name.startswith("cost_critic")
             is_encoder = any(name.startswith(p) for p in encoder_prefixes)
+            is_std = name == "log_std"
             if is_value:
                 value_params.append(param)
             elif is_encoder:
                 encoder_params.append(param)
+            elif is_std:
+                std_params.append(param)
             else:
                 self._policy_params.append(param)
 
@@ -182,9 +189,19 @@ class ConstraintTRPO:
         else:
             self._encoder_params = []
             self.encoder_optimizer = None
+
+        # Separate optimizer for log_std: decoupled from TRPO KL budget.
+        # Sigma follows score-function gradient dlogpi/dsigma = ((a-mu)^2 - sigma^2)/sigma^3
+        # without competing with mu for KL trust region capacity.
+        self._std_params = std_params
+        self.std_optimizer = optim.Adam(std_params, lr=std_lr) if std_params else None
+
         logger.info(
-            "ConstraintTRPO: %d actor params (TRPO), %d encoder params (Adam), %d value params (Adam)",
+            "ConstraintTRPO: %d actor params (TRPO), %d std params (Adam lr=%.0e), "
+            "%d encoder params (Adam), %d value params (Adam)",
             len(self._policy_params),
+            len(std_params),
+            std_lr,
             len(encoder_params),
             len(value_params),
         )
@@ -556,7 +573,37 @@ class ConstraintTRPO:
 
         ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate)
 
-        # Noise floor: applied after TRPO step (outside trust region optimization).
+        # ------------------------------------------------------------------
+        # 2b. Sigma update (separate Adam, decoupled from TRPO KL budget)
+        # ------------------------------------------------------------------
+        # Re-snapshot post-TRPO baseline so IS ratio starts at 1.0 for sigma.
+        # Gradient is the vanilla PG score function for sigma:
+        #   dlogpi/dsigma = ((a - mu)^2 - sigma^2) / sigma^3
+        # This is self-correcting: when advantage-weighted action spread exceeds
+        # sigma^2, gradient pushes sigma up (more exploration needed); when below,
+        # pushes sigma down (policy is precise enough).
+        if self.std_optimizer is not None:
+            with torch.no_grad():
+                self.policy.act(obs_flat)
+                std_baseline_lp = self.policy.get_actions_log_prob(actions_flat).squeeze(-1)
+
+            self.policy.act(obs_flat)
+            log_prob = self.policy.get_actions_log_prob(actions_flat)
+            ratio = torch.exp(log_prob - std_baseline_lp)
+            # Reward surrogate + log barrier (constraint feedback to sigma)
+            reward_surr = -(adv_sq * ratio).mean()
+            cost_surrs = (ratio.unsqueeze(-1) * cost_advantages_flat).mean(dim=0)
+            margin = barrier_base - cost_surrs
+            std_barrier = -torch.log(margin.clamp(min=1e-8)).sum() / self._barrier_t
+            std_loss = reward_surr + std_barrier
+            # Compute gradient only for std params (avoid wasteful actor/encoder grads)
+            std_grads = torch.autograd.grad(std_loss, self._std_params)
+            self.std_optimizer.zero_grad()
+            for p, g in zip(self._std_params, std_grads):
+                p.grad = g
+            self.std_optimizer.step()
+
+        # Noise floor: hard clamp after both TRPO and Adam steps.
         min_log_std = math.log(self.min_std)
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=min_log_std)

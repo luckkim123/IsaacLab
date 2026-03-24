@@ -106,10 +106,9 @@ def compute_privileged_obs(
         - Action latency (1D): 0-4 physics steps delay
         - Joint static friction (1D): Coulomb friction coefficient
         - Joint viscous friction (1D): viscous friction coefficient
-        - Yaw quadratic damping (1D): yaw-axis quadratic damping
         - Water density (1D): water density in kg/m^3
 
-    Total: 28D.
+    Total: 27D.
 
     Args:
         env: The ALBC environment instance.
@@ -167,10 +166,6 @@ def compute_privileged_obs(
     jid = env._albc_joint_ids[0]
     priv_obs.append(env._robot.data.joint_friction_coeff[:, jid : jid + 1])  # 1D: static friction
     priv_obs.append(env._robot.data.joint_viscous_friction_coeff[:, jid : jid + 1])  # 1D: viscous friction
-
-    # Yaw quadratic damping (1D): independently DR'd from roll/pitch.
-    # Relevant for yaw_velocity constraint (ALBC cannot generate yaw torque).
-    priv_obs.append(env._hydro.quadratic_damping[:, 5:6])  # 1D: yaw axis
 
     # Water density (1D): DR range 995-1025 kg/m^3.
     # Affects buoyancy and hydrodynamic forces. DORAEMON curriculum target.

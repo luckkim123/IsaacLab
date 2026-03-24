@@ -148,8 +148,8 @@ class ALBCEnvCfg(DirectRLEnvCfg):
 
     Network Input Dimensions (ActorCriticEncoder):
         - observation_space (13): Used for gym.spaces.Box definition only
-        - state_space (28): Privileged info, returned as observations["privileged"]
-        - Encoder: privileged(28D) -> softsign -> latent z(13D) in (-1, 1)
+        - state_space (27): Privileged info, returned as observations["privileged"]
+        - Encoder: privileged(27D) -> softsign -> latent z(13D) in (-1, 1)
         - Actual Actor/Critic input: policy_obs(13) + hist(240) + z(13) = 266D
     """
 
@@ -160,7 +160,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     decimation: int = 1  # 0.005 * 1 = 0.005s step; 50Hz control via control_decimation=4
     action_space: int = 2
     observation_space: int = 13
-    state_space: int = 28  # 28D privileged obs for encoder (+5: latency, friction x2, yaw_damp, density)
+    state_space: int = 27  # 27D privileged obs for encoder (+4: latency, friction x2, density)
     debug_vis: bool = True
 
     # Top-down camera view (looking down at robot from above)
