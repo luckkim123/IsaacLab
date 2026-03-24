@@ -78,7 +78,7 @@ class ConstraintTRPO:
         encoder_lr: float = 3e-4,
         # Noise floor and sigma optimizer
         min_std: float = 0.2,
-        std_lr: float = 1e-4,
+        std_lr: float = 3e-3,
         # Entropy regularization
         entropy_coef: float = 0.0,
         # Post-encoder KL gating

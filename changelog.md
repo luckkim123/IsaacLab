@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-24] Increase std_lr 1e-4 -> 3e-3 for faster sigma equilibrium
+
+### Context
+Training run `2026-03-24_18-11-41` (310 iter) after sigma decoupling showed the opposite
+of the previous collapse problem: noise_std barely moved (1.0 -> 0.98 over 310 iter, 2%
+reduction). The score-function gradient `((a-mu)^2 - sigma^2)/sigma^3` was present but
+std_lr=1e-4 was too slow for it to take effect.
+
+Consequences of stuck-high sigma (0.98):
+1. Actions essentially random noise -> joint_torque OVER (25.48 vs dk=20), joint_vel_limit
+   OVER (12.23 vs dk=10)
+2. Encoder gradient death (enc_grad=0.00): with random actions, encoder z has no impact on
+   advantages, so encoder receives no useful gradient
+3. Reward plateau since ~iter 100 (roll=7.28, pitch=12.57 deg, no progress for 200 iter)
+
+Score-function equilibrium is self-correcting: overshooting sigma triggers corrective
+gradient in the opposite direction. This makes higher LR safe -- unlike actor/encoder where
+overshooting can be catastrophic, sigma naturally oscillates toward equilibrium. Chose 3e-3
+(30x increase, same magnitude as encoder_lr but 10x higher to compensate for 1 step/iter
+vs encoder's 3 epochs/iter).
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `std_lr` 1e-4 -> 3e-3. Updated docstring with rationale.
+- `algorithms/constraint_trpo.py`: `std_lr` default 1e-4 -> 3e-3 (sync).
+
+### Notes
+- Key metrics to watch: noise_std should find equilibrium in 0.3-0.8 range within 100 iter.
+  If it oscillates wildly, reduce to 1e-3. If still too slow, increase to 1e-2.
+- Encoder recovery depends on sigma coming down: random actions (sigma~1) prevent encoder
+  from learning useful z representations.
+- Alternative considered: lowering init_std (1.0 -> 0.5). Rejected because it doesn't fix
+  the fundamental LR issue -- sigma would still take too long to adjust from any starting point.
+
 ## [2026-03-24] Decouple sigma from TRPO + remove yaw_quad_damp from privileged obs
 
 ### Context
