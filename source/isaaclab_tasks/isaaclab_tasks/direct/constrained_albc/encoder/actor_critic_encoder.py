@@ -9,16 +9,18 @@ This module provides the encoder-based actor-critic network:
     - ActorCriticEncoder: Base encoder network (Phase 1 teacher training)
 
 Architecture:
-    Encoder: privileged (23D) -> MLP -> softsign -> z (13D)
+    Encoder: cat([policy_obs, hist_flat, privileged]) = 280D -> MLP -> softsign -> z (13D)
     Actor:   cat([policy_obs, hist_flat, z]) = 266D -> MLP -> actions
-    Critic:  cat([policy_obs, hist_flat, privileged]) = 276D -> MLP -> value (1D)
+    Critic:  cat([policy_obs, hist_flat, privileged]) = 280D -> MLP -> value (1D)
 
-    The encoder takes ONLY privileged info as input (HORA Phase 1 style).
-    This forces the actor to use z for DR-specific adaptation, since z is the
-    only path through which privileged information reaches the actor.
+    The encoder receives policy_obs + proprioception history + privileged info,
+    producing a time-varying z that encodes both dynamic state and DR parameters.
+    This matches NORBC/ANYmal/RMA where encoder input includes dynamic privileged
+    quantities (body velocity, contact forces, terrain), ensuring z changes every
+    timestep and the policy naturally develops z-dependency.
 
     proprio_hist (N, 30, 8) is flattened to (N, 240) and concatenated directly.
-    No embedding module -- the actor/critic MLPs learn from raw history.
+    No embedding module -- the encoder/actor/critic MLPs learn from raw history.
 
 Reference:
     - HORA: Heuristic-Free Online Robust Adaptation (Qi et al., 2023)
@@ -29,7 +31,6 @@ Reference:
 from __future__ import annotations
 
 import logging
-import math
 from typing import TYPE_CHECKING, Any, NoReturn
 
 import torch
@@ -43,29 +44,19 @@ if TYPE_CHECKING:
     from tensordict import TensorDict
 
 
-class _FixedNormalization(nn.Module):
-    """Fixed (x - mean) / std normalization using pre-computed statistics."""
-
-    def __init__(self, mean: torch.Tensor, std: torch.Tensor) -> None:
-        super().__init__()
-        self.register_buffer("_mean", mean.unsqueeze(0))
-        self.register_buffer("_std", std.unsqueeze(0))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return (x - self._mean) / self._std
-
-
 class ActorCriticEncoder(nn.Module):
     """ActorCritic with extrinsics encoder for HORA Phase 1 teacher policy.
 
-    The encoder compresses privileged information into a bounded latent z (softsign).
-    Encoder input is privileged-only (HORA Phase 1 style), ensuring z encodes
-    DR parameters rather than redundant policy_obs/history information.
+    The encoder compresses dynamic state + privileged info into bounded latent z.
+    Encoder input includes policy_obs, proprioception history, and privileged info,
+    producing a time-varying z (changes every timestep). This matches NORBC/ANYmal
+    where encoder input contains dynamic quantities, ensuring strong policy-encoder
+    coupling via natural z-dependency.
 
     Architecture:
-        Encoder: privileged (23D) -> MLP -> softsign -> z (13D)
+        Encoder: cat([policy_obs, hist_flat, privileged]) = 280D -> MLP -> softsign -> z (13D)
         Actor:   cat([policy_obs, hist_flat, z]) = 266D -> MLP -> actions
-        Critic:  cat([policy_obs, hist_flat, privileged]) = 276D -> MLP -> value (asymmetric)
+        Critic:  cat([policy_obs, hist_flat, privileged]) = 280D -> MLP -> value (asymmetric)
 
     Encoder gradient flows only from actor loss (critic doesn't use z).
     """
@@ -138,14 +129,16 @@ class ActorCriticEncoder(nn.Module):
             self._hist_flat_dim,
         )
 
-        # --- Encoder MLP: privileged -> softsign -> z (HORA Phase 1 style) ---
-        encoder_input_dim = privileged_dim
+        # --- Encoder MLP: cat([policy_obs, hist_flat, privileged]) -> softsign -> z ---
+        # Dynamic input (policy_obs + history) ensures z varies every timestep,
+        # matching NORBC/ANYmal encoder design where input includes dynamic state.
+        encoder_input_dim = policy_obs_dim + self._hist_flat_dim + privileged_dim
+        self.encoder_input_dim = encoder_input_dim
 
         self.encoder_obs_normalization = encoder_obs_normalization
-        if encoder_obs_normalization:
-            self.encoder_obs_normalizer = self._build_fixed_encoder_normalizer(encoder_input_dim)
-        else:
-            self.encoder_obs_normalizer = nn.Identity()
+        self.encoder_obs_normalizer = (
+            EmpiricalNormalization(encoder_input_dim) if encoder_obs_normalization else nn.Identity()
+        )
 
         self.encoder = MLP(
             encoder_input_dim,
@@ -183,109 +176,6 @@ class ActorCriticEncoder(nn.Module):
         self.distribution: Normal | None = None
         Normal.set_default_validate_args(False)
 
-    @staticmethod
-    def _build_fixed_encoder_normalizer(dim: int) -> nn.Module:
-        """Build fixed normalization for 27D privileged encoder input.
-
-        Mean and std computed analytically from DR config distributions.
-        For uniform U(a,b): mean = (a+b)/2, std = (b-a)/sqrt(12).
-        For scaled values (base * U(lo,hi)): mean = base*(lo+hi)/2, std = base*(hi-lo)/sqrt(12).
-        For disk-uniform (radius R): mean = 0, std = R/2.
-
-        Privileged obs order (28D):
-            [0-2]   main hydro: volume, CoG_z, CoB_z
-            [3-5]   buoy hydro: volume, CoG_z, CoB_z
-            [6-7]   main inertia: Ixx, Iyy
-            [8-9]   buoy inertia: Ixx, Iyy
-            [10-13] payload: mass, cog_x, cog_y, cog_z
-            [14]    main added mass surge
-            [15]    joint stiffness (Kp)
-            [16]    joint damping (Kd)
-            [17]    joint effort limit
-            [18-19] main linear damping roll, pitch
-            [20-21] main quadratic damping roll, pitch
-            [22]    main body mass
-            [23]    action latency (physics steps)
-            [24]    joint static friction
-            [25]    joint viscous friction
-            [26]    yaw quadratic damping
-            [27]    water density (kg/m^3)
-        """
-        s12 = math.sqrt(12.0)
-
-        # fmt: off
-        mean = torch.tensor([
-            0.009,                     # [0]  main volume: 0.009 * mean(U(0.9,1.1)) = 0.009
-            -0.05,                     # [1]  main CoG_z: -0.05 + mean(U(-0.02,0.02)) = -0.05
-            0.0,                       # [2]  main CoB_z: 0.0 + mean(U(-0.02,0.02)) = 0.0
-            0.00268,                   # [3]  buoy volume: 0.00268 * mean(U(0.9,1.1)) = 0.00268
-            0.059,                     # [4]  buoy CoG_z: 0.059 + mean(U(-0.02,0.02)) = 0.059
-            0.059,                     # [5]  buoy CoB_z: 0.059 + mean(U(-0.02,0.02)) = 0.059
-            0.0994 * 1.025,            # [6]  main Ixx: 0.0994 * mean(U(0.75,1.3))
-            0.0994 * 1.025,            # [7]  main Iyy: same
-            0.00278 * 1.025,           # [8]  buoy Ixx: 0.00278 * mean(U(0.75,1.3))
-            0.00278 * 1.025,           # [9]  buoy Iyy: same
-            0.5,                       # [10] payload mass: mean(U(0,1)) = 0.5
-            0.0,                       # [11] payload cog_x: disk-uniform, mean=0
-            0.0,                       # [12] payload cog_y: disk-uniform, mean=0
-            -0.015,                    # [13] payload cog_z: mean(U(-0.03,0)) = -0.015
-            8.0,                       # [14] main added mass surge: 8.0 * mean(U(0.85,1.15))
-            80.0,                      # [15] joint stiffness: mean(U(40,120)) = 80
-            2.75,                      # [16] joint damping: mean(U(0.5,5.0)) = 2.75
-            8.075,                     # [17] effort limit: 9.5 * mean(U(0.7,1.0)) = 8.075
-            0.3,                       # [18] main lin_damp roll: 0.3 * mean(U(0.5,1.5))
-            0.3,                       # [19] main lin_damp pitch: same
-            1.0,                       # [20] main quad_damp roll: 1.0 * mean(U(0.5,1.5))
-            1.0,                       # [21] main quad_damp pitch: same
-            9.18,                      # [22] body mass: 9.18 * mean(U(0.9,1.1))
-            2.0,                       # [23] action latency: mean(U(0,4)) = 2.0
-            0.015,                     # [24] joint static friction: mean(U(0,0.03)) = 0.015
-            0.1,                       # [25] joint viscous friction: mean(U(0,0.2)) = 0.1
-            1010.0,                    # [26] water density: mean(U(995,1025)) = 1010
-        ])
-
-        std = torch.tensor([
-            0.009 * 0.2 / s12,         # [0]  main volume
-            0.04 / s12,                # [1]  main CoG_z offset range 0.04
-            0.04 / s12,                # [2]  main CoB_z offset range 0.04
-            0.00268 * 0.2 / s12,       # [3]  buoy volume
-            0.04 / s12,                # [4]  buoy CoG_z
-            0.04 / s12,                # [5]  buoy CoB_z
-            0.0994 * 0.55 / s12,       # [6]  main Ixx (scale range 0.55)
-            0.0994 * 0.55 / s12,       # [7]  main Iyy
-            0.00278 * 0.55 / s12,      # [8]  buoy Ixx
-            0.00278 * 0.55 / s12,      # [9]  buoy Iyy
-            1.0 / s12,                 # [10] payload mass (range 1.0)
-            0.05,                      # [11] payload cog_x: disk R=0.1, std=R/2
-            0.05,                      # [12] payload cog_y: disk R=0.1, std=R/2
-            0.03 / s12,                # [13] payload cog_z (range 0.03)
-            8.0 * 0.3 / s12,           # [14] main added mass surge (scale range 0.3)
-            80.0 / s12,                # [15] joint stiffness (range 80)
-            4.5 / s12,                 # [16] joint damping (range 4.5)
-            9.5 * 0.3 / s12,           # [17] effort limit (scale range 0.3)
-            0.3 * 1.0 / s12,           # [18] main lin_damp roll (scale range 1.0)
-            0.3 * 1.0 / s12,           # [19] main lin_damp pitch
-            1.0 * 1.0 / s12,           # [20] main quad_damp roll (scale range 1.0)
-            1.0 * 1.0 / s12,           # [21] main quad_damp pitch
-            9.18 * 0.2 / s12,          # [22] body mass (scale range 0.2)
-            4.0 / s12,                 # [23] action latency (range 4)
-            0.03 / s12,                # [24] joint static friction (range 0.03)
-            0.2 / s12,                 # [25] joint viscous friction (range 0.2)
-            30.0 / s12,                # [26] water density (range 30)
-        ])
-        # fmt: on
-
-        if dim != 27:
-            logger.warning(
-                "Fixed encoder normalizer expects 27D privileged obs, got %d. Falling back to EmpiricalNormalization.",
-                dim,
-            )
-            return EmpiricalNormalization(dim)
-
-        normalizer = _FixedNormalization(mean, std)
-        logger.info("Encoder using fixed normalization (27D, analytical DR stats)")
-        return normalizer
-
     def reset(self, _dones: torch.Tensor | None = None) -> None:
         """Reset hidden states. No-op for non-recurrent networks."""
         pass
@@ -318,20 +208,32 @@ class ActorCriticEncoder(nn.Module):
         """
         return obs[self._proprio_hist_key].flatten(start_dim=1)
 
-    def _encode(self, obs: TensorDict) -> torch.Tensor:
-        """Encode privileged info into latent z.
-
-        encoder(normalize(privileged)) -> softsign -> z in (-1, 1)
-        """
-        encoder_input = obs[self._privileged_key]
+    def _encode_from_parts(
+        self, policy_obs: torch.Tensor, hist_flat: torch.Tensor, privileged: torch.Tensor
+    ) -> torch.Tensor:
+        """Core encoding: cat([policy_obs, hist_flat, privileged]) -> softsign -> z."""
+        encoder_input = torch.cat([policy_obs, hist_flat, privileged], dim=-1)
         x = self.encoder(self.encoder_obs_normalizer(encoder_input))
         return torch.nn.functional.softsign(x)
+
+    def _encode(self, obs: TensorDict) -> torch.Tensor:
+        """Encode dynamic state + privileged info into latent z.
+
+        encoder(normalize(cat([policy_obs, hist_flat, privileged]))) -> softsign -> z in (-1, 1)
+
+        Dynamic input (policy_obs, hist_flat) ensures z varies every timestep,
+        matching NORBC encoder design. Static privileged info (DR params) provides
+        ground-truth environment parameters for the information bottleneck.
+        """
+        return self._encode_from_parts(
+            obs[self._policy_obs_key], self._get_hist_flat(obs), obs[self._privileged_key]
+        )
 
     def _get_combined_obs(self, obs: TensorDict) -> torch.Tensor:
         """Combined observation for actor: cat([policy_obs, hist_flat, z])."""
         policy_obs = obs[self._policy_obs_key]
         hist_flat = self._get_hist_flat(obs)
-        z = self._encode(obs)
+        z = self._encode_from_parts(policy_obs, hist_flat, obs[self._privileged_key])
         return torch.cat([policy_obs, hist_flat, z], dim=-1)
 
     def _get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
@@ -372,7 +274,11 @@ class ActorCriticEncoder(nn.Module):
 
     def update_normalization(self, obs: TensorDict) -> None:
         """Update observation normalization statistics."""
-        # Encoder uses fixed normalization (no update needed).
+        if self.encoder_obs_normalization:
+            policy_obs = obs[self._policy_obs_key]
+            hist_flat = self._get_hist_flat(obs)
+            encoder_input = torch.cat([policy_obs, hist_flat, obs[self._privileged_key]], dim=-1)
+            self.encoder_obs_normalizer.update(encoder_input)  # type: ignore[union-attr]
         if self.actor_obs_normalization:
             with torch.no_grad():
                 combined = self._get_combined_obs(obs)
@@ -394,7 +300,7 @@ class ActorCriticEncoder(nn.Module):
 
         if prefix == "encoder.":
             current_module = self.encoder
-            expected_dim = self.privileged_dim
+            expected_dim = self.encoder_input_dim
         elif prefix == "critic.":
             current_module = self.critic
             expected_dim = self.num_critic_obs
@@ -422,12 +328,24 @@ class ActorCriticEncoder(nn.Module):
         """
         if self.encoder_obs_normalization:
             prefix = "encoder_obs_normalizer."
-            if not any(k.startswith(prefix) for k in state_dict):
+            has_keys = any(k.startswith(prefix) for k in state_dict)
+            if not has_keys:
                 logger.info("Old checkpoint: injecting default encoder_obs_normalizer state.")
                 for k, v in self.encoder_obs_normalizer.state_dict().items():
                     state_dict[prefix + k] = v
+            else:
+                # Check for dimension mismatch (e.g. old 27D -> new 280D)
+                mean_key = prefix + "mean"
+                if mean_key in state_dict and state_dict[mean_key].shape[-1] != self.encoder_input_dim:
+                    logger.warning(
+                        "encoder_obs_normalizer dim mismatch (%dD vs %dD), reinitializing.",
+                        state_dict[mean_key].shape[-1],
+                        self.encoder_input_dim,
+                    )
+                    for k, v in self.encoder_obs_normalizer.state_dict().items():
+                        state_dict[prefix + k] = v
 
-        # Detect input dimension mismatches (encoder: privileged-only change, critic: symmetric <-> asymmetric)
+        # Detect input dimension mismatches (encoder: input dim change, critic: symmetric <-> asymmetric)
         self._handle_dim_mismatch(state_dict, "encoder.")
         self._handle_dim_mismatch(state_dict, "critic.")
 

@@ -4,6 +4,60 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-24] Encoder dynamic input integration (NORBC alignment)
+
+### Context
+Two consecutive training runs with constrained TRPO failed with different encoder
+failure modes:
+- Run `2026-03-24_19-05-41` (546 iter): encoder gradient death (enc_grad -> 0.0005).
+  Roll error oscillated 10-20 deg, constraints (joint_torque, joint_vel_limit) diverging.
+- Run `2026-03-24_19-45-59` (181 iter, with reconstruction auxiliary loss): encoder z
+  collapse (z_std 0.34 -> 0.088). Pitch error exploded to 39 deg. Decoder learned
+  degenerate solution (mapped collapsed z to mean privileged_obs, ignoring z content).
+
+Root cause analysis revealed the fundamental issue: **encoder input was exclusively
+static DR parameters (27D), making z constant throughout each 3000-step episode.**
+In NORBC/ANYmal/RMA papers, encoder input includes dynamic quantities (body velocity,
+contact forces, terrain scans), making z time-varying and naturally creating policy-
+encoder coupling. With static-only input, unique z samples per iteration = 4096
+(num_envs) vs 262K (num_envs x steps) in the reference papers -- a 64x difference
+in encoder gradient diversity.
+
+The hero_agent PPO encoder already solved this by using
+`cat([policy_obs, hist_flat, privileged])` as encoder input. The constrained_albc
+encoder used only `privileged` -- a divergence from the reference architecture.
+
+Reconstruction auxiliary loss was reverted (commit 4e8d218b) as it failed to prevent
+z collapse and was treating symptoms rather than the root cause.
+
+### Changed
+- `encoder/actor_critic_encoder.py`: Encoder input changed from `privileged(27D)` to
+  `cat([policy_obs(13), hist_flat(240), privileged(27)]) = 280D`, matching hero_agent
+  and NORBC encoder design. Switched from `_FixedNormalization` (analytical DR stats)
+  to `EmpiricalNormalization` (online Welford) since dynamic inputs have no fixed
+  distribution. Added `_encode_from_parts()` helper to avoid double hist_flat computation
+  in `_get_combined_obs()`. Fixed `_handle_dim_mismatch()` to use `encoder_input_dim`
+  instead of `privileged_dim`. Added normalizer buffer dimension mismatch detection in
+  `load_state_dict()`.
+- `agents/rsl_rl_ppo_cfg.py`: `encoder_hidden_dims` [128, 64] -> [256, 128, 64] to
+  handle 280D input (matching hero_agent). 280D -> 128 was too aggressive a compression.
+- `encoder/actor_critic_encoder_constrained.py`: Updated docstring (encoder 280D input).
+- `config.py`: Updated network dimension docstring to reflect 280D encoder input.
+
+### Removed
+- `encoder/actor_critic_encoder.py`: Removed `_FixedNormalization` class and
+  `_build_fixed_encoder_normalizer()` method (100+ lines of analytical DR stats).
+  No longer needed with EmpiricalNormalization.
+
+### Notes
+- Reconstruction auxiliary loss was tried and failed: decoder learned degenerate solution
+  (predicting mean privileged_obs with collapsed z). Root cause was static encoder input,
+  not lack of auxiliary gradient. Do not re-attempt auxiliary losses on encoder.
+- Old checkpoints (27D encoder input) will auto-reinitialize encoder via dim mismatch
+  detection. This is intended since all recent runs failed.
+- constraint_trpo.py required NO changes: encoder_prefixes, _update_encoder(), and KL
+  rollback all work transparently with the new architecture.
+
 ## [2026-03-24] Encoder learning rate + DORAEMON threshold tuning
 
 ### Context

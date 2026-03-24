@@ -149,8 +149,9 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     Network Input Dimensions (ActorCriticEncoder):
         - observation_space (13): Used for gym.spaces.Box definition only
         - state_space (27): Privileged info, returned as observations["privileged"]
-        - Encoder: privileged(27D) -> softsign -> latent z(13D) in (-1, 1)
-        - Actual Actor/Critic input: policy_obs(13) + hist(240) + z(13) = 266D
+        - Encoder: cat([policy_obs(13), hist(240), privileged(27)]) = 280D -> softsign -> z(13D)
+        - Actor input: policy_obs(13) + hist(240) + z(13) = 266D
+        - Critic input: policy_obs(13) + hist(240) + privileged(27) = 280D
     """
 
     # ==========================================================================
