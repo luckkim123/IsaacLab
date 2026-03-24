@@ -50,10 +50,10 @@ class DoraemonCfg:
     With concentration=30, Beta(15,15) has std~0.065 vs Beta(4,4) std~0.17,
     requiring more KL budget to reach bounds (~500 iters vs ~100)."""
 
-    success_threshold_deg: float = 10.0
+    success_threshold_deg: float = 15.0
     """Attitude error below this (deg) counts as success. Evaluated over settling window."""
 
-    success_threshold_deg_final: float = 10.0
+    success_threshold_deg_final: float = 15.0
     """Final success threshold (deg). Same as initial = no annealing."""
 
     success_threshold_anneal_steps: int = 0

@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-24] Encoder learning rate + DORAEMON threshold tuning
+
+### Context
+Deep analysis of run `2026-03-24_18-23-55` (853 iter, std_lr=3e-3) showed three issues:
+
+1. **Encoder gradient death (enc_grad=0.003)**: Despite noise_std properly decreasing
+   (1.0 -> 0.33), the encoder gradient remained near zero. Initial hypothesis blamed
+   softsign activation saturation (z_range [-0.98, 0.97]), but this was debunked:
+   batch min/max of 4096 envs will ALWAYS approach +/-1 for any bounded activation
+   (statistical inevitability, not saturation). The old successful run (2026-03-17,
+   tanh) also had z_max=1.0, z_min=-0.999 yet enc_grad grew to 0.056.
+
+2. **Real cause identified**: Comparison with old successful run revealed encoder_lr
+   and num_encoder_epochs were significantly more conservative:
+   - encoder_lr: 1e-3 (old) vs 3e-4 (current) -- 3.3x smaller
+   - num_encoder_epochs: 5 (old) vs 3 (current) -- 1.7x fewer
+   These were the likely bottleneck, not the activation function.
+
+3. **DORAEMON threshold mismatch**: With pitch_err=12.7 deg, the success_threshold_deg=10
+   caused most episodes to fail. success_rate=0.36 kept DR distribution overly conservative,
+   starving the encoder of diverse training signal.
+
+Retracted suggestions from this session:
+- softsign -> tanh revert: NOT justified. Same "saturation" false positive pattern that
+  led to sigmoid->tanh->softsign cycle. Batch min/max != saturation.
+- max_kl 0.002 -> 0.005: NOT justified. backtracks=0 does NOT mean KL budget has room;
+  TRPO step formula scales to exactly max_kl. Both old and new runs use 92-98% of budget.
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `encoder_lr` 3e-4 -> 1e-3, `num_encoder_epochs` 3 -> 5
+  (matched to prior successful run 2026-03-17 parameters)
+- `algorithms/constraint_trpo.py`: `encoder_lr` default 3e-4 -> 1e-3,
+  `num_encoder_epochs` default 1 -> 5 (sync __init__ defaults)
+- `doraemon.py`: `success_threshold_deg` 10 -> 15, `success_threshold_deg_final` 10 -> 15
+
+### Notes
+- max_encoder_kl=0.003 may be too restrictive with the stronger encoder (lr=1e-3, 5 epochs).
+  The old successful run had no KL gating at all. If enc_grad stays dead despite lr increase,
+  check whether KL gating is reverting most encoder updates.
+- noise_std behavior (monotonic decrease to min_std=0.2) confirmed as intended per
+  RMA (Kumar 2021) and NORBC (Kim 2023). No fix needed.
+- NORBC uses TRPO natural gradient for std; current ALBC uses separate Adam. Both are
+  valid approaches per paper survey (state-independent trainable std is standard).
+
 ## [2026-03-24] Increase std_lr 1e-4 -> 3e-3 for faster sigma equilibrium
 
 ### Context

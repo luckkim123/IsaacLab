@@ -74,8 +74,8 @@ class ConstraintTRPO:
         barrier_t: float = 50.0,
         barrier_alpha: float = 0.02,
         # Encoder update
-        num_encoder_epochs: int = 1,
-        encoder_lr: float = 3e-4,
+        num_encoder_epochs: int = 5,
+        encoder_lr: float = 1e-3,
         # Noise floor and sigma optimizer
         min_std: float = 0.2,
         std_lr: float = 3e-3,

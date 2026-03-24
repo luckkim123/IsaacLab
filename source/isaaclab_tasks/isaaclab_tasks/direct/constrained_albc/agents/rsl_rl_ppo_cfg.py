@@ -160,12 +160,14 @@ class RslRlConstraintTRPOAlgorithmCfg:
     are reverted. Derived: max_kl * line_search_kl_margin = 0.002 * 1.5 = 0.003."""
 
     # Encoder update
-    num_encoder_epochs: int = 3
+    num_encoder_epochs: int = 5
     """Number of encoder gradient steps per iteration. KL gating (max_encoder_kl)
-    reverts encoder if distribution shift exceeds budget, making multi-step safe."""
+    reverts encoder if distribution shift exceeds budget, making multi-step safe.
+    Matched to prior successful run (2026-03-17) which used 5 epochs."""
 
-    encoder_lr: float = 3e-4
-    """Encoder Adam learning rate."""
+    encoder_lr: float = 1e-3
+    """Encoder Adam learning rate. Raised from 3e-4 to match prior successful run
+    (2026-03-17) where encoder_lr=1e-3 produced healthy enc_grad growth (0.003->0.056)."""
 
 
 # =============================================================================
