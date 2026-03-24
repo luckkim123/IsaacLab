@@ -76,6 +76,7 @@ class ConstraintTRPO:
         # Encoder update
         num_encoder_epochs: int = 5,
         encoder_lr: float = 1e-3,
+        recon_loss_coef: float = 1.0,
         # Noise floor and sigma optimizer
         min_std: float = 0.2,
         std_lr: float = 3e-3,
@@ -117,6 +118,7 @@ class ConstraintTRPO:
         self.cost_lam = cost_lam
         self.line_search_kl_margin = line_search_kl_margin
         self.num_encoder_epochs = num_encoder_epochs
+        self.recon_loss_coef = recon_loss_coef
         self.min_std = min_std
         self.std_lr = std_lr
         self._entropy_coef = entropy_coef
@@ -136,6 +138,7 @@ class ConstraintTRPO:
         self._last_entropy_bonus = 0.0
         self._last_surrogate_loss = 0.0
         self._last_pre_encoder_kl = 0.0
+        self._last_recon_loss = 0.0
 
         # TRPO step quality diagnostics
         self._last_trpo_shs = 0.0
@@ -165,7 +168,7 @@ class ConstraintTRPO:
         std_params = []
         self._policy_params = []  # Actor MLP weights only (TRPO)
 
-        encoder_prefixes = ("encoder",)
+        encoder_prefixes = ("encoder", "decoder")
         for name, param in self.policy.named_parameters():
             is_value = name.startswith("critic") or name.startswith("cost_critic")
             is_encoder = any(name.startswith(p) for p in encoder_prefixes)
@@ -724,7 +727,11 @@ class ConstraintTRPO:
         for _epoch in range(self.num_encoder_epochs):
             # Save encoder state for potential rollback
             if kl_gating:
-                saved_state = {n: p.data.clone() for n, p in self.policy.named_parameters() if n.startswith("encoder")}
+                saved_state = {
+                    n: p.data.clone()
+                    for n, p in self.policy.named_parameters()
+                    if n.startswith("encoder") or n.startswith("decoder")
+                }
 
             self.encoder_optimizer.zero_grad()
 
@@ -732,7 +739,12 @@ class ConstraintTRPO:
             self.policy.act(obs_flat)
             log_prob = self.policy.get_actions_log_prob(actions_flat)
             ratio = torch.exp(log_prob - old_log_prob_flat.squeeze(-1))
-            total_loss = -(advantages_flat.squeeze(-1) * ratio).mean()
+            surrogate = -(advantages_flat.squeeze(-1) * ratio).mean()
+
+            # Reconstruction auxiliary loss (advantage-independent encoder gradient)
+            recon_loss = self.policy.reconstruction_loss(obs_flat)
+            self._last_recon_loss = recon_loss.item()
+            total_loss = surrogate + self.recon_loss_coef * recon_loss
 
             # Guard against NaN/Inf loss propagating to encoder params
             if not torch.isfinite(total_loss):

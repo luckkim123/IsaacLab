@@ -4,6 +4,56 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-24] Reconstruction auxiliary loss for encoder gradient survival
+
+### Context
+Run `2026-03-24_19-05-41` (546 iter) with encoder_lr=1e-3 and num_encoder_epochs=5
+still showed encoder gradient death: enc_grad peaked at 0.003 (Q1) then decayed to
+0.0005 by iter 500. Reward plateaued at ~114 since iter 220 (40% into training).
+Constraint costs (joint_torque=44.8 vs d_k=20, joint_vel=26 vs d_k=10) stuck at
+2x+ over budget with no improvement.
+
+Root cause analysis (code-level):
+- Encoder gradient flows ONLY from `_update_encoder`'s surrogate loss:
+  `total_loss = -mean(advantages * ratio)`. When the policy converges (advantages -> 0),
+  this gradient vanishes. No other source of gradient exists for the encoder.
+- Key structural difference from PPO (hero_agent): PPO encoder survives because of
+  z_bounds_loss (always-on gradient) + 24 gradient steps/iter + no KL gating. The
+  constrained TRPO encoder has none of these.
+- Entropy bonus does NOT help the encoder in either system (entropy depends only on
+  log_std, not on encoder output z).
+
+Solution: Add a reconstruction decoder that maps z (13D) back to normalized
+privileged_obs (27D). MSE reconstruction loss provides advantage-independent gradient
+to the encoder at every iteration, regardless of policy convergence state.
+
+### Added
+- `encoder/actor_critic_encoder.py`: Decoder MLP (13D -> [64, 128] -> 27D, ELU hidden,
+  no output activation). Mirrors encoder architecture in reverse. `_last_z` stored with
+  grad in `_encode()`. New `reconstruction_loss(obs)` method computes MSE against
+  normalized privileged obs.
+- `agents/rsl_rl_ppo_cfg.py`: `recon_loss_coef: float = 1.0` config parameter
+- `runners/constraint_encoder_runner.py`: `Encoder/recon_loss` TensorBoard logging
+
+### Changed
+- `algorithms/constraint_trpo.py`: Encoder update now computes
+  `total_loss = surrogate + recon_coef * recon_loss`. Decoder params included in
+  encoder optimizer (`encoder_prefixes = ("encoder", "decoder")`). KL rollback
+  now saves/restores both encoder AND decoder params for consistency.
+
+### Notes
+- Code review caught critical bug: KL rollback originally only saved encoder params,
+  not decoder params. Fixed to include decoder in saved_state to prevent
+  encoder-decoder state inconsistency after rollback.
+- recon_loss_coef=1.0 chosen because grad_clip(max_norm=1.0) prevents any single loss
+  from dominating. At early training, surrogate is also large; at late training,
+  reconstruction provides gradient floor.
+- Checkpoint backward compatibility: old checkpoints without decoder keys load normally
+  (load_state_dict uses strict=False, decoder gets random init).
+- Next step: monitor Encoder/recon_loss and enc_grad to verify reconstruction keeps
+  encoder alive. If max_kl=0.002 still causes too-fast policy convergence, consider
+  increasing to 0.005.
+
 ## [2026-03-24] Encoder learning rate + DORAEMON threshold tuning
 
 ### Context
