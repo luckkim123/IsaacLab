@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-25] TRPO max_kl increase (0.002 -> 0.005)
+
+### Context
+Analysis of run `2026-03-24_20-18-09` (2500 iter, constrained encoder) showed the
+policy effectively stopped updating: TRPO step_norm decayed from 0.18 to 0.009 while
+grad_norm grew from 0.01 to 0.5 (policy wants larger changes but trust region blocks
+them). Line search backtracks = 0 in 2498/2500 iters, confirming steps were trivially
+small. Joint torque/vel constraints remained over budget (cr=29/17 vs dk=20/10) with
+no improvement after iter 500. Pitch error volatile at 18 deg (vs 10 deg in prior run).
+
+Original max_kl=0.002 was derived from per-dim scaling (0.01 * 2/12) for 2D actions,
+but this did not account for barrier constraints consuming part of the KL budget. The
+effective reward-direction step was even smaller than intended.
+
+Noise_std floor reached at iter 1402 (vs iter 153 in prior run) -- significantly slower
+exploration decay due to std_lr=0.003 introduced earlier. This is an improvement, but
+the small TRPO steps prevented the policy from capitalizing on the extended exploration.
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: max_kl 0.002 -> 0.005 to allow ~1.6x larger policy
+  steps (sqrt scaling). Still below standard TRPO default of 0.01.
+
 ## [2026-03-24] Encoder dynamic input integration (NORBC alignment)
 
 ### Context

@@ -93,11 +93,10 @@ class RslRlConstraintTRPOAlgorithmCfg:
     class_name: str = "ALBCConstraintTRPO"
 
     # TRPO parameters
-    max_kl: float = 0.002
-    """KL trust region size. Scaled for 2D action space: 0.01 * (2/12) ≈ 0.002.
-    Standard 0.01 assumes ~12D actions (locomotion). With 2D, per-dim KL budget
-    is 6x larger, causing σ to decay 6x faster. 0.002 normalizes per-dim dynamics
-    to match the reference paper's 12D behavior."""
+    max_kl: float = 0.005
+    """KL trust region size. Raised from 0.002 to allow larger policy steps.
+    Original 0.002 was per-dim scaled (0.01 * 2/12) but too conservative with
+    barrier constraints consuming part of the KL budget."""
     cg_iters: int = 10
     cg_damping: float = 0.1
     line_search_max_backtracks: int = 10
