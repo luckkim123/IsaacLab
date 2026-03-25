@@ -44,7 +44,7 @@ class ALBCRewardCfg:
     Active terms (all dt-scaled):
         command    (+5.0): attitude tracking (exponential, quadratic, or laplacian)
         smoothness (-0.5): mean(da^2) + mean(d2a^2) action smoothness
-        torque     (-0.001): mean(tau^2) joint torque penalty
+        torque     (-0.01): mean(tau^2) joint torque penalty
     """
 
     # Command tracking reward
@@ -73,9 +73,11 @@ class ALBCRewardCfg:
     smoothness_weight: float = -0.5
 
     # Joint torque penalty: penalizes computed torque magnitude
-    torque_weight: float = -0.001
-    """Joint torque penalty weight. Encourages energy efficiency by minimizing
-    motor torque usage. Small magnitude to avoid interfering with tracking."""
+    torque_weight: float = -0.01
+    """Joint torque penalty weight. Penalizes computed torque magnitude to
+    discourage sustained action saturation. Raised from -0.001 (900x weaker
+    than command reward, negligible gradient) to -0.01 (~6% of command reward)
+    so the reward gradient includes an action-reducing component."""
 
     # -- Meta fields (not reward terms) --
     termination_penalty: float = -10.0

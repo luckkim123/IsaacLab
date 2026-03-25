@@ -235,7 +235,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
         command_coeff_roll=5.0,
         command_coeff_pitch=7.5,
         smoothness_weight=-0.5,
-        torque_weight=-0.001,
+        torque_weight=-0.01,
     )
 
     # ==========================================================================

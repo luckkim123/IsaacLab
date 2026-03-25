@@ -49,6 +49,45 @@ Additional analysis uncovered three structural issues for future investigation:
 - Constraint/action issues (barrier weakness, action magnitude) are separate problems
   to address after encoder fix is validated.
 
+## [2026-03-25] Encoder fix validation + torque_weight increase
+
+### Context
+Run `2026-03-25_15-01-22` (encoder fix applied: max_encoder_kl=0.0075, encoder_lr=3e-4)
+completed 2500 iterations. Encoder fix confirmed working: enc_added 0.003-0.007 throughout
+(vs 0.000 in previous frozen run), z_std expanded 0.13 -> 0.87.
+
+encoder_z_sweep comparison proved encoder IS learning meaningful representations:
+- NEW run (model_2499): Payload Mass 11/13 dims active (max range 0.74), Main CoG Z
+  5/13, Main Ixx 2/13. Sensitivity growing over training.
+- OLD frozen run (model_950): 1/13 dim barely active (max range 0.052). Essentially dead.
+
+However, attitude error (~10 deg) and reward (~110) are identical between runs.
+Encoder learning did not translate to performance improvement. Root cause analysis
+of the barrier/TRPO system identified 5 structural issues:
+
+1. Adaptive threshold pins barrier margin at alpha*d_k (0.4/0.2) when violating --
+   gradient coefficient 1/(t*alpha*d_k) is constant regardless of violation depth.
+2. Cost advantage standardization (mean subtraction) removes absolute-level signal.
+3. TRPO trust region normalization cancels barrier_t scaling when reward gradient is
+   ~0 (plateau). surrogate decomposition confirmed barrier is 100% of gradient.
+4. No action magnitude penalty: smoothness penalizes da (rate), torque_weight=-0.001
+   is 900x weaker than command reward. Policy sustains action saturation (1.25) freely.
+5. Cost value loss d_k^2 normalization weakens critic gradient for large-budget constraints.
+
+First intervention: increase torque_weight to create reward gradient aligned with
+constraint reduction, breaking the TRPO scale-invariance deadlock (problem 3).
+
+### Changed
+- `config.py`: torque_weight -0.001 -> -0.01 (10x, ~6% of command reward magnitude)
+- `mdp/rewards.py`: Updated torque_weight default and docstring with rationale
+
+### Notes
+- barrier_t alone is ineffective when reward gradient is zero (TRPO normalizes away scaling)
+- torque_weight creates g_reward component aligned with barrier direction, enabling barrier_t
+  to affect gradient direction mixing ratio
+- Future fixes planned: violation penalty (B), standardization fix (C), d_k^2 removal (D)
+- Encoder z sensitivity is heavily Payload Mass biased (11/13 dims). Other DR params weak.
+
 ## [2026-03-24] Encoder dynamic input integration (NORBC alignment)
 
 ### Context
