@@ -88,6 +88,25 @@ constraint reduction, breaking the TRPO scale-invariance deadlock (problem 3).
 - Future fixes planned: violation penalty (B), standardization fix (C), d_k^2 removal (D)
 - Encoder z sensitivity is heavily Payload Mass biased (11/13 dims). Other DR params weak.
 
+## [2026-03-25] torque_weight -0.01 insufficient, escalate to -0.05
+
+### Context
+Run `2026-03-25_17-35-34` (torque_weight=-0.01) reached iter 387. Mid-run comparison
+with previous run (torque_weight=-0.001) at identical iterations showed:
+- Torque penalty now visible: -0.53 (was -0.06), ~8% of command reward
+- Constraint costs reduced ~15% early (jt: 25.7 vs 39.1 at iter 50)
+- But action_size plateaued at 1.37 (was 1.36) -- no meaningful reduction
+- Constraint costs re-converged to near-violation levels (jt=39.6, jv=22.4 at plateau)
+- -0.01 insufficient to break the "max action = max reward" equilibrium
+
+Escalating to -0.05 (~30% of command reward) to create stronger gradient pressure
+against action saturation. Risk: tracking performance may degrade if torque penalty
+dominates. Monitoring needed.
+
+### Changed
+- `config.py`: torque_weight -0.01 -> -0.05
+- `mdp/rewards.py`: Updated default and docstring with escalation rationale
+
 ## [2026-03-24] Encoder dynamic input integration (NORBC alignment)
 
 ### Context

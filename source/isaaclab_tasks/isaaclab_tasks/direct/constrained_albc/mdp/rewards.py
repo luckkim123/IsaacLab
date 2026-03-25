@@ -73,11 +73,11 @@ class ALBCRewardCfg:
     smoothness_weight: float = -0.5
 
     # Joint torque penalty: penalizes computed torque magnitude
-    torque_weight: float = -0.01
+    torque_weight: float = -0.05
     """Joint torque penalty weight. Penalizes computed torque magnitude to
-    discourage sustained action saturation. Raised from -0.001 (900x weaker
-    than command reward, negligible gradient) to -0.01 (~6% of command reward)
-    so the reward gradient includes an action-reducing component."""
+    discourage sustained action saturation. Raised from -0.001 -> -0.01 -> -0.05
+    (~30% of command reward). -0.01 reduced constraint costs ~15% but action_size
+    stayed at 1.37 (plateau at iter 200). 5x more pressure needed."""
 
     # -- Meta fields (not reward terms) --
     termination_penalty: float = -10.0
