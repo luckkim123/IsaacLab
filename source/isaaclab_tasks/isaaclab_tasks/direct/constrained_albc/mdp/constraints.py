@@ -131,24 +131,23 @@ def attitude_absolute_cost(
 def effort_limit_cost(
     _robot: Articulation,
     env: ALBCEnv,
-    real_limit_scale: float = 1.0,
+    limit_nm: float = 9.5,
 ) -> torch.Tensor:
-    """Binary cost: 1 if any ALBC joint computed torque exceeds real motor limit.
+    """Binary cost: 1 if any ALBC joint computed torque exceeds motor spec limit.
 
-    Uses per-env current effort limits (after DR), not a cached scalar.
-    This correctly handles envs whose DR'd limit is lower than the default.
+    Uses a fixed threshold (motor stall torque) independent of PhysX effort_limit_sim
+    and DR. PhysX hard cap (effort_limit_sim=13) allows higher torques in simulation
+    so the policy has headroom to operate below the constraint threshold.
 
     Args:
         env: Environment instance.
-        real_limit_scale: Scale applied to per-env effort limit (1.0 = current DR'd limit).
+        limit_nm: Motor torque limit in Nm (Dynamixel XW540 stall torque = 9.5 Nm).
 
     Returns:
         (num_envs,) binary tensor.
     """
     computed = _robot.data.computed_torque[:, env._albc_joint_ids]
-    # Per-env, per-joint DR'd effort limits: (num_envs, num_joints)
-    limits = _robot.data.joint_effort_limits[:, env._albc_joint_ids] * real_limit_scale
-    return (computed.abs() > limits).any(dim=-1).float()
+    return (computed.abs() > limit_nm).any(dim=-1).float()
 
 
 def joint_velocity_limit_cost(

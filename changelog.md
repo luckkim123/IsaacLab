@@ -107,6 +107,45 @@ dominates. Monitoring needed.
 - `config.py`: torque_weight -0.01 -> -0.05
 - `mdp/rewards.py`: Updated default and docstring with escalation rationale
 
+## [2026-03-25] Constraint headroom fix: decouple PhysX limits from constraint thresholds
+
+### Context
+Root cause analysis revealed why joint_torque and joint_vel_limit constraints were
+permanently violated (cr=40 vs d_k=20, cr=24 vs d_k=10): zero headroom between the
+action space boundary and constraint threshold.
+
+Velocity: `max_joint_velocity = 4*pi/3 = 4.189 rad/s` (action scaling) was identical
+to `limit_rad_per_s = 4.189 rad/s` (constraint threshold). Action=1.0 immediately hits
+the constraint. Meanwhile PhysX allowed up to `velocity_limit_sim = 6.28 rad/s`.
+
+Effort: `effort_limit_sim = 9.5 Nm` (PhysX cap) was the same value the constraint read
+via `_robot.data.joint_effort_limits`. DR further reduced this to 6.65-9.5 Nm, making
+the constraint structurally unavoidable during transients with Kp up to 120 Nm/rad.
+
+torque_weight escalation (-0.001 -> -0.01 -> -0.05) was a reward workaround for the
+constraint system's structural failure. Run `2026-03-25_17-35-34` (torque_weight=-0.01)
+showed ~15% constraint reduction but action_size stayed at 1.37. The real fix is giving
+the policy headroom to operate below constraint thresholds within the action space.
+
+Design pattern follows effort_limit: PhysX hard cap > constraint threshold (motor spec).
+Constraint thresholds are fixed at motor specs (no DR) -- DR affects physics only.
+
+### Changed
+- `hero_agent.py`: effort_limit_sim 9.5 -> 13.0 Nm (PhysX hard cap, 27% above motor spec)
+- `config.py`: max_joint_velocity 4*pi/3 -> 2*pi rad/s (matches PhysX velocity_limit_sim=6.28, 33% headroom)
+- `config.py`: torque_weight -0.05 -> -0.001 (reverted, constraint system handles it now)
+- `config.py`: effort_limit_cost params added (limit_nm=9.5, fixed motor spec threshold)
+- `mdp/constraints.py`: effort_limit_cost uses fixed threshold instead of DR'd joint_effort_limits
+- `mdp/rewards.py`: torque_weight reverted to -0.001 with updated docstring
+
+### Notes
+- All 6 constraints checked for headroom issues: only joint_torque and joint_vel_limit affected
+- Constraint thresholds have no DR (fixed at motor specs). DR affects PhysX physics only.
+- accum_rot, attitude_abs, overshoot, yaw_vel: already have adequate headroom, unchanged
+- The 5 barrier structural issues (adaptive threshold, standardization, TRPO invariance,
+  d_k^2 normalization) remain. This fix addresses the most basic prerequisite: the policy
+  must be ABLE to satisfy constraints within the action space.
+
 ## [2026-03-24] Encoder dynamic input integration (NORBC alignment)
 
 ### Context

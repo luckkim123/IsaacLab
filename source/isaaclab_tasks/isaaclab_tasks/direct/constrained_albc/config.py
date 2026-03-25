@@ -213,7 +213,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     # ALBC Joint Control
     # ==========================================================================
     albc_joint_names: list[str] = HERO_AGENT_ALBC_JOINT_NAMES
-    max_joint_velocity: float = 4.0 * math.pi / 3.0  # 40 RPM at 12V = 4*pi/3 rad/s
+    max_joint_velocity: float = 2.0 * math.pi  # rad/s, matches PhysX velocity_limit_sim=6.28
     control_decimation: int = 4  # target updates every 4th step = 0.02s (50Hz control)
     initial_joint_pos_range: tuple[float, float] = (-math.pi, math.pi)
     joint_init_mode: str = "random"  # "equilibrium" or "random"
@@ -235,7 +235,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
         command_coeff_roll=5.0,
         command_coeff_pitch=7.5,
         smoothness_weight=-0.5,
-        torque_weight=-0.05,
+        torque_weight=-0.001,
     )
 
     # ==========================================================================
@@ -305,6 +305,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
             ),
             ConstraintTermCfg(
                 func=effort_limit_cost,
+                params={"limit_nm": 9.5},  # Dynamixel XW540 stall torque @ 12V
                 budget=0.20,
                 name="joint_torque",
             ),
