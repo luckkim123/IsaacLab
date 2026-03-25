@@ -153,10 +153,10 @@ class RslRlConstraintTRPOAlgorithmCfg:
     (constant upward pressure with no counteracting reward gradient)."""
 
     # Post-encoder KL gating
-    max_encoder_kl: float = 0.003
+    max_encoder_kl: float = 0.0075
     """Maximum additional KL divergence allowed from encoder update. If an encoder
     step causes KL to exceed pre_encoder_kl + max_encoder_kl, the encoder params
-    are reverted. Derived: max_kl * line_search_kl_margin = 0.002 * 1.5 = 0.003."""
+    are reverted. Derived: max_kl * line_search_kl_margin = 0.005 * 1.5 = 0.0075."""
 
     # Encoder update
     num_encoder_epochs: int = 5
@@ -164,9 +164,12 @@ class RslRlConstraintTRPOAlgorithmCfg:
     reverts encoder if distribution shift exceeds budget, making multi-step safe.
     Matched to prior successful run (2026-03-17) which used 5 epochs."""
 
-    encoder_lr: float = 1e-3
-    """Encoder Adam learning rate. Raised from 3e-4 to match prior successful run
-    (2026-03-17) where encoder_lr=1e-3 produced healthy enc_grad growth (0.003->0.056)."""
+    encoder_lr: float = 3e-4
+    """Encoder Adam learning rate. Lowered from 1e-3: with max_kl=0.005 the TRPO
+    step shifts the policy further, making each encoder epoch produce proportionally
+    larger KL. At 1e-3, epoch 0 immediately exceeds max_encoder_kl budget and reverts,
+    freezing z_std at 0.12 for the entire run. At 3e-4, per-epoch KL fits within
+    the 0.0075 budget, allowing gradual z expansion (proven in prior run 2026-03-24)."""
 
 
 # =============================================================================
