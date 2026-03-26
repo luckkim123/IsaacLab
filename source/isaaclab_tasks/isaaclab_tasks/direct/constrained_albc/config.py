@@ -205,9 +205,12 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     control_decimation: int = 1  # policy updates every env step (50Hz = 200Hz / 4)
     initial_joint_pos_range: tuple[float, float] = (-math.pi, math.pi)
 
-    nominal_joint_pos: tuple[float, float] = (0.0, math.pi)
-    """Nominal joint configuration (g1, g2). At (0, pi), EE is at body center (0, 0).
-    Used as initial target on episode reset."""
+    nominal_joint_pos: tuple[float, float] = (0.0, math.pi / 2.0)
+    """Nominal joint configuration (g1, g2). At (0, pi/2), EE is at (L1, L2) = (0.233, 0.233).
+    This provides full-rank Jacobian (maximum manipulability) with balanced authority
+    in both x (pitch) and y (roll) directions. The previous (0, pi) was a kinematic
+    singularity with zero pitch authority. Small bias torque (~0.06 Nm) is negligible
+    compared to buoy restoring force (~17N). Used as initial target on episode reset."""
 
     delta_scale: float = 0.08
     """Delta action scaling (rad/step). q_des += delta_scale * a_t each control step.
@@ -223,8 +226,8 @@ class ALBCEnvCfg(DirectRLEnvCfg):
 
     reward: ALBCRewardCfg = ALBCRewardCfg(
         k_c=-8.0,
-        k_tau=-0.01,
-        k_s=-0.2,
+        k_tau=-0.005,  # Reduced: constraint handles hard torque limit
+        k_s=-0.1,  # Reduced: constraint handles velocity limit
     )
 
     # ==========================================================================
@@ -279,29 +282,89 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(
         terms=[
             # --- Probabilistic (binary indicator) ---
+            # Budgets tuned from Step 3 ablation (barrier debug run):
+            #   Set at ~2-3x actual cost_return for meaningful barrier pressure.
             ConstraintTermCfg(
                 func=attitude_limit_cost,
                 params={"limit": 1.396},
-                budget=0.01,
+                budget=0.01,  # Was 20x margin, keep (attitude safety critical)
                 name="attitude",
             ),
             ConstraintTermCfg(
                 func=torque_limit_cost,
                 params={"limit_nm": 9.5},
-                budget=0.20,
+                budget=0.08,  # 0.20->0.08: was 4.3x margin, now ~1.7x (tighter)
                 name="torque",
             ),
             ConstraintTermCfg(
                 func=velocity_limit_cost,
                 params={"limit_rad_per_s": 4.189},
-                budget=0.10,
+                budget=0.02,  # 0.10->0.02: was 62x margin, now ~12x (much tighter)
                 name="velocity",
             ),
             # --- Average (continuous) ---
             ConstraintTermCfg(
                 func=yaw_velocity_cost,
-                budget=0.785,
+                budget=0.40,  # 0.785->0.40: was 2.3x margin, now ~1.2x (tighter)
                 name="yaw_vel",
             ),
         ],
     )
+
+
+@configclass
+class ALBCDebugEnvCfg(ALBCEnvCfg):
+    """Step 0: Pure RL baseline (no DR, no encoder, no constraints).
+
+    Validates that PPO can learn 2-DOF attitude control in clean physics.
+    Result: roll 0.6 deg, pitch 0.7 deg at 75 iters. PASSED.
+    """
+
+    state_space: int = 0
+    observation_noise_model: None = None
+
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg(enable=False)
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
+    randomize_target_attitude: bool = False
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
+
+
+@configclass
+class ALBCDebugDREnvCfg(ALBCEnvCfg):
+    """Step 1: PPO + DR (no encoder, no constraints).
+
+    Tests whether domain randomization alone breaks learning.
+    Without encoder, policy must learn a single robust policy across all DR settings.
+    """
+
+    state_space: int = 0
+    # Keep observation noise (realistic sensor model)
+
+    randomization: DomainRandomizationCfg = DomainRandomizationCfg(enable=True)
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
+
+
+@configclass
+class ALBCDebugBarrierEnvCfg(ALBCEnvCfg):
+    """Step 3: TRPO + IPO barrier + DR (no encoder).
+
+    Tests whether the barrier constraints break learning, independent of encoder.
+    Uses full 4 constraints but no encoder (state_space=0).
+    """
+
+    state_space: int = 0  # No encoder
+
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
+
+
+@configclass
+class ALBCDebugEncoderEnvCfg(ALBCEnvCfg):
+    """Step 4: TRPO + Encoder + DR (no constraints).
+
+    Tests whether the encoder breaks learning, independent of barrier.
+    Full privileged obs (23D) for encoder, but no constraint enforcement.
+    """
+
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])

@@ -431,7 +431,7 @@ class ALBCEnv(DirectRLEnv):
             reward += self.reset_terminated * self.cfg.reward.termination_penalty
 
         # Compute constraint costs for TRPO + IPO (if constraints configured)
-        if self._constraints_cfg is not None:
+        if self._constraints_cfg is not None and self._constraints_cfg.num_constraints > 0:
             self.extras["costs"] = compute_all_costs(self._robot, self, self._constraints_cfg)
 
         # DORAEMON: accumulate episode return and settling error

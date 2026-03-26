@@ -5,7 +5,8 @@
 
 """Encoder networks for constrained ALBC environments."""
 
+from .actor_critic_constrained import ActorCriticConstrained
 from .actor_critic_encoder import ActorCriticEncoder
 from .actor_critic_encoder_constrained import ActorCriticEncoderConstrained
 
-__all__ = ["ActorCriticEncoder", "ActorCriticEncoderConstrained"]
+__all__ = ["ActorCriticConstrained", "ActorCriticEncoder", "ActorCriticEncoderConstrained"]

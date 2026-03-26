@@ -6,6 +6,86 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
+## [2026-03-27] Ablation study: encoder identified as root cause of training failure
+
+### Context
+Full constrained ALBC system (TRPO+IPO+Encoder+DR) showed 17-27 deg attitude error after 141
+iterations, while the TDC controller achieves 0.2-6 deg on the same system. Systematic ablation
+study was conducted to isolate the problematic component by adding one feature at a time.
+
+**Ablation results (each row adds ONE component to the previous):**
+
+| Step | Config | Roll | Pitch | Iters | Verdict |
+|------|--------|------|-------|-------|---------|
+| 0 | Pure PPO (no DR/encoder/constraints) | 0.6 | 0.7 | 75 | PASS |
+| 1 | PPO + DR | 3.9 | 3.7 | 66 | PASS |
+| 2 | TRPO + DR | 5.4 | 5.1 | 83 | PASS (slower) |
+| 3 | TRPO + DR + Barrier (4 constraints) | 8.4 | 6.3 | 162 | PASS (tighter=slower) |
+| 4 | TRPO + DR + Encoder (no constraints) | 16.4 | 45.2 | 54 | **FAIL (diverged)** |
+| Full | TRPO + DR + Barrier + Encoder | 17 | 27 | 141 | **FAIL** |
+
+**Key findings:**
+1. RL approach is fundamentally sound: PPO solves the 2-DOF task in <75 iters (0.7 deg)
+2. DR adds ~3 deg error but converges cleanly (expected without adaptation)
+3. TRPO is slower than PPO but converges (~5 deg)
+4. Barrier constraints work correctly without encoder: 0 spike, all margins positive, cost
+   returns actively reduced. Adds ~2 deg error from restricted action space.
+5. **Encoder breaks training even WITHOUT barrier**: pitch diverges to 45 deg, reward -92.
+   The encoder and actor share the same TRPO KL budget (max_kl=0.005). Encoder update
+   consumes KL budget, leaving actor unable to improve. Encoder z shifts actor input
+   distribution, invalidating what the actor learned.
+
+**Nominal position investigation (rejected):** Changed nominal_joint_pos from (0, pi) to
+(0, pi/2) hypothesizing singularity caused pitch-roll asymmetry. Results showed no difference
+-- the asymmetry was caused by the encoder, not kinematics. The singularity only affects the
+first few steps of each 712-step episode.
+
+**Constraint budget tuning:** With ablation data from Step 3, tightened budgets based on
+actual cost returns. Previous budgets had 4-62x margin (barrier gradient negligible).
+
+### Added
+- `encoder/actor_critic_constrained.py`: ActorCritic + cost critic wrapper (no encoder) for
+  barrier-only ablation testing
+- `config.py`: 4 debug env configs (`ALBCDebugEnvCfg`, `ALBCDebugDREnvCfg`,
+  `ALBCDebugBarrierEnvCfg`, `ALBCDebugEncoderEnvCfg`)
+- `agents/rsl_rl_ppo_cfg.py`: 4 debug runner configs (PPO, PPO+DR, TRPO, TRPO+Barrier,
+  TRPO+Encoder) with standard PPO algorithm configs
+- `__init__.py`: Registered 4 ablation tasks:
+  `Isaac-Constrained-ALBC-Debug-v0` (Step 0),
+  `Isaac-Constrained-ALBC-Debug-DR-v0` (Step 1),
+  `Isaac-Constrained-ALBC-Debug-TRPO-v0` (Step 2),
+  `Isaac-Constrained-ALBC-Debug-Barrier-v0` (Step 3),
+  `Isaac-Constrained-ALBC-Debug-Encoder-v0` (Step 4)
+
+### Changed
+- `config.py`: `nominal_joint_pos` (0, pi) -> (0, pi/2) for non-singular FK Jacobian.
+  Did not fix the pitch-roll asymmetry (root cause was encoder, not kinematics).
+- `config.py`: Constraint budgets tightened from ablation data:
+  torque 0.20 -> 0.08 (was 4.3x margin, now ~1.7x),
+  velocity 0.10 -> 0.02 (was 62x margin, now ~12x),
+  yaw_vel 0.785 -> 0.40 (was 2.3x margin, now ~1.2x),
+  attitude 0.01 unchanged (safety critical).
+- `config.py`: Reward weights adjusted for constraint coexistence:
+  k_tau -0.01 -> -0.005 (constraint handles hard torque limit),
+  k_s -0.2 -> -0.1 (constraint handles velocity limit).
+
+### Fixed
+- `albc_env.py`: Guard `compute_all_costs()` with `num_constraints > 0` check to prevent
+  crash when constraints list is empty (needed for debug configs).
+- `algorithms/constraint_trpo.py`: Added `num_constraints > 0` guards in `act()`,
+  `process_env_step()`, `compute_returns()`, and `_update_values()` to support
+  ConstraintTRPO with 0 constraints (pure TRPO mode for ablation).
+
+### Notes
+- **Next step: separate encoder from TRPO trust region.** Options:
+  (a) Encoder uses separate Adam optimizer (like hero_agent PPO), actor uses TRPO
+  (b) Freeze encoder, train actor first, then fine-tune encoder
+  (c) Switch to PPO-based constrained RL (e.g., PPO-Lagrangian) to avoid KL budget issue
+- Barrier penalty spikes (max 0.455) in full system were caused by encoder gradient
+  flowing through log(margin), NOT by the barrier itself. Barrier-only test had 0 spikes.
+- The 2-DOF attitude control task is trivial for RL (0.7 deg in 75 iters with PPO).
+  All complexity comes from the constrained encoder architecture.
+
 ## [2026-03-27] Tune delta_scale and reward weights after delta action analysis
 
 ### Context

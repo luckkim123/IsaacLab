@@ -13,17 +13,19 @@ import rsl_rl.runners.on_policy_runner as _runner_module
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
 
 # Register custom classes in RSL-RL runner module namespace.
 from ..algorithms import ConstraintTRPO
 from ..encoder import (
+    ActorCriticConstrained,
     ActorCriticEncoder,
     ActorCriticEncoderConstrained,
 )
 from ..runners import ConstraintEncoderRunner
 
 # Use ALBC-prefixed names to avoid collision with hero_agent registrations.
+_runner_module.ALBCActorCriticConstrained = ActorCriticConstrained
 _runner_module.ALBCActorCriticEncoder = ActorCriticEncoder
 _runner_module.ALBCActorCriticEncoderConstrained = ActorCriticEncoderConstrained
 _runner_module.ALBCConstraintEncoderRunner = ConstraintEncoderRunner
@@ -130,6 +132,136 @@ class ConstrainedALBCEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
     max_iterations = 2500
     save_interval = 50
     experiment_name = "constrained_albc_encoder"
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = RslRlConstraintTRPOAlgorithmCfg()
+    policy = RslRlPpoActorCriticEncoderConstrainedCfg()
+
+
+# =============================================================================
+# Debug Configuration (pure PPO, no encoder, no constraints)
+# =============================================================================
+
+
+@configclass
+class _DebugPolicyCfg(RslRlPpoActorCriticCfg):
+    """Standard actor-critic for debug (no encoder)."""
+
+    class_name: str = "ActorCritic"
+    init_noise_std: float = 1.0
+    noise_std_type: str = "log"
+    actor_obs_normalization: bool = True
+    critic_obs_normalization: bool = True
+    actor_hidden_dims: list[int] = [256, 128, 64]
+    critic_hidden_dims: list[int] = [256, 128, 64]
+    activation: str = "elu"
+
+
+@configclass
+class _DebugAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """Standard PPO for debug."""
+
+    class_name: str = "PPO"
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 3e-4
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    entropy_coef: float = 0.01
+    desired_kl: float = 0.01
+    max_grad_norm: float = 1.0
+    value_loss_coef: float = 1.0
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+
+
+@configclass
+class ALBCDebugRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Debug runner: standard PPO, no encoder, no constraints."""
+
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug"
+
+    algorithm = _DebugAlgorithmCfg()
+    policy = _DebugPolicyCfg()
+
+
+@configclass
+class ALBCDebugDRRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 1: PPO + DR (no encoder, no constraints)."""
+
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_dr"
+
+    algorithm = _DebugAlgorithmCfg()
+    policy = _DebugPolicyCfg()
+
+
+@configclass
+class ALBCDebugTRPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 2: TRPO + DR (no encoder, no barriers). Tests TRPO vs PPO."""
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_trpo"
+
+    algorithm = RslRlConstraintTRPOAlgorithmCfg()
+    policy = _DebugPolicyCfg()
+
+
+@configclass
+class _BarrierPolicyCfg(RslRlPpoActorCriticCfg):
+    """ActorCritic + cost critic (no encoder) for barrier ablation."""
+
+    class_name: str = "ALBCActorCriticConstrained"
+    init_noise_std: float = 1.0
+    noise_std_type: str = "log"
+    actor_obs_normalization: bool = True
+    critic_obs_normalization: bool = True
+    actor_hidden_dims: list[int] = [256, 128, 64]
+    critic_hidden_dims: list[int] = [256, 128, 64]
+    activation: str = "elu"
+    num_constraints: int = 0  # Auto-synced by runner
+
+
+@configclass
+class ALBCDebugBarrierRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 3: TRPO + IPO barrier + DR (no encoder). Tests barrier impact."""
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_barrier"
+
+    algorithm = RslRlConstraintTRPOAlgorithmCfg()
+    policy = _BarrierPolicyCfg()
+
+
+@configclass
+class ALBCDebugEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 4: TRPO + Encoder + DR (no constraints). Tests encoder impact."""
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_encoder"
     obs_groups: dict[str, list[str]] = {
         "policy": ["policy", "privileged"],
         "critic": ["policy", "privileged"],

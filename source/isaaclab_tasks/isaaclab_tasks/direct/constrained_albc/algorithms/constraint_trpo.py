@@ -199,7 +199,8 @@ class ConstraintTRPO:
         self.transition.action_mean = self.policy.action_mean.detach()
         self.transition.action_sigma = self.policy.action_std.detach()
         self.transition.observations = obs
-        self._current_cost_values = self.policy.evaluate_costs(obs).detach()
+        if self.num_constraints > 0:
+            self._current_cost_values = self.policy.evaluate_costs(obs).detach()
         return self.transition.actions
 
     def process_env_step(
@@ -219,12 +220,13 @@ class ConstraintTRPO:
             )
 
         step = self.storage.step
-        costs = extras.get("costs", self._zero_costs)
-        if "time_outs" in extras:
-            time_out_mask = extras["time_outs"].unsqueeze(1).to(self.device)
-            costs = costs + self.cost_gamma * self._current_cost_values * time_out_mask
-        self.storage.costs[step] = costs
-        self.storage.cost_values[step] = self._current_cost_values
+        if self.num_constraints > 0:
+            costs = extras.get("costs", self._zero_costs)
+            if "time_outs" in extras:
+                time_out_mask = extras["time_outs"].unsqueeze(1).to(self.device)
+                costs = costs + self.cost_gamma * self._current_cost_values * time_out_mask
+            self.storage.costs[step] = costs
+            self.storage.cost_values[step] = self._current_cost_values
 
         self.storage.add_transitions(self.transition)
         self.transition.clear()
@@ -233,8 +235,9 @@ class ConstraintTRPO:
     def compute_returns(self, obs: TensorDict) -> None:
         last_values = self.policy.evaluate(obs).detach()
         self.storage.compute_returns(last_values, self.gamma, self.lam)
-        last_cost_values = self.policy.evaluate_costs(obs).detach()
-        self._compute_cost_returns(last_cost_values)
+        if self.num_constraints > 0:
+            last_cost_values = self.policy.evaluate_costs(obs).detach()
+            self._compute_cost_returns(last_cost_values)
 
     def _compute_cost_returns(self, last_cost_values: torch.Tensor) -> None:
         """Cost GAE for all K constraints."""
@@ -518,10 +521,13 @@ class ConstraintTRPO:
 
                 value_loss = (returns_flat[idx] - self.policy.evaluate(obs_mb)).pow(2).mean()
 
-                cost_pred = self.policy.evaluate_costs(obs_mb)
-                target = cost_returns_flat[idx].clamp(min=0.0)
-                per_k_mse = (target - cost_pred).pow(2).mean(dim=0)
-                cost_value_loss = per_k_mse.mean()
+                if self.num_constraints > 0:
+                    cost_pred = self.policy.evaluate_costs(obs_mb)
+                    target = cost_returns_flat[idx].clamp(min=0.0)
+                    per_k_mse = (target - cost_pred).pow(2).mean(dim=0)
+                    cost_value_loss = per_k_mse.mean()
+                else:
+                    cost_value_loss = torch.zeros_like(value_loss)
 
                 total = self.value_loss_coef * value_loss + self.cost_value_loss_coef * cost_value_loss
                 self.value_optimizer.zero_grad()
