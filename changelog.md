@@ -34,7 +34,7 @@ reward always won.
 - `mdp/rewards.py`: Replaced exponential reward `exp(-c*e^2)` with quadratic penalty
   `c*e^2` (positive output, used with negative weight). Gradient = 2*c*e (linear in error,
   never vanishes). Pitch/roll gradient ratio = cp/cr = 1.5 (constant at all error levels).
-  command_weight changed from +5.0 to -5.0, coeff_roll 5.0 -> 1.0, coeff_pitch 7.5 -> 1.5.
+  command_weight changed from +5.0 to -1.0, coeff_roll 5.0 -> 1.0, coeff_pitch 7.5 -> 1.5.
   Default torque_weight synced to -0.0001 (was -0.001 in default, already -0.0001 in config).
 - `config.py`: Updated ALBCRewardCfg instantiation to match new quadratic defaults
 - `albc_env.py`: Removed `command_type` parameter from reward term params, updated docstring
