@@ -252,7 +252,7 @@ class ALBCEnv(DirectRLEnv):
         """Build the reward terms dict. Override in subclasses to add/modify terms.
 
         3-term architecture:
-            1. command    (-): cr*e_r^2 + cp*e_p^2 quadratic tracking penalty, dt-scaled
+            1. command    (+/-): attitude tracking (exponential or quadratic), dt-scaled
             2. smoothness (-): mean(da^2) + mean(d2a^2), dt-scaled
             3. torque     (-): mean(tau^2) joint torque penalty, dt-scaled
         """
@@ -264,6 +264,7 @@ class ALBCEnv(DirectRLEnv):
                 params={
                     "coeff_roll": rcfg.command_coeff_roll,
                     "coeff_pitch": rcfg.command_coeff_pitch,
+                    "command_type": rcfg.command_type,
                 },
             ),
         }

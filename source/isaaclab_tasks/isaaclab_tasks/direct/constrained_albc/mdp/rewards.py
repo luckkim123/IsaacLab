@@ -42,25 +42,27 @@ class ALBCRewardCfg:
     """ALBC reward configuration: 3-term architecture.
 
     Active terms (all dt-scaled):
-        command    (-1.0): cr*e_r^2 + cp*e_p^2 quadratic tracking penalty
+        command    (+5.0): exponential attitude tracking reward
         smoothness (-0.5): mean(da^2) + mean(d2a^2) action smoothness
-        torque     (-0.0001): mean(tau^2) joint torque penalty
+        torque     (-0.001): mean(tau^2) joint torque penalty
     """
 
-    # Command tracking penalty (negative weight: minimizes error)
-    command_weight: float = -1.0
+    # Command tracking reward (positive weight: rewards low error)
+    command_weight: float = 5.0
+    command_type: str = "exponential"
+    """Command reward type: 'exponential' (exp(-c*e^2)) or 'quadratic' (c*e^2)."""
 
-    command_coeff_roll: float = 1.0
-    """Roll axis quadratic coefficient. Gradient = 2*cr*e_r (never vanishes)."""
+    command_coeff_roll: float = 5.0
+    """Roll axis coefficient for exp(-c*e_r^2)."""
 
-    command_coeff_pitch: float = 1.5
-    """Pitch axis quadratic coefficient. 1.5x roll for tighter tracking."""
+    command_coeff_pitch: float = 7.5
+    """Pitch axis coefficient for exp(-c*e_p^2). 1.5x roll for tighter tracking."""
 
     # Action smoothness: first + second order action difference
     smoothness_weight: float = -0.5
 
     # Joint torque penalty: penalizes computed torque magnitude
-    torque_weight: float = -0.0001
+    torque_weight: float = -0.001
     """Joint torque penalty weight. Small magnitude for energy efficiency.
     Constraint enforcement handled by barrier system with proper headroom."""
 
@@ -183,22 +185,28 @@ class RewardManager:
 def command_reward(
     _robot: Articulation,
     env: ALBCEnv,
-    coeff_roll: float = 1.0,
-    coeff_pitch: float = 1.5,
+    coeff_roll: float = 5.0,
+    coeff_pitch: float = 7.5,
+    command_type: str = "exponential",
     **_kwargs,
 ) -> torch.Tensor:
-    """Attitude tracking penalty: weighted quadratic per axis.
+    """Attitude tracking reward/penalty per axis.
 
-    Returns cr*e_r^2 + cp*e_p^2 (positive). Use with negative weight.
-    Gradient = 2c*e (never vanishes, linear in error).
+    Two modes:
+        exponential: exp(-cr*e_r^2) + exp(-cp*e_p^2). Returns [0, 2]. Use with positive weight.
+        quadratic:   cr*e_r^2 + cp*e_p^2. Returns [0, inf). Use with negative weight.
 
     Args:
         env: Environment instance (provides _attitude_error).
-        coeff_roll: Roll axis quadratic coefficient.
-        coeff_pitch: Pitch axis quadratic coefficient (1.5x roll for tighter tracking).
+        coeff_roll: Roll axis coefficient.
+        coeff_pitch: Pitch axis coefficient.
+        command_type: 'exponential' or 'quadratic'.
     """
     err_rp = env._attitude_error[:, :2]
-    return coeff_roll * err_rp[:, 0] ** 2 + coeff_pitch * err_rp[:, 1] ** 2
+    if command_type == "exponential":
+        return torch.exp(-coeff_roll * err_rp[:, 0] ** 2) + torch.exp(-coeff_pitch * err_rp[:, 1] ** 2)
+    else:
+        return coeff_roll * err_rp[:, 0] ** 2 + coeff_pitch * err_rp[:, 1] ** 2
 
 
 def action_smoothness_penalty(

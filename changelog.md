@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-26] Revert to exponential reward for isolation test
+
+### Context
+Quadratic reward (fix1 from earlier session) produced consistent arm-freeze failure across
+multiple training runs: arm saturates at action boundary (act_size=1.41), action rate drops
+to ~0.03, and command reward monotonically worsens while smoothness/torque improve. The
+arm-freeze pattern was identical with command_weight=-1.0, -7.0, and even with smoothness
+completely removed (weight=0.0).
+
+Deep investigation of the optimization pipeline revealed:
+1. Advantage normalization (double: storage + update) erases absolute reward magnitude,
+   making weight/coefficient tuning irrelevant.
+2. In an all-negative reward landscape (quadratic penalty), the "least negative" timesteps
+   (which get positive advantage after normalization) are those with least movement, not
+   those with lowest attitude error. This systematically directs the policy gradient toward
+   "freeze arm" rather than "find good position."
+3. Exponential reward (positive per-step values) avoids this by giving positive advantages
+   to timesteps with genuinely low error, regardless of movement.
+
+To isolate whether fix1 (quadratic reward) or fix2 (barrier weights) caused the failure,
+reverted reward to exponential (matching working run 2026-03-25_18-22-28) while keeping
+fix2 (violation-proportional barrier weights) active.
+
+### Changed
+- `mdp/rewards.py`: Restored exponential mode in `command_reward()` with `command_type`
+  parameter ('exponential' or 'quadratic'). Default: exponential with coeff 5.0/7.5.
+  Re-added `command_type` field to `ALBCRewardCfg`. torque_weight default: -0.001.
+- `config.py`: Reverted reward config to exponential (command_weight=+5.0, coeff_roll=5.0,
+  coeff_pitch=7.5, smoothness_weight=-0.5, torque_weight=-0.001)
+- `albc_env.py`: Pass `command_type` from config to `command_reward` params
+
+### Notes
+- Fix2 (violation-proportional barrier weights in constraint_trpo.py) is PRESERVED
+- If this run works: fix1 (quadratic) was the problem, exponential reward is necessary
+- If this run fails: fix2 (barrier weights) is the problem or the combination matters
+- The original one-axis collapse problem (exponential gradient vanishing) may need a
+  different solution than quadratic penalty
+
 ## [2026-03-26] Quadratic reward + violation-proportional barrier weights
 
 ### Context
