@@ -9,12 +9,14 @@ Standalone package for constrained RL training with TRPO + IPO and encoder.
 Independent from hero_agent -- can be used without hero_agent installed.
 
 Registered tasks (ablation ladder):
-    Isaac-Constrained-ALBC-Debug-v0:         Step 0 - Pure PPO (no DR/encoder/constraints)
-    Isaac-Constrained-ALBC-Debug-DR-v0:      Step 1 - PPO + DR (no encoder/constraints)
-    Isaac-Constrained-ALBC-Debug-TRPO-v0:    Step 2 - TRPO + DR (no encoder/barriers)
-    Isaac-Constrained-ALBC-Debug-Barrier-v0: Step 3 - TRPO + IPO + DR (no encoder)
-    Isaac-Constrained-ALBC-Debug-Encoder-v0: Step 4 - TRPO + Encoder + DR (no constraints)
-    Isaac-Constrained-ALBC-Encoder-v0:       Full   - TRPO + IPO + Encoder + DR
+    Isaac-Constrained-ALBC-Debug-v0:             Step 0  - Pure PPO (no DR/encoder/constraints)
+    Isaac-Constrained-ALBC-Debug-DR-v0:          Step 1  - PPO + DR (no encoder/constraints)
+    Isaac-Constrained-ALBC-Debug-TRPO-v0:        Step 2  - TRPO + DR (no encoder/barriers)
+    Isaac-Constrained-ALBC-Debug-Barrier-v0:     Step 3  - TRPO + IPO + DR (no encoder)
+    Isaac-Constrained-ALBC-Debug-Encoder-v0:     Step 4  - TRPO + Encoder + DR (no constraints)
+    Isaac-Constrained-ALBC-Debug-PPO-Encoder-v0: Step 4b - PPO + Encoder + DR (no constraints)
+    Isaac-Constrained-ALBC-Debug-PPO-Enc-Hist-v0:Step 4c - PPO + Encoder + History + DR (no constraints)
+    Isaac-Constrained-ALBC-Encoder-v0:           Full    - TRPO + IPO + Encoder + DR
 """
 
 import gymnasium as gym
@@ -24,6 +26,7 @@ from .config import (
     ALBCDebugBarrierEnvCfg,
     ALBCDebugDREnvCfg,
     ALBCDebugEncoderEnvCfg,
+    ALBCDebugEncoderHistEnvCfg,
     ALBCDebugEnvCfg,
     ALBCEnvCfg,
     DomainRandomizationCfg,
@@ -70,6 +73,26 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.config:ALBCDebugBarrierEnvCfg",
         "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCDebugBarrierRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Constrained-ALBC-Debug-PPO-Encoder-v0",
+    entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config:ALBCDebugEncoderEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCDebugPPOEncoderRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Constrained-ALBC-Debug-PPO-Enc-Hist-v0",
+    entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config:ALBCDebugEncoderHistEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCDebugPPOEncoderHistRunnerCfg",
     },
 )
 

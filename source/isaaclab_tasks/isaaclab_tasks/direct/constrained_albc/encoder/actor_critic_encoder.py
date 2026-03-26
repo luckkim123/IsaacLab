@@ -54,6 +54,7 @@ class ActorCriticEncoder(nn.Module):
         # Encoder
         policy_obs_dim: int = 14,
         privileged_dim: int = 23,
+        proprio_hist_dim: int = 0,
         encoder_hidden_dims: list[int] | tuple[int, ...] = (256, 128, 64),
         encoder_latent_dim: int = 13,
         encoder_activation: str = "elu",
@@ -76,8 +77,9 @@ class ActorCriticEncoder(nn.Module):
         self.policy_obs_dim = policy_obs_dim
         self.privileged_dim = privileged_dim
         self.encoder_latent_dim = encoder_latent_dim
+        self.proprio_hist_dim = proprio_hist_dim
 
-        # Parse obs_groups: require [policy_obs, privileged]
+        # Parse obs_groups: require [policy_obs, privileged, (optional) proprio_hist]
         policy_groups = obs_groups["policy"]
         if len(policy_groups) < 2:
             raise ValueError(
@@ -86,6 +88,7 @@ class ActorCriticEncoder(nn.Module):
             )
         self._policy_obs_key = policy_groups[0]
         self._privileged_key = policy_groups[1]
+        self._proprio_hist_key = policy_groups[2] if len(policy_groups) > 2 else None
 
         # Verify dimensions
         if obs[self._policy_obs_key].shape[-1] != policy_obs_dim:
@@ -101,12 +104,12 @@ class ActorCriticEncoder(nn.Module):
         self.encoder = MLP(privileged_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
         logger.info("Encoder: %dD -> %s -> softsign -> %dD", privileged_dim, encoder_hidden_dims, encoder_latent_dim)
 
-        # --- Actor: cat([o_t, z]) -> actions ---
-        num_actor_obs = policy_obs_dim + encoder_latent_dim
+        # --- Actor: cat([o_t, (hist_flat,) z]) -> actions ---
+        num_actor_obs = policy_obs_dim + proprio_hist_dim + encoder_latent_dim
         self.actor_obs_normalization = actor_obs_normalization
         self.actor_obs_normalizer = EmpiricalNormalization(num_actor_obs) if actor_obs_normalization else nn.Identity()
         self.actor = MLP(num_actor_obs, num_actions, list(actor_hidden_dims), activation)
-        logger.info("Actor: %dD -> %s -> %dD", num_actor_obs, actor_hidden_dims, num_actions)
+        logger.info("Actor: %dD (obs=%d+hist=%d+z=%d) -> %s -> %dD", num_actor_obs, policy_obs_dim, proprio_hist_dim, encoder_latent_dim, actor_hidden_dims, num_actions)
 
         # --- Critic: cat([o_t, p_t]) -> value (asymmetric) ---
         num_critic_obs = policy_obs_dim + privileged_dim
@@ -153,9 +156,13 @@ class ActorCriticEncoder(nn.Module):
         return torch.nn.functional.softsign(self.encoder(self.encoder_obs_normalizer(p_t)))
 
     def _get_actor_obs(self, obs: TensorDict) -> torch.Tensor:
-        """Actor observation: cat([o_t, z])."""
+        """Actor observation: cat([o_t, (hist_flat,) z])."""
         o_t = obs[self._policy_obs_key]
         z = self._encode(obs)
+        if self._proprio_hist_key is not None and self._proprio_hist_key in obs:
+            hist = obs[self._proprio_hist_key]
+            hist_flat = hist.flatten(start_dim=-2)  # (N, T, F) -> (N, T*F)
+            return torch.cat([o_t, hist_flat, z], dim=-1)
         return torch.cat([o_t, z], dim=-1)
 
     def _get_critic_obs(self, obs: TensorDict) -> torch.Tensor:

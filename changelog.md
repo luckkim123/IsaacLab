@@ -6,6 +6,78 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
+## [2026-03-27] PPO+Encoder experiments and history-augmented actor input
+
+### Context
+After the ablation study confirmed encoder as root cause (Step 4: TRPO+Encoder diverged to
+45 deg pitch), two follow-up experiments were conducted to isolate whether the failure is
+TRPO-specific or encoder-general.
+
+**Step 4b: PPO + Encoder + DR (no constraints)**
+Same env as Step 4 but with PPO instead of TRPO. Result: also failed, but via a completely
+different mechanism.
+
+| Metric | Step 4 (TRPO+Enc) | Step 4b (PPO+Enc) |
+|--------|-------------------|--------------------|
+| Roll final | 14.7 deg | 32.5 deg |
+| Pitch final | 46.2 deg | 26.3 deg |
+| z_std final | 0.265 | 0.975 (saturated) |
+| LR final | N/A (TRPO) | 1e-5 (crashed) |
+| Failure mode | Fisher amplification -> pitch diverge | z saturation -> KL explosion -> LR death |
+
+TRPO failure: Fisher info ~0 for encoder params + CG damping=0.1 amplifies encoder gradient
+10x. Encoder takes disproportionately large param steps, z shifts disrupt actor, pitch
+diverges monotonically while line search succeeds 100%.
+
+PPO failure: 20 optimizer steps/iter (5 epochs x 4 minibatches) cause encoder z to expand
+from z_std=0.17 to 0.63 in just 10 iterations. KL explodes to 0.04 (4x desired_kl=0.01),
+adaptive LR crashes to 1e-5 at iter 2 and stays there. Both actor and encoder frozen.
+
+**Root cause analysis: z/actor_input ratio**
+Compared with HORA reference (which successfully uses vanilla PPO + encoder):
+
+| | HORA | ALBC |
+|--|------|------|
+| Base obs (o_t) | 96D | 14D |
+| Encoder z | 8D | 13D |
+| Actor input | 104D | 27D |
+| z ratio | 7.7% | 48.1% |
+
+HORA succeeds because 96D rich proprioception provides a stable actor foundation; 8D z is
+a minor correction signal. In ALBC, 14D obs is too sparse and 13D z dominates 48% of actor
+input, making training highly sensitive to any z change.
+
+**Solution: Add proprio history to actor input (matching NORBC paper)**
+The NORBC paper's actor receives o_t (with history) + l_t, not bare o_t + l_t.
+Adding 30-step x 8D flattened history (240D) to actor input reduces z ratio from 48% to 4.9%.
+
+### Added
+- `config.py`: `proprio_history_len` (default 0, disabled) and `proprio_feature_dim` (8)
+  config fields for optional proprioceptive history buffer
+- `config.py`: `ALBCDebugEncoderHistEnvCfg` (Step 4c) with `proprio_history_len=30`
+- `albc_env.py`: `_get_proprio_features()` extracting 8D per step:
+  [roll, pitch, p, q, joint_pos_norm(2), prev_actions(2)]
+- `albc_env.py`: `_update_proprio_hist()` ring buffer (shift-left + append), called in
+  `_pre_physics_step()`. Buffer reset to zero on episode reset.
+- `albc_env.py`: `_get_observations()` exposes `proprio_hist` as obs group when enabled
+- `encoder/actor_critic_encoder.py`: `proprio_hist_dim` parameter, `_proprio_hist_key`
+  parsing from obs_groups (optional 3rd group), `_get_actor_obs()` flattens history
+  `(N, 30, 8)` -> `(N, 240)` and concatenates as `cat([o_t, hist_flat, z])`
+- `agents/rsl_rl_ppo_cfg.py`: `_PPOEncoderPolicyCfg` (Step 4b), `_PPOEncoderHistPolicyCfg`
+  (Step 4c, proprio_hist_dim=240), `ALBCDebugPPOEncoderRunnerCfg`,
+  `ALBCDebugPPOEncoderHistRunnerCfg` with obs_groups including "proprio_hist"
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-Debug-PPO-Encoder-v0` (Step 4b) and
+  `Isaac-Constrained-ALBC-Debug-PPO-Enc-Hist-v0` (Step 4c)
+
+### Notes
+- Step 4c actor input: o_t(14D) + hist(240D) + z(13D) = 267D. z ratio = 4.9%.
+- History features reuse the same quantities already computed in `compute_policy_obs()`
+  (roll, pitch, angular velocity, joint positions, previous actions).
+- Encoder input unchanged: privileged info (23D) only, matching NORBC paper.
+- Critic unchanged: asymmetric cat([o_t, p_t]) = 37D, no history needed.
+- PPO vanilla (no ppo_patch, no separate encoder optimizer). If Step 4c still fails,
+  next step is adding hero_agent-style encoder LR isolation and z_bounds_loss.
+
 ## [2026-03-27] Ablation study: encoder identified as root cause of training failure
 
 ### Context

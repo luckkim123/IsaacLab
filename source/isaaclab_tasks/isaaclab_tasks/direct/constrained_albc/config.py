@@ -218,6 +218,18 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     Any absolute position reachable via accumulation over multiple steps."""
 
     # ==========================================================================
+    # Proprioceptive History (for actor input, reduces z/input ratio)
+    # ==========================================================================
+    proprio_history_len: int = 0
+    """Number of timesteps in proprioception history buffer. 0 = disabled.
+    When > 0, actor receives cat([o_t, hist_flat, z]) instead of cat([o_t, z]).
+    Features per step (8D): roll, pitch, p, q, joint_pos_norm(2), prev_actions(2).
+    Flattened: history_len * 8 dimensions added to actor input."""
+
+    proprio_feature_dim: int = 8
+    """Dimension of proprioceptive features per timestep."""
+
+    # ==========================================================================
     # Attitude Task and Rewards
     # ==========================================================================
     target_attitude: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -365,6 +377,20 @@ class ALBCDebugEncoderEnvCfg(ALBCEnvCfg):
     Tests whether the encoder breaks learning, independent of barrier.
     Full privileged obs (23D) for encoder, but no constraint enforcement.
     """
+
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
+
+
+@configclass
+class ALBCDebugEncoderHistEnvCfg(ALBCEnvCfg):
+    """Step 4c: PPO + Encoder + DR + History (no constraints).
+
+    Adds proprio history to actor input to reduce z/input ratio from 48% to 5%.
+    Actor input: cat([o_t(14D), hist_flat(240D), z(13D)]) = 267D.
+    """
+
+    proprio_history_len: int = 30
 
     doraemon: DoraemonCfg = DoraemonCfg(enable=False)
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])

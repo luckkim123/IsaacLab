@@ -269,3 +269,64 @@ class ALBCDebugEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     algorithm = RslRlConstraintTRPOAlgorithmCfg()
     policy = RslRlPpoActorCriticEncoderConstrainedCfg()
+
+
+@configclass
+class _PPOEncoderPolicyCfg(_EncoderPolicyCfg):
+    """Encoder policy for PPO (no cost critic)."""
+
+    class_name: str = "ALBCActorCriticEncoder"
+
+
+@configclass
+class ALBCDebugPPOEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 4b: PPO + Encoder + DR (no constraints). Tests PPO vs TRPO with encoder."""
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_encoder"
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _DebugAlgorithmCfg()
+    policy = _PPOEncoderPolicyCfg()
+
+
+@configclass
+class _PPOEncoderHistPolicyCfg(_EncoderPolicyCfg):
+    """Encoder policy with proprio history for PPO.
+
+    Actor input: cat([o_t(14D), hist_flat(240D), z(13D)]) = 267D.
+    z/input ratio: 13/267 = 4.9% (was 48% without history).
+    """
+
+    class_name: str = "ALBCActorCriticEncoder"
+    proprio_hist_dim: int = 240  # 30 steps * 8 features
+
+
+@configclass
+class ALBCDebugPPOEncoderHistRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 4c: PPO + Encoder + History + DR (no constraints).
+
+    Adds proprio history to actor input to reduce z/input ratio from 48% to 5%.
+    Matches NORBC paper architecture: Actor = cat([o_t(+history), z]).
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_encoder_hist"
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _DebugAlgorithmCfg()
+    policy = _PPOEncoderHistPolicyCfg()

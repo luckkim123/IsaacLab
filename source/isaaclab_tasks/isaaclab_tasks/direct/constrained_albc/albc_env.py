@@ -213,6 +213,18 @@ class ALBCEnv(DirectRLEnv):
         self._joint_pos_targets = self._nominal_joint_pos.expand(self.num_envs, -1).clone()
         self._control_step_counter = 0
 
+        # Proprioceptive history buffer for actor input (reduces z/input ratio)
+        self._proprio_history_len = self.cfg.proprio_history_len
+        if self._proprio_history_len > 0:
+            self._proprio_hist = torch.zeros(
+                self.num_envs,
+                self._proprio_history_len,
+                self.cfg.proprio_feature_dim,
+                device=self.device,
+            )
+        else:
+            self._proprio_hist = None
+
         # Force/torque buffers
         self._hydro_forces = torch.zeros(self.num_envs, 3, device=self.device)
         self._hydro_torques = torch.zeros(self.num_envs, 3, device=self.device)
@@ -309,6 +321,29 @@ class ALBCEnv(DirectRLEnv):
             self._prev_actions_obs = self._prev_actions.clone()
         self._control_step_counter += 1
 
+    def _get_proprio_features(self) -> torch.Tensor:
+        """Extract proprioception features for history buffer (8D).
+
+        Features: roll, pitch, p (ang_vel_x), q (ang_vel_y),
+                  joint_pos_norm(2), prev_actions(2).
+        """
+        roll, pitch, _yaw = euler_xyz_from_quat(self._robot.data.root_quat_w)
+        ang_vel = self._robot.data.root_ang_vel_b
+        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
+        joint_pos_norm = 2.0 * (joint_pos - self._joint_limits_lower) / self._joint_limits_range - 1.0
+        return torch.cat(
+            [roll.unsqueeze(-1), pitch.unsqueeze(-1), ang_vel[:, :2], joint_pos_norm, self._prev_actions_obs],
+            dim=-1,
+        )
+
+    def _update_proprio_hist(self) -> None:
+        """Shift ring buffer left and append current proprioception features."""
+        if self._proprio_hist is None:
+            return
+        new_entry = self._get_proprio_features()
+        self._proprio_hist[:, :-1] = self._proprio_hist[:, 1:].clone()
+        self._proprio_hist[:, -1] = new_entry
+
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Process actions: compute joint PD targets from policy output.
 
@@ -319,6 +354,7 @@ class ALBCEnv(DirectRLEnv):
             actions: Action commands [-1, 1]. Shape: (num_envs, 2).
         """
         self._update_action_buffers(actions)
+        self._update_proprio_hist()
 
         if self._control_step_counter % self.cfg.control_decimation == 0:
             self._apply_joint_pd_action(self._actions)
@@ -409,6 +445,8 @@ class ALBCEnv(DirectRLEnv):
         observations = {"policy": compute_policy_obs(self, self._robot)}
         if self.cfg.state_space > 0:
             observations["privileged"] = compute_privileged_obs(self)
+        if self._proprio_hist is not None:
+            observations["proprio_hist"] = self._proprio_hist.clone()
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
@@ -635,10 +673,12 @@ class ALBCEnv(DirectRLEnv):
         self._reset_action_buffers(env_ids)
 
     def _reset_action_buffers(self, env_ids: torch.Tensor) -> None:
-        """Reset action buffers."""
+        """Reset action buffers and proprio history."""
         for buf in (self._actions, self._prev_actions, self._prev_prev_actions, self._prev_actions_obs):
             buf[env_ids] = 0.0
         self._joint_pos_targets[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
+        if self._proprio_hist is not None:
+            self._proprio_hist[env_ids] = 0.0
 
     def _reset_physics(self, env_ids: torch.Tensor) -> None:
         """Reset hydrodynamics, payload, and apply domain randomization."""
