@@ -209,9 +209,9 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     """Nominal joint configuration (g1, g2). At (0, pi), EE is at body center (0, 0).
     Used as initial target on episode reset."""
 
-    delta_scale: float = 0.05
+    delta_scale: float = 0.08
     """Delta action scaling (rad/step). q_des += delta_scale * a_t each control step.
-    At 50Hz, max joint velocity = delta_scale * 50 = 2.5 rad/s (within 4.189 limit).
+    At 50Hz, max joint velocity = delta_scale * 50 = 4.0 rad/s (within 4.189 limit).
     Any absolute position reachable via accumulation over multiple steps."""
 
     # ==========================================================================
@@ -223,8 +223,8 @@ class ALBCEnvCfg(DirectRLEnvCfg):
 
     reward: ALBCRewardCfg = ALBCRewardCfg(
         k_c=-8.0,
-        k_tau=-0.001,
-        k_s=-0.05,
+        k_tau=-0.01,
+        k_s=-0.2,
     )
 
     # ==========================================================================

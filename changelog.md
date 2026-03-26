@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
+## [2026-03-27] Tune delta_scale and reward weights after delta action analysis
+
+### Context
+Analysis of run `2026-03-27_02-40-36` (139 iters, first delta action run) showed dramatic
+improvements in actuator dynamics but attitude control regression:
+
+**Dynamics success (delta action working):**
+- effort_saturation: 91% -> 2.2% (PD controller no longer saturated)
+- applied_torque_max: 12.3 -> 6.5 Nm (within 9.5 Nm constraint limit)
+- joint_vel_max: 6.0 -> 2.1 rad/s (within 4.189 constraint limit)
+- Torque cost_return: 92 -> 4.5 (within budget 20 for the first time!)
+- Velocity cost_return: 91 -> 0.02 (within budget 10, essentially zero violation)
+
+**Attitude regression:**
+- Roll error: 17 -> 21.6 deg, Pitch error: 13 -> 18.8 deg (worse than absolute action)
+- Per-step reward breakdown: command=-2.92 (97.3%), torque=-0.014 (0.5%), smoothness=-0.068 (2.3%)
+- The 160:1 ratio between tracking and smoothness means the policy has almost no incentive
+  to be smooth or energy-efficient -- only attitude matters in the reward landscape.
+
+**Two issues identified:**
+1. delta_scale=0.05 limits arm bandwidth: 2.9 deg/step means reaching 90 deg offset takes
+   0.62 seconds. Arm may be too slow to compensate for disturbances.
+2. Reward weight imbalance: k_tau and k_s contribute <3% combined to the total reward,
+   making torque efficiency and smoothness invisible to the optimizer.
+
+### Changed
+- `config.py`: `delta_scale` 0.05 -> 0.08 (arm bandwidth +60%, max 4.6 deg/step, max PD
+  torque = 8.0 Nm still within 9.5 limit). Time to reach 90 deg offset: 0.39s (was 0.62s).
+- `config.py`: `k_tau` -0.001 -> -0.01 (10x increase, torque penalty ~5% of reward).
+  Encourages energy efficiency now that constraints handle hard limits.
+- `config.py`: `k_s` -0.05 -> -0.2 (4x increase, smoothness penalty ~10% of reward).
+  Discourages jerky acceleration in delta action space.
+
+### Notes
+- Reward contribution targets: command ~85%, smoothness ~10%, torque ~5%.
+  Previous: command 97.3%, smoothness 2.3%, torque 0.5%.
+- delta_scale=0.10 was considered but rejected: PD torque = 10 Nm exceeds 9.5 limit.
+- k_c=-8.0 intentionally unchanged: attitude tracking remains the primary objective.
+
 ## [2026-03-27] Switch from absolute to delta action parameterization
 
 ### Context
