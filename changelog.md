@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-26] Fix encoder z_sweep dimension indexing for 280D concatenated input
+
+### Context
+Ran encoder z_sweep on constrained ALBC run `2026-03-25_18-22-28` (post-headroom-fix,
+2500 iter) and noticed only Payload Mass showed sensitivity (13/13 dims, range 0.69)
+while all other DR parameters had near-zero response. This led to a false "encoder
+collapse" diagnosis -- z_min/z_max at softsign boundaries was interpreted as saturation.
+
+Root cause: the constrained ALBC encoder takes a **280D concatenated input**:
+`cat([policy_obs(13), history(240), privileged(27)])`. The z_sweep script's
+`build_sweep_params_from_checkpoint()` only handled `input_dim == 28` (privileged-only)
+and `input_dim == 19` (hero_agent). For 280D input, it fell through to the 19D hero_agent
+path, sweeping indices 0-18 which target **policy_obs and early history** instead of the
+privileged obs at indices 253-279.
+
+Result: "Payload Mass" was actually sweeping `policy_obs[14]` (history buffer element),
+not the actual payload mass at `privileged[10]` (index 263). The strong response was due
+to injecting out-of-distribution values into history, not real DR sensitivity.
+
+After fix: encoder shows **excellent** DR sensitivity across all 27 privileged parameters.
+Most parameters activate 10-13/13 z dimensions with max ranges up to 1.71. The encoder
+is NOT collapsed -- it has learned a rich 13D representation of the full 27D privileged
+observation space. Previous sessions' z_sweep analyses for constrained ALBC (including
+run `2026-03-25_15-01-22`) were also invalid.
+
+### Fixed
+- `scripts/analysis/common.py`: Added 280D concatenated input handling to
+  `build_sweep_params_from_checkpoint()`. Detects full encoder input (>=100D), extracts
+  the privileged portion at the end, and applies correct index offset (253 for 280D).
+  Added `_build_constrained_albc_27d_sweep()` helper with proper DR ranges for all 27
+  privileged dimensions. Refactored 28D case to reuse helper with yaw quad damping.
+
+### Notes
+- All previous constrained ALBC encoder z_sweep results are invalid and should be re-run.
+- The encoder is working well; the real bottleneck is policy optimization (plateau at 5%,
+  pitch error 20 deg, step_norm=0.01) and constraint costs still above budget.
+- Binary cost gradient IS present via cost advantage (GAE), contrary to earlier analysis.
+  The original paper uses binary costs successfully.
+- Training run analysis (2026-03-25_18-22-28): reward 103, roll 7.8 deg, pitch 20 deg,
+  ls_success=1.00, entropy collapsed (-0.38), noise at floor (0.20).
+
 ## [2026-03-25] TRPO max_kl increase + encoder KL gating fix
 
 ### Context
