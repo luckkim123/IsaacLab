@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-26] Remove violation-proportional barrier weights (fix2)
+
+### Context
+Isolation test (exponential reward + fix2 barrier weights, run 2026-03-26_14-59-24) confirmed
+fix2 is the root cause of arm freeze, not fix1 (quadratic reward). Run showed identical failure:
+act_size=1.41 (saturated), act_rate=0.02, roll_err=42 deg, pitch_err=33 deg.
+
+Analysis of early-iteration barrier weights revealed the mechanism:
+- At iter 10: joint_vel_limit w_k=5.22, joint_torque w_k=3.42 (barrier weights from fix2)
+- Total barrier gradient: 0.75 (fix2) vs 0.20 (standard) -- 3.75x amplification
+- Positive feedback loop: exploration -> high cost -> amplified barrier -> "don't move" -> arm freeze
+- Working run (2026-03-25_18-22-28, no fix2) had same initial cost levels but standard barrier
+  allowed gradual cost reduction without arm freeze
+
+Fix2 was introduced to compensate for "constant gradient" from adaptive thresholds (barrier
+structural analysis problem 1). But the working run proved constant gradient IS sufficient --
+it's a feature, not a bug. The adaptive threshold margin (alpha*d_k) provides stable, consistent
+constraint pressure that lets the policy explore while gradually satisfying constraints.
+
+### Removed
+- `constraint_trpo.py`: Removed `barrier_weights = (mean_cost_returns / d_k).clamp(min=1.0)`
+  computation and its usage in both TRPO surrogate and sigma update barriers. Restored standard
+  log barrier: `-sum_k log(margin_k) / t`
+
+### Notes
+- This fully reverts the fix2 portion of commit 7239ff6f
+- Combined with the fix1 revert (previous entry), config now matches working run 2026-03-25_18-22-28
+- The one-axis collapse problem (which motivated fix1/fix2) still needs a different solution
+
 ## [2026-03-26] Revert to exponential reward for isolation test
 
 ### Context
