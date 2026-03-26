@@ -4,6 +4,40 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-26] Fix 3 gradient explosion bugs in ConstraintTRPO
+
+### Context
+Analysis of run 2026-03-26_18-12-25 (delta EE mode, 580 iters) revealed training was
+completely broken by gradient explosions -- not a methodology issue, but algorithmic bugs.
+
+Symptoms: grad_norm grew from O(1) to O(1e16) over 500 iterations, shs peaked at 5.97e11,
+step_norm collapsed to 0.01 (policy effectively frozen), encoder_grad_norm hit inf in 130/458
+iterations. At iter 562+ the system entered permanent failure: grad=inf every iteration,
+line search always fails, encoder permanently frozen.
+
+Root cause traced to cost advantage standardization dividing by (std + 1e-8) for binary
+constraints (accum_rot, overshoot, attitude_abs) that have near-zero std because they
+rarely fire. A single non-zero cost advantage sample (e.g., 0.1) gets amplified by
+0.1/1e-8 = 1e7, which flows through the barrier surrogate into TRPO gradient.
+Progressive deterioration: each spike slightly perturbs the policy, changing violation
+patterns, creating a positive feedback loop until infinity.
+
+Two secondary bugs identified: (1) encoder update used pre-TRPO old_log_prob as baseline,
+causing ratio drift over 5 encoder epochs; (2) no guard against inf gradients after
+clip_grad_norm_, which produces NaN parameters when clipping inf.
+
+### Fixed
+- `algorithms/constraint_trpo.py`: Cost advantage standardization epsilon changed from `(std + 1e-8)` to `std.clamp(min=1.0)` -- binary constraints with near-zero std keep natural scale instead of 1e8x amplification
+- `algorithms/constraint_trpo.py`: Encoder update now re-snapshots log_prob AFTER TRPO step (was using pre-TRPO baseline, causing ratio explosion over encoder epochs)
+- `algorithms/constraint_trpo.py`: Added gradient norm clipping on TRPO surrogate gradient before CG solver (defense-in-depth against barrier gradient spikes)
+- `algorithms/constraint_trpo.py`: Added `isfinite` guard after encoder `clip_grad_norm_` -- skips optimizer step when gradients are inf/NaN to prevent parameter corruption
+
+### Notes
+- Bug 1 (cost_adv 0-division) is the root cause; Bugs 2-3 are downstream amplifiers
+- `max_grad_norm=1.0` already existed for value function; now also applied to TRPO policy gradient
+- The `clamp(min=1.0)` means constraints with std < 1.0 get centering only (no scaling), std > 1.0 get full standardization
+- Needs smoke test to verify gradient stability before full training run
+
 ## [2026-03-26] Switch to delta EE action mode: fix arm freeze root cause
 
 ### Context

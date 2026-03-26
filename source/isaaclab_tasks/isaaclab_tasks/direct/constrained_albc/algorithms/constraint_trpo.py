@@ -526,9 +526,11 @@ class ConstraintTRPO:
         # Per-constraint cost advantage standardization (NORBC Sec IV-B).
         # Equalizes gradient magnitude across constraints so barrier 1/margin_k
         # provides proximity-based prioritization only.
+        # clamp(min=1.0): binary constraints with near-zero std (rarely violated)
+        # keep their natural scale instead of being amplified by 1/eps.
         ca_mean = cost_advantages_flat.mean(dim=0, keepdim=True)  # (1, K)
-        ca_std = cost_advantages_flat.std(dim=0, keepdim=True)  # (1, K)
-        cost_advantages_flat = (cost_advantages_flat - ca_mean) / (ca_std + 1e-8)
+        ca_std = cost_advantages_flat.std(dim=0, keepdim=True).clamp(min=1.0)  # (1, K)
+        cost_advantages_flat = (cost_advantages_flat - ca_mean) / ca_std
 
         batch_size = obs_flat.batch_size[0]
 
@@ -621,10 +623,15 @@ class ConstraintTRPO:
         self._last_pre_encoder_kl = pre_encoder_kl
 
         if self.encoder_optimizer is not None and ls_success:
+            # Re-snapshot log_prob AFTER TRPO step so encoder ratio starts at 1.0.
+            # Using pre-TRPO log_prob causes ratio drift over encoder epochs.
+            with torch.no_grad():
+                self.policy.act(obs_flat)
+                post_trpo_log_prob = self.policy.get_actions_log_prob(actions_flat)
             self._update_encoder(
                 obs_flat,
                 advantages_flat,
-                old_log_prob_flat,
+                post_trpo_log_prob,
                 actions_flat,
                 old_mu_flat=old_mu_flat,
                 old_sigma_flat=old_sigma_flat,
@@ -678,6 +685,12 @@ class ConstraintTRPO:
         self._last_surrogate_loss = loss.item()
         g = self._flat_grad(loss, self._policy_params, retain_graph=False)
         self._last_trpo_grad_norm = g.norm().item()
+
+        # Clip gradient norm before CG to prevent barrier-induced explosion.
+        # Preserves direction; only caps magnitude.
+        g_norm = g.norm()
+        if g_norm > self.max_grad_norm:
+            g = g * (self.max_grad_norm / g_norm)
 
         # 2. Natural gradient via conjugate gradient: x = F^{-1} g
         nat_grad = self._conjugate_gradient(obs_flat, old_mu_flat, old_sigma_flat, g)
@@ -746,6 +759,13 @@ class ConstraintTRPO:
             total_loss.backward()
             enc_grad_norm = nn.utils.clip_grad_norm_(self._encoder_params, max_norm=1.0)
             self._last_encoder_grad_norm = enc_grad_norm.item()
+
+            # Guard: clip_grad_norm_ on inf gradients produces NaN params
+            if not torch.isfinite(enc_grad_norm):
+                logger.warning("Encoder grad non-finite (%.4e), skipping epoch %d", enc_grad_norm.item(), _epoch)
+                self.encoder_optimizer.zero_grad()
+                continue
+
             self.encoder_optimizer.step()
 
             # KL gating: revert if encoder step caused excessive KL shift
