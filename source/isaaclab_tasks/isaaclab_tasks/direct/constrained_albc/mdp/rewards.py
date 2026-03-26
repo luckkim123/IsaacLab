@@ -42,21 +42,21 @@ class ALBCRewardCfg:
     """ALBC reward configuration: 3-term architecture.
 
     Active terms (all dt-scaled):
-        command    (+5.0): exponential attitude tracking reward
+        command    (-1.0): quadratic attitude tracking penalty
         smoothness (-0.5): mean(da^2) + mean(d2a^2) action smoothness
         torque     (-0.001): mean(tau^2) joint torque penalty
     """
 
-    # Command tracking reward (positive weight: rewards low error)
-    command_weight: float = 5.0
-    command_type: str = "exponential"
+    # Command tracking penalty (negative weight: penalizes error)
+    command_weight: float = -1.0
+    command_type: str = "quadratic"
     """Command reward type: 'exponential' (exp(-c*e^2)) or 'quadratic' (c*e^2)."""
 
     command_coeff_roll: float = 5.0
-    """Roll axis coefficient for exp(-c*e_r^2)."""
+    """Roll axis coefficient for quadratic penalty c*e_r^2."""
 
     command_coeff_pitch: float = 7.5
-    """Pitch axis coefficient for exp(-c*e_p^2). 1.5x roll for tighter tracking."""
+    """Pitch axis coefficient for quadratic penalty c*e_p^2. 1.5x roll for tighter tracking."""
 
     # Action smoothness: first + second order action difference
     smoothness_weight: float = -0.5

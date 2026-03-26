@@ -601,7 +601,10 @@ class ALBCEnv(DirectRLEnv):
         """Convert EE position actions to joint targets via analytical 2-link IK.
 
         Actions in [-1, 1]^2 are scaled to desired EE position (x, y) in body frame.
-        Analytical IK computes (gamma1, gamma2) from (x, y).
+        Analytical IK computes (gamma1, gamma2) from (x, y), then the joint target
+        is rate-limited to prevent large jumps (matching the implicit rate limit in
+        joint_velocity mode). This follows the ABPC reference where the servo tracks
+        smoothly-changing targets rather than jumping to the IK solution.
 
         Args:
             actions: Normalized EE position commands [-1, 1]. Shape: (num_envs, 2).
@@ -629,8 +632,16 @@ class ALBCEnv(DirectRLEnv):
         sin_g2 = torch.sin(g2)
         g1 = torch.atan2(y_des, x_des) - torch.atan2(_L2 * sin_g2, _L1 + _L2 * cos_g2)
 
-        self._joint_pos_targets[:, 0] = g1
-        self._joint_pos_targets[:, 1] = g2
+        # Rate-limit joint target: clamp delta to max_joint_velocity * control_dt.
+        # This matches the implicit rate limit in joint_velocity mode and prevents
+        # large joint angle jumps during exploration.
+        ik_target = torch.stack([g1, g2], dim=-1)
+        delta = ik_target - self._joint_pos_targets
+        delta = torch.atan2(torch.sin(delta), torch.cos(delta))  # shortest path
+        control_dt = self.step_dt * self.cfg.control_decimation
+        max_delta = self.cfg.max_joint_velocity * control_dt
+        delta = torch.clamp(delta, -max_delta, max_delta)
+        self._joint_pos_targets += delta
 
     def _apply_action(self):
         """Apply joint position targets, hydrodynamic forces, and random perturbation."""
@@ -1000,9 +1011,28 @@ class ALBCEnv(DirectRLEnv):
             self._action_latency[env_ids] = torch.randint(lo, hi + 1, (len(env_ids),), device=self.device)
 
     def _reset_action_buffers(self, env_ids: torch.Tensor) -> None:
-        """Zero action, EMA, rotation tracking, and overshoot detection buffers."""
-        for buf in (self._actions, self._prev_actions, self._prev_prev_actions, self._prev_actions_obs):
-            buf[env_ids] = 0.0
+        """Reset action, EMA, rotation tracking, and overshoot detection buffers.
+
+        For ee_position mode, initializes action buffers to the FK of the current
+        joint position (normalized to [-1, 1]) instead of zero. This prevents a
+        false smoothness spike on the first step, since action=[0,0] means "EE at
+        center" which may be far from the actual initial joint configuration.
+        """
+        if self.cfg.action_mode == "ee_position":
+            joint_pos = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
+            g1, g2 = joint_pos[:, 0], joint_pos[:, 1]
+            x = _L1 * torch.cos(g1) + _L2 * torch.cos(g1 + g2)
+            y = _L1 * torch.sin(g1) + _L2 * torch.sin(g1 + g2)
+            R = self.cfg.workspace_radius
+            init_action = torch.stack([x / R, y / R], dim=-1).clamp(-1.0, 1.0)
+            for buf in (self._actions, self._prev_actions, self._prev_prev_actions):
+                buf[env_ids] = init_action
+            self._prev_actions_obs[env_ids] = init_action
+            self._joint_pos_targets[env_ids] = joint_pos
+        else:
+            for buf in (self._actions, self._prev_actions, self._prev_prev_actions, self._prev_actions_obs):
+                buf[env_ids] = 0.0
+            self._joint_pos_targets[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
         self._ema_joint_vel[env_ids] = 0.0
         self._accumulated_rotation[env_ids] = 0.0
         self._prev_joint_pos[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]

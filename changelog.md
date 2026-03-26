@@ -4,6 +4,48 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-26] Fix ee_position mode: rate limiting + reset initialization + quadratic reward
+
+### Context
+After removing fix2 (barrier weights), the isolation test run 2026-03-26_15-11-51 still showed
+identical arm freeze (act_size=1.41, act_rate=0.02, roll_err=43 deg). Comparing configs between
+the working run (2026-03-25_18-22-28) and all failed runs revealed the true root cause:
+`action_mode: ee_position` (commit 851f946d) was added AFTER the working run, which used
+`joint_velocity` mode.
+
+The fundamental problem: ee_position mode applies IK-computed joint angles directly as position
+targets, with no rate limiting. In joint_velocity mode, the integrator naturally limits joint
+position delta to `max_vel * dt = 0.126 rad/step`. Without this, random exploration during early
+training causes huge joint angle jumps → high torque/velocity → constraint costs spike →
+barrier gradient pushes toward "don't move" → arm freeze.
+
+Additionally, the reset initialization was wrong for ee_position: action buffers were zeroed
+(action=[0,0] = "EE at center"), but joints start at random positions. This caused a false
+smoothness spike on the first step of every episode. `_joint_pos_targets` was never reset,
+leaving stale targets from the previous episode.
+
+Reference: `/workspace/references/abpc_dynamixel_control/src/advanced_albc_controller.cpp`
+operates at 50Hz with smooth EE target changes from IMU-derived PID/TD controller. The ABPC
+servo tracks via internal PD at ~1kHz. Our implementation must rate-limit since RL actions
+lack the natural smoothness of a PID controller.
+
+### Changed
+- `albc_env.py`: Added joint position rate limiting to `_apply_ee_position_action()`. IK target
+  delta is clamped to `max_joint_velocity * control_dt` (= 0.126 rad/step) with atan2 wrapping
+  for shortest-path angular interpolation. Matches joint_velocity mode's implicit rate limit.
+- `albc_env.py`: `_reset_action_buffers()` now initializes `_joint_pos_targets` to current joint
+  position for both modes. For ee_position mode, action buffers are initialized via FK of current
+  joint position (normalized to [-1,1]) instead of zero, preventing first-step smoothness spike.
+- `config.py`: Re-applied quadratic reward (command_weight=-1.0, command_type="quadratic") for
+  testing with rate limiting. Quadratic gradient = 2*c*e never vanishes, addressing one-axis collapse.
+- `rewards.py`: Updated `ALBCRewardCfg` defaults to quadratic (command_weight=-1.0, command_type="quadratic")
+
+### Notes
+- Fix2 (barrier weights) removed in previous commit (a1bcb86f), kept removed
+- First test of quadratic reward WITHOUT fix2 and WITH rate limiting
+- Elbow-up IK convention (g2 >= 0) restricts joint space to half; may need revisiting
+- Proprio history includes prev_actions whose distribution changes between modes
+
 ## [2026-03-26] Remove violation-proportional barrier weights (fix2)
 
 ### Context
