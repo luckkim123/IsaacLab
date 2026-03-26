@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
+## [2026-03-27] Add missing 1/(1-gamma) factor to IPO barrier cost surrogate
+
+### Context
+Systematic comparison of the NORBC paper's Equation 10 against the current ConstraintTRPO
+implementation revealed the log-barrier's cost surrogate was missing the `1/(1-gamma)` factor
+from the performance difference lemma.
+
+**Paper's formula (Eq. 10):**
+```
+margin_k = d_k^i - J_Ck(pi_i) - [1/(1-gamma)] * E[ratio * A_Ck]
+                                  ^^^^^^^^^^^^
+                                  MISSING in code
+```
+
+**Impact:** With `cost_gamma=0.99`, the factor `1/(1-gamma) = 100`. The barrier was estimating
+the constraint margin change as 100x smaller than reality, making it effectively inactive.
+The barrier could not detect that a proposed policy step would violate constraints.
+
+**Example (attitude, d_k=1.0, barrier_base=0.5):**
+- Paper: margin = 0.5 - 100*0.003 = 0.2 (barrier detects shrinking margin)
+- Code:  margin = 0.5 - 0.003 = 0.497 (barrier sees almost no change)
+
+**barrier_t analysis:** Verified that `barrier_t=100` (paper default) remains correct after
+the fix. At margin floor (alpha*d_k), effective barrier weight = 50/d_k for attitude (strong
+enforcement when infeasible), dropping to ~2 when feasible (reward takes over). This is the
+intended log-barrier behavior. No adjustment needed.
+
+**Reward term asymmetry (intentional):** The paper omits `1/(1-gamma)` from the reward
+surrogate because it's a constant scale factor that doesn't affect the TRPO optimization
+direction. But for the cost term INSIDE the log(), the factor changes the argument, not just
+the scale -- it determines when the barrier approaches -inf.
+
+### Fixed
+- `algorithms/constraint_trpo.py`: Added `inv_one_minus_gamma = 1/(1-cost_gamma)` factor
+  to `cost_surrs` in the IPO barrier surrogate function. Was: `E[ratio * A_Ck]`.
+  Now: `[1/(1-gamma)] * E[ratio * A_Ck]` (matching NORBC Eq. 10).
+
+### Notes
+- Combined with the encoder TRPO integration (previous entry), this completes alignment
+  with the NORBC paper's TRPO+IPO formulation
+- The `1/(1-gamma)` was NOT needed in the reward surrogate (TRPO standard: direction-only,
+  step size from KL constraint)
+- Code reviewer identified 3 secondary items for future monitoring:
+  1. `margin.clamp(min=1e-8)` kills gradient when margin <= 0 (OK at ratio=1, may need
+     smooth barrier if value function accuracy is poor)
+  2. `mean_cost_returns.clamp(min=0)` slightly inflates margin (acceptable for non-negative costs)
+  3. Gradient clipping before CG (practical stabilization, not in paper)
+
 ## [2026-03-27] Integrate encoder into TRPO trust region (joint natural gradient + line search)
 
 ### Context

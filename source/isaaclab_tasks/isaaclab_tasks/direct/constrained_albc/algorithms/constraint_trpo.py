@@ -394,6 +394,10 @@ class ConstraintTRPO:
         old_lp = old_log_prob_flat.squeeze(-1)
         adv = advantages_flat.squeeze(-1)
         barrier_base = adaptive_d_k - mean_cost_returns  # (K,) static margin
+        # Performance difference lemma: J_Ck(pi') ~ J_Ck(pi) + [1/(1-gamma)] * E[r*A_Ck]
+        # The 1/(1-gamma) converts per-step advantage into total discounted return change.
+        # Required inside log-barrier to correctly estimate constraint margin under new policy.
+        inv_one_minus_gamma = 1.0 / (1.0 - self.cost_gamma)
 
         def surrogate() -> torch.Tensor:
             self.policy.act(obs_flat)
@@ -402,7 +406,8 @@ class ConstraintTRPO:
             # E[A(s,a)] term (minimization -> negate)
             reward_surr = -(adv * ratio).mean()
             # (1/t) * sum_k log(d_k^i - J_hat_Ck) term (minimization -> negate log)
-            cost_surrs = (ratio.unsqueeze(-1) * cost_advantages_flat).mean(dim=0)
+            # J_hat_Ck = J_Ck + [1/(1-gamma)] * E[ratio * A_Ck]  (Eq. 10 in NORBC)
+            cost_surrs = inv_one_minus_gamma * (ratio.unsqueeze(-1) * cost_advantages_flat).mean(dim=0)
             margin = barrier_base - cost_surrs
             barrier = -torch.log(margin.clamp(min=1e-8)).sum() / self._barrier_t
             self._last_barrier_penalty = barrier.item()
