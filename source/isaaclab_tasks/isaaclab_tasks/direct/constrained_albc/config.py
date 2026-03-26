@@ -394,3 +394,14 @@ class ALBCDebugEncoderHistEnvCfg(ALBCEnvCfg):
 
     doraemon: DoraemonCfg = DoraemonCfg(enable=False)
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
+
+
+@configclass
+class ALBCDebugHistOnlyEnvCfg(ALBCEnvCfg):
+    """Step 4d: PPO + History + DR (NO encoder). Tests if encoder causes LR death."""
+
+    state_space: int = 0  # No privileged obs, no encoder
+    proprio_history_len: int = 30
+
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])

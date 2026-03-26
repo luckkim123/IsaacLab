@@ -6,6 +6,79 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
+## [2026-03-27] HORA-informed ablation: encoder confirmed as LR death root cause
+
+### Context
+Systematic single-variable ablation of PPO+Encoder+History (Step 4c) to diagnose why
+encoder training fails. Compared HORA reference implementation to identify key differences.
+All 6 ablation experiments failed -- every single one hit LR death (adaptive LR crash to 1e-5)
+or NaN divergence (fixed schedule). Step 4d (history without encoder) succeeds, confirming
+encoder is the sole problem.
+
+**HORA vs ALBC comparison (key parameters):**
+
+| Parameter | HORA | ALBC |
+|-----------|------|------|
+| entropy_coef | 0.0 | 0.01 |
+| init_lr | 5e-3 | 3e-4 |
+| kl_threshold | 0.02 | 0.01 |
+| horizon (steps/env) | 8 | 64 |
+| normalize_value | yes | no |
+| reward_scale | 0.01x | 1x |
+| min_lr | 1e-6 | 1e-5 |
+
+Note: HORA adaptive schedule structure is identical to RSL-RL (/1.5, *1.5).
+HORA survives because init_lr=5e-3 gives 21 consecutive decreases before hitting min_lr,
+while ALBC's 3e-4 dies after only 9.
+
+**Single-variable ablation results (all with PPO+Encoder+History, 267D actor input):**
+
+| Experiment | Changed variable | LR death | roll | pitch | Key observation |
+|------------|-----------------|:--------:|-----:|------:|----------------|
+| 4c baseline | (none) | YES | 41.5 | 32.5 | noise_std stuck at 0.97 ceiling |
+| 4c-1 | entropy_coef=0.0 | YES | 29.8 | 37.2 | noise_std downtrend (vvvv) but LR=5.1e-5 |
+| 4c-2 | ent=0.0 + lr=5e-3 | YES | 16.2 | 47.1 | roll improved, pitch worsened (asymmetric) |
+| 4c-3 | desired_kl=0.02 | YES | 15.9 | 40.3 | Best reward (-78.8), z SAT returned |
+| 4c-4 | num_steps_per_env=8 | YES | 13.3 | 53.0 | Roll/pitch anti-phase oscillation, NaN crash |
+| 4c-5 | normalize_value=True | YES | 24.3 | 22.0 | Best balanced (only run where BOTH improved) |
+| 4c-6 | schedule="fixed" | N/A | NaN | NaN | Complete divergence -- adaptive LR death was safety net |
+
+None achieved meaningful learning (noise_std > 0.94 in all, policy effectively random).
+All "improvements" were initial condition variance, not actual convergence.
+
+**Step 4d: PPO + History + DR (NO encoder):**
+Actor input: policy(14D) + proprio_hist(240D) = 254D. Standard ActorCritic, standard PPO.
+Result: WORKS. Confirms 240D input is not the problem -- encoder is.
+
+**Key insight:** Adaptive LR death at 1e-5 is simultaneously the failure mode AND the
+safety net. It prevents learning but also prevents NaN divergence. Fixed LR removes both.
+The encoder destabilizes the loss landscape in a way that no single hyperparameter can fix.
+
+### Added
+- `config.py`: `ALBCDebugHistOnlyEnvCfg` (Step 4d) with `state_space=0` (no privileged obs),
+  `proprio_history_len=30`, no encoder
+- `agents/rsl_rl_ppo_cfg.py`: `_PPOEncoderHistAlgorithmCfg` (dedicated algo cfg for 4c ablations),
+  `ALBCDebugPPOHistOnlyRunnerCfg` (Step 4d, standard PPO + standard ActorCritic)
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-Debug-PPO-Hist-Only-v0` (Step 4d)
+- `runners/constraint_encoder_runner.py`: Value normalization feature (`normalize_value` flag
+  in train_cfg, `_normalize_storage_values()` using Welford running mean/std on returns/values)
+
+### Changed
+- `albc_env.py`: `_get_observations()` now outputs `proprio_hist` as flat `(N, 240)` instead of
+  `(N, 30, 8)`. Flatten moved from encoder to env for compatibility with standard ActorCritic.
+- `encoder/actor_critic_encoder.py`: `_get_actor_obs()` no longer flattens hist (already flat from env).
+  Added `nan_to_num` + `clamp(-10, 5)` guard on `log_std` to prevent NaN crash in distribution sampling.
+
+### Notes
+- Step 4d success confirms: 240D input dimension is fine, encoder integration is the problem
+- Value normalization was the only single variable that improved BOTH roll and pitch simultaneously
+- HORA succeeds not from any single parameter but from their combination (ent=0, lr=5e-3, kl=0.02,
+  normalize_value, reward_scale=0.01, short horizon) providing enough headroom for adaptive LR
+- Next steps: either (a) combine effective variables, (b) restructure encoder as HORA-style env_mlp
+  inside actor (not separate module), or (c) use separate encoder optimizer with fixed LR
+
+---
+
 ## [2026-03-27] PPO+Encoder experiments and history-augmented actor input
 
 ### Context

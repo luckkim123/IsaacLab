@@ -446,7 +446,7 @@ class ALBCEnv(DirectRLEnv):
         if self.cfg.state_space > 0:
             observations["privileged"] = compute_privileged_obs(self)
         if self._proprio_hist is not None:
-            observations["proprio_hist"] = self._proprio_hist.clone()
+            observations["proprio_hist"] = self._proprio_hist.clone().flatten(start_dim=-2)
         return observations
 
     def _get_rewards(self) -> torch.Tensor:

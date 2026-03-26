@@ -160,9 +160,8 @@ class ActorCriticEncoder(nn.Module):
         o_t = obs[self._policy_obs_key]
         z = self._encode(obs)
         if self._proprio_hist_key is not None and self._proprio_hist_key in obs:
-            hist = obs[self._proprio_hist_key]
-            hist_flat = hist.flatten(start_dim=-2)  # (N, T, F) -> (N, T*F)
-            return torch.cat([o_t, hist_flat, z], dim=-1)
+            hist = obs[self._proprio_hist_key]  # Already flat (N, T*F) from env
+            return torch.cat([o_t, hist, z], dim=-1)
         return torch.cat([o_t, z], dim=-1)
 
     def _get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
@@ -173,7 +172,7 @@ class ActorCriticEncoder(nn.Module):
 
     def _update_distribution(self, actor_obs: torch.Tensor) -> None:
         mean = self.actor(actor_obs)
-        std = torch.exp(self.log_std).expand_as(mean)
+        std = torch.exp(torch.nan_to_num(self.log_std, nan=0.0).clamp(-10.0, 5.0)).expand_as(mean)
         self.distribution = Normal(mean, std)
 
     # --- Core API ---

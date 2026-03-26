@@ -310,6 +310,25 @@ class _PPOEncoderHistPolicyCfg(_EncoderPolicyCfg):
 
 
 @configclass
+class _PPOEncoderHistAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """PPO for encoder+history ablation."""
+
+    class_name: str = "PPO"
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 3e-4
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    entropy_coef: float = 0.01
+    desired_kl: float = 0.01
+    max_grad_norm: float = 1.0
+    value_loss_coef: float = 1.0
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+
+
+@configclass
 class ALBCDebugPPOEncoderHistRunnerCfg(RslRlOnPolicyRunnerCfg):
     """Step 4c: PPO + Encoder + History + DR (no constraints).
 
@@ -323,10 +342,29 @@ class ALBCDebugPPOEncoderHistRunnerCfg(RslRlOnPolicyRunnerCfg):
     max_iterations = 500
     save_interval = 50
     experiment_name = "constrained_albc_debug_ppo_encoder_hist"
+    normalize_value: bool = False
     obs_groups: dict[str, list[str]] = {
         "policy": ["policy", "privileged", "proprio_hist"],
         "critic": ["policy", "privileged"],
     }
 
-    algorithm = _DebugAlgorithmCfg()
+    algorithm = _PPOEncoderHistAlgorithmCfg()
     policy = _PPOEncoderHistPolicyCfg()
+
+
+@configclass
+class ALBCDebugPPOHistOnlyRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 4d: PPO + History + DR (NO encoder). Tests if encoder is the problem."""
+
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_hist_only"
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "proprio_hist"],
+        "critic": ["policy", "proprio_hist"],
+    }
+
+    algorithm = _DebugAlgorithmCfg()
+    policy = _DebugPolicyCfg()

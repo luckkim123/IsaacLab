@@ -65,12 +65,64 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         else:
             self._constraint_names = ()
 
+        # Value normalization flag (set via train_cfg or algorithm config)
+        self._normalize_value = train_cfg.get("normalize_value", False)
+
         super().__init__(env, train_cfg, log_dir, device)
 
         # Detect encoder for conditional metrics logging
         self._has_encoder = hasattr(self.alg.policy, "encoder")
         if self._has_encoder:
             logger.info("[ConstraintEncoderRunner] Encoder detected. Encoder metrics logging enabled.")
+
+        # Set up value normalization (running mean/std on returns)
+        if self._normalize_value:
+            self._value_running_mean = torch.zeros(1, device=device)
+            self._value_running_var = torch.ones(1, device=device)
+            self._value_count = 1e-4
+            # Wrap alg.compute_returns to normalize after GAE
+            original_compute_returns = self.alg.compute_returns
+
+            def _compute_returns_normalized(obs):
+                original_compute_returns(obs)
+                self._normalize_storage_values()
+
+            self.alg.compute_returns = _compute_returns_normalized
+            logger.info("[ConstraintEncoderRunner] Value normalization enabled.")
+
+    # ------------------------------------------------------------------
+    # Value normalization
+    # ------------------------------------------------------------------
+
+    def _normalize_storage_values(self) -> None:
+        """Normalize values and returns in storage using running mean/std.
+
+        Mirrors HORA's normalize_value: update running stats from returns,
+        then normalize both values and returns in-place.
+        """
+        storage = self.alg.storage
+        returns_flat = storage.returns.flatten()
+
+        # Update running statistics (Welford's algorithm)
+        batch_mean = returns_flat.mean()
+        batch_var = returns_flat.var()
+        batch_count = returns_flat.numel()
+
+        delta = batch_mean - self._value_running_mean
+        total_count = self._value_count + batch_count
+        self._value_running_mean = self._value_running_mean + delta * batch_count / total_count
+        m_a = self._value_running_var * self._value_count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + delta**2 * self._value_count * batch_count / total_count
+        self._value_running_var = m2 / total_count
+        self._value_count = total_count
+
+        # Normalize in-place
+        std = torch.sqrt(self._value_running_var + 1e-8)
+        storage.values[:] = (storage.values - self._value_running_mean) / std
+        storage.returns[:] = (storage.returns - self._value_running_mean) / std
+        # Recompute advantages from normalized values/returns
+        storage.advantages = storage.returns - storage.values
 
     # ------------------------------------------------------------------
     # Properties
