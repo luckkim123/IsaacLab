@@ -10,7 +10,7 @@ This module provides the encoder-based actor-critic network:
 
 Architecture:
     Encoder: cat([policy_obs, hist_flat, privileged]) = 280D -> MLP -> softsign -> z (13D)
-    Actor:   cat([policy_obs, hist_flat, z]) = 266D -> MLP -> actions
+    Actor:   cat([policy_obs, hist_flat, z]) = 266D -> MLP -> tanh -> actions in (-1, 1)
     Critic:  cat([policy_obs, hist_flat, privileged]) = 280D -> MLP -> value (1D)
 
     The encoder receives policy_obs + proprioception history + privileged info,
@@ -251,16 +251,23 @@ class ActorCriticEncoder(nn.Module):
     # --- Core API ---
 
     def act(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
-        """Sample an action from the policy distribution."""
+        """Sample an action from the policy distribution.
+
+        The raw Gaussian sample is squashed through tanh to bound actions to (-1, 1).
+        This prevents unbounded actions from causing gradient death via workspace
+        clamping in ee_position mode. The KL divergence and importance sampling
+        ratio are invariant under this bijective transform (Jacobian cancels).
+        """
         actor_obs = self.actor_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
         self._update_distribution(actor_obs)
         assert self.distribution is not None
-        return self.distribution.sample()
+        self._raw_actions = self.distribution.sample()
+        return torch.tanh(self._raw_actions)
 
     def act_inference(self, obs: TensorDict) -> torch.Tensor:
-        """Get deterministic action (mean) for inference."""
+        """Get deterministic action (mean) for inference, bounded to (-1, 1)."""
         actor_obs = self.actor_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
-        return self.actor(actor_obs)
+        return torch.tanh(self.actor(actor_obs))
 
     def evaluate(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
         """Evaluate the value function for given observations."""
@@ -268,9 +275,17 @@ class ActorCriticEncoder(nn.Module):
         return self.critic(critic_obs)
 
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
-        """Compute log probability of actions under current distribution."""
+        """Compute log probability of squashed actions under current distribution.
+
+        Actions are tanh-squashed, so we invert via atanh to get the raw Gaussian
+        sample, then compute Gaussian log_prob. The Jacobian correction is NOT
+        needed here because the importance sampling ratio pi_new(a)/pi_old(a)
+        cancels the Jacobian terms (both use the same tanh transform).
+        """
         assert self.distribution is not None, "Call act() first to initialize distribution"
-        return self.distribution.log_prob(actions).sum(dim=-1)
+        # Invert tanh: raw = atanh(action), clamped for numerical stability
+        raw = torch.atanh(actions.clamp(-0.999, 0.999))
+        return self.distribution.log_prob(raw).sum(dim=-1)
 
     def update_normalization(self, obs: TensorDict) -> None:
         """Update observation normalization statistics."""

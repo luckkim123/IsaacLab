@@ -227,10 +227,11 @@ class ALBCEnvCfg(DirectRLEnvCfg):
         joint angles via analytical 2-link IK. Provides a more natural action space
         since buoy (x, y) maps directly to (pitch, roll) torque."""
 
-    workspace_radius: float = 0.40
-    """Maximum EE reach for action scaling (meters). Actions in [-1, 1] are scaled to
-    [-workspace_radius, workspace_radius]. Set below the kinematic max (0.466m) to avoid
-    IK singularity at full extension."""
+    workspace_radius: float = 0.461
+    """Maximum EE reach for action scaling (meters). Actions in (-1, 1) from tanh-squashed
+    actor are scaled to (-workspace_radius, workspace_radius). Set to kinematic limit
+    minus small margin (L1+L2-0.005 = 0.461m) so tanh output covers the full workspace.
+    IK singularity at full extension is avoided by the workspace clamp safety net."""
 
     # EMA alpha for constraint system joint velocity filtering
     ema_joint_vel_alpha: float = 0.2

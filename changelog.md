@@ -46,6 +46,51 @@ lack the natural smoothness of a PID controller.
 - Elbow-up IK convention (g2 >= 0) restricts joint space to half; may need revisiting
 - Proprio history includes prev_actions whose distribution changes between modes
 
+## [2026-03-26] Add tanh squashing to actor output + expand workspace radius
+
+### Context
+Run 2026-03-26_15-43-39 (with rate limiting + quadratic reward) still showed complete failure:
+command reward declining to -73, attitude error 32 deg, act_size=1.41 (saturated at sqrt(2)),
+act_rate=0.00 (constant actions). TRPO surrogate_loss exactly matched barrier_penalty (-0.249)
+throughout training, meaning reward surrogate contribution was ~zero.
+
+Root cause analysis: the actor MLP outputs unbounded mu, and Gaussian sampling produces actions
+well beyond [-1, 1]. These are scaled by workspace_radius=0.40 and then clamped at r_max=0.461m.
+Multiple different actions (e.g., 1.2, 1.5, 2.0) all map to the same physical EE position after
+clamping, creating a FLAT reward landscape. Policy gradient = 0 in these regions because different
+actions produce identical outcomes. The policy converges to constant extreme actions and cannot
+escape this local optimum.
+
+Solution: apply tanh to raw Gaussian samples, bounding actions to (-1, 1). Key mathematical
+insight: KL divergence is invariant under bijective transforms (tanh is a diffeomorphism from
+R to (-1,1)). The Jacobian of tanh cancels in the importance sampling ratio. Therefore: no
+changes needed to KL computation, Fisher vector product, surrogate loss, or line search.
+
+tanh chosen over softsign because: workspace 95% requires raw=1.83 (tanh) vs raw=19 (softsign),
+matching typical MLP output range. tanh provides 19x better exploration at y=0.9. Standard
+practice (SAC). softsign's polynomial gradient decay advantage is not needed with proper init.
+
+workspace_radius increased from 0.40 to 0.461 (= L1+L2-0.005) so tanh output (-1,1) maps to
+the full reachable workspace. The diagonal workspace clamp remains as a safety net for cases
+where both axes are near-maximal (radius = R*sqrt(2) > r_max).
+
+### Changed
+- `encoder/actor_critic_encoder.py`: `act()` now returns `tanh(distribution.sample())` instead
+  of raw `distribution.sample()`. All actions are bounded to (-1, 1) by construction.
+- `encoder/actor_critic_encoder.py`: `act_inference()` returns `tanh(actor(obs))` for consistency.
+- `encoder/actor_critic_encoder.py`: `get_actions_log_prob()` inverts squashed actions via
+  `atanh(actions.clamp(-0.999, 0.999))` then computes Gaussian log_prob. Jacobian correction
+  not needed (cancels in importance sampling ratio).
+- `config.py`: `workspace_radius` 0.40 -> 0.461 (full workspace coverage, matches r_max)
+
+### Notes
+- KL, FVP, surrogate, line search, value function, constraints: NO changes (KL invariance)
+- `action_mean`/`action_std` properties still return raw Gaussian parameters (correct for KL)
+- `_update_action_buffers` clamp(-1,1) kept for joint_velocity mode compatibility
+- entropy_coef=0.0 so Gaussian vs squashed entropy difference is moot
+- Existing checkpoints incompatible (action distribution semantics changed), fresh training needed
+- atanh numerical stability: clamp to (-0.999, 0.999) prevents inf at boundaries
+
 ## [2026-03-26] Remove violation-proportional barrier weights (fix2)
 
 ### Context
