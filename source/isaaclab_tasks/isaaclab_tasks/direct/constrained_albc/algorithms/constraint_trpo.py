@@ -417,12 +417,12 @@ class ConstraintTRPO:
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=math.log(self.min_std))
 
-        # --- 3. Encoder update (single-step, gated on line search success) ---
+        # --- 3. Encoder update (always, decoupled from line search) ---
         with torch.no_grad():
             pre_encoder_kl = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
         self._last_pre_encoder_kl = pre_encoder_kl
 
-        if self.encoder_optimizer is not None and ls_success:
+        if self.encoder_optimizer is not None:
             with torch.no_grad():
                 self.policy.act(obs_flat)
                 post_trpo_lp = self.policy.get_actions_log_prob(actions_flat)
@@ -536,7 +536,7 @@ class ConstraintTRPO:
                 cost_pred = self.policy.evaluate_costs(obs_mb)
                 target = cost_returns_flat[idx].clamp(min=0.0)
                 per_k_mse = (target - cost_pred).pow(2).mean(dim=0)
-                cost_value_loss = (per_k_mse / self.d_k.pow(2).clamp(min=0.01)).mean()
+                cost_value_loss = per_k_mse.mean()
 
                 total = self.value_loss_coef * value_loss + self.cost_value_loss_coef * cost_value_loss
                 self.value_optimizer.zero_grad()
