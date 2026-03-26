@@ -63,9 +63,6 @@ class ConstraintTRPO:
         line_search_kl_margin: float = 1.5,
         barrier_t: float = 100.0,
         barrier_alpha: float = 0.02,
-        # Encoder
-        num_encoder_epochs: int = 5,
-        encoder_lr: float = 1e-3,
         # Noise floor
         min_std: float = 0.2,
         # Device
@@ -104,7 +101,6 @@ class ConstraintTRPO:
         self._barrier_t = barrier_t
         self._barrier_alpha = barrier_alpha
         self.min_std = min_std
-        self.num_encoder_epochs = num_encoder_epochs
 
         # Monitoring (read by ConstraintEncoderRunner)
         self._last_cost_returns = [0.0] * num_constraints
@@ -114,7 +110,7 @@ class ConstraintTRPO:
         self._last_barrier_penalty = 0.0
         self._last_mean_entropy = 0.0
         self._last_surrogate_loss = 0.0
-        self._last_pre_encoder_kl = 0.0
+        self._last_encoder_grad_norm = 0.0
 
         if cost_gamma >= 1.0:
             raise ValueError(f"cost_gamma must be < 1.0, got {cost_gamma}")
@@ -127,46 +123,48 @@ class ConstraintTRPO:
         )
 
         # --- Parameter groups ---
-        # Actor: TRPO natural gradient (no optimizer)
-        # Encoder: Adam
+        # Policy (actor + encoder + log_std): TRPO natural gradient (no optimizer)
+        #   Encoder is inside the trust region so line search verifies barrier feasibility
+        #   for the combined actor+encoder update, and KL constraint covers both.
         # Value (shared backbone + reward/cost heads): Adam
         value_prefixes = ("critic", "cost_critic", "value_backbone", "reward_head", "cost_head")
         value_params = []
-        encoder_params = []
         self._policy_params = []
+        self._encoder_param_offset = 0
+        self._encoder_param_count = 0
 
+        offset = 0
+        enc_start = None
         for name, param in self.policy.named_parameters():
             if any(name.startswith(p) for p in value_prefixes):
                 value_params.append(param)
-            elif name.startswith("encoder"):
-                encoder_params.append(param)
-            elif name == "log_std":
-                self._policy_params.append(param)
             else:
                 self._policy_params.append(param)
+                if name.startswith("encoder"):
+                    if enc_start is None:
+                        enc_start = offset
+                    self._encoder_param_count += param.numel()
+                offset += param.numel()
+        self._encoder_param_offset = enc_start if enc_start is not None else 0
 
         self._value_params = value_params
         self.value_optimizer = optim.Adam(value_params, lr=value_lr)
 
-        self._has_encoder_params = len(encoder_params) > 0
-        if self._has_encoder_params:
-            self._encoder_params = encoder_params
-            self.encoder_optimizer = optim.Adam(encoder_params, lr=encoder_lr, weight_decay=1e-5)
-        else:
-            self._encoder_params = []
-            self.encoder_optimizer = None
-
         logger.info(
-            "ConstraintTRPO: %d actor params (TRPO), %d encoder params (Adam), %d value params (Adam)",
-            len(self._policy_params),
-            len(encoder_params),
-            len(value_params),
+            "ConstraintTRPO: %d policy params (TRPO, incl encoder), %d value params (Adam), "
+            "encoder slice [%d:%d] (%d params)",
+            sum(p.numel() for p in self._policy_params),
+            sum(p.numel() for p in value_params),
+            self._encoder_param_offset,
+            self._encoder_param_offset + self._encoder_param_count,
+            self._encoder_param_count,
         )
 
         # RSL-RL OnPolicyRunner compatibility
         self.rnd = None
         self.learning_rate = value_lr
         self.optimizer = self.value_optimizer
+        self.encoder_optimizer = None  # no separate encoder optimizer
 
         # Storage
         self.storage: RolloutStorage | None = None
@@ -364,7 +362,7 @@ class ConstraintTRPO:
     # ==================================================================
 
     def update(self) -> dict[str, float]:
-        """One iteration: TRPO step with IPO barrier -> encoder step -> value update."""
+        """One iteration: TRPO step with IPO barrier (joint actor+encoder) -> value update."""
         obs_flat = self.storage.observations.flatten(0, 1).clone()
         actions_flat = self.storage.actions.flatten(0, 1).clone()
         returns_flat = self.storage.returns.flatten(0, 1).clone()
@@ -392,7 +390,7 @@ class ConstraintTRPO:
         with torch.no_grad():
             self._last_barrier_margins = (adaptive_d_k - mean_cost_returns).tolist()
 
-        # --- 2. TRPO + IPO surrogate ---
+        # --- 2. TRPO + IPO surrogate (joint actor+encoder) ---
         old_lp = old_log_prob_flat.squeeze(-1)
         adv = advantages_flat.squeeze(-1)
         barrier_base = adaptive_d_k - mean_cost_returns  # (K,) static margin
@@ -417,17 +415,7 @@ class ConstraintTRPO:
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=math.log(self.min_std))
 
-        # --- 3. Encoder update (always, decoupled from line search) ---
-        with torch.no_grad():
-            pre_encoder_kl = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
-        self._last_pre_encoder_kl = pre_encoder_kl
-
-        if self.encoder_optimizer is not None:
-            with torch.no_grad():
-                self.policy.act(obs_flat)
-                post_trpo_lp = self.policy.get_actions_log_prob(actions_flat)
-            self._update_encoder(obs_flat, advantages_flat, post_trpo_lp, actions_flat)
-
+        # --- 3. KL after joint update (should be within trust region) ---
         with torch.no_grad():
             mean_kl = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
 
@@ -460,6 +448,11 @@ class ConstraintTRPO:
         self._last_surrogate_loss = loss.item()
         g = self._flat_grad(loss, self._policy_params)
 
+        # Store encoder gradient norm (pre-clip) for logging
+        if self._encoder_param_count > 0:
+            enc_slice = g[self._encoder_param_offset : self._encoder_param_offset + self._encoder_param_count]
+            self._last_encoder_grad_norm = enc_slice.norm().item()
+
         # Clip gradient norm before CG
         g_norm = g.norm()
         if g_norm > self.max_grad_norm:
@@ -489,29 +482,6 @@ class ConstraintTRPO:
             with torch.no_grad():
                 surrogate_fn()
         return ls_success
-
-    def _update_encoder(
-        self,
-        obs_flat: TensorDict,
-        advantages_flat: torch.Tensor,
-        old_log_prob_flat: torch.Tensor,
-        actions_flat: torch.Tensor,
-    ) -> None:
-        """Single-step encoder update via policy gradient."""
-        for _ in range(self.num_encoder_epochs):
-            self.encoder_optimizer.zero_grad()
-            self.policy.act(obs_flat)
-            log_prob = self.policy.get_actions_log_prob(actions_flat)
-            ratio = torch.exp(log_prob - old_log_prob_flat.squeeze(-1))
-            loss = -(advantages_flat.squeeze(-1) * ratio).mean()
-            if not torch.isfinite(loss):
-                continue
-            loss.backward()
-            enc_grad_norm = nn.utils.clip_grad_norm_(self._encoder_params, max_norm=1.0)
-            if not torch.isfinite(enc_grad_norm):
-                self.encoder_optimizer.zero_grad()
-                continue
-            self.encoder_optimizer.step()
 
     def _update_values(
         self,

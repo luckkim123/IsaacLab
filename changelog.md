@@ -6,6 +6,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
+## [2026-03-27] Integrate encoder into TRPO trust region (joint natural gradient + line search)
+
+### Context
+Deep analysis of run `2026-03-27_00-09-23` (280 iters) revealed the root cause of training
+stagnation: the separate Adam-based encoder update was destroying the TRPO trust region.
+
+**Evidence from TensorBoard data:**
+- TRPO pre_encoder_kl: 0.0035 avg (within max_kl=0.005 budget)
+- Post-encoder KL: 0.138 avg (**27.6x budget**, median 32.1x, max 1153.4x)
+- Encoder added 26.9x the TRPO KL budget per iteration on average
+- 11.4% of iterations had barrier_penalty = -inf (numerical degeneration from ratio overflow)
+- Reward flat at -67, all constraints 2-5x over budget, no convergence
+
+**Root cause:** The encoder update ran 5 Adam epochs (lr=3e-4) after each TRPO step,
+changing z which shifts the actor input distribution without any KL constraint. This
+directly contradicts the NORBC paper's rationale for choosing TRPO+IPO:
+1. TRPO's line search verifies barrier feasibility -- encoder bypassed it entirely
+2. TRPO's KL constraint limits policy change -- encoder added 32x the budget
+3. TRPO protects log-barrier from numerical explosion -- encoder caused -inf values
+
+The NORBC paper trains encoder jointly with actor (same optimizer, same KL constraint).
+The separate encoder update was an implementation deviation that nullified the trust region.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Moved encoder params from separate Adam optimizer into
+  `_policy_params` (TRPO natural gradient group). CG + line search now jointly optimize
+  actor and encoder. KL constraint covers the combined distribution shift. Line search
+  verifies barrier feasibility for the joint actor+encoder update.
+- `algorithms/constraint_trpo.py`: Added encoder gradient norm extraction from TRPO flat
+  gradient vector (`_encoder_param_offset`, `_encoder_param_count`) for monitoring.
+- `utils/logging.py`: `log_encoder_metrics()` now accepts `alg` parameter to read
+  `_last_encoder_grad_norm` from the TRPO gradient (no `.grad` available after `autograd.grad`).
+- `runners/constraint_encoder_runner.py`: Removed encoder optimizer save/load. Replaced
+  `pre_encoder_kl` logging with `encoder_grad_norm`. Passes `alg` to `log_encoder_metrics`.
+- `agents/rsl_rl_ppo_cfg.py`: Removed `num_encoder_epochs` and `encoder_lr` config fields.
+
+### Removed
+- `algorithms/constraint_trpo.py`: Deleted `_update_encoder()` method (22 lines).
+  Encoder no longer has a separate update loop.
+- `algorithms/constraint_trpo.py`: Removed `encoder_optimizer` (Adam), `_encoder_params`,
+  `_has_encoder_params`, `_last_pre_encoder_kl` fields.
+- `runners/constraint_encoder_runner.py`: Removed `encoder_optimizer.pt` checkpoint
+  save/load (no separate optimizer to persist).
+
+### Notes
+- CG Fisher matrix automatically captures encoder's KL contribution: params that strongly
+  affect the distribution get smaller steps via natural gradient curvature
+- Encoder weight_decay was 1e-5 in Adam; now omitted (TRPO has no optimizer). If needed,
+  L2 penalty can be added to the surrogate as future work
+- Previous encoder grad_norm=1.0 (always clipped) was post-clip from separate Adam update.
+  New metric reports pre-clip norm from the TRPO surrogate gradient, which is more informative
+- Backward compatible: old configs with `num_encoder_epochs`/`encoder_lr` are silently
+  ignored via `**_kwargs`
+
 ## [2026-03-27] Remove cost critic d_k^2 normalization and encoder line-search gating
 
 ### Context

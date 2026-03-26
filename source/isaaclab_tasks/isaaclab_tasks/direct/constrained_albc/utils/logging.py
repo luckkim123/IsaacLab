@@ -131,12 +131,13 @@ def log_encoder_metrics(
     device: str | torch.device,
     logger_type: str = "tensorboard",
     metrics: dict[str, float] | None = None,
+    alg: Any | None = None,
 ) -> None:
     """Log essential encoder metrics.
 
     Metrics kept (5):
         - Encoder/z_mean, z_std, z_min, z_max: z latent health
-        - Encoder/grad_norm: training signal
+        - Encoder/grad_norm: training signal (from TRPO surrogate gradient)
 
     Args:
         writer: TensorBoard SummaryWriter or equivalent logger.
@@ -146,6 +147,7 @@ def log_encoder_metrics(
         device: Computation device.
         logger_type: Logger type ("tensorboard" or "wandb").
         metrics: Optional dict to accumulate into. If None, flushes immediately.
+        alg: Algorithm instance with _last_encoder_grad_norm (ConstraintTRPO).
     """
     if not hasattr(policy, "encoder"):
         return
@@ -163,11 +165,10 @@ def log_encoder_metrics(
         metrics["Encoder/z_min"] = z.min().item()
         metrics["Encoder/z_max"] = z.max().item()
 
-    # Gradient norm (outside no_grad context)
-    encoder_params = list(policy.encoder.parameters())
-    if encoder_params and encoder_params[0].grad is not None:
-        grad_norm = sum(p.grad.data.norm(2).item() ** 2 for p in encoder_params if p.grad is not None) ** 0.5
-        metrics["Encoder/grad_norm"] = grad_norm
+    # Gradient norm from TRPO surrogate (encoder is inside trust region,
+    # so .grad is not set -- read from algorithm's stored value instead)
+    if alg is not None and hasattr(alg, "_last_encoder_grad_norm"):
+        metrics["Encoder/grad_norm"] = alg._last_encoder_grad_norm
 
     if flush_after:
         flush_metrics(writer, metrics, iteration, logger_type)

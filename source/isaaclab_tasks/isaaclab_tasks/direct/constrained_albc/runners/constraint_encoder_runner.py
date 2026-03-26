@@ -125,6 +125,7 @@ class ConstraintEncoderRunner(OnPolicyRunner):
                 iteration=iteration,
                 device=self.device,
                 logger_type=self.logger_type,
+                alg=self.alg,
             )
 
         # Constraint metrics
@@ -144,12 +145,8 @@ class ConstraintEncoderRunner(OnPolicyRunner):
     # ------------------------------------------------------------------
 
     def save(self, path: str, infos: dict | None = None) -> None:
-        """Save model checkpoint, encoder optimizer, and DORAEMON state."""
+        """Save model checkpoint and DORAEMON state."""
         super().save(path, infos)
-
-        # Save encoder optimizer state for seamless resume
-        if getattr(self.alg, "encoder_optimizer", None) is not None:
-            self._save_aux_state(path, "encoder_optimizer.pt", self.alg.encoder_optimizer.state_dict())
 
         # Save DORAEMON distribution state
         raw_env = self.env.unwrapped
@@ -157,15 +154,8 @@ class ConstraintEncoderRunner(OnPolicyRunner):
             self._save_aux_state(path, "doraemon_state.pt", raw_env._doraemon.state_dict())
 
     def load(self, path: str, load_optimizer: bool = True, map_location: str | None = None) -> dict:
-        """Load model checkpoint, encoder optimizer, and DORAEMON state if available."""
+        """Load model checkpoint and DORAEMON state if available."""
         infos = super().load(path, load_optimizer, map_location)
-
-        # Restore encoder optimizer state for seamless resume
-        if load_optimizer and getattr(self.alg, "encoder_optimizer", None) is not None:
-            enc_opt_state = self._load_aux_state(path, "encoder_optimizer.pt", self.device)
-            if enc_opt_state is not None:
-                self.alg.encoder_optimizer.load_state_dict(enc_opt_state)
-                logger.info("Restored encoder optimizer state from checkpoint")
 
         # Restore DORAEMON distribution state
         raw_env = self.env.unwrapped
@@ -208,6 +198,6 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         # Policy diagnostics
         metrics["Policy/line_search_success"] = alg._last_line_search_success
         metrics["Policy/entropy"] = alg._last_mean_entropy
-        metrics["Policy/pre_encoder_kl"] = alg._last_pre_encoder_kl
+        metrics["Policy/encoder_grad_norm"] = alg._last_encoder_grad_norm
 
         flush_metrics(self.writer, metrics, iteration, self.logger_type)

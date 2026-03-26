@@ -114,10 +114,6 @@ class RslRlConstraintTRPOAlgorithmCfg:
     # Noise floor
     min_std: float = 0.2
 
-    # Encoder update
-    num_encoder_epochs: int = 5
-    encoder_lr: float = 3e-4
-
 
 # =============================================================================
 # Runner Configuration
