@@ -42,38 +42,25 @@ class ALBCRewardCfg:
     """ALBC reward configuration: 3-term architecture.
 
     Active terms (all dt-scaled):
-        command    (+5.0): attitude tracking (exponential, quadratic, or laplacian)
+        command    (-5.0): cr*e_r^2 + cp*e_p^2 quadratic tracking penalty
         smoothness (-0.5): mean(da^2) + mean(d2a^2) action smoothness
-        torque     (-0.001): mean(tau^2) joint torque penalty
+        torque     (-0.0001): mean(tau^2) joint torque penalty
     """
 
-    # Command tracking reward
-    command_weight: float = 5.0
-    command_type: str = "exponential"
-    """Reward type:
-    "exponential" = exp(-cr*e_r^2) + exp(-cp*e_p^2), per-axis Gaussian sum.
-        Bounded [0, 2]. Direct coefficient controls Gaussian width.
-        c = 1/sigma^2. Larger c = tighter (stronger gradient near zero, shorter reach).
-    "quadratic" = -(e_r^2 + e_p^2). Gradient weakens near zero.
-    "laplacian" = exp(-cr*|e_r|) + exp(-cp*|e_p|). Per-axis summed.
-    "min_laplacian" = min per axis. Worst axis drives reward.
-    "smooth_min_laplacian" = soft-min via LogSumExp (alpha=5, differentiable)."""
+    # Command tracking penalty (negative weight: minimizes error)
+    command_weight: float = -5.0
 
-    command_coeff_roll: float = 5.0
-    """Roll axis coefficient in exponent. exp(-cr * e_r^2).
-    c=5: gradient peak at ~14 deg, reward 50% at ~21 deg.
-    Reach alive at 43 deg (reward=0.06), strong equalization incentive."""
+    command_coeff_roll: float = 1.0
+    """Roll axis quadratic coefficient. Gradient = 2*cr*e_r (never vanishes)."""
 
-    command_coeff_pitch: float = 7.5
-    """Pitch axis coefficient in exponent. exp(-cp * e_p^2).
-    c=7.5: 1.5x roll coefficient (paper pattern for harder axis).
-    Gradient peak at ~12 deg, reward 50% at ~17 deg."""
+    command_coeff_pitch: float = 1.5
+    """Pitch axis quadratic coefficient. 1.5x roll for tighter tracking."""
 
     # Action smoothness: first + second order action difference
     smoothness_weight: float = -0.5
 
     # Joint torque penalty: penalizes computed torque magnitude
-    torque_weight: float = -0.001
+    torque_weight: float = -0.0001
     """Joint torque penalty weight. Small magnitude for energy efficiency.
     Constraint enforcement handled by barrier system with proper headroom."""
 
@@ -196,41 +183,22 @@ class RewardManager:
 def command_reward(
     _robot: Articulation,
     env: ALBCEnv,
-    command_type: str = "exponential",
-    coeff_roll: float = 5.0,
-    coeff_pitch: float = 7.5,
+    coeff_roll: float = 1.0,
+    coeff_pitch: float = 1.5,
     **_kwargs,
 ) -> torch.Tensor:
-    """Attitude tracking reward with selectable kernel.
+    """Attitude tracking penalty: weighted quadratic per axis.
 
-    Exponential (paper form): exp(-cr*e_r^2) + exp(-cp*e_p^2).
-        Per-axis Gaussian sum. Bounded [0, 2]. Direct coefficient form --
-        larger coefficient = tighter tracking (stronger near-zero gradient).
-        Paper uses 1.0 for easy axis, 1.5 for harder axis.
-    Quadratic: -(e_r^2 + e_p^2). Gradient = -2e, weakens near zero.
-    Laplacian: exp(-cr*|e_r|) + exp(-cp*|e_p|). Per-axis summed.
-    Min-Laplacian: min(exp(-cr*|e_r|), exp(-cp*|e_p|)). Worst axis drives reward.
+    Returns cr*e_r^2 + cp*e_p^2 (positive). Use with negative weight.
+    Gradient = 2c*e (never vanishes, linear in error).
 
     Args:
         env: Environment instance (provides _attitude_error).
-        command_type: "exponential", "quadratic", "laplacian", or "min_laplacian".
-        coeff_roll: Roll axis coefficient in exponent.
-        coeff_pitch: Pitch axis coefficient in exponent.
+        coeff_roll: Roll axis quadratic coefficient.
+        coeff_pitch: Pitch axis quadratic coefficient (1.5x roll for tighter tracking).
     """
     err_rp = env._attitude_error[:, :2]
-    if command_type == "exponential":
-        return torch.exp(-coeff_roll * err_rp[:, 0] ** 2) + torch.exp(-coeff_pitch * err_rp[:, 1] ** 2)
-    coeff = torch.tensor([coeff_roll, coeff_pitch], device=err_rp.device)
-    if command_type == "smooth_min_laplacian":
-        per_axis = torch.exp(-coeff * err_rp.abs())
-        alpha = 5.0
-        return -torch.logsumexp(-alpha * per_axis, dim=-1) / alpha
-    if command_type == "min_laplacian":
-        per_axis = torch.exp(-coeff * err_rp.abs())
-        return per_axis.min(dim=-1).values
-    if command_type == "laplacian":
-        return torch.exp(-coeff * err_rp.abs()).sum(dim=-1)
-    return -(err_rp[:, 0] ** 2 + err_rp[:, 1] ** 2)
+    return coeff_roll * err_rp[:, 0] ** 2 + coeff_pitch * err_rp[:, 1] ** 2
 
 
 def action_smoothness_penalty(

@@ -553,16 +553,20 @@ class ConstraintTRPO:
         # Detach constants for the barrier (only cost_surrs depend on theta)
         barrier_base = adaptive_d_k - mean_cost_returns  # (K,) static part of margin
 
+        # Violation-severity barrier weights: amplifies gradient for violated constraints.
+        # w_k = max(1, J_C_k / d_k). Satisfied constraints get w_k=1 (unchanged).
+        barrier_weights = (mean_cost_returns / self.d_k.clamp(min=1e-8)).clamp(min=1.0)  # (K,)
+
         def surrogate() -> torch.Tensor:
             self.policy.act(obs_flat)
             log_prob = self.policy.get_actions_log_prob(actions_flat)
             ratio = torch.exp(log_prob - old_lp_sq)
             # Reward surrogate (minimization: negative improvement)
             reward_surr = -(adv_sq * ratio).mean()
-            # Log barrier: minimize -sum_k log(margin_k) / t
+            # Log barrier: minimize -sum_k w_k * log(margin_k) / t
             cost_surrs = (ratio.unsqueeze(-1) * cost_advantages_flat).mean(dim=0)  # (K,)
             margin = barrier_base - cost_surrs  # (K,)
-            barrier = -torch.log(margin.clamp(min=1e-8)).sum() / self._barrier_t
+            barrier = -(barrier_weights * torch.log(margin.clamp(min=1e-8))).sum() / self._barrier_t
             self._last_barrier_penalty = barrier.item()
             # Entropy bonus: maximize entropy (negative in minimization objective)
             mean_entropy = self.policy.entropy.mean()
@@ -594,7 +598,7 @@ class ConstraintTRPO:
             reward_surr = -(adv_sq * ratio).mean()
             cost_surrs = (ratio.unsqueeze(-1) * cost_advantages_flat).mean(dim=0)
             margin = barrier_base - cost_surrs
-            std_barrier = -torch.log(margin.clamp(min=1e-8)).sum() / self._barrier_t
+            std_barrier = -(barrier_weights * torch.log(margin.clamp(min=1e-8))).sum() / self._barrier_t
             std_loss = reward_surr + std_barrier
             # Compute gradient only for std params (avoid wasteful actor/encoder grads)
             std_grads = torch.autograd.grad(std_loss, self._std_params)

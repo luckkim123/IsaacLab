@@ -4,6 +4,56 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-26] Quadratic reward + violation-proportional barrier weights
+
+### Context
+Diagnosed the "one-axis collapse" problem: EE position mode run `2026-03-26_10-47-16`
+showed pitch converging to 6.5 deg while roll diverged to 49 deg -- the EXACT INVERSE
+of joint velocity mode runs (roll 8 deg, pitch 20 deg). The pattern was consistent:
+whichever axis learned first monopolized the optimizer, and the other axis never recovered.
+
+Deep analysis of the TRPO gradient dynamics revealed the root cause was NOT the optimizer
+but the reward function: `exp(-c*e^2)` has vanishing gradient at large errors (>40 deg,
+gradient falls to 1.8% of peak). Combined with TRPO's shared KL budget, the axis with
+stronger gradient consumed 99% of the update budget. This created a race condition: the
+weak axis's update rate was slower than its physical drift rate, causing permanent divergence.
+
+Key insight from cross-system comparison: quadruped locomotion systems NEVER have this
+problem because they use quadratic (`-e^2`) or linear (`-|e|`) penalties whose gradients
+NEVER vanish. The gradient ratio between axes is constant (cp/cr) at all error levels,
+preventing KL budget starvation. Per-axis advantage decomposition was considered but
+rejected as over-engineering -- the real fix is using the right reward function.
+
+Also identified why 3 constraints (joint_torque, joint_vel_limit, yaw_vel) were diverging:
+the adaptive barrier threshold `d_k^i = max(d_k, J_C_k + alpha*d_k)` produces a CONSTANT
+margin `alpha*d_k` when over budget, giving CONSTANT barrier gradient regardless of violation
+severity. With reward gradient at 2.12 vs barrier gradient at 0.05 (ratio 42:1), the
+reward always won.
+
+### Changed
+- `mdp/rewards.py`: Replaced exponential reward `exp(-c*e^2)` with quadratic penalty
+  `c*e^2` (positive output, used with negative weight). Gradient = 2*c*e (linear in error,
+  never vanishes). Pitch/roll gradient ratio = cp/cr = 1.5 (constant at all error levels).
+  command_weight changed from +5.0 to -5.0, coeff_roll 5.0 -> 1.0, coeff_pitch 7.5 -> 1.5.
+  Default torque_weight synced to -0.0001 (was -0.001 in default, already -0.0001 in config).
+- `config.py`: Updated ALBCRewardCfg instantiation to match new quadratic defaults
+- `albc_env.py`: Removed `command_type` parameter from reward term params, updated docstring
+- `algorithms/constraint_trpo.py`: Added violation-proportional barrier weights
+  `w_k = max(1, J_C_k/d_k)`. Violated constraints get amplified barrier gradient proportional
+  to how far they exceed budget. Applied in both TRPO surrogate and sigma Adam step.
+  Satisfied constraints (w_k=1) are completely unchanged (backward compatible).
+
+### Removed
+- `mdp/rewards.py`: Deleted all non-exponential command_type variants (laplacian,
+  min_laplacian, smooth_min_laplacian, quadratic fallback). The exponential kernel was
+  also removed as part of the switch to quadratic. `command_type` config field deleted.
+
+### Notes
+- Quadratic reward is unbounded negative (larger error = more negative). Episode total at
+  20 deg both axes: ~-23 (vs old exponential ~+71). Termination penalty -10.0 is comparable.
+- Barrier weight growth is uncapped. If needed, `clamp(min=1.0, max=N)` can be added later.
+- The 1.5x pitch coefficient ratio preserved from old config (was 7.5/5.0 = 1.5).
+
 ## [2026-03-26] Add EE position action mode for constrained ALBC
 
 ### Context
