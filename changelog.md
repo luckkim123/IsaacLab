@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-26] Add gradient decomposition diagnostics to ConstraintTRPO
+
+### Context
+Post-bugfix run (2026-03-26_20-12-54, 429 iters) showed grad_norm still growing from
+O(3) to O(18K) with max 42M. Initial analysis assumed barrier gradient dominated, but
+surrogate decomposition revealed reward_surr spikes to 0.66 at high-grad iters (should
+be ~0 if ratio=1.0). This implies ratio deviates from 1.0 at the first surrogate call,
+which should not happen if policy params are unchanged since rollout. Root cause unclear
+-- added diagnostic logging to decompose gradient into reward vs barrier components and
+track ratio statistics to identify the exact source of gradient explosion.
+
+### Added
+- `algorithms/constraint_trpo.py`: Gradient decomposition in `_trpo_step()`: computes
+  reward-only gradient separately, derives barrier gradient by subtraction. Logs ratio
+  stats (mean/min/max), reward_surr value, and minimum barrier margin per iteration.
+- `runners/constraint_encoder_runner.py`: 7 diagnostic TB metrics (`Diag/reward_grad_norm`,
+  `Diag/barrier_grad_norm`, `Diag/ratio_mean`, `Diag/ratio_max`, `Diag/ratio_min`,
+  `Diag/reward_surr`, `Diag/margin_min`)
+
+### Notes
+- Diagnostics are temporary -- will be removed once root cause is identified
+- Key question to answer: is gradient explosion from reward gradient, barrier gradient, or both?
+- If ratio_mean deviates from 1.0, investigate EmpiricalNormalization drift (still enabled
+  on actor/encoder/critic despite memory claiming "fixed analytical" replacement)
+
 ## [2026-03-26] Fix 3 gradient explosion bugs in ConstraintTRPO
 
 ### Context

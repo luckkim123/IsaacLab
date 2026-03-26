@@ -231,4 +231,13 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         metrics["TRPO/encoder_grad_norm"] = alg._last_encoder_grad_norm
         metrics["TRPO/surrogate_loss"] = alg._last_surrogate_loss
 
+        # Gradient decomposition diagnostics
+        metrics["Diag/reward_grad_norm"] = getattr(alg, "_diag_reward_grad_norm", 0.0)
+        metrics["Diag/barrier_grad_norm"] = getattr(alg, "_diag_barrier_grad_norm", 0.0)
+        metrics["Diag/ratio_mean"] = getattr(alg, "_diag_ratio_mean", 1.0)
+        metrics["Diag/ratio_max"] = getattr(alg, "_diag_ratio_max", 1.0)
+        metrics["Diag/ratio_min"] = getattr(alg, "_diag_ratio_min", 1.0)
+        metrics["Diag/reward_surr"] = getattr(alg, "_diag_reward_surr", 0.0)
+        metrics["Diag/margin_min"] = getattr(alg, "_diag_margin_min", 0.0)
+
         flush_metrics(self.writer, metrics, iteration, self.logger_type)

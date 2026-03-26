@@ -559,6 +559,12 @@ class ConstraintTRPO:
         # Detach constants for the barrier (only cost_surrs depend on theta)
         barrier_base = adaptive_d_k - mean_cost_returns  # (K,) static part of margin
 
+        # Store references for gradient decomposition diagnostics
+        self._diag_old_lp = old_lp_sq
+        self._diag_adv = adv_sq
+        self._diag_actions = actions_flat
+        self._diag_obs = obs_flat
+
         def surrogate() -> torch.Tensor:
             self.policy.act(obs_flat)
             log_prob = self.policy.get_actions_log_prob(actions_flat)
@@ -575,6 +581,13 @@ class ConstraintTRPO:
             self._last_mean_entropy = mean_entropy.item()
             entropy_bonus = -self._entropy_coef * mean_entropy
             self._last_entropy_bonus = entropy_bonus.item()
+            # Diagnostics: ratio stats + per-component values
+            with torch.no_grad():
+                self._diag_ratio_mean = ratio.mean().item()
+                self._diag_ratio_max = ratio.max().item()
+                self._diag_ratio_min = ratio.min().item()
+                self._diag_reward_surr = reward_surr.item()
+                self._diag_margin_min = margin.min().item()
             return reward_surr + barrier + entropy_bonus
 
         ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate)
@@ -680,11 +693,38 @@ class ConstraintTRPO:
         surrogate_fn: Callable[[], torch.Tensor],
     ) -> bool:
         """Execute a single TRPO natural-gradient step."""
-        # 1. Compute loss + flat gradient
+        # 1. Compute loss + flat gradient (decomposed for diagnostics)
+        # -- Reward-only gradient (separate forward pass) --
+        self.policy.act(self._diag_obs)
+        _log_prob = self.policy.get_actions_log_prob(self._diag_actions)
+        _ratio = torch.exp(_log_prob - self._diag_old_lp)
+        _reward_surr = -(self._diag_adv * _ratio).mean()
+        g_reward = self._flat_grad(_reward_surr, self._policy_params, retain_graph=False)
+        self._diag_reward_grad_norm = g_reward.norm().item()
+
+        # -- Full surrogate (reward + barrier + entropy) --
         loss = surrogate_fn()
         self._last_surrogate_loss = loss.item()
         g = self._flat_grad(loss, self._policy_params, retain_graph=False)
         self._last_trpo_grad_norm = g.norm().item()
+
+        # -- Barrier gradient by subtraction --
+        self._diag_barrier_grad_norm = (g - g_reward).norm().item()
+
+        # -- Ratio diagnostics (from last surrogate call) --
+        logger.debug(
+            "DIAG iter=%d: grad=%.2e, g_reward=%.2e, g_barrier=%.2e, "
+            "ratio=[%.4f, %.4f, %.4f], reward_surr=%.4f, margin_min=%.4f",
+            self._iteration,
+            g.norm().item(),
+            g_reward.norm().item(),
+            (g - g_reward).norm().item(),
+            getattr(self, "_diag_ratio_min", 0.0),
+            getattr(self, "_diag_ratio_mean", 0.0),
+            getattr(self, "_diag_ratio_max", 0.0),
+            getattr(self, "_diag_reward_surr", 0.0),
+            getattr(self, "_diag_margin_min", 0.0),
+        )
 
         # Clip gradient norm before CG to prevent barrier-induced explosion.
         # Preserves direction; only caps magnitude.
