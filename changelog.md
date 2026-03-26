@@ -46,6 +46,50 @@ lack the natural smoothness of a PID controller.
 - Elbow-up IK convention (g2 >= 0) restricts joint space to half; may need revisiting
 - Proprio history includes prev_actions whose distribution changes between modes
 
+## [2026-03-26] Fix raw action storage for tanh squashing + barrier_t=100
+
+### Context
+Run 2026-03-26_16-55-58 (first tanh squashing run) showed arm freeze resolved -- arm was
+actively moving (act_size=0.91, act_rate=0.80, jnt_vel=3.49 vs previous 0.09). However,
+`TRPO/encoder_grad_norm` showed 34/248 iterations at `inf` (14%), with raw values reaching
+10^12 before grad clipping. `Constraint/barrier_penalty` also showed `-inf` values. TRPO
+grad norm reached millions. Surrogate loss spiked to -40+. All fundamentally broken.
+
+Root cause: `get_actions_log_prob()` was calling `atanh(actions.clamp(-0.999, 0.999))` to
+invert the tanh squashing, but this is numerically lossy. Example: raw=4.0 -> tanh=0.99933
+-> atanh=3.654 (not 4.0). When encoder shifts the distribution, the log_prob at the wrong
+raw value produces extreme importance sampling ratios: exp(log_prob_new - log_prob_old)
+reaching 10^6+, causing gradient explosion through the entire TRPO pipeline.
+
+The correct approach: store raw (pre-tanh) actions in the rollout buffer during collection,
+and use them directly for all log_prob/ratio computations. This eliminates the lossy atanh
+round-trip entirely. The tanh-squashed actions are still sent to the environment (bounded
+to (-1,1) for workspace mapping), but all probability computations use the exact raw values.
+
+Additionally, barrier_t increased from 50 to 100 (paper nominal). Three constraints were
+over budget (joint_torque 2.2x, joint_vel_limit 2.6x, yaw_vel 1.6x), causing barrier
+gradient spikes up to +1.29. At t=100, barrier gradient is halved: 1/(margin*100) vs
+1/(margin*50), reducing spike severity.
+
+### Changed
+- `encoder/actor_critic_encoder.py`: `act()` stores `last_raw_actions` (pre-tanh sample).
+  `get_actions_log_prob()` now expects raw actions directly -- atanh inversion removed entirely.
+- `algorithms/constraint_trpo.py`: Added `storage.raw_actions` tensor in `init_storage()`.
+  Collection stores raw actions alongside squashed actions. `update()` uses `raw_actions` for
+  all surrogate/ratio computations instead of squashed actions.
+- `algorithms/constraint_trpo.py`: `barrier_t` default 50.0 -> 100.0 (paper nominal)
+- `agents/rsl_rl_ppo_cfg.py`: `barrier_t` 50.0 -> 100.0, updated docstring
+
+### Fixed
+- `encoder/actor_critic_encoder.py`: Eliminated lossy atanh round-trip that caused importance
+  sampling ratio explosion (10^12) and gradient blow-up in TRPO surrogate and encoder update
+
+### Notes
+- Raw actions stored separately from squashed actions: env receives tanh(raw), storage keeps raw
+- `actions_flat` in update() is now raw (pre-tanh), not squashed -- all log_prob calls are exact
+- barrier_t=100 halves barrier gradient magnitude, reducing spike-induced instability
+- The `action_mean`/`action_std` properties still return raw Gaussian params (correct for KL)
+
 ## [2026-03-26] Add tanh squashing to actor output + expand workspace radius
 
 ### Context

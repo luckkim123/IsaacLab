@@ -257,12 +257,15 @@ class ActorCriticEncoder(nn.Module):
         This prevents unbounded actions from causing gradient death via workspace
         clamping in ee_position mode. The KL divergence and importance sampling
         ratio are invariant under this bijective transform (Jacobian cancels).
+
+        The raw (pre-tanh) sample is stored in ``last_raw_actions`` for exact log_prob
+        computation without lossy atanh inversion.
         """
         actor_obs = self.actor_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
         self._update_distribution(actor_obs)
         assert self.distribution is not None
-        self._raw_actions = self.distribution.sample()
-        return torch.tanh(self._raw_actions)
+        self.last_raw_actions = self.distribution.sample()
+        return torch.tanh(self.last_raw_actions)
 
     def act_inference(self, obs: TensorDict) -> torch.Tensor:
         """Get deterministic action (mean) for inference, bounded to (-1, 1)."""
@@ -275,17 +278,17 @@ class ActorCriticEncoder(nn.Module):
         return self.critic(critic_obs)
 
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
-        """Compute log probability of squashed actions under current distribution.
+        """Compute log probability of raw (pre-tanh) actions under current distribution.
 
-        Actions are tanh-squashed, so we invert via atanh to get the raw Gaussian
-        sample, then compute Gaussian log_prob. The Jacobian correction is NOT
-        needed here because the importance sampling ratio pi_new(a)/pi_old(a)
-        cancels the Jacobian terms (both use the same tanh transform).
+        Expects raw actions (before tanh squashing), NOT squashed actions.
+        Raw actions are stored in the rollout buffer during collection and
+        passed directly here, avoiding lossy atanh inversion entirely.
+
+        The Jacobian correction is NOT needed because the importance sampling
+        ratio pi_new(a)/pi_old(a) cancels the Jacobian terms (both use same tanh).
         """
         assert self.distribution is not None, "Call act() first to initialize distribution"
-        # Invert tanh: raw = atanh(action), clamped for numerical stability
-        raw = torch.atanh(actions.clamp(-0.999, 0.999))
-        return self.distribution.log_prob(raw).sum(dim=-1)
+        return self.distribution.log_prob(actions).sum(dim=-1)
 
     def update_normalization(self, obs: TensorDict) -> None:
         """Update observation normalization statistics."""

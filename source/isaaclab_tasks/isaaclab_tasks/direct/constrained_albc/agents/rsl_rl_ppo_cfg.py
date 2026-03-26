@@ -122,10 +122,10 @@ class RslRlConstraintTRPOAlgorithmCfg:
     line_search_kl_margin: float = 1.5
 
     # Log barrier constraint parameters (Modified IPO)
-    barrier_t: float = 50.0
-    """Barrier steepness parameter. Higher t = barrier activates only near boundary.
-    Barrier coefficient per constraint: 1/(t * margin). At t=50 with alpha=0.02,
-    barrier gradient for joint_vel_limit (d_k=10): 1/(50*0.2)=0.10 per step."""
+    barrier_t: float = 100.0
+    """Barrier steepness parameter (paper nominal t=100). Higher t = barrier activates
+    only near boundary. Barrier coefficient per constraint: 1/(t * margin). At t=100
+    with alpha=0.02, barrier gradient for joint_vel_limit (d_k=10): 1/(100*0.2)=0.05."""
 
     barrier_alpha: float = 0.02
     """Adaptive threshold expansion coefficient (NORBC Section IV-B-1).
