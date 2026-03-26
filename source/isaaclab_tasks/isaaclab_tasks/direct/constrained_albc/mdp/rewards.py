@@ -42,13 +42,13 @@ class ALBCRewardCfg:
     """ALBC reward configuration: 3-term architecture.
 
     Active terms (all dt-scaled):
-        command    (-5.0): cr*e_r^2 + cp*e_p^2 quadratic tracking penalty
+        command    (-1.0): cr*e_r^2 + cp*e_p^2 quadratic tracking penalty
         smoothness (-0.5): mean(da^2) + mean(d2a^2) action smoothness
         torque     (-0.0001): mean(tau^2) joint torque penalty
     """
 
     # Command tracking penalty (negative weight: minimizes error)
-    command_weight: float = -5.0
+    command_weight: float = -1.0
 
     command_coeff_roll: float = 1.0
     """Roll axis quadratic coefficient. Gradient = 2*cr*e_r (never vanishes)."""
