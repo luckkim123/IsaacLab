@@ -379,6 +379,16 @@ class ConstraintTRPO:
 
         cost_returns_flat = self.storage.cost_returns.flatten(0, 1).clone()
         cost_advantages_flat = self.storage.cost_advantages.flatten(0, 1).clone()
+
+        # Per-constraint cost advantage standardization (NORBC Sec IV-B).
+        # Equalizes gradient magnitude across constraints with different physical
+        # units/scales so barrier 1/margin_k provides proximity-based prioritization.
+        # Zero-mean ensures: positive A_Ck = worse than average, negative = better.
+        ca_std = cost_advantages_flat.std(dim=0, keepdim=True)
+        cost_advantages_flat = (cost_advantages_flat - cost_advantages_flat.mean(dim=0, keepdim=True)) / (
+            ca_std + 1e-8
+        )
+
         batch_size = obs_flat.batch_size[0]
 
         # Mean cost returns (clamped non-negative)

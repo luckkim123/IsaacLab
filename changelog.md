@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
+## [2026-03-27] Restore per-constraint cost advantage standardization (NORBC Sec IV-B)
+
+### Context
+Analysis of run `2026-03-27_01-15-43` (197 iters, post-1/(1-gamma) fix) revealed that while the
+barrier fix improved reward (2x), attitude error (38-55% better), and eliminated z saturation,
+3/4 constraints (torque, velocity, yaw_vel) remained deeply infeasible with margins stuck at the
+adaptive threshold floor (alpha*d_k).
+
+**Root cause:** Per-constraint cost advantage standardization was removed during the paper-aligned
+architecture overhaul (`8ba1827c`). Without it, constraints with different physical scales
+(binary 0/1 costs vs continuous |omega_z| costs) have vastly different gradient magnitudes.
+When deeply infeasible (e.g., 96% torque violation), the cost value function accurately predicts
+high costs, making raw cost advantages near-zero (A_Ck ≈ 0.04 for violating steps). This leaves
+the barrier gradient direction dominated by noise.
+
+**Paper reference (NORBC Sec IV-B):** The paper explicitly standardizes per-constraint cost
+advantages: `A_hat_Ck = (A_Ck - mu) / sigma` per constraint k. This equalizes gradient scale
+across constraints so barrier weight 1/(t*margin_k) provides proximity-based prioritization only.
+
+**Synergy with adaptive threshold:** Zero-mean standardization means positive A_Ck = worse than
+average cost, negative = better. Combined with adaptive d_k^i ensuring positive margin at ratio=1
+(since standardized mean=0 gives cost_surrs=0), the barrier remains well-defined while providing
+balanced gradient direction across all constraints.
+
+### Fixed
+- `algorithms/constraint_trpo.py`: Restored per-constraint cost advantage standardization in
+  `update()`. Was: raw `cost_advantages_flat`. Now: standardized per constraint
+  `(A_Ck - mean) / (std + 1e-8)`. Originally added in `332eff85`, removed in `8ba1827c`.
+
+### Notes
+- The 1/(1-gamma) factor (previous fix) and standardization serve complementary roles:
+  1/(1-gamma) provides correct barrier sensitivity to ratio changes; standardization
+  equalizes gradient magnitude across constraints
+- Run comparison (pre-fix vs post-fix): reward -78.80 -> -38.77, roll 29.20 -> 17.96 deg,
+  pitch 26.45 -> 11.91 deg, z_range [-0.99,0.99] -> [-0.53,0.40] (no saturation)
+- Encoder grad_norm 20-300 is expected: barrier amplifies by 1/(1-gamma)=100, encoder is
+  ~50% of policy params. Scalar gradient clipping preserves direction in TRPO.
+- z_std 0.08 -> 0.21 (steadily increasing) indicates genuine encoder learning
+
 ## [2026-03-27] Add missing 1/(1-gamma) factor to IPO barrier cost surrogate
 
 ### Context
