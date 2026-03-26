@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-26] Fix line search metric spike logging artifact in ConstraintTRPO
+
+### Context
+During constrained ALBC training, `barrier_penalty` and `entropy` metrics spiked
+sharply whenever line search failed. Investigation revealed this was a logging artifact,
+not a real policy instability. The `surrogate()` closure sets `_last_barrier_penalty` and
+`_last_mean_entropy` on every call. During backtracking line search (up to 10 attempts),
+each call to `surrogate()` with rejected candidate parameters overwrites these monitoring
+variables. On failure, `_line_search()` reverts policy params to `old_params`, but the
+monitoring vars retain the last rejected candidate's values -- often with inflated barrier
+penalty from near-constraint-boundary proposals. Literature confirms this is a known issue
+with interior point methods: log(margin) diverges as margin approaches zero (Boyd &
+Vandenberghe; Nocedal et al., SIAM 2008).
+
+### Fixed
+- `algorithms/constraint_trpo.py`: After line search failure, recalculate `surrogate()`
+  with reverted parameters so `_last_barrier_penalty` and `_last_mean_entropy` reflect
+  actual policy state, not rejected candidates
+
+### Notes
+- Only affects monitoring/logging -- actual policy update logic was already correct
+  (params properly reverted on failure, encoder update correctly gated on `ls_success`)
+- The structural causes of line search failure itself (adaptive threshold constant gradient,
+  TRPO scale invariance, barrier landscape ill-conditioning) remain separate issues
+
 ## [2026-03-26] Fix torque reward scaling + add dynamics logging
 
 ### Context

@@ -481,7 +481,14 @@ class ConstraintTRPO:
 
         with torch.no_grad():
             old_loss = surrogate_fn()
-        return self._line_search(obs_flat, old_mu_flat, old_sigma_flat, step_dir, old_loss, surrogate_fn)
+        ls_success = self._line_search(obs_flat, old_mu_flat, old_sigma_flat, step_dir, old_loss, surrogate_fn)
+        if not ls_success:
+            # Recalculate _last_barrier_penalty / _last_mean_entropy with reverted params.
+            # Line search calls surrogate() up to 10 times with rejected candidates,
+            # overwriting monitoring vars with values that don't reflect actual policy state.
+            with torch.no_grad():
+                surrogate_fn()
+        return ls_success
 
     def _update_encoder(
         self,
