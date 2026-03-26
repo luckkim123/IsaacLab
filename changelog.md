@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
+## [2026-03-27] Fix torque constraint: computed_torque -> applied_torque
+
+### Context
+Analysis of run `2026-03-27_01-51-47` (200 iters, post-standardization + alpha=0.05) revealed that
+torque and velocity cost_returns were not improving -- in fact worsening (torque: 30.7 -> 98.7,
+velocity: 28.3 -> 88.3) while reward also degraded (-9.2 -> -30.6).
+
+**Root cause:** `torque_limit_cost()` checked `_robot.data.computed_torque` (PD controller output
+BEFORE actuator clamping) against limit=9.5 Nm. With Kp=100 and ImplicitActuator, computed_torque
+ranges 326-554 Nm -- always exceeding 9.5 Nm on every step, making the constraint 100% violated
+and fundamentally unsatisfiable.
+
+**Evidence:**
+- `computed_torque_abs_max`: 326-554 Nm (always >> 9.5 Nm limit)
+- `applied_torque_abs_max`: 12.0-12.5 Nm (post-clamp by effort_limit_sim=13 Nm)
+- `effort_saturation_frac`: 78-95% (PD almost always requests more than actuator can deliver)
+- Torque violation rate: ~100% (every step), budget: 20% -> unsatisfiable by 5x
+
+**Impact on training:** The unsatisfiable constraint created constant barrier gradient at the
+alpha*d_k floor margin. This gradient:
+1. Provided no directional information (100% vs 99% violation = same barrier pressure)
+2. Dominated reward signal (barrier:reward ratio still ~4:1 even after alpha fix)
+3. Pushed exploration down (noise_std 0.61 -> 0.41, entropy 0.73)
+4. Caused encoder grad_norm spikes (19680 at iter 156) when cost_surrs pushed margin to clamp floor
+
+**Asset spec:** Hero Agent ALBC arm uses effort_limit_sim=13.0 Nm (PhysX hard cap, above motor
+stall torque 9.5 Nm). The constraint should measure actual motor output (applied_torque), not
+the PD controller's unbounded internal computation. The reward `joint_torque` already correctly
+uses `applied_torque`.
+
+### Fixed
+- `mdp/constraints.py`: `torque_limit_cost()` now uses `_robot.data.applied_torque` instead of
+  `_robot.data.computed_torque`. With applied_torque, violation is achievable (~70-80% initially)
+  and decreases as the policy learns smoother control, providing actionable barrier gradient.
+
+### Notes
+- Velocity constraint (limit=4.189 rad/s) is correct: checks actual joint_vel against real motor
+  max speed. 91% violation rate is high but physically achievable, not a metric error.
+- With torque constraint fixed, barrier gradient should focus on velocity + yaw_vel, allowing
+  reward (especially torque/smoothness components) to improve.
+- Encoder grad_norm spikes should reduce: the constant noise from the unsatisfiable torque
+  constraint was a major source of barrier gradient instability.
+
 ## [2026-03-27] Increase barrier_alpha to reduce barrier-to-reward gradient imbalance
 
 ### Context

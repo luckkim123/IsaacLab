@@ -80,9 +80,14 @@ def torque_limit_cost(
     env: ALBCEnv,
     limit_nm: float = 9.5,
 ) -> torch.Tensor:
-    """C_jt: I(any |tau_j| > tau_max). Maps to paper's c_jt (joint torque limit)."""
-    computed = _robot.data.computed_torque[:, env._albc_joint_ids]
-    return (computed.abs() > limit_nm).any(dim=-1).float()
+    """C_jt: I(any |tau_j| > tau_max). Maps to paper's c_jt (joint torque limit).
+
+    Uses applied_torque (post-actuator-clamp) rather than computed_torque (pre-clamp)
+    because computed_torque from the PD controller is unbounded (Kp*error can be 500+ Nm)
+    while the physical motor output is limited by the actuator effort_limit.
+    """
+    applied = _robot.data.applied_torque[:, env._albc_joint_ids]
+    return (applied.abs() > limit_nm).any(dim=-1).float()
 
 
 def velocity_limit_cost(
