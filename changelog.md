@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
+## [2026-03-27] Step 4d: history-only PPO succeeds, entropy_coef=0.0 improves exploration
+
+### Context
+Step 4d (PPO + History + DR, no encoder) confirmed that encoder is the sole cause of
+LR death. With 254D input (14D policy + 240D history), standard PPO converges to
+roll=3.6, pitch=3.3 deg -- nearly identical to Step 1 (PPO+DR, 14D input, 3.5/3.3 deg).
+
+However, noise_std plateaued at 0.81 (vs Step 1's 0.45) and was rising. Root cause:
+entropy_coef=0.01 pushes sigma up while LR death prevents the advantage gradient from
+pushing it down. Setting entropy_coef=0.0 (matching HORA) resolved this:
+
+| Metric | 4d (ent=0.01) | 4d (ent=0.0) |
+|--------|---------------|--------------|
+| roll | 3.57 | 3.03 |
+| pitch | 3.27 | 3.83 |
+| reward | -6.71 | -5.57 |
+| noise_std | 0.81 (rising) | 0.20 (falling) |
+| act_size | 1.10 | 0.33 |
+
+With ent=0.0, noise_std drops continuously from 1.0 to 0.20, action size shrinks 3x,
+and reward improves from -6.7 to -5.6 due to lower torque/smoothness penalties.
+
+### Added
+- `agents/rsl_rl_ppo_cfg.py`: `_PPOHistOnlyAlgorithmCfg` with `entropy_coef=0.0`,
+  dedicated algo config for Step 4d (avoids modifying shared `_DebugAlgorithmCfg`)
+
+### Notes
+- noise_std=0.20 triggered LOW warning -- may need min_std floor if it drops further
+- Step 4d proves: 254D input works fine, encoder integration is the problem
+- entropy_coef=0.0 should be the default for future encoder experiments
+- Next: either restructure encoder (HORA-style env_mlp inside actor) or combine
+  effective ablation variables (ent=0 + val_norm + higher LR) with encoder
+
+---
+
 ## [2026-03-27] HORA-informed ablation: encoder confirmed as LR death root cause
 
 ### Context

@@ -353,6 +353,25 @@ class ALBCDebugPPOEncoderHistRunnerCfg(RslRlOnPolicyRunnerCfg):
 
 
 @configclass
+class _PPOHistOnlyAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """PPO for history-only ablation."""
+
+    class_name: str = "PPO"
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 3e-4
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    entropy_coef: float = 0.0
+    desired_kl: float = 0.01
+    max_grad_norm: float = 1.0
+    value_loss_coef: float = 1.0
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+
+
+@configclass
 class ALBCDebugPPOHistOnlyRunnerCfg(RslRlOnPolicyRunnerCfg):
     """Step 4d: PPO + History + DR (NO encoder). Tests if encoder is the problem."""
 
@@ -366,5 +385,5 @@ class ALBCDebugPPOHistOnlyRunnerCfg(RslRlOnPolicyRunnerCfg):
         "critic": ["policy", "proprio_hist"],
     }
 
-    algorithm = _DebugAlgorithmCfg()
+    algorithm = _PPOHistOnlyAlgorithmCfg()
     policy = _DebugPolicyCfg()
