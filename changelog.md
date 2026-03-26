@@ -4,6 +4,67 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-26] Switch to delta EE action mode: fix arm freeze root cause
+
+### Context
+Systematic root cause analysis of arm freeze across all ee_position runs revealed the
+fundamental issue is not tanh squashing or barrier tuning, but the **action parameterization
+itself**. In absolute ee_position mode, max extension = max restoring torque, so the
+physical optimum lies at the action boundary (action_size=1.41 = sqrt(2), both axes
+at tanh saturation). At the boundary (pre-tanh mu~2.65):
+- g2_std = 0.00 deg (literally zero joint diversity from sampling)
+- EE position range = 0.022m (2.2cm out of 0.92m workspace)
+- All sampled actions produce identical physical outcomes -> advantage = noise
+- TRPO gradient has no directional signal -> policy frozen permanently
+
+This is a **structural trap**: no gradient-based method can escape because the reward
+surface is flat in the sampled action region. Sigma optimizer compounds the problem by
+monotonically reducing noise_std (1.0->0.46, never increases) since boundary dynamics
+make variance reduction always "locally optimal". Smoothness penalty (weight=-0.5)
+accelerates trap entry by penalizing action changes, collapsing act_rate from 1.18 to
+0.05 within 80 iterations.
+
+Analysis of RSL-RL, HORA, Isaac Lab Factory, and hero_agent revealed that ALL working
+systems use delta/velocity actions where optimal steady-state = action(0,0) = center of
+action space. No system uses absolute EE position with TRPO.
+
+Solution: delta EE mode where actions specify EE displacement per control step, not
+absolute position. Current EE computed via FK, delta added, then IK + rate limiting.
+Simultaneously removed tanh squashing (unnecessary with centered action space) and
+reduced smoothness penalty 10x.
+
+Smoke test (10 iter, 64 envs) confirmed: action_size_mean=0.74 (not boundary-saturated),
+action_rate_mean=0.74 (active movement). Previous runs always showed 1.41/0.00.
+
+### Added
+- `albc_env.py`: `_compute_ee_position()` FK helper method (joint angles -> EE xy)
+- `albc_env.py`: `_apply_ee_delta_action()` method: FK(current joints) + scaled delta + IK + rate limit
+- `config.py`: `ee_delta_scale: float = 0.02` (0.02m/step at 50Hz = 1.0 m/s max)
+- `docs/arm-freeze-analysis.md`: Complete root cause analysis document with 6 hypotheses, 5 analysis tracks, numerical evidence
+
+### Changed
+- `config.py`: `action_mode` default "ee_position" -> "ee_delta", docstring updated for 3 modes
+- `config.py`: `smoothness_weight` -0.5 -> -0.05 (H2: stillness attractor trigger, 10x reduction)
+- `albc_env.py`: `_pre_physics_step()` dispatch now handles "ee_delta" mode
+- `albc_env.py`: `_reset_action_buffers()` refactored to use `_compute_ee_position()` for FK; ee_delta uses zero init (action=0 = hold position)
+- `encoder/actor_critic_encoder.py`: `act()` removed tanh squashing, replaced with `.clamp(-1, 1)`
+- `encoder/actor_critic_encoder.py`: `act_inference()` removed tanh, replaced with `.clamp(-1, 1)`
+- `encoder/actor_critic_encoder.py`: `get_actions_log_prob()` docstring updated (no more raw/squashed distinction)
+- `algorithms/constraint_trpo.py`: Removed `storage.raw_actions` (no longer needed without tanh)
+- `algorithms/constraint_trpo.py`: `act()` simplified: uses clipped actions directly for log_prob
+- `algorithms/constraint_trpo.py`: `update()` uses `storage.actions` instead of `storage.raw_actions`
+
+### Removed
+- `encoder/actor_critic_encoder.py`: `last_raw_actions` attribute (tanh removed, no raw/squashed split)
+- `algorithms/constraint_trpo.py`: `storage.raw_actions` tensor and all raw action handling
+
+### Notes
+- ee_delta_scale=0.02m at 50Hz: full workspace traverse (~0.46m) in ~0.46s at max action
+- entropy_coef stays at 0; consider 0.001-0.01 if sigma still collapses in delta mode
+- torque_weight (-0.001) kept unchanged; review if delta mode training shows issues
+- H4 (constraint implicit stillness) was REJECTED: barrier gradient only 15% of TRPO total
+- Full analysis: `constrained_albc/docs/arm-freeze-analysis.md`
+
 ## [2026-03-26] Fix ee_position mode: rate limiting + reset initialization + quadratic reward
 
 ### Context

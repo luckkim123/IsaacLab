@@ -219,19 +219,26 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     joint_init_mode: str = "random"  # "equilibrium" or "random"
     equilibrium_joint_noise: tuple[float, float] = (-0.3, 0.3)  # rad, noise around equilibrium
 
-    # Action mode: "joint_velocity" (legacy) or "ee_position" (IK-based)
-    action_mode: str = "ee_position"
+    # Action mode: "joint_velocity" (legacy), "ee_position", or "ee_delta"
+    action_mode: str = "ee_delta"
     """Action interpretation:
     "joint_velocity": actions are joint velocity commands, integrated to position targets.
-    "ee_position": actions are desired EE position (x, y) in body frame, converted to
-        joint angles via analytical 2-link IK. Provides a more natural action space
-        since buoy (x, y) maps directly to (pitch, roll) torque."""
+    "ee_position": actions are absolute EE position (x, y) in body frame, via IK.
+    "ee_delta": actions are EE displacement (dx, dy) per control step. Current EE
+        is computed via FK, delta is added, then converted to joint targets via IK.
+        Optimal steady-state is action=(0,0), avoiding tanh boundary saturation."""
 
     workspace_radius: float = 0.461
-    """Maximum EE reach for action scaling (meters). Actions in (-1, 1) from tanh-squashed
-    actor are scaled to (-workspace_radius, workspace_radius). Set to kinematic limit
-    minus small margin (L1+L2-0.005 = 0.461m) so tanh output covers the full workspace.
-    IK singularity at full extension is avoided by the workspace clamp safety net."""
+    """Maximum EE reach (meters). Used by ee_position mode for action scaling and
+    by ee_delta mode for workspace clamping. Set to kinematic limit minus small
+    margin (L1+L2-0.005 = 0.461m). IK singularity at full extension is avoided
+    by the workspace clamp safety net."""
+
+    ee_delta_scale: float = 0.02
+    """Per-control-step EE displacement scale (meters) for ee_delta mode. Actions
+    in [-1, 1] are scaled by this value. At 50Hz control (control_decimation=4),
+    action=1.0 moves EE by 0.02m/step = 1.0 m/s max velocity. Full workspace
+    traverse (~0.46m) takes ~0.46s at max action."""
 
     # EMA alpha for constraint system joint velocity filtering
     ema_joint_vel_alpha: float = 0.2
@@ -249,7 +256,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
         command_type="quadratic",
         command_coeff_roll=5.0,
         command_coeff_pitch=7.5,
-        smoothness_weight=-0.5,
+        smoothness_weight=-0.05,
         torque_weight=-0.001,
     )
 

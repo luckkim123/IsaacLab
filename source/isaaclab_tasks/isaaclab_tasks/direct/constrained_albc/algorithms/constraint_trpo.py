@@ -248,9 +248,6 @@ class ConstraintTRPO:
         self.storage.cost_values = torch.zeros(T, N, K, device=self.device)
         self.storage.cost_returns = torch.zeros(T, N, K, device=self.device)
         self.storage.cost_advantages = torch.zeros(T, N, K, device=self.device)
-        # Raw (pre-tanh) actions for exact log_prob without lossy atanh inversion
-        A = actions_shape[0] if isinstance(actions_shape, (tuple, list)) else actions_shape
-        self.storage.raw_actions = torch.zeros(T, N, A, device=self.device)
         # Pre-allocated zero costs buffer (avoids per-step GPU allocation in process_env_step)
         self._zero_costs = torch.zeros(N, K, device=self.device)
 
@@ -258,18 +255,15 @@ class ConstraintTRPO:
         if self.policy.is_recurrent:
             self.transition.hidden_states = self.policy.get_hidden_states()
 
-        # act() returns tanh-squashed actions for the environment, but also stores
-        # pre-tanh raw actions in policy.last_raw_actions for exact log_prob.
+        # act() returns clipped actions for the environment.
         self.transition.actions = self.policy.act(obs).detach()
         self.transition.values = self.policy.evaluate(obs).detach()
-        # Compute log_prob using raw (pre-tanh) actions to avoid lossy atanh inversion.
-        raw_actions = self.policy.last_raw_actions.detach()
-        self.transition.actions_log_prob = self.policy.get_actions_log_prob(raw_actions).detach()
+        self.transition.actions_log_prob = self.policy.get_actions_log_prob(
+            self.transition.actions
+        ).detach()
         self.transition.action_mean = self.policy.action_mean.detach()
         self.transition.action_sigma = self.policy.action_std.detach()
         self.transition.observations = obs
-        # Store raw actions for surrogate computation during update.
-        self.transition.raw_actions = raw_actions
 
         # Store cost values for this step
         self._current_cost_values = self.policy.evaluate_costs(obs).detach()
@@ -306,10 +300,7 @@ class ConstraintTRPO:
         self.storage.cost_values[step] = self._current_cost_values
 
         # Record the transition (add_transitions increments step)
-        raw_act = self.transition.raw_actions
         self.storage.add_transitions(self.transition)
-        # Store raw (pre-tanh) actions manually (not handled by RolloutStorage)
-        self.storage.raw_actions[step] = raw_act
         self.transition.clear()
         self.policy.reset(dones)
 
@@ -515,7 +506,7 @@ class ConstraintTRPO:
         # Flatten storage (clone to escape inference_mode)
         obs_flat = self.storage.observations.flatten(0, 1).clone()
         # Use raw (pre-tanh) actions for log_prob to avoid lossy atanh inversion
-        actions_flat = self.storage.raw_actions.flatten(0, 1).clone()
+        actions_flat = self.storage.actions.flatten(0, 1).clone()
         returns_flat = self.storage.returns.flatten(0, 1).clone()
         advantages_flat = self.storage.advantages.flatten(0, 1).clone()
 

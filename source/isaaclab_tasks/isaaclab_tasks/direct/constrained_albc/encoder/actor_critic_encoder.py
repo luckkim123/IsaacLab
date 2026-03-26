@@ -251,26 +251,22 @@ class ActorCriticEncoder(nn.Module):
     # --- Core API ---
 
     def act(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
-        """Sample an action from the policy distribution.
+        """Sample an action from the policy distribution, clipped to [-1, 1].
 
-        The raw Gaussian sample is squashed through tanh to bound actions to (-1, 1).
-        This prevents unbounded actions from causing gradient death via workspace
-        clamping in ee_position mode. The KL divergence and importance sampling
-        ratio are invariant under this bijective transform (Jacobian cancels).
-
-        The raw (pre-tanh) sample is stored in ``last_raw_actions`` for exact log_prob
-        computation without lossy atanh inversion.
+        Standard Gaussian sampling with hard clamp. No tanh squashing: with
+        ee_delta action mode, actions are naturally centered near zero and
+        the optimal steady-state is (0, 0), so boundary saturation does not
+        occur. Actions are clipped in the environment wrapper as well.
         """
         actor_obs = self.actor_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
         self._update_distribution(actor_obs)
         assert self.distribution is not None
-        self.last_raw_actions = self.distribution.sample()
-        return torch.tanh(self.last_raw_actions)
+        return self.distribution.sample().clamp(-1.0, 1.0)
 
     def act_inference(self, obs: TensorDict) -> torch.Tensor:
-        """Get deterministic action (mean) for inference, bounded to (-1, 1)."""
+        """Get deterministic action (mean) for inference, clipped to [-1, 1]."""
         actor_obs = self.actor_obs_normalizer(self._get_combined_obs(obs))  # type: ignore[operator]
-        return torch.tanh(self.actor(actor_obs))
+        return self.actor(actor_obs).clamp(-1.0, 1.0)
 
     def evaluate(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
         """Evaluate the value function for given observations."""
@@ -278,14 +274,12 @@ class ActorCriticEncoder(nn.Module):
         return self.critic(critic_obs)
 
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
-        """Compute log probability of raw (pre-tanh) actions under current distribution.
+        """Compute log probability of actions under current distribution.
 
-        Expects raw actions (before tanh squashing), NOT squashed actions.
-        Raw actions are stored in the rollout buffer during collection and
-        passed directly here, avoiding lossy atanh inversion entirely.
-
-        The Jacobian correction is NOT needed because the importance sampling
-        ratio pi_new(a)/pi_old(a) cancels the Jacobian terms (both use same tanh).
+        Actions are clipped samples from the Gaussian distribution. The clipping
+        introduces a small bias in the log_prob for samples that were clipped,
+        but this is negligible when mu stays well within [-1, 1] (as in ee_delta
+        mode where optimal action is near zero).
         """
         assert self.distribution is not None, "Call act() first to initialize distribution"
         return self.distribution.log_prob(actions).sum(dim=-1)

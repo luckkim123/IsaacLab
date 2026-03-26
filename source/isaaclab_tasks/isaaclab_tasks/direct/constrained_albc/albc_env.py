@@ -28,8 +28,9 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse
 
-from isaaclab_assets.robots.uuv import HERO_AGENT_ALBC_LINK1_LENGTH, HERO_AGENT_ALBC_LINK2_LENGTH
 from isaaclab_tasks.models import HydrodynamicsModel
+
+from isaaclab_assets.robots.uuv import HERO_AGENT_ALBC_LINK1_LENGTH, HERO_AGENT_ALBC_LINK2_LENGTH
 
 from .config import ALBCEnvCfg
 
@@ -586,6 +587,8 @@ class ALBCEnv(DirectRLEnv):
 
             if self.cfg.action_mode == "ee_position":
                 self._apply_ee_position_action(effective_actions)
+            elif self.cfg.action_mode == "ee_delta":
+                self._apply_ee_delta_action(effective_actions)
             else:
                 # Legacy: integrate velocity to position
                 control_dt = self.step_dt * self.cfg.control_decimation
@@ -596,6 +599,20 @@ class ALBCEnv(DirectRLEnv):
                     self._joint_limits_lower,
                     self._joint_limits_upper,
                 )
+
+    def _compute_ee_position(self, joint_pos: torch.Tensor) -> torch.Tensor:
+        """Forward kinematics: joint angles (g1, g2) -> EE position (x, y) in body frame.
+
+        Args:
+            joint_pos: Joint angles, shape (N, 2) with columns [g1, g2].
+
+        Returns:
+            EE position (x, y) in body frame, shape (N, 2).
+        """
+        g1, g2 = joint_pos[:, 0], joint_pos[:, 1]
+        x = _L1 * torch.cos(g1) + _L2 * torch.cos(g1 + g2)
+        y = _L1 * torch.sin(g1) + _L2 * torch.sin(g1 + g2)
+        return torch.stack([x, y], dim=-1)
 
     def _apply_ee_position_action(self, actions: torch.Tensor) -> None:
         """Convert EE position actions to joint targets via analytical 2-link IK.
@@ -635,6 +652,53 @@ class ALBCEnv(DirectRLEnv):
         # Rate-limit joint target: clamp delta to max_joint_velocity * control_dt.
         # This matches the implicit rate limit in joint_velocity mode and prevents
         # large joint angle jumps during exploration.
+        ik_target = torch.stack([g1, g2], dim=-1)
+        delta = ik_target - self._joint_pos_targets
+        delta = torch.atan2(torch.sin(delta), torch.cos(delta))  # shortest path
+        control_dt = self.step_dt * self.cfg.control_decimation
+        max_delta = self.cfg.max_joint_velocity * control_dt
+        delta = torch.clamp(delta, -max_delta, max_delta)
+        self._joint_pos_targets += delta
+
+    def _apply_ee_delta_action(self, actions: torch.Tensor) -> None:
+        """Convert delta EE actions to joint targets via FK + IK.
+
+        Actions in [-1, 1]^2 are scaled to EE displacement (dx, dy), added to
+        the current EE position (computed via FK from actual joint positions),
+        then converted to joint targets via the same IK and rate-limiting as
+        ee_position mode. Optimal steady-state action is (0, 0) = hold position.
+
+        Args:
+            actions: Normalized EE delta commands [-1, 1]. Shape: (num_envs, 2).
+        """
+        # Current EE position via FK from actual joint positions
+        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
+        ee_current = self._compute_ee_position(joint_pos)
+
+        # Desired EE = current + scaled delta
+        S = self.cfg.ee_delta_scale
+        x_des = ee_current[:, 0] + actions[:, 0] * S
+        y_des = ee_current[:, 1] + actions[:, 1] * S
+
+        # Clamp radius to avoid IK singularity at full extension
+        r_sq = x_des**2 + y_des**2
+        r_max = _L1 + _L2 - 0.005
+        r_max_sq = r_max**2
+        over = r_sq > r_max_sq
+        if over.any():
+            scale = torch.sqrt(r_max_sq / r_sq.clamp(min=1e-8))
+            x_des = torch.where(over, x_des * scale, x_des)
+            y_des = torch.where(over, y_des * scale, y_des)
+            r_sq = torch.where(over, torch.tensor(r_max_sq, device=r_sq.device), r_sq)
+
+        # Analytical 2-link IK (elbow-up: gamma2 >= 0)
+        cos_g2 = (r_sq - _L1**2 - _L2**2) / (2.0 * _L1 * _L2)
+        cos_g2 = torch.clamp(cos_g2, -1.0, 1.0)
+        g2 = torch.acos(cos_g2)
+        sin_g2 = torch.sin(g2)
+        g1 = torch.atan2(y_des, x_des) - torch.atan2(_L2 * sin_g2, _L1 + _L2 * cos_g2)
+
+        # Rate-limit joint target
         ik_target = torch.stack([g1, g2], dim=-1)
         delta = ik_target - self._joint_pos_targets
         delta = torch.atan2(torch.sin(delta), torch.cos(delta))  # shortest path
@@ -1017,14 +1081,15 @@ class ALBCEnv(DirectRLEnv):
         joint position (normalized to [-1, 1]) instead of zero. This prevents a
         false smoothness spike on the first step, since action=[0,0] means "EE at
         center" which may be far from the actual initial joint configuration.
+
+        For ee_delta and joint_velocity modes, action=[0,0] means "hold position"
+        so zero initialization is correct.
         """
         if self.cfg.action_mode == "ee_position":
             joint_pos = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
-            g1, g2 = joint_pos[:, 0], joint_pos[:, 1]
-            x = _L1 * torch.cos(g1) + _L2 * torch.cos(g1 + g2)
-            y = _L1 * torch.sin(g1) + _L2 * torch.sin(g1 + g2)
+            ee_pos = self._compute_ee_position(joint_pos)
             R = self.cfg.workspace_radius
-            init_action = torch.stack([x / R, y / R], dim=-1).clamp(-1.0, 1.0)
+            init_action = torch.stack([ee_pos[:, 0] / R, ee_pos[:, 1] / R], dim=-1).clamp(-1.0, 1.0)
             for buf in (self._actions, self._prev_actions, self._prev_prev_actions):
                 buf[env_ids] = init_action
             self._prev_actions_obs[env_ids] = init_action
