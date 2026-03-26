@@ -10,7 +10,8 @@ The ALBC uses 2 revolute joints (joint1, joint2) to position a buoyancy element
 for attitude stabilization.
 
 Control Flow:
-    actions [-1, 1] -> accumulate with dt*scale -> clamp to limits -> position target
+    ee_position mode: actions [-1, 1] -> scale to EE (x,y) -> analytical IK -> joint position target
+    joint_velocity mode (legacy): actions [-1, 1] -> integrate with dt*scale -> clamp -> position target
 
 ALBC has a unique buoy body (link3) that requires separate hydrodynamic
 force calculations.
@@ -27,9 +28,14 @@ from isaaclab.assets import Articulation
 from isaaclab.envs import DirectRLEnv
 from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse
 
+from isaaclab_assets.robots.uuv import HERO_AGENT_ALBC_LINK1_LENGTH, HERO_AGENT_ALBC_LINK2_LENGTH
 from isaaclab_tasks.models import HydrodynamicsModel
 
 from .config import ALBCEnvCfg
+
+# ALBC arm link lengths for analytical IK
+_L1 = HERO_AGENT_ALBC_LINK1_LENGTH  # 0.233 m
+_L2 = HERO_AGENT_ALBC_LINK2_LENGTH  # 0.233 m
 from .mdp import (
     RewardManager,
     RewardTermCfg,
@@ -556,12 +562,13 @@ class ALBCEnv(DirectRLEnv):
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         """Process actions before physics step with control decimation.
 
-        Velocity commands are integrated to position targets at control frequency,
-        reflecting real hardware actuator constraints. Action latency is applied
-        before control integration.
+        Supports two action modes:
+          - "joint_velocity": actions are joint velocity commands, integrated to position targets.
+          - "ee_position": actions are desired EE position (x, y) in body frame, converted to
+            joint angles via analytical 2-link IK.
 
         Args:
-            actions: Joint velocity commands [-1, 1]. Shape: (num_envs, 2).
+            actions: Action commands [-1, 1]. Shape: (num_envs, 2).
         """
         self._update_proprio_hist()
         self._update_action_buffers(actions)
@@ -577,17 +584,53 @@ class ALBCEnv(DirectRLEnv):
             # Apply action latency (delayed actions for control, raw actions kept for obs)
             effective_actions = self._get_delayed_actions(self._actions)
 
-            # Integrate velocity to position: delta_pos = dt * max_vel * action
-            # control_dt = step_dt * control_decimation (50Hz = 0.005 * 4 = 0.02s)
-            control_dt = self.step_dt * self.cfg.control_decimation
-            position_delta = control_dt * self.cfg.max_joint_velocity * effective_actions
-            self._joint_pos_targets += position_delta
+            if self.cfg.action_mode == "ee_position":
+                self._apply_ee_position_action(effective_actions)
+            else:
+                # Legacy: integrate velocity to position
+                control_dt = self.step_dt * self.cfg.control_decimation
+                position_delta = control_dt * self.cfg.max_joint_velocity * effective_actions
+                self._joint_pos_targets += position_delta
+                self._joint_pos_targets = torch.clamp(
+                    self._joint_pos_targets,
+                    self._joint_limits_lower,
+                    self._joint_limits_upper,
+                )
 
-            self._joint_pos_targets = torch.clamp(
-                self._joint_pos_targets,
-                self._joint_limits_lower,
-                self._joint_limits_upper,
-            )
+    def _apply_ee_position_action(self, actions: torch.Tensor) -> None:
+        """Convert EE position actions to joint targets via analytical 2-link IK.
+
+        Actions in [-1, 1]^2 are scaled to desired EE position (x, y) in body frame.
+        Analytical IK computes (gamma1, gamma2) from (x, y).
+
+        Args:
+            actions: Normalized EE position commands [-1, 1]. Shape: (num_envs, 2).
+        """
+        # Scale actions to workspace coordinates
+        R = self.cfg.workspace_radius
+        x_des = actions[:, 0] * R
+        y_des = actions[:, 1] * R
+
+        # Clamp radius to avoid IK singularity at full extension
+        r_sq = x_des**2 + y_des**2
+        r_max = _L1 + _L2 - 0.005  # small margin from kinematic limit
+        r_max_sq = r_max**2
+        over = r_sq > r_max_sq
+        if over.any():
+            scale = torch.sqrt(r_max_sq / r_sq.clamp(min=1e-8))
+            x_des = torch.where(over, x_des * scale, x_des)
+            y_des = torch.where(over, y_des * scale, y_des)
+            r_sq = torch.where(over, torch.tensor(r_max_sq, device=r_sq.device), r_sq)
+
+        # Analytical 2-link IK (elbow-up: gamma2 >= 0)
+        cos_g2 = (r_sq - _L1**2 - _L2**2) / (2.0 * _L1 * _L2)
+        cos_g2 = torch.clamp(cos_g2, -1.0, 1.0)
+        g2 = torch.acos(cos_g2)
+        sin_g2 = torch.sin(g2)
+        g1 = torch.atan2(y_des, x_des) - torch.atan2(_L2 * sin_g2, _L1 + _L2 * cos_g2)
+
+        self._joint_pos_targets[:, 0] = g1
+        self._joint_pos_targets[:, 1] = g2
 
     def _apply_action(self):
         """Apply joint position targets, hydrodynamic forces, and random perturbation."""

@@ -219,6 +219,19 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     joint_init_mode: str = "random"  # "equilibrium" or "random"
     equilibrium_joint_noise: tuple[float, float] = (-0.3, 0.3)  # rad, noise around equilibrium
 
+    # Action mode: "joint_velocity" (legacy) or "ee_position" (IK-based)
+    action_mode: str = "ee_position"
+    """Action interpretation:
+    "joint_velocity": actions are joint velocity commands, integrated to position targets.
+    "ee_position": actions are desired EE position (x, y) in body frame, converted to
+        joint angles via analytical 2-link IK. Provides a more natural action space
+        since buoy (x, y) maps directly to (pitch, roll) torque."""
+
+    workspace_radius: float = 0.40
+    """Maximum EE reach for action scaling (meters). Actions in [-1, 1] are scaled to
+    [-workspace_radius, workspace_radius]. Set below the kinematic max (0.466m) to avoid
+    IK singularity at full extension."""
+
     # EMA alpha for constraint system joint velocity filtering
     ema_joint_vel_alpha: float = 0.2
 
@@ -235,7 +248,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
         command_coeff_roll=5.0,
         command_coeff_pitch=7.5,
         smoothness_weight=-0.5,
-        torque_weight=-0.001,
+        torque_weight=-0.0001,
     )
 
     # ==========================================================================

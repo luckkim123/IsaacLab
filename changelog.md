@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-26] Add EE position action mode for constrained ALBC
+
+### Context
+Analysis of run `2026-03-25_18-22-28` (2500 iter, headroom fix) showed persistent pitch
+error asymmetry: roll converged to 7.8 deg while pitch plateaued at 20 deg. Training
+trajectory revealed the policy locked into a roll-priority strategy at iter 25 (roll 16
+deg, pitch 39 deg) and never recovered. Exploration was NOT the issue -- noise_std
+remained high until iter 800 but pitch showed no improvement.
+
+Root cause: the additive reward structure `exp(-c_r*e_r^2) + exp(-c_p*e_p^2)` combined
+with TRPO's conservative trust region created a local optimum. The policy learned to
+extend the arm along Y (good for roll), creating x_EE near 0 (bad for pitch). Escaping
+this requires temporarily worsening roll to reposition the arm, which TRPO's small
+KL steps cannot achieve.
+
+Additionally, the joint velocity action space required the policy to implicitly learn the
+FK/IK/Jacobian mapping -- a nonlinear function of joint configuration that TDC computes
+analytically. TDC achieves ~5 deg on both axes, proving the physics is not the limitation.
+
+Solution: change the action space from joint velocity commands to desired EE position
+(x, y) in body frame, with analytical 2-link IK converting to joint angle targets. This
+makes the action semantics match the physics: action[0] controls x_EE (pitch torque),
+action[1] controls y_EE (roll torque). No integration, no drift, no implicit Jacobian
+learning required.
+
+Initial test showed torque penalty scale increased ~10x due to abrupt target position
+changes (no velocity integration smoothing). Reduced torque_weight accordingly.
+
+### Added
+- `albc_env.py`: `_apply_ee_position_action()` method -- analytical 2-link IK converting
+  normalized EE position actions to joint position targets with workspace radius clamping
+- `config.py`: `action_mode` parameter ("ee_position" default, "joint_velocity" legacy)
+- `config.py`: `workspace_radius` parameter (0.40m, below kinematic max 0.466m for margin)
+
+### Changed
+- `albc_env.py`: `_pre_physics_step()` now branches on `action_mode`
+- `config.py`: `torque_weight` -0.001 -> -0.0001 (10x reduction to match EE position mode
+  torque scale; PD actuator generates larger torques with direct position targets)
+
+### Notes
+- Legacy `joint_velocity` mode preserved for backward compatibility
+- Smoothness penalty now operates on EE position changes (da = EE_t - EE_{t-1}) which is
+  more physically meaningful than joint velocity changes
+- Encoder z_sweep fix also committed this session (separate commit dbee3bcc)
+- All previous encoder z_sweep results for constrained ALBC were invalid (wrong indices)
+
 ## [2026-03-26] Fix encoder z_sweep dimension indexing for 280D concatenated input
 
 ### Context
