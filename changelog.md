@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
+## [2026-03-27] Switch from absolute to delta action parameterization
+
+### Context
+Analysis of runs 01-51-47 (computed_torque) and 02-09-08 (applied_torque fix) revealed that
+while the torque constraint fix dramatically improved gradient stability (enc_grad max 19680->218,
+entropy 0.93->1.60), reward and constraint cost_returns showed no improvement. Per-step reward
+components were actually worsening: command -0.48->-1.74, smoothness -0.04->-0.35.
+
+**Root cause: Gaussian policy noise creates high-frequency jitter in joint targets.**
+
+The policy samples `a_t ~ N(mean, std)` independently each step. With `action_scale = pi` and
+`noise_std = 0.64`, this creates per-step target jumps of `0.64 * pi = 2.0 rad = 115 deg` from
+noise alone (even if the mean is perfectly stable). The PD controller (Kp=100) cannot track these
+rapid target changes, resulting in 91% effort saturation and permanent torque/velocity constraint
+violation.
+
+**Key calculation:** For `applied_torque < 9.5 Nm` with Kp=100, position error must be < 0.095 rad
+(5.4 deg). Even at min_std=0.2, noise amplitude = `0.2 * pi = 0.63 rad = 36 deg` -- 7x the
+constraint-feasible range.
+
+**Reference comparison:** TDC controller achieves 0.2 deg (no DR) to 6 deg (max DR) attitude error
+on the same system, using small incremental IK-computed joint deltas. The RL policy at 17-18 deg
+is worse than the classical controller because of action jitter.
+
+**Paper reference (NORBC):** Uses `sigma_a = 0.4` (8x smaller than our pi) for legged robots.
+However, absolute scaling doesn't suit ALBC's continuous-rotation arm because +-23 deg range may
+be insufficient. Delta action is the right approach: limits per-step change while allowing any
+absolute position via accumulation.
+
+### Changed
+- `config.py`: Replaced `action_scale: float = pi` with `delta_scale: float = 0.05`.
+  At 50Hz, max joint velocity = 0.05 * 50 = 2.5 rad/s (within 4.189 constraint).
+  With min_std=0.2, noise position change = 0.65 deg/step (within PD tracking range).
+- `albc_env.py`: `_apply_joint_pd_action()` changed from absolute
+  (`q_des = q_nominal + scale * a_t`) to delta accumulation
+  (`q_des += delta_scale * a_t`). Joint limits still enforced via clamp.
+
+### Notes
+- Reward weights (k_c=-8.0, k_s=-0.05, k_tau=-0.001) intentionally unchanged to isolate
+  the effect of delta action. The 160:1 tracking/smoothness ratio may need adjustment later.
+- Reset behavior unchanged: on episode reset, q_des initializes to current joint position
+  (already the case in `_reset_action_buffers`).
+- Smoothness reward now penalizes acceleration (change in velocity command) rather than
+  change in absolute position target -- a more physically meaningful quantity with delta actions.
+
 ## [2026-03-27] Fix torque constraint: computed_torque -> applied_torque
 
 ### Context

@@ -132,7 +132,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
         - state_space (23): p_t privileged info, returned as observations["privileged"]
         - Encoder: p_t(23D) -> MLP[256,128,64] -> softsign -> z(13D)
         - Actor:   cat([o_t(14D), z(13D)]) = 27D -> MLP[256,128,64] -> a_t(2D)
-        - Action:  q_des = q_nominal + action_scale * a_t (Joint PD targets)
+        - Action:  q_des += delta_scale * a_t (Delta joint PD targets)
         - Critic:  cat([o_t(14D), p_t(23D)]) = 37D -> Shared Backbone[512,256,128]->64D
                    -> Reward Head(1D) + Cost Head(K=4)
 
@@ -207,11 +207,12 @@ class ALBCEnvCfg(DirectRLEnvCfg):
 
     nominal_joint_pos: tuple[float, float] = (0.0, math.pi)
     """Nominal joint configuration (g1, g2). At (0, pi), EE is at body center (0, 0).
-    Actions offset from this: q_des = q_nominal + action_scale * a_t."""
+    Used as initial target on episode reset."""
 
-    action_scale: float = math.pi
-    """Action scaling factor (sigma_a). Maps action [-1, 1] to joint offset [-pi, pi].
-    q_des = q_nominal + action_scale * a_t. PD controller tracks q_des at 2000Hz."""
+    delta_scale: float = 0.05
+    """Delta action scaling (rad/step). q_des += delta_scale * a_t each control step.
+    At 50Hz, max joint velocity = delta_scale * 50 = 2.5 rad/s (within 4.189 limit).
+    Any absolute position reachable via accumulation over multiple steps."""
 
     # ==========================================================================
     # Attitude Task and Rewards

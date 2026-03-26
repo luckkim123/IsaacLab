@@ -47,7 +47,7 @@ class ALBCEnv(DirectRLEnv):
     """ALBC environment: 2-joint buoyancy attitude control with constrained RL.
 
     Obs (14D): euler(3), ang_vel(3), att_err(2), joint_pos(2), joint_vel(2), prev_actions(2).
-    Action (2D): Joint PD targets via q_des = q_nominal + action_scale * a_t.
+    Action (2D): Delta joint targets via q_des += delta_scale * a_t.
     """
 
     cfg: ALBCEnvCfg
@@ -207,9 +207,9 @@ class ALBCEnv(DirectRLEnv):
         self._prev_prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
         self._prev_actions_obs = torch.zeros(self.num_envs, 2, device=self.device)
 
-        # Joint PD target: q_des = q_nominal + action_scale * a_t
+        # Joint PD target: delta accumulation q_des += delta_scale * a_t
         self._nominal_joint_pos = torch.tensor(self.cfg.nominal_joint_pos, device=self.device)
-        self._action_scale = self.cfg.action_scale
+        self._delta_scale = self.cfg.delta_scale
         self._joint_pos_targets = self._nominal_joint_pos.expand(self.num_envs, -1).clone()
         self._control_step_counter = 0
 
@@ -324,17 +324,17 @@ class ALBCEnv(DirectRLEnv):
             self._apply_joint_pd_action(self._actions)
 
     def _apply_joint_pd_action(self, actions: torch.Tensor) -> None:
-        """Compute joint PD targets: q_des = q_nominal + action_scale * a_t.
+        """Accumulate delta joint targets: q_des += delta_scale * a_t.
 
-        PD controller (ImplicitActuator at 2000Hz) naturally rate-limits
-        the actual joint motion via Kp/Kd gains and PhysX velocity limits.
+        Delta parameterization limits per-step position change, preventing
+        PD actuator saturation while allowing any absolute position via
+        accumulation over multiple steps.
 
         Args:
             actions: Normalized actions [-1, 1]. Shape: (num_envs, 2).
         """
-        q_des = self._nominal_joint_pos + self._action_scale * actions
-        q_des = torch.clamp(q_des, self._joint_limits_lower, self._joint_limits_upper)
-        self._joint_pos_targets = q_des
+        self._joint_pos_targets += self._delta_scale * actions
+        self._joint_pos_targets.clamp_(self._joint_limits_lower, self._joint_limits_upper)
 
     def _apply_action(self):
         """Apply joint position targets and hydrodynamic forces."""
