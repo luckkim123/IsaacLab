@@ -46,8 +46,8 @@ def command_tracking(env: ALBCEnv) -> torch.Tensor:
 
 
 def joint_torque(robot: Articulation, env: ALBCEnv) -> torch.Tensor:
-    """r_tau = mean(tau^2). Energy efficiency penalty."""
-    return robot.data.computed_torque[:, env._albc_joint_ids].pow(2).mean(dim=-1)
+    """r_tau = mean(tau^2). Energy efficiency penalty (post-clamp applied torque)."""
+    return robot.data.applied_torque[:, env._albc_joint_ids].pow(2).mean(dim=-1)
 
 
 def action_smoothness(env: ALBCEnv) -> torch.Tensor:

@@ -136,9 +136,9 @@ class ALBCEnvCfg(DirectRLEnvCfg):
         - Critic:  cat([o_t(14D), p_t(23D)]) = 37D -> Shared Backbone[512,256,128]->64D
                    -> Reward Head(1D) + Cost Head(K=4)
 
-    Control Frequency (1:40 ratio):
-        - Physics: dt=0.0005s (2000Hz PD)
-        - Env step: decimation=40 -> 0.02s (50Hz)
+    Control Frequency (1:4 ratio):
+        - Physics: dt=0.005s (200Hz)
+        - Env step: decimation=4 -> 0.02s (50Hz)
         - Policy: control_decimation=1 -> 50Hz
     """
 
@@ -146,7 +146,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     # Environment Settings
     # ==========================================================================
     episode_length_s: float = 15.0
-    decimation: int = 40  # 40 physics substeps per env step: 0.0005 * 40 = 0.02s (50Hz)
+    decimation: int = 4  # 4 physics substeps per env step: 0.005 * 4 = 0.02s (50Hz)
     action_space: int = 2
     observation_space: int = 14  # o_t: euler(3) + ang_vel(3) + att_err(2) + jpos(2) + jvel(2) + prev_act(2)
     state_space: int = 23  # p_t: hydro(6)+inertia(4)+damping(4)+mass(2)+payload(4)+joint(2)+density(1)
@@ -162,8 +162,8 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     # Simulation
     # ==========================================================================
     sim: SimulationCfg = SimulationCfg(
-        dt=0.0005,  # 2000Hz physics (PD control), 1:40 ratio with 50Hz policy
-        render_interval=40,  # render every 40 physics steps = 50Hz
+        dt=0.005,  # 200Hz physics, 1:4 ratio with 50Hz policy
+        render_interval=4,  # render every 4 physics steps = 50Hz
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -202,7 +202,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     # ==========================================================================
     albc_joint_names: list[str] = HERO_AGENT_ALBC_JOINT_NAMES
     max_joint_velocity: float = 2.0 * math.pi  # rad/s, matches PhysX velocity_limit_sim=6.28
-    control_decimation: int = 1  # policy updates every env step (50Hz = 2000Hz / 40)
+    control_decimation: int = 1  # policy updates every env step (50Hz = 200Hz / 4)
     initial_joint_pos_range: tuple[float, float] = (-math.pi, math.pi)
 
     nominal_joint_pos: tuple[float, float] = (0.0, math.pi)
@@ -221,7 +221,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     target_attitude_range: tuple[float, float, float] = (0.349, 0.349, 0.0)
 
     reward: ALBCRewardCfg = ALBCRewardCfg(
-        k_c=-1.0,
+        k_c=-8.0,
         k_tau=-0.001,
         k_s=-0.05,
     )

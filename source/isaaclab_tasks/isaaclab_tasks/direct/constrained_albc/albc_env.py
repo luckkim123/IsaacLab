@@ -492,6 +492,28 @@ class ALBCEnv(DirectRLEnv):
         da = self._actions[env_ids] - self._prev_actions[env_ids]
         log["Action/rate_mean"] = torch.linalg.norm(da, dim=-1).mean().item()
 
+        # --- Dynamics & actuator diagnostics ---
+        ang_vel = self._robot.data.root_ang_vel_b[env_ids]
+        log["Dynamics/angular_velocity_rp_rms"] = ang_vel[:, :2].pow(2).mean().sqrt().item()
+        log["Dynamics/angular_velocity_yaw_rms"] = ang_vel[:, 2].pow(2).mean().sqrt().item()
+
+        jids = self._albc_joint_ids
+        joint_vel = self._robot.data.joint_vel[env_ids][:, jids]
+        joint_pos = self._robot.data.joint_pos[env_ids][:, jids]
+        log["Dynamics/joint_pos_mean_abs"] = joint_pos.abs().mean().item()
+        log["Dynamics/joint_vel_abs_max"] = joint_vel.abs().max().item()
+
+        effort_lim = self._robot.data.joint_effort_limits[env_ids][:, jids]
+        computed = self._robot.data.computed_torque[env_ids][:, jids]
+        applied = self._robot.data.applied_torque[env_ids][:, jids]
+        log["Dynamics/effort_limit_mean"] = effort_lim.mean().item()
+        log["Dynamics/computed_torque_abs_max"] = computed.abs().max().item()
+        log["Dynamics/applied_torque_abs_max"] = applied.abs().max().item()
+        log["Dynamics/effort_saturation_frac"] = (computed.abs() >= effort_lim * 0.99).float().mean().item()
+
+        vel_lim = self._robot.data.joint_vel_limits[env_ids][:, jids]
+        log["Dynamics/vel_saturation_frac"] = (joint_vel.abs() >= vel_lim.clamp(min=1e-6) * 0.95).float().mean().item()
+
         # DR parameters (when randomization is enabled)
         if hasattr(self.cfg, "randomization") and self.cfg.randomization.enable:
             # log_dr_metrics expects extras["log"] dict -- pass a wrapper

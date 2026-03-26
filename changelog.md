@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [2026-03-26] Fix torque reward scaling + add dynamics logging
+
+### Context
+During constrained ALBC training, reward_torque was -35 while command reward was only
+-0.6. Analysis revealed `joint_torque()` reward used `computed_torque` (pre-effort-clamp
+PD torque) which can be 100s of Nm (Kp*position_error), while `applied_torque` is clamped
+to the 9.5Nm effort limit. This caused torque penalty to dominate command tracking by ~58x,
+discouraging arm movement. Additionally, the constrained_albc environment lacked actuator
+dynamics diagnostics that hero_agent already had, making it impossible to monitor effort/
+velocity saturation in WandB.
+
+### Changed
+- `constrained_albc/mdp/rewards.py`: `joint_torque()` now uses `applied_torque` (post-clamp)
+  instead of `computed_torque` (pre-clamp). Max tau^2 drops from ~25,600 to 90.25.
+- `constrained_albc/config.py`: Command tracking weight `k_c` increased from -1.0 to -8.0
+  to strengthen attitude tracking gradient relative to other reward terms.
+
+### Added
+- `constrained_albc/albc_env.py`: 9 Dynamics/* metrics ported from hero_agent (simplified,
+  without EMA-based oscillation metric): angular_velocity_rp/yaw_rms, joint_pos/vel stats,
+  effort_limit_mean, computed/applied_torque_abs_max, effort/vel_saturation_frac.
+
+### Notes
+- `constraints.py` `torque_limit_cost()` still uses `computed_torque` intentionally -- it
+  needs to detect when PD demands exceed physical limits (binary violation indicator).
+- Dynamics/computed_torque_abs_max vs applied_torque_abs_max comparison in WandB shows
+  how much the PD controller is being clamped by effort limits.
+
 ## [2026-03-26] Add gradient decomposition diagnostics to ConstraintTRPO
 
 ### Context
