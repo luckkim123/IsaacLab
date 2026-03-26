@@ -5,11 +5,11 @@
 
 """Constrained ALBC (Active Linear Buoyancy Controller) environment.
 
-Standalone package for constrained RL training with C-TRPO and encoder.
+Standalone package for constrained RL training with TRPO + IPO and encoder.
 Independent from hero_agent -- can be used without hero_agent installed.
 
 Registered task:
-    Isaac-Constrained-ALBC-Encoder-v0: C-TRPO + encoder constrained RL
+    Isaac-Constrained-ALBC-Encoder-v0: TRPO + IPO encoder constrained RL
 """
 
 import gymnasium as gym

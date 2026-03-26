@@ -5,11 +5,12 @@
 
 """Observation functions for ALBC environments.
 
-This module provides observation computation functions that can be called
-from the ALBCEnv class. Separating observation logic enables:
-- Cleaner environment code
-- Easier testing of observation components
-- Consistent structure with Isaac Lab mdp conventions
+Teacher policy observation design following the paper's framework:
+    o_t (14D): Proprioceptive observation (measurable on real robot)
+    p_t (23D): Privileged information (simulator-only DR parameters)
+
+The encoder receives only p_t to compress physical unknowns into latent z.
+The actor receives o_t + z. The critic receives o_t + p_t (asymmetric).
 """
 
 from __future__ import annotations
@@ -28,58 +29,48 @@ if TYPE_CHECKING:
     from ..albc_env import ALBCEnv
 
 
-def _hydro_privileged_info(hydro: HydrodynamicsModel) -> torch.Tensor:
-    """Pack hydrodynamic parameters into a 3D privileged observation vector.
+def compute_policy_obs(
+    env: ALBCEnv,
+    robot: Articulation,
+) -> torch.Tensor:
+    """Compute policy observation o_t (14D).
 
-    Only z-components of CoG/CoB: x/y offsets are +-0.01m (negligible torque
-    contribution vs 6-10Nm effort limits). z-component dominates roll/pitch dynamics.
-
-    Returns: (num_envs, 3) = [volume(1), r_cg_z(1), r_cb_z(1)].
+    Measurable on the real robot via IMU and motor encoders:
+        [0:3]   euler angles (roll, pitch, yaw)
+        [3:6]   angular velocity in body frame (p, q, r)
+        [6:8]   attitude error roll, pitch (command signal)
+        [8:10]  joint positions (normalized to [-1, 1])
+        [10:12] joint velocities
+        [12:14] previous actions
     """
+    roll, pitch, yaw = euler_xyz_from_quat(robot.data.root_quat_w)
+
+    joint_pos = robot.data.joint_pos[:, env._albc_joint_ids]
+    joint_pos_norm = 2.0 * (joint_pos - env._joint_limits_lower) / env._joint_limits_range - 1.0
+    joint_vel = robot.data.joint_vel[:, env._albc_joint_ids]
+
+    att_err = env._get_attitude_error()
+
     return torch.cat(
         [
-            hydro.volume.unsqueeze(-1),
-            hydro.center_of_gravity[:, 2:3],  # z-component only
-            hydro.center_of_buoyancy[:, 2:3],  # z-component only
+            torch.stack([roll, pitch, yaw], dim=-1),  # 3D: euler
+            robot.data.root_ang_vel_b,  # 3D: angular velocity
+            att_err[:, :2],  # 2D: attitude error (roll, pitch only)
+            joint_pos_norm,  # 2D: joint positions
+            joint_vel,  # 2D: joint velocities
+            env._prev_actions_obs,  # 2D: previous actions
         ],
         dim=-1,
     )
 
 
-def compute_policy_obs(
-    env: ALBCEnv,
-    robot: Articulation,
-) -> torch.Tensor:
-    """Compute policy observations for ALBC control.
-
-    Returns 13-dim observation:
-        [0:3]   roll, pitch, yaw (euler angles)
-        [3:6]   angular velocity in body frame
-        [6:9]   attitude errors from task
-        [9:11]  joint positions (normalized to [-1, 1])
-        [11:13] previous actions (joint velocities)
-
-    Args:
-        env: The ALBC environment instance.
-        robot: The robot articulation.
-
-    Returns:
-        Policy observation tensor of shape (num_envs, 13).
-    """
-    roll, pitch, yaw = euler_xyz_from_quat(robot.data.root_quat_w)
-
-    # Normalize joint positions to [-1, 1]
-    joint_pos_normalized = (
-        2.0 * (robot.data.joint_pos[:, env._albc_joint_ids] - env._joint_limits_lower) / env._joint_limits_range - 1.0
-    )
-
+def _hydro_privileged(hydro: HydrodynamicsModel) -> torch.Tensor:
+    """Pack hydrodynamic parameters: [volume, CoG_z, CoB_z] (3D)."""
     return torch.cat(
         [
-            torch.stack([roll, pitch, yaw], dim=-1),  # 3: euler angles
-            robot.data.root_ang_vel_b,  # 3: angular velocity
-            env._get_attitude_error(),  # 3: attitude errors
-            joint_pos_normalized,  # 2: joint positions
-            env._prev_actions_obs,  # 2: previous actions
+            hydro.volume.unsqueeze(-1),
+            hydro.center_of_gravity[:, 2:3],
+            hydro.center_of_buoyancy[:, 2:3],
         ],
         dim=-1,
     )
@@ -88,87 +79,56 @@ def compute_policy_obs(
 def compute_privileged_obs(
     env: ALBCEnv,
 ) -> torch.Tensor:
-    """Compute privileged observations for asymmetric training.
+    """Compute privileged information p_t (23D).
 
-    Returns privileged info containing hydrostatic + dynamics + actuator parameters:
-        - Main body hydro (3D): volume, r_cg_z, r_cb_z
-        - Buoy body hydro (3D): volume, r_cg_z, r_cb_z
-        - Main body inertia (2D): Ixx, Iyy (roll/pitch only)
-        - Buoy inertia (2D): Ixx, Iyy
-        - Payload (4D): mass, cog_offset (3)
-        - Main body added mass surge (1D)
-        - Joint stiffness (1D): PD Kp (DR range 40-120, 3x)
-        - Joint damping (1D): PD Kd (DR range 0.5-5.0, 10x)
-        - Joint effort limit (1D): max torque (DR range 0.7-1.0 x 9.5Nm)
-        - Main body linear damping roll, pitch (2D): DR 0.5-1.5 scale (3x)
-        - Main body quadratic damping roll, pitch (2D): DR 0.5-1.5 scale (3x)
-        - Body mass (1D): DR 0.9-1.1 scale (1.22x)
-        - Action latency (1D): 0-4 physics steps delay
-        - Joint static friction (1D): Coulomb friction coefficient
-        - Joint viscous friction (1D): viscous friction coefficient
-        - Water density (1D): water density in kg/m^3
+    Simulator-only DR parameters that the encoder must compress into latent z.
+    Organized by physical category:
 
-    Total: 27D.
-
-    Args:
-        env: The ALBC environment instance.
-
-    Returns:
-        Privileged observation tensor of shape (num_envs, state_space).
+        Hydrodynamics (6D):
+            [0:3]   main body: volume, CoG_z, CoB_z
+            [3:6]   buoy body: volume, CoG_z, CoB_z
+        Inertia (4D):
+            [6:8]   main body Ixx, Iyy
+            [8:10]  buoy body Ixx, Iyy
+        Damping (4D):
+            [10:12] linear damping roll, pitch
+            [12:14] quadratic damping roll, pitch
+        Body properties (2D):
+            [14]    body mass
+            [15]    added mass surge
+        Payload (4D):
+            [16]    payload mass
+            [17:20] payload CoG offset (x, y, z)
+        Actuator (2D):
+            [20]    joint stiffness Kp
+            [21]    joint damping Kd
+        Environment (1D):
+            [22]    water density
     """
-    priv_obs = [
-        _hydro_privileged_info(env._hydro),  # 3D: volume, CoG_z, CoB_z
-        _hydro_privileged_info(env._buoy_hydro),  # 3D: volume, CoG_z, CoB_z
-    ]
+    jid = env._albc_joint_ids[0]
 
-    # Inertia: Ixx/Iyy only (Izz irrelevant for roll/pitch attitude control).
-    # Independently randomized per body by _randomize_hydro_model().
-    priv_obs.append(env._hydro.rigid_body_inertia[:, :2])  # 2D: main Ixx, Iyy
-    priv_obs.append(env._buoy_hydro.rigid_body_inertia[:, :2])  # 2D: buoy Ixx, Iyy
-
-    # Payload: mass + CoG offset (4D)
-    payload_priv = torch.cat(
-        [env._payload_mass.unsqueeze(-1), env._payload_cog_offset],
+    return torch.cat(
+        [
+            # Hydrodynamics (6D)
+            _hydro_privileged(env._hydro),
+            _hydro_privileged(env._buoy_hydro),
+            # Inertia (4D)
+            env._hydro.rigid_body_inertia[:, :2],
+            env._buoy_hydro.rigid_body_inertia[:, :2],
+            # Damping (4D)
+            env._hydro.linear_damping[:, 3:5],
+            env._hydro.quadratic_damping[:, 3:5],
+            # Body properties (2D)
+            env._hydro.body_mass.unsqueeze(-1),
+            env._hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1),
+            # Payload (4D)
+            env._payload_mass.unsqueeze(-1),
+            env._payload_cog_offset,
+            # Actuator (2D)
+            env._robot.data.joint_stiffness[:, jid : jid + 1],
+            env._robot.data.joint_damping[:, jid : jid + 1],
+            # Environment (1D)
+            env._hydro.water_density.unsqueeze(-1),
+        ],
         dim=-1,
     )
-    priv_obs.append(payload_priv)  # 4D: mass, cog_offset_xyz
-
-    # Main body surge added mass: effective inertia = I_rigid + M_added (1D).
-    priv_obs.append(env._hydro.added_mass_matrix[:, 0, 0].unsqueeze(-1))  # 1D: main M_a surge
-
-    # Joint actuator parameters: critical DR params with largest variability.
-    # Both ALBC joints share the same DR'd value (scalar per env, broadcast to 2 joints).
-    jid = env._albc_joint_ids[0]
-    priv_obs.append(env._robot.data.joint_stiffness[:, jid : jid + 1])  # 1D: Kp
-    priv_obs.append(env._robot.data.joint_damping[:, jid : jid + 1])  # 1D: Kd
-    priv_obs.append(env._robot.data.joint_effort_limits[:, jid : jid + 1])  # 1D: effort limit
-
-    # Hydrodynamic damping: roll/pitch components (indices 3, 4 of 6-DOF vector).
-    # DR scale 0.5-1.5 (3x range). Linear damping dominates at low angular velocity,
-    # quadratic at high. Both are critical for predicting angular velocity decay rate.
-    priv_obs.append(env._hydro.linear_damping[:, 3:5])  # 2D: roll, pitch linear damping
-    priv_obs.append(env._hydro.quadratic_damping[:, 3:5])  # 2D: roll, pitch quadratic damping
-
-    # Body mass: DR scale 0.9-1.1 (1.22x). Combined with volume (already included),
-    # determines buoyancy-gravity ratio F_bu/W = rho*V*g / (m*g) = rho*V/m.
-    # Volume without mass cannot determine equilibrium buoyancy.
-    priv_obs.append(env._hydro.body_mass.unsqueeze(-1))  # 1D: main body mass
-
-    # Action latency (1D): per-env delay in physics steps (0-4).
-    # Directly affects closed-loop phase margin (~40% of 50Hz control period at max).
-    if env._action_latency is not None:
-        priv_obs.append(env._action_latency.float().unsqueeze(-1))  # 1D
-    else:
-        priv_obs.append(torch.zeros(env.num_envs, 1, device=env.device))  # 1D: zero when disabled
-
-    # Joint friction: static (Coulomb) and viscous coefficients.
-    # Both ALBC joints share the same DR'd value; read from first joint.
-    jid = env._albc_joint_ids[0]
-    priv_obs.append(env._robot.data.joint_friction_coeff[:, jid : jid + 1])  # 1D: static friction
-    priv_obs.append(env._robot.data.joint_viscous_friction_coeff[:, jid : jid + 1])  # 1D: viscous friction
-
-    # Water density (1D): DR range 995-1025 kg/m^3.
-    # Affects buoyancy and hydrodynamic forces. DORAEMON curriculum target.
-    priv_obs.append(env._hydro.water_density.unsqueeze(-1))  # 1D
-
-    return torch.cat(priv_obs, dim=-1)

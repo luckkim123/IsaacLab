@@ -5,12 +5,8 @@
 
 """DORAEMON: Domain Randomization with Entropy Maximization (ICLR 2024).
 
-Replaces linear DR curriculum with adaptive Beta distribution scheduling.
-Maximizes DR entropy subject to policy success rate >= alpha.
-When the constraint is infeasible, backs up toward higher success rate.
-
-Reference:
-    Tiboni et al., "Domain Randomization via Entropy Maximization", ICLR 2024.
+Adaptive Beta distribution scheduling for DR, replacing linear curriculum.
+Reference: Tiboni et al., "Domain Randomization via Entropy Maximization", ICLR 2024.
 """
 
 from __future__ import annotations
@@ -29,9 +25,8 @@ from isaaclab.utils import configclass
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
 # Configuration
-# =============================================================================
+# ---------------------------------------------------------------------------
 
 
 @configclass
@@ -39,52 +34,21 @@ class DoraemonCfg:
     """DORAEMON scheduler configuration."""
 
     enable: bool = True
-    alpha: float = 0.5
-    """Success rate threshold. Distribution expands only when success >= alpha."""
-
-    kl_ub: float = 0.0015
-    """Trust region KL divergence upper bound per step."""
-
-    init_concentration: float = 30.0
-    """Initial Beta(a, b) concentration (a + b). Higher = tighter initial distribution.
-    With concentration=30, Beta(15,15) has std~0.065 vs Beta(4,4) std~0.17,
-    requiring more KL budget to reach bounds (~500 iters vs ~100)."""
-
-    success_threshold_deg: float = 15.0
-    """Attitude error below this (deg) counts as success. Evaluated over settling window."""
-
-    success_threshold_deg_final: float = 15.0
-    """Final success threshold (deg). Same as initial = no annealing."""
-
-    success_threshold_anneal_steps: int = 0
-    """Set to 0 for immediate final threshold (no annealing)."""
-
-    buffer_size: int = 2000
-    """Maximum episode buffer capacity."""
-
-    min_episodes: int = 200
-    """Minimum episodes before first DORAEMON update."""
-
-    traversability_tau_deg: float = 2.0
-    """Sigmoid temperature for soft traversability (degrees). Controls transition
-    sharpness around success threshold. At tau=2, success transitions from ~1.0
-    at threshold-4 deg to ~0.0 at threshold+4 deg."""
-
-    min_ess_ratio: float = 0.05
-    """Minimum ESS/buffer_size ratio. If post-optimization ESS falls below this,
-    the update is reverted to prevent unreliable IS estimates from corrupting
-    the distribution."""
-
-    param_overrides: dict[str, tuple[float, float]] = {}
-    """Per-parameter bound overrides as {name: (min_bound, max_bound)}.
-    Use to tighten or shift DORAEMON bounds for specific environments.
-    E.g., TDC envs need higher joint_stiffness bounds: {"joint_stiffness": (120.0, 300.0)}.
-    Only min/max bounds are changed; nominal is recomputed as the midpoint."""
+    alpha: float = 0.5  # Success rate threshold for distribution expansion
+    kl_ub: float = 0.0015  # Trust region KL upper bound per step
+    init_concentration: float = 30.0  # Initial Beta(a,b) concentration (a+b)
+    success_threshold_deg: float = 15.0  # Attitude error threshold (deg)
+    success_threshold_deg_final: float = 15.0  # Final threshold (no annealing if same)
+    success_threshold_anneal_steps: int = 0  # 0 = immediate final threshold
+    buffer_size: int = 2000  # Maximum episode buffer capacity
+    min_episodes: int = 200  # Minimum episodes before first update
+    traversability_tau_deg: float = 2.0  # Sigmoid temperature for soft success
+    min_ess_ratio: float = 0.05  # Minimum ESS/buffer_size to accept update
+    param_overrides: dict[str, tuple[float, float]] = {}  # Per-param bound overrides {name: (lo, hi)}
 
 
-# =============================================================================
 # Parameter Specification
-# =============================================================================
+# ---------------------------------------------------------------------------
 
 
 class ParamSpec(NamedTuple):
@@ -97,7 +61,6 @@ class ParamSpec(NamedTuple):
 
 
 # 7 DORAEMON-managed DR parameters for constrained ALBC.
-# "Environment-like" parameters that benefit from curriculum scheduling.
 # Order matches BetaDistribution dimension indices.
 PARAM_SPECS: list[ParamSpec] = [
     ParamSpec("payload_mass", 0.0, 1.0, 0.5),
@@ -111,21 +74,12 @@ PARAM_SPECS: list[ParamSpec] = [
 
 NDIMS = len(PARAM_SPECS)
 
-# Minimum Beta parameter value to keep distribution well-defined.
 _MIN_BETA_PARAM = 1.0
 _MAX_BETA_PARAM = 500.0
 
 
 def _compute_kl(flat_new: np.ndarray, flat_prev: np.ndarray) -> float:
-    """Compute KL(new || prev) for independent Beta distributions.
-
-    Args:
-        flat_new: [a0, b0, a1, b1, ...] new distribution parameters.
-        flat_prev: [a0, b0, a1, b1, ...] previous distribution parameters.
-
-    Returns:
-        Sum of per-dimension KL divergences.
-    """
+    """Compute KL(new || prev) for independent Beta distributions."""
     a_b_new = torch.from_numpy(flat_new.copy()).reshape(-1, 2).double()
     a_b_prev = torch.from_numpy(flat_prev.copy()).reshape(-1, 2).double()
     new = torch.distributions.Beta(
@@ -139,41 +93,32 @@ def _compute_kl(flat_new: np.ndarray, flat_prev: np.ndarray) -> float:
     return torch.distributions.kl_divergence(new, prev).sum().item()
 
 
-# =============================================================================
 # Beta Distribution
-# =============================================================================
+# ---------------------------------------------------------------------------
 
 
 class BetaDistribution:
-    """Independent Beta distributions over DR parameter space.
-
-    Each dimension i has Beta(a_i, b_i) on [0, 1], linearly mapped to
-    [min_bound_i, max_bound_i] for physical sampling.
-    """
+    """Independent Beta distributions over DR parameter space, mapped to physical bounds."""
 
     def __init__(self, params: list[ParamSpec], device: torch.device, concentration: float = 200.0) -> None:
         self.params = params
         self.ndims = len(params)
         self.device = device
 
-        # Physical bounds: (ndims,)
         self._mins = torch.tensor([p.min_bound for p in params], dtype=torch.float64)
         self._maxs = torch.tensor([p.max_bound for p in params], dtype=torch.float64)
         self._ranges = self._maxs - self._mins
 
-        # Initialize Beta(a, b) from nominal + concentration
         self._a = torch.zeros(self.ndims, dtype=torch.float64)
         self._b = torch.zeros(self.ndims, dtype=torch.float64)
 
         for i, p in enumerate(params):
-            # Map nominal to [0, 1]
             mu = (p.nominal - p.min_bound) / (p.max_bound - p.min_bound)
-            mu = max(0.01, min(0.99, mu))  # Avoid boundary degeneration
+            mu = max(0.01, min(0.99, mu))
             a_raw = mu * concentration
             b_raw = (1.0 - mu) * concentration
             if a_raw < _MIN_BETA_PARAM or b_raw < _MIN_BETA_PARAM:
-                # Clamp would distort mean; preserve mean by deriving the other param.
-                # mean = a/(a+b) = mu  →  b = a*(1-mu)/mu  or  a = b*mu/(1-mu)
+                # Preserve mean: derive the other param from the clamped one
                 if mu <= 0.5:
                     self._a[i] = _MIN_BETA_PARAM
                     self._b[i] = _MIN_BETA_PARAM * (1.0 - mu) / mu
@@ -185,36 +130,21 @@ class BetaDistribution:
                 self._b[i] = b_raw
 
     def sample(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Sample n parameter vectors and their log probabilities.
-
-        Returns:
-            xi_physical: (n, ndims) physical-scale samples on GPU.
-            log_probs: (n,) sum of per-dim log probs on GPU.
-        """
+        """Sample n parameter vectors and their log probabilities."""
         a_gpu = self._a.float().to(self.device)
         b_gpu = self._b.float().to(self.device)
         dist = torch.distributions.Beta(a_gpu, b_gpu)
 
-        # Sample in [0, 1] space
-        xi_unit = dist.sample((n,))  # (n, ndims)
-        log_probs = dist.log_prob(xi_unit).sum(dim=-1)  # (n,)
+        xi_unit = dist.sample((n,))
+        log_probs = dist.log_prob(xi_unit).sum(dim=-1)
 
-        # Map to physical space
         mins_gpu = self._mins.float().to(self.device)
         ranges_gpu = self._ranges.float().to(self.device)
         xi_physical = mins_gpu + xi_unit * ranges_gpu
-
         return xi_physical, log_probs
 
     def log_prob(self, xi_physical: torch.Tensor) -> torch.Tensor:
-        """Compute log probability of physical-scale samples.
-
-        Args:
-            xi_physical: (n, ndims) physical-scale values.
-
-        Returns:
-            (n,) sum of per-dim log probs.
-        """
+        """Compute log probability of physical-scale samples."""
         mins_gpu = self._mins.float().to(self.device)
         ranges_gpu = self._ranges.float().to(self.device)
         xi_unit = (xi_physical - mins_gpu) / ranges_gpu
@@ -261,7 +191,7 @@ class BetaDistribution:
         return new
 
     def get_stats(self) -> dict[str, float]:
-        """Return per-dimension mean and std in physical space for logging."""
+        """Per-dimension mean and std in physical space for logging."""
         stats = {}
         for i, p in enumerate(self.params):
             a, b = self._a[i].item(), self._b[i].item()
@@ -275,9 +205,8 @@ class BetaDistribution:
         return stats
 
 
-# =============================================================================
 # Episode Buffer
-# =============================================================================
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -308,11 +237,10 @@ class EpisodeBuffer:
         success: torch.Tensor,
         log_probs: torch.Tensor,
     ) -> None:
-        """Batch insert episodes using vectorized indexing. Wraps around if capacity exceeded."""
+        """Batch insert episodes. Wraps around if capacity exceeded."""
         n = xi.shape[0]
         if n == 0:
             return
-        # If batch exceeds capacity, only keep the last `capacity` entries
         if n > self.capacity:
             tail = n - self.capacity
             xi = xi[tail:]
@@ -320,16 +248,13 @@ class EpisodeBuffer:
             success = success[tail:]
             log_probs = log_probs[tail:]
             n = self.capacity
-        # Compute destination indices (handles wrap-around)
         start = self._write_idx % self.capacity
         if start + n <= self.capacity:
-            # No wrap: single contiguous slice
             self.xi[start : start + n] = xi
             self.returns[start : start + n] = returns
             self.success[start : start + n] = success
             self.log_probs[start : start + n] = log_probs
         else:
-            # Wrap-around: two slices
             first = self.capacity - start
             self.xi[start:] = xi[:first]
             self.returns[start:] = returns[:first]
@@ -353,23 +278,18 @@ class EpisodeBuffer:
         self._write_idx = 0
 
 
-# =============================================================================
 # DORAEMON Scheduler
-# =============================================================================
+# ---------------------------------------------------------------------------
 
 
 class DoraemonScheduler:
-    """DORAEMON DR distribution scheduler.
-
-    Maintains a Beta distribution over DR parameters, collects episode statistics,
-    and optimizes the distribution to maximize entropy subject to success rate >= alpha.
-    """
+    """DORAEMON DR distribution scheduler."""
 
     def __init__(self, cfg: DoraemonCfg, device: torch.device) -> None:
         self.cfg = cfg
         self.device = device
 
-        # Apply per-parameter bound overrides (e.g., TDC joint_stiffness)
+        # Apply per-parameter bound overrides
         specs = list(PARAM_SPECS)
         if cfg.param_overrides:
             name_to_idx = {s.name: i for i, s in enumerate(specs)}
@@ -379,8 +299,7 @@ class DoraemonScheduler:
                     continue
                 idx = name_to_idx[name]
                 old = specs[idx]
-                nominal = (lo + hi) / 2.0  # midpoint as new nominal
-                specs[idx] = ParamSpec(old.name, lo, hi, nominal)
+                specs[idx] = ParamSpec(old.name, lo, hi, (lo + hi) / 2.0)
                 logger.info(
                     "[DORAEMON] Override %s bounds: (%.2f, %.2f) -> (%.2f, %.2f)",
                     name,
@@ -391,14 +310,11 @@ class DoraemonScheduler:
                 )
 
         self.dist = BetaDistribution(specs, device, cfg.init_concentration)
-
         self.buffer = EpisodeBuffer(cfg.buffer_size, NDIMS, device)
 
         self._step_count = 0
         self._backup_count = 0
         self._total_episodes = 0
-
-        # Success threshold annealing state
         self._current_threshold_deg = cfg.success_threshold_deg
         self._threshold_anneal_count = 0
 
@@ -415,12 +331,7 @@ class DoraemonScheduler:
         )
 
     def sample(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Sample DR parameters from current Beta distribution.
-
-        Returns:
-            xi_physical: (n, ndims) physical-scale samples.
-            log_probs: (n,) log probabilities.
-        """
+        """Sample DR parameters from current Beta distribution."""
         return self.dist.sample(n)
 
     def record_episodes(
@@ -435,11 +346,7 @@ class DoraemonScheduler:
         self._total_episodes += xi.shape[0]
 
     def step(self) -> dict[str, float]:
-        """Run one DORAEMON optimization step.
-
-        Returns:
-            Metrics dict for logging.
-        """
+        """Run one DORAEMON optimization step. Returns metrics dict."""
         xi, _returns, success, _log_probs = self.buffer.get_all()
         n = xi.shape[0]
 
@@ -456,20 +363,16 @@ class DoraemonScheduler:
         success_rate = success.mean().item()
         metrics["success_rate"] = success_rate
 
-        # Anneal success threshold only when agent is performing well
         if success_rate >= self.cfg.alpha:
             self._anneal_threshold()
         metrics["success_threshold_deg"] = self._current_threshold_deg
 
         metrics["entropy_before"] = self.dist.entropy()
 
-        # Save current distribution for trust region
         prev_dist = self.dist.clone()
 
         if success_rate < self.cfg.alpha:
-            # Infeasible: backup toward higher success
             self._backup(prev_dist, xi, success)
-            # Retry entropy maximization using backup result as starting point
             backup_success = self._estimate_success_rate(xi, success, prev_dist)
             if backup_success >= self.cfg.alpha:
                 self._maximize_entropy(self.dist.clone(), xi, success)
@@ -478,7 +381,6 @@ class DoraemonScheduler:
                 metrics["mode"] = 0.0  # backup only
             self._backup_count += 1
         else:
-            # Feasible: maximize entropy subject to success >= alpha
             self._maximize_entropy(prev_dist, xi, success)
             metrics["mode"] = 1.0  # expand
 
@@ -495,27 +397,10 @@ class DoraemonScheduler:
             metrics["reverted"] = 1.0
             metrics["entropy_after"] = self.dist.entropy()
             metrics["kl_step"] = 0.0
-            logger.warning(
-                "[DORAEMON] Reverted: ESS=%.0f (%.1f%% of %d)",
-                ess,
-                100 * ess_ratio,
-                n,
-            )
-
-        # Per-parameter sensitivity: Pearson correlation with success
-        for i, spec in enumerate(self.dist.params):
-            xi_i = xi[:, i]
-            xi_mean, s_mean = xi_i.mean(), success.mean()
-            cov = ((xi_i - xi_mean) * (success - s_mean)).mean()
-            xi_std, s_std = xi_i.std(), success.std()
-            if xi_std > 1e-8 and s_std > 1e-8:
-                metrics[f"sensitivity/{spec.name}"] = (cov / (xi_std * s_std)).item()
-            else:
-                metrics[f"sensitivity/{spec.name}"] = 0.0
+            logger.warning("[DORAEMON] Reverted: ESS=%.0f (%.1f%% of %d)", ess, 100 * ess_ratio, n)
 
         # Per-parameter distribution stats
-        param_stats = self.dist.get_stats()
-        for k, v in param_stats.items():
+        for k, v in self.dist.get_stats().items():
             metrics[k] = v
 
         self.buffer.clear()
@@ -523,7 +408,7 @@ class DoraemonScheduler:
         return metrics
 
     def _anneal_threshold(self) -> None:
-        """Anneal success threshold by one step. Only called when success_rate >= alpha."""
+        """Anneal success threshold by one step."""
         cfg = self.cfg
         self._threshold_anneal_count += 1
         if cfg.success_threshold_anneal_steps <= 0:
@@ -540,11 +425,7 @@ class DoraemonScheduler:
         prev_dist: BetaDistribution,
         n: int,
     ) -> tuple[float, float]:
-        """Compute Effective Sample Size between current and previous distribution.
-
-        Returns:
-            (ess, ess_ratio): ESS value and ESS/n ratio.
-        """
+        """Compute Effective Sample Size between current and previous distribution."""
         new_lp = self.dist.log_prob(xi)
         old_lp = prev_dist.log_prob(xi)
         log_ratio = new_lp - old_lp
@@ -573,11 +454,7 @@ class DoraemonScheduler:
         xi: torch.Tensor,
         success: torch.Tensor,
     ) -> None:
-        """Maximize entropy subject to success >= alpha and trust region.
-
-        Uses trust-constr optimizer with keep_feasible=True to guarantee
-        KL constraint satisfaction at every iteration.
-        """
+        """Maximize entropy subject to success >= alpha and KL trust region."""
         prev_flat = prev_dist.get_flat_params()
         ranges = self.dist._ranges
         mins = self.dist._mins
@@ -586,19 +463,16 @@ class DoraemonScheduler:
         success_cpu = success.detach().cpu().numpy().astype(np.float64)
 
         def objective_and_grad(flat: np.ndarray) -> tuple[float, np.ndarray]:
-            """Negative entropy (to minimize) with gradient via autograd."""
             a_b = torch.from_numpy(flat.copy()).reshape(NDIMS, 2).double().requires_grad_(True)
             a = a_b[:, 0].clamp(min=_MIN_BETA_PARAM)
             b = a_b[:, 1].clamp(min=_MIN_BETA_PARAM)
             dist = torch.distributions.Beta(a, b)
-            entropy = (dist.entropy() + ranges.log()).sum()
-            neg_entropy = -entropy
+            neg_entropy = -(dist.entropy() + ranges.log()).sum()
             neg_entropy.backward()
             assert a_b.grad is not None
             return neg_entropy.item(), a_b.grad.flatten().numpy().copy()
 
         def success_constraint_fun(flat: np.ndarray) -> float:
-            """IS-weighted success rate under new distribution."""
             a_b = torch.from_numpy(flat.copy()).reshape(NDIMS, 2).double()
             a_new = a_b[:, 0].clamp(min=_MIN_BETA_PARAM)
             b_new = a_b[:, 1].clamp(min=_MIN_BETA_PARAM)
@@ -619,7 +493,6 @@ class DoraemonScheduler:
             return (weights * success_t).sum().item()
 
         def kl_constraint_fun(flat: np.ndarray) -> float:
-            """KL(new || prev)."""
             return _compute_kl(flat, prev_flat)
 
         success_con = NonlinearConstraint(success_constraint_fun, lb=self.cfg.alpha, ub=np.inf)
@@ -633,13 +506,7 @@ class DoraemonScheduler:
         constraints: list,
         label: str,
     ) -> None:
-        """Run a single trust-constr optimization step on the Beta distribution.
-
-        Args:
-            objective_fn: Callable returning (value, gradient) given flat params.
-            constraints: List of NonlinearConstraint objects for the optimizer.
-            label: Human-readable label for warning messages on failure.
-        """
+        """Run a single trust-constr optimization step on the Beta distribution."""
         bounds = [(float(_MIN_BETA_PARAM), float(_MAX_BETA_PARAM))] * (2 * NDIMS)
         x0 = self.dist.get_flat_params()
         try:
@@ -663,13 +530,8 @@ class DoraemonScheduler:
         xi: torch.Tensor,
         success: torch.Tensor,
     ) -> None:
-        """Backup: maximize IS-weighted success rate within trust region.
-
-        Uses trust-constr with keep_feasible=True for KL constraint.
-        """
-        # Guard: if no successful episodes, objective is constant-zero everywhere.
-        # The optimizer would declare trivial convergence and accept arbitrary drift
-        # within the KL trust region, causing unintended distribution expansion.
+        """Maximize IS-weighted success rate within KL trust region."""
+        # Skip if no successful episodes (optimizer would drift within trust region)
         if success.sum().item() < 1.0:
             logger.debug("[DORAEMON] Backup skipped: no successful episodes in buffer.")
             return
@@ -682,7 +544,6 @@ class DoraemonScheduler:
         success_cpu = success.detach().cpu().numpy().astype(np.float64)
 
         def neg_success_and_grad(flat: np.ndarray) -> tuple[float, np.ndarray]:
-            """Negative IS-weighted success rate with gradient."""
             a_b = torch.from_numpy(flat.copy()).reshape(NDIMS, 2).double().requires_grad_(True)
             a = a_b[:, 0].clamp(min=_MIN_BETA_PARAM)
             b = a_b[:, 1].clamp(min=_MIN_BETA_PARAM)
@@ -712,16 +573,10 @@ class DoraemonScheduler:
             return _compute_kl(flat, prev_flat)
 
         kl_con = NonlinearConstraint(kl_constraint_fun, lb=0.0, ub=self.cfg.kl_ub, keep_feasible=True)
-
         self._run_scipy_step(neg_success_and_grad, [kl_con], "Backup step")
 
     def state_dict(self) -> dict:
-        """Serialize scheduler state for checkpoint persistence.
-
-        Captures the learned Beta distribution parameters, optimization counters,
-        and the episode buffer contents so training can resume without re-learning
-        the DR distribution from scratch.
-        """
+        """Serialize scheduler state for checkpoint persistence."""
         return {
             "dist_a": self.dist._a.clone(),
             "dist_b": self.dist._b.clone(),
@@ -738,16 +593,10 @@ class DoraemonScheduler:
         }
 
     def load_state_dict(self, state: dict) -> None:
-        """Restore scheduler state from a checkpoint.
-
-        Args:
-            state: Dictionary produced by :meth:`state_dict`.
-        """
-        # Restore Beta distribution parameters
+        """Restore scheduler state from a checkpoint."""
         self.dist._a = state["dist_a"].double()
         self.dist._b = state["dist_b"].double()
 
-        # Restore scheduler counters
         self._step_count = state["step_count"]
         self._backup_count = state["backup_count"]
         self._total_episodes = state["total_episodes"]
@@ -763,13 +612,3 @@ class DoraemonScheduler:
             self.buffer.log_probs[:n] = state["buffer_log_probs"].to(self.device)
             self.buffer._count = n
             self.buffer._write_idx = state["buffer_write_idx"]
-
-    def get_metrics(self) -> dict[str, float]:
-        """Current distribution stats for logging."""
-        metrics = {
-            "entropy": self.dist.entropy(),
-            "step_count": float(self._step_count),
-            "backup_count": float(self._backup_count),
-        }
-        metrics.update(self.dist.get_stats())
-        return metrics

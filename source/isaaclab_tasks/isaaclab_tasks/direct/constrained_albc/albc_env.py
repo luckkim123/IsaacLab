@@ -5,16 +5,8 @@
 
 """ALBC (Active Linear Buoyancy Controller) Environment.
 
-This module implements joint-based attitude control for ALBC without thrusters.
-The ALBC uses 2 revolute joints (joint1, joint2) to position a buoyancy element
-for attitude stabilization.
-
-Control Flow:
-    ee_position mode: actions [-1, 1] -> scale to EE (x,y) -> analytical IK -> joint position target
-    joint_velocity mode (legacy): actions [-1, 1] -> integrate with dt*scale -> clamp -> position target
-
-ALBC has a unique buoy body (link3) that requires separate hydrodynamic
-force calculations.
+Joint-based attitude control using 2 revolute joints to position a buoyancy
+element. No thrusters. Joint PD target action mode (q_des = q_nominal + sigma_a * a_t).
 """
 
 from __future__ import annotations
@@ -30,26 +22,10 @@ from isaaclab.utils.math import euler_xyz_from_quat, quat_apply_inverse
 
 from isaaclab_tasks.models import HydrodynamicsModel
 
-from isaaclab_assets.robots.uuv import HERO_AGENT_ALBC_LINK1_LENGTH, HERO_AGENT_ALBC_LINK2_LENGTH
-
 from .config import ALBCEnvCfg
-
-# ALBC arm link lengths for analytical IK
-_L1 = HERO_AGENT_ALBC_LINK1_LENGTH  # 0.233 m
-_L2 = HERO_AGENT_ALBC_LINK2_LENGTH  # 0.233 m
-from .mdp import (
-    RewardManager,
-    RewardTermCfg,
-    action_smoothness_penalty,
-    command_reward,
-    compute_all_costs,
-    compute_policy_obs,
-    compute_privileged_obs,
-    joint_torque_penalty,
-)
+from .mdp.constraints import compute_all_costs
 from .mdp.events import (
     DRSampler,
-    compute_equilibrium_joint_positions,
     randomize_body_mass,
     randomize_hydrodynamics,
     randomize_joint_effort_limit,
@@ -62,34 +38,16 @@ from .mdp.events import (
     reset_joint_positions_default,
     reset_robot_pose_default,
 )
-from .utils import DebugVisualization, log_dr_metrics
+from .mdp.observations import compute_policy_obs, compute_privileged_obs
+from .mdp.rewards import RewardManager
+from .utils import log_dr_metrics
 
 
 class ALBCEnv(DirectRLEnv):
-    """ALBC environment for attitude control using joint-based buoyancy control.
+    """ALBC environment: 2-joint buoyancy attitude control with constrained RL.
 
-    This environment implements:
-    - Joint position control (no thrusters)
-    - Multi-body hydrodynamics (main body + buoy)
-    - Potential-based reward system
-    - Decimated control (default: every physics step, configurable via control_decimation)
-
-    Observation Space (13 dims):
-        [0:3]   roll, pitch, yaw (Euler angles from quaternion)
-        [3:6]   angular velocity in body frame
-        [6:9]   attitude errors (target - current, wrapped)
-        [9:11]  joint positions (normalized to [-1, 1])
-        [11:13] previous actions
-
-    Action Space (2 dims):
-        [0] joint1 velocity command [-1, 1]
-        [1] joint2 velocity command [-1, 1]
-
-    Physical Parameters:
-        - sim_dt: 1/200 s (200 Hz physics), decimation: 1, control_decimation: 4 (50 Hz control)
-        - max_joint_velocity: 4*pi/3 rad/s (40 RPM at 12V, ~240 deg/s)
-        - joint stiffness: 100.0, damping: 3.0 (ImplicitActuator default)
-        - joint_limits: from URDF (±2*pi rad, i.e. ±360 deg)
+    Obs (14D): euler(3), ang_vel(3), att_err(2), joint_pos(2), joint_vel(2), prev_actions(2).
+    Action (2D): Joint PD targets via q_des = q_nominal + action_scale * a_t.
     """
 
     cfg: ALBCEnvCfg
@@ -150,10 +108,6 @@ class ALBCEnv(DirectRLEnv):
         self._term_too_fast = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._term_bad_state = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._term_excessive_tilt = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-
-        # Debug visualization manager
-        self._debug_vis = DebugVisualization(self.num_envs, self.device)
-        self.set_debug_vis(self.cfg.debug_vis)
 
     @staticmethod
     def _iter_noise_params(cfg: ALBCEnvCfg):
@@ -232,11 +186,7 @@ class ALBCEnv(DirectRLEnv):
         self._joint_limits_range = self._joint_limits_upper - self._joint_limits_lower
 
     def _init_task_and_rewards(self) -> None:
-        """Initialize attitude task buffers and reward manager.
-
-        Reward terms are built by ``_build_reward_terms()`` (overridable hook).
-        """
-        # Attitude task state (inlined from AttitudeTask)
+        """Initialize attitude task buffers and reward manager."""
         self._randomize_targets = self.cfg.randomize_target_attitude
         self._base_attitude = torch.tensor(self.cfg.target_attitude, device=self.device)
         self._target_range = torch.tensor(self.cfg.target_attitude_range, device=self.device)
@@ -244,42 +194,10 @@ class ALBCEnv(DirectRLEnv):
         self._attitude_error = torch.zeros(self.num_envs, 3, dtype=torch.float32, device=self.device)
 
         self._reward_manager = RewardManager(
-            cfg=self._build_reward_terms(),
+            cfg=self.cfg.reward,
             num_envs=self.num_envs,
             device=self.device,
         )
-
-    def _build_reward_terms(self) -> dict[str, RewardTermCfg]:
-        """Build the reward terms dict. Override in subclasses to add/modify terms.
-
-        3-term architecture:
-            1. command    (+/-): attitude tracking (exponential or quadratic), dt-scaled
-            2. smoothness (-): mean(da^2) + mean(d2a^2), dt-scaled
-            3. torque     (-): mean(tau^2) joint torque penalty, dt-scaled
-        """
-        rcfg = self.cfg.reward
-        terms: dict[str, RewardTermCfg] = {
-            "command": RewardTermCfg(
-                func=command_reward,
-                weight=rcfg.command_weight,
-                params={
-                    "coeff_roll": rcfg.command_coeff_roll,
-                    "coeff_pitch": rcfg.command_coeff_pitch,
-                    "command_type": rcfg.command_type,
-                },
-            ),
-        }
-        if rcfg.smoothness_weight != 0.0:
-            terms["smoothness"] = RewardTermCfg(
-                func=action_smoothness_penalty,
-                weight=rcfg.smoothness_weight,
-            )
-        if rcfg.torque_weight != 0.0:
-            terms["torque"] = RewardTermCfg(
-                func=joint_torque_penalty,
-                weight=rcfg.torque_weight,
-            )
-        return terms
 
     def _init_state_buffers(self) -> None:
         """Initialize action and force/torque buffers."""
@@ -289,20 +207,10 @@ class ALBCEnv(DirectRLEnv):
         self._prev_prev_actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
         self._prev_actions_obs = torch.zeros(self.num_envs, 2, device=self.device)
 
-        # Accumulated rotation tracking (for constraint)
-        self._accumulated_rotation = torch.zeros(self.num_envs, 2, device=self.device)
-        self._prev_joint_pos = torch.zeros(self.num_envs, 2, device=self.device)
-
-        # Overshoot detection buffer (per-axis signed roll/pitch error from prev step)
-        self._prev_attitude_error_rp = torch.zeros(self.num_envs, 2, device=self.device)
-
-        # EMA joint velocity (for high-pass oscillation penalty)
-        self._ema_joint_vel = torch.zeros(self.num_envs, 2, device=self.device)
-        self._ema_joint_vel_alpha = self.cfg.ema_joint_vel_alpha
-        self._joint_pos_targets = torch.zeros(self.num_envs, 2, device=self.device)
-        # Global step counter (not per-env). With control_decimation=1 (default),
-        # this modulo always passes. If control_decimation > 1, all envs share
-        # the same control phase.
+        # Joint PD target: q_des = q_nominal + action_scale * a_t
+        self._nominal_joint_pos = torch.tensor(self.cfg.nominal_joint_pos, device=self.device)
+        self._action_scale = self.cfg.action_scale
+        self._joint_pos_targets = self._nominal_joint_pos.expand(self.num_envs, -1).clone()
         self._control_step_counter = 0
 
         # Force/torque buffers
@@ -310,39 +218,6 @@ class ALBCEnv(DirectRLEnv):
         self._hydro_torques = torch.zeros(self.num_envs, 3, device=self.device)
         self._buoy_hydro_forces = torch.zeros(self.num_envs, 3, device=self.device)
         self._buoy_hydro_torques = torch.zeros(self.num_envs, 3, device=self.device)
-
-        # Random perturbation buffers (Tan et al. 2018)
-        self._perturb_forces = torch.zeros(self.num_envs, 3, device=self.device)
-        self._perturb_torques = torch.zeros(self.num_envs, 3, device=self.device)
-        self._perturb_timer = torch.randint(0, self._perturb_cycle, (self.num_envs,), device=self.device)
-
-        # Proprioception history buffer (ring buffer for temporal conv encoder)
-        self._proprio_history_len = self.cfg.proprio_history_len
-        if self._proprio_history_len > 0:
-            self._proprio_hist = torch.zeros(
-                self.num_envs,
-                self._proprio_history_len,
-                self.cfg.proprio_feature_dim,
-                device=self.device,
-            )
-        else:
-            self._proprio_hist = None
-
-        # Pre-allocated index tensor for action latency gathering (avoids per-step allocation)
-        self._env_idx = torch.arange(self.num_envs, device=self.device)
-
-        # Action latency buffer (ring buffer for delayed action application)
-        rand_cfg = self.cfg.randomization
-        max_latency = rand_cfg.action_latency_range[1]
-        self._max_action_latency = max_latency
-        if max_latency > 0:
-            self._action_history = torch.zeros(
-                self.num_envs, max_latency + 1, self.cfg.action_space, device=self.device
-            )
-            self._action_latency = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        else:
-            self._action_history = None
-            self._action_latency = None
 
     def _init_doraemon(self) -> None:
         """Initialize DORAEMON adaptive DR scheduler if enabled."""
@@ -364,12 +239,6 @@ class ALBCEnv(DirectRLEnv):
             self._settling_window = 50  # 1 second at 50Hz control
             self._settling_errors = torch.zeros(self.num_envs, self._settling_window, device=self.device)
             self._settling_idx = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-
-    @property
-    def _perturb_cycle(self) -> int:
-        """Perturbation event cycle length (interval + duration), minimum 1."""
-        rand_cfg = self.cfg.randomization
-        return max(1, rand_cfg.perturbation_interval + rand_cfg.perturbation_duration)
 
     # ------------------------------------------------------------------
     # Attitude task methods
@@ -397,35 +266,6 @@ class ALBCEnv(DirectRLEnv):
     def _get_attitude_error(self) -> torch.Tensor:
         """Return cached attitude error (computed in _update_attitude_error during reward step)."""
         return self._attitude_error
-
-    def _get_proprio_features(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Extract proprioception features shared by policy obs and adaptation history.
-
-        Returns:
-            roll, pitch, p (ang_vel_x), q (ang_vel_y), joint_pos_normalized
-        """
-        roll, pitch, _ = euler_xyz_from_quat(self._robot.data.root_quat_w)
-        ang_vel_b = self._robot.data.root_ang_vel_b
-        p = ang_vel_b[:, 0:1]
-        q = ang_vel_b[:, 1:2]
-        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
-        joint_pos_norm = 2.0 * (joint_pos - self._joint_limits_lower) / self._joint_limits_range - 1.0
-        return roll, pitch, p, q, joint_pos_norm
-
-    def _update_proprio_hist(self) -> None:
-        """Shift ring buffer left and append current proprioception features.
-
-        Only active when proprio_history_len > 0. Called from _pre_physics_step().
-        """
-        if self._proprio_hist is None:
-            return
-        roll, pitch, p, q, joint_pos_norm = self._get_proprio_features()
-        new_entry = torch.cat(
-            [roll.unsqueeze(-1), pitch.unsqueeze(-1), p, q, joint_pos_norm, self._prev_actions_obs],
-            dim=-1,
-        )
-        self._proprio_hist[:, :-1] = self._proprio_hist[:, 1:].clone()
-        self._proprio_hist[:, -1] = new_entry
 
     def _update_attitude_error(self, quat: torch.Tensor) -> None:
         """Update cached attitude error from current orientation.
@@ -469,252 +309,38 @@ class ALBCEnv(DirectRLEnv):
             self._prev_actions_obs = self._prev_actions.clone()
         self._control_step_counter += 1
 
-    def _get_delayed_actions(self, actions: torch.Tensor) -> torch.Tensor:
-        """Apply action latency by returning delayed actions from the history buffer.
-
-        The history buffer stores recent actions in order [newest, ..., oldest].
-        Each env has a per-env latency (sampled at reset). Latency=0 returns
-        the current action (no delay).
-
-        Args:
-            actions: Current raw actions. Shape: (num_envs, action_space).
-
-        Returns:
-            Delayed actions. Same shape as input.
-        """
-        if self._action_history is None or not self.cfg.randomization.enable:
-            return actions
-
-        # Shift history: move existing entries one slot older
-        if self._action_history.shape[1] > 1:
-            self._action_history[:, 1:] = self._action_history[:, :-1].clone()
-        # Insert newest action at index 0
-        self._action_history[:, 0] = actions
-
-        # Read delayed actions using per-env latency as index
-        return self._action_history[self._env_idx, self._action_latency]
-
-    def _apply_perturbation_cycle(
-        self,
-        timer: torch.Tensor,
-        forces: torch.Tensor,
-        torques: torch.Tensor,
-        force_range: tuple[float, float],
-        torque_range: tuple[float, float],
-        cycle: int,
-        duration: int,
-    ) -> torch.Tensor:
-        """Advance perturbation timer and generate/clear random wrench.
-
-        Returns updated timer.
-        """
-        timer = (timer + 1) % cycle
-
-        trigger = timer == 0
-        if trigger.any():
-            n = trigger.sum().item()
-            f_dir = torch.randn(n, 3, device=self.device)
-            f_dir = f_dir / f_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
-            f_lo, f_hi = force_range
-            f_mag = torch.rand(n, device=self.device) * (f_hi - f_lo) + f_lo
-            forces[trigger] = f_dir * f_mag.unsqueeze(1)
-
-            t_dir = torch.randn(n, 3, device=self.device)
-            t_dir = t_dir / t_dir.norm(dim=1, keepdim=True).clamp(min=1e-8)
-            t_lo, t_hi = torque_range
-            t_mag = torch.rand(n, device=self.device) * (t_hi - t_lo) + t_lo
-            torques[trigger] = t_dir * t_mag.unsqueeze(1)
-
-        deactivate = timer == duration
-        if deactivate.any():
-            forces[deactivate] = 0.0
-            torques[deactivate] = 0.0
-
-        return timer
-
-    def _update_perturbation(self) -> None:
-        """Update per-step random perturbation forces on the base body.
-
-        Uses per-env timers that cycle through [0, interval+duration).
-        Phase [0, duration): perturbation active. Phase [duration, cycle): cooldown.
-        New random wrench is generated at the start of each active phase.
-
-        Forces are stored in ``_perturb_forces`` / ``_perturb_torques``
-        and added to hydro forces in ``_apply_action()``.
-        """
-        rand_cfg = self.cfg.randomization
-        if not rand_cfg.enable or not rand_cfg.enable_perturbation:
-            return
-
-        interval = rand_cfg.perturbation_interval
-        duration = rand_cfg.perturbation_duration
-        cycle = interval + duration
-
-        self._perturb_timer = self._apply_perturbation_cycle(
-            self._perturb_timer,
-            self._perturb_forces,
-            self._perturb_torques,
-            rand_cfg.perturbation_force_range,
-            rand_cfg.perturbation_torque_range,
-            cycle,
-            duration,
-        )
-
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        """Process actions before physics step with control decimation.
+        """Process actions: compute joint PD targets from policy output.
 
-        Supports two action modes:
-          - "joint_velocity": actions are joint velocity commands, integrated to position targets.
-          - "ee_position": actions are desired EE position (x, y) in body frame, converted to
-            joint angles via analytical 2-link IK.
+        Called once per env step (50Hz). With decimation=40, the subsequent
+        _apply_action() runs 40 times (2000Hz PD) tracking these targets.
 
         Args:
             actions: Action commands [-1, 1]. Shape: (num_envs, 2).
         """
-        self._update_proprio_hist()
         self._update_action_buffers(actions)
 
-        # Accumulate joint rotation delta (for constraint)
-        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
-        delta = joint_pos - self._prev_joint_pos
-        delta = torch.atan2(torch.sin(delta), torch.cos(delta))  # wrap to [-pi, pi]
-        self._accumulated_rotation += delta
-        self._prev_joint_pos = joint_pos.clone()
-
         if self._control_step_counter % self.cfg.control_decimation == 0:
-            # Apply action latency (delayed actions for control, raw actions kept for obs)
-            effective_actions = self._get_delayed_actions(self._actions)
+            self._apply_joint_pd_action(self._actions)
 
-            if self.cfg.action_mode == "ee_position":
-                self._apply_ee_position_action(effective_actions)
-            elif self.cfg.action_mode == "ee_delta":
-                self._apply_ee_delta_action(effective_actions)
-            else:
-                # Legacy: integrate velocity to position
-                control_dt = self.step_dt * self.cfg.control_decimation
-                position_delta = control_dt * self.cfg.max_joint_velocity * effective_actions
-                self._joint_pos_targets += position_delta
-                self._joint_pos_targets = torch.clamp(
-                    self._joint_pos_targets,
-                    self._joint_limits_lower,
-                    self._joint_limits_upper,
-                )
+    def _apply_joint_pd_action(self, actions: torch.Tensor) -> None:
+        """Compute joint PD targets: q_des = q_nominal + action_scale * a_t.
 
-    def _compute_ee_position(self, joint_pos: torch.Tensor) -> torch.Tensor:
-        """Forward kinematics: joint angles (g1, g2) -> EE position (x, y) in body frame.
+        PD controller (ImplicitActuator at 2000Hz) naturally rate-limits
+        the actual joint motion via Kp/Kd gains and PhysX velocity limits.
 
         Args:
-            joint_pos: Joint angles, shape (N, 2) with columns [g1, g2].
-
-        Returns:
-            EE position (x, y) in body frame, shape (N, 2).
+            actions: Normalized actions [-1, 1]. Shape: (num_envs, 2).
         """
-        g1, g2 = joint_pos[:, 0], joint_pos[:, 1]
-        x = _L1 * torch.cos(g1) + _L2 * torch.cos(g1 + g2)
-        y = _L1 * torch.sin(g1) + _L2 * torch.sin(g1 + g2)
-        return torch.stack([x, y], dim=-1)
-
-    def _apply_ee_position_action(self, actions: torch.Tensor) -> None:
-        """Convert EE position actions to joint targets via analytical 2-link IK.
-
-        Actions in [-1, 1]^2 are scaled to desired EE position (x, y) in body frame.
-        Analytical IK computes (gamma1, gamma2) from (x, y), then the joint target
-        is rate-limited to prevent large jumps (matching the implicit rate limit in
-        joint_velocity mode). This follows the ABPC reference where the servo tracks
-        smoothly-changing targets rather than jumping to the IK solution.
-
-        Args:
-            actions: Normalized EE position commands [-1, 1]. Shape: (num_envs, 2).
-        """
-        # Scale actions to workspace coordinates
-        R = self.cfg.workspace_radius
-        x_des = actions[:, 0] * R
-        y_des = actions[:, 1] * R
-
-        # Clamp radius to avoid IK singularity at full extension
-        r_sq = x_des**2 + y_des**2
-        r_max = _L1 + _L2 - 0.005  # small margin from kinematic limit
-        r_max_sq = r_max**2
-        over = r_sq > r_max_sq
-        if over.any():
-            scale = torch.sqrt(r_max_sq / r_sq.clamp(min=1e-8))
-            x_des = torch.where(over, x_des * scale, x_des)
-            y_des = torch.where(over, y_des * scale, y_des)
-            r_sq = torch.where(over, torch.tensor(r_max_sq, device=r_sq.device), r_sq)
-
-        # Analytical 2-link IK (elbow-up: gamma2 >= 0)
-        cos_g2 = (r_sq - _L1**2 - _L2**2) / (2.0 * _L1 * _L2)
-        cos_g2 = torch.clamp(cos_g2, -1.0, 1.0)
-        g2 = torch.acos(cos_g2)
-        sin_g2 = torch.sin(g2)
-        g1 = torch.atan2(y_des, x_des) - torch.atan2(_L2 * sin_g2, _L1 + _L2 * cos_g2)
-
-        # Rate-limit joint target: clamp delta to max_joint_velocity * control_dt.
-        # This matches the implicit rate limit in joint_velocity mode and prevents
-        # large joint angle jumps during exploration.
-        ik_target = torch.stack([g1, g2], dim=-1)
-        delta = ik_target - self._joint_pos_targets
-        delta = torch.atan2(torch.sin(delta), torch.cos(delta))  # shortest path
-        control_dt = self.step_dt * self.cfg.control_decimation
-        max_delta = self.cfg.max_joint_velocity * control_dt
-        delta = torch.clamp(delta, -max_delta, max_delta)
-        self._joint_pos_targets += delta
-
-    def _apply_ee_delta_action(self, actions: torch.Tensor) -> None:
-        """Convert delta EE actions to joint targets via FK + IK.
-
-        Actions in [-1, 1]^2 are scaled to EE displacement (dx, dy), added to
-        the current EE position (computed via FK from actual joint positions),
-        then converted to joint targets via the same IK and rate-limiting as
-        ee_position mode. Optimal steady-state action is (0, 0) = hold position.
-
-        Args:
-            actions: Normalized EE delta commands [-1, 1]. Shape: (num_envs, 2).
-        """
-        # Current EE position via FK from actual joint positions
-        joint_pos = self._robot.data.joint_pos[:, self._albc_joint_ids]
-        ee_current = self._compute_ee_position(joint_pos)
-
-        # Desired EE = current + scaled delta
-        S = self.cfg.ee_delta_scale
-        x_des = ee_current[:, 0] + actions[:, 0] * S
-        y_des = ee_current[:, 1] + actions[:, 1] * S
-
-        # Clamp radius to avoid IK singularity at full extension
-        r_sq = x_des**2 + y_des**2
-        r_max = _L1 + _L2 - 0.005
-        r_max_sq = r_max**2
-        over = r_sq > r_max_sq
-        if over.any():
-            scale = torch.sqrt(r_max_sq / r_sq.clamp(min=1e-8))
-            x_des = torch.where(over, x_des * scale, x_des)
-            y_des = torch.where(over, y_des * scale, y_des)
-            r_sq = torch.where(over, torch.tensor(r_max_sq, device=r_sq.device), r_sq)
-
-        # Analytical 2-link IK (elbow-up: gamma2 >= 0)
-        cos_g2 = (r_sq - _L1**2 - _L2**2) / (2.0 * _L1 * _L2)
-        cos_g2 = torch.clamp(cos_g2, -1.0, 1.0)
-        g2 = torch.acos(cos_g2)
-        sin_g2 = torch.sin(g2)
-        g1 = torch.atan2(y_des, x_des) - torch.atan2(_L2 * sin_g2, _L1 + _L2 * cos_g2)
-
-        # Rate-limit joint target
-        ik_target = torch.stack([g1, g2], dim=-1)
-        delta = ik_target - self._joint_pos_targets
-        delta = torch.atan2(torch.sin(delta), torch.cos(delta))  # shortest path
-        control_dt = self.step_dt * self.cfg.control_decimation
-        max_delta = self.cfg.max_joint_velocity * control_dt
-        delta = torch.clamp(delta, -max_delta, max_delta)
-        self._joint_pos_targets += delta
+        q_des = self._nominal_joint_pos + self._action_scale * actions
+        q_des = torch.clamp(q_des, self._joint_limits_lower, self._joint_limits_upper)
+        self._joint_pos_targets = q_des
 
     def _apply_action(self):
-        """Apply joint position targets, hydrodynamic forces, and random perturbation."""
-        # Joint position control
+        """Apply joint position targets and hydrodynamic forces."""
         self._robot.set_joint_position_target(self._joint_pos_targets, joint_ids=self._albc_joint_ids)
 
-        # Update PhysX acceleration cache for added mass force (M_A * v_dot).
-        # Uses previous step's acceleration to avoid circular dependency.
-        # Stability factor must satisfy: factor * max(M_A_i / M_rigid_i) < 1
+        # Update PhysX acceleration cache for added mass force
         if self._hydro.apply_added_mass:
             self._hydro.update_physx_state(
                 body_com_acc_w=self._robot.data.body_com_acc_w,
@@ -727,21 +353,16 @@ class ALBCEnv(DirectRLEnv):
                 root_quat_w=self._robot.data.body_quat_w[:, buoy_body_idx, :],
             )
 
-        # Update random perturbation state (per-step event, independent of control freq)
-        self._update_perturbation()
-
-        # Main body hydrodynamics + random perturbation
+        # Main body hydrodynamics
         self._hydro_forces, self._hydro_torques = self._hydro.compute_forces(
             root_lin_vel_w=self._robot.data.root_lin_vel_w,
             root_ang_vel_w=self._robot.data.root_ang_vel_w,
             root_quat_w=self._robot.data.root_quat_w,
         )
-        total_forces = self._hydro_forces + self._perturb_forces
-        total_torques = self._hydro_torques + self._perturb_torques
         self._robot.permanent_wrench_composer.set_forces_and_torques(
             body_ids=self._body_id,
-            forces=total_forces.unsqueeze(1),
-            torques=total_torques.unsqueeze(1),
+            forces=self._hydro_forces.unsqueeze(1),
+            torques=self._hydro_torques.unsqueeze(1),
         )
 
         # Buoy hydrodynamics
@@ -780,22 +401,14 @@ class ALBCEnv(DirectRLEnv):
         return payload_weight_b, payload_torque_b
 
     def _get_observations(self) -> dict:
-        """Compute ALBC-specific observations.
-
-        Returns 13-dim policy observation and optional privileged observations.
-        See mdp.observations for implementation details.
+        """Compute observations: o_t (14D policy) and p_t (23D privileged).
 
         Returns:
-            Observation dictionary with "policy" key and optional "privileged" key.
+            Observation dictionary with "policy" and "privileged" keys.
         """
-        policy_obs = compute_policy_obs(self, self._robot)
-
-        observations = {"policy": policy_obs}
+        observations = {"policy": compute_policy_obs(self, self._robot)}
         if self.cfg.state_space > 0:
             observations["privileged"] = compute_privileged_obs(self)
-        if self._proprio_hist is not None:
-            observations["proprio_hist"] = self._proprio_hist.clone()
-
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
@@ -807,24 +420,17 @@ class ALBCEnv(DirectRLEnv):
         # Update attitude error before reward computation
         self._update_attitude_error(self._robot.data.root_quat_w)
 
-        # Update EMA joint velocity (low-pass) before reward computation
-        vel = self._robot.data.joint_vel[:, self._albc_joint_ids]
-        alpha = self._ema_joint_vel_alpha
-        self._ema_joint_vel = alpha * vel + (1.0 - alpha) * self._ema_joint_vel
-
         reward = self._reward_manager.compute(
             robot=self._robot,
             dt=self.step_dt,
-            actions=self._actions,
-            prev_actions=self._prev_actions,
-            env=self,  # Pass env for accessing attitude_error, EMA state
+            env=self,
         )
 
         # Termination penalty: large one-time penalty on early termination
         if self.cfg.reward.termination_penalty != 0.0:
             reward += self.reset_terminated * self.cfg.reward.termination_penalty
 
-        # Compute constraint costs for C-TRPO (if constraints configured)
+        # Compute constraint costs for TRPO + IPO (if constraints configured)
         if self._constraints_cfg is not None:
             self.extras["costs"] = compute_all_costs(self._robot, self, self._constraints_cfg)
 
@@ -835,9 +441,6 @@ class ALBCEnv(DirectRLEnv):
             idx = self._settling_idx % self._settling_window
             self._settling_errors.scatter_(1, idx.unsqueeze(1), err.unsqueeze(1))
             self._settling_idx += 1
-
-        # Update overshoot buffer AFTER constraint computation (so overshoot_cost reads prev step)
-        self._prev_attitude_error_rp[:] = self._attitude_error[:, :2]
 
         return reward
 
@@ -889,9 +492,6 @@ class ALBCEnv(DirectRLEnv):
         da = self._actions[env_ids] - self._prev_actions[env_ids]
         log["Action/rate_mean"] = torch.linalg.norm(da, dim=-1).mean().item()
 
-        # Dynamics & actuator diagnostics
-        self._collect_dynamics_metrics(log, env_ids)
-
         # DR parameters (when randomization is enabled)
         if hasattr(self.cfg, "randomization") and self.cfg.randomization.enable:
             # log_dr_metrics expects extras["log"] dict -- pass a wrapper
@@ -911,57 +511,6 @@ class ALBCEnv(DirectRLEnv):
         log["Episode_Termination/too_fast"] = _term_rate(self._term_too_fast)
         log["Episode_Termination/bad_state"] = _term_rate(self._term_bad_state)
         log["Episode_Termination/excessive_tilt"] = _term_rate(self._term_excessive_tilt)
-
-    def _collect_dynamics_metrics(self, log: dict[str, float | torch.Tensor], env_ids: torch.Tensor) -> None:
-        """Collect angular velocity, joint, and actuator saturation diagnostics."""
-        ang_vel = self._robot.data.root_ang_vel_b[env_ids]
-        log["Dynamics/angular_velocity_rp_rms"] = ang_vel[:, :2].pow(2).mean().sqrt().item()
-        log["Dynamics/angular_velocity_yaw_rms"] = ang_vel[:, 2].pow(2).mean().sqrt().item()
-
-        jids = self._albc_joint_ids
-        joint_vel = self._robot.data.joint_vel[env_ids][:, jids]
-        joint_pos = self._robot.data.joint_pos[env_ids][:, jids]
-
-        # Joint oscillation high-freq component
-        hf = joint_vel - self._ema_joint_vel[env_ids]
-        log["Dynamics/joint_oscillation_hf_rms"] = hf.pow(2).mean().sqrt().item()
-        log["Dynamics/joint_pos_mean_abs"] = joint_pos.abs().mean().item()
-        log["Dynamics/joint_vel_abs_max"] = joint_vel.abs().max().item()
-
-        # Effort limit saturation
-        effort_lim = self._robot.data.joint_effort_limits[env_ids][:, jids]
-        computed = self._robot.data.computed_torque[env_ids][:, jids]
-        log["Dynamics/effort_limit_mean"] = effort_lim.mean().item()
-        log["Dynamics/computed_torque_abs_max"] = computed.abs().max().item()
-        log["Dynamics/effort_saturation_frac"] = (computed.abs() >= effort_lim * 0.99).float().mean().item()
-
-        # Velocity limit saturation
-        vel_lim = self._robot.data.joint_vel_limits[env_ids][:, jids]
-        log["Dynamics/vel_saturation_frac"] = (joint_vel.abs() >= vel_lim.clamp(min=1e-6) * 0.95).float().mean().item()
-
-    def get_eval_snapshot(self) -> dict[str, float]:
-        """Return current evaluation metrics for play-mode diagnostics.
-
-        Provides instantaneous per-env averages of key quantities, useful for
-        printing periodic summaries during play without needing episode resets.
-
-        Returns:
-            Dict with keys: attitude_error_deg, action_rate,
-            angular_velocity_rp_rms, angular_velocity_yaw_rms,
-            joint_oscillation_hf_rms, joint_pos_mean_abs.
-        """
-        err = self._attitude_error[:, :2]
-        da = self._actions - self._prev_actions
-        joint_vel = self._robot.data.joint_vel[:, self._albc_joint_ids]
-        hf = joint_vel - self._ema_joint_vel
-        return {
-            "attitude_error_deg": torch.rad2deg(torch.linalg.norm(err, dim=-1)).mean().item(),
-            "action_rate": torch.linalg.norm(da, dim=-1).mean().item(),
-            "angular_velocity_rp_rms": self._robot.data.root_ang_vel_b[:, :2].pow(2).mean().sqrt().item(),
-            "angular_velocity_yaw_rms": self._robot.data.root_ang_vel_b[:, 2].pow(2).mean().sqrt().item(),
-            "joint_oscillation_hf_rms": hf.pow(2).mean().sqrt().item(),
-            "joint_pos_mean_abs": self._robot.data.joint_pos[:, self._albc_joint_ids].abs().mean().item(),
-        }
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute termination conditions.
@@ -1062,52 +611,12 @@ class ALBCEnv(DirectRLEnv):
             self.episode_length_buf[env_ids] = torch.randint_like(self.episode_length_buf[env_ids], high=max_jitter)
 
         self._reset_action_buffers(env_ids)
-        self._reset_perturbation_buffers(env_ids)
-
-        # Reset proprioception history buffer
-        if self._proprio_hist is not None:
-            self._proprio_hist[env_ids] = 0.0
-
-        # Reset action latency: sample new per-env latency and clear history
-        if self._action_history is not None and self._action_latency is not None:
-            lo, hi = self.cfg.randomization.action_latency_range
-            self._action_history[env_ids] = 0.0
-            self._action_latency[env_ids] = torch.randint(lo, hi + 1, (len(env_ids),), device=self.device)
 
     def _reset_action_buffers(self, env_ids: torch.Tensor) -> None:
-        """Reset action, EMA, rotation tracking, and overshoot detection buffers.
-
-        For ee_position mode, initializes action buffers to the FK of the current
-        joint position (normalized to [-1, 1]) instead of zero. This prevents a
-        false smoothness spike on the first step, since action=[0,0] means "EE at
-        center" which may be far from the actual initial joint configuration.
-
-        For ee_delta and joint_velocity modes, action=[0,0] means "hold position"
-        so zero initialization is correct.
-        """
-        if self.cfg.action_mode == "ee_position":
-            joint_pos = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
-            ee_pos = self._compute_ee_position(joint_pos)
-            R = self.cfg.workspace_radius
-            init_action = torch.stack([ee_pos[:, 0] / R, ee_pos[:, 1] / R], dim=-1).clamp(-1.0, 1.0)
-            for buf in (self._actions, self._prev_actions, self._prev_prev_actions):
-                buf[env_ids] = init_action
-            self._prev_actions_obs[env_ids] = init_action
-            self._joint_pos_targets[env_ids] = joint_pos
-        else:
-            for buf in (self._actions, self._prev_actions, self._prev_prev_actions, self._prev_actions_obs):
-                buf[env_ids] = 0.0
-            self._joint_pos_targets[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
-        self._ema_joint_vel[env_ids] = 0.0
-        self._accumulated_rotation[env_ids] = 0.0
-        self._prev_joint_pos[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
-        self._prev_attitude_error_rp[env_ids] = 0.0
-
-    def _reset_perturbation_buffers(self, env_ids: torch.Tensor) -> None:
-        """Zero perturbation forces/torques and randomize timer phase."""
-        self._perturb_forces[env_ids] = 0.0
-        self._perturb_torques[env_ids] = 0.0
-        self._perturb_timer[env_ids] = torch.randint(0, self._perturb_cycle, (len(env_ids),), device=self.device)
+        """Reset action buffers."""
+        for buf in (self._actions, self._prev_actions, self._prev_prev_actions, self._prev_actions_obs):
+            buf[env_ids] = 0.0
+        self._joint_pos_targets[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
 
     def _reset_physics(self, env_ids: torch.Tensor) -> None:
         """Reset hydrodynamics, payload, and apply domain randomization."""
@@ -1161,16 +670,14 @@ class ALBCEnv(DirectRLEnv):
             self._target_euler[env_ids] = self._base_attitude.unsqueeze(0).expand(num_reset, -1)
 
         rand_cfg = self.cfg.randomization
-        # Pose must be set BEFORE joints so equilibrium init can read current attitude
+        # Pose must be set BEFORE joints
         if rand_cfg.enable:
             randomize_robot_pose(env=self, env_ids=env_ids, rand_cfg=rand_cfg)
         else:
             reset_robot_pose_default(env=self, env_ids=env_ids, initial_height=self.cfg.initial_height)
 
-        # Joint initialization: equilibrium-based or random
-        if self.cfg.joint_init_mode == "equilibrium":
-            compute_equilibrium_joint_positions(env=self, env_ids=env_ids, noise_range=self.cfg.equilibrium_joint_noise)
-        elif rand_cfg.enable:
+        # Joint initialization: random or default
+        if rand_cfg.enable:
             randomize_joint_positions(env=self, env_ids=env_ids, joint_pos_range=self.cfg.initial_joint_pos_range)
         else:
             reset_joint_positions_default(env=self, env_ids=env_ids)
@@ -1184,36 +691,3 @@ class ALBCEnv(DirectRLEnv):
             randomize_joint_gains(env=self, env_ids=env_ids, dr=dr)
             randomize_joint_effort_limit(env=self, env_ids=env_ids, dr=dr)
             randomize_joint_friction(env=self, env_ids=env_ids, dr=dr)
-
-        # Initialize overshoot buffer to initial error (prevents false positive on first step).
-        # write_root_pose_to_sim() immediately updates internal data cache,
-        # so root_quat_w reflects the new pose without needing an explicit update() call.
-        attitude_error = self.compute_attitude_error(self._robot.data.root_quat_w[env_ids], env_ids)
-        self._prev_attitude_error_rp[env_ids] = attitude_error[:, :2]
-
-        # Re-sync _prev_joint_pos after joint positions were changed above.
-        # Without this, the first _pre_physics_step() sees a false delta between
-        # the post-reset joint_pos and the stale pre-reset _prev_joint_pos,
-        # injecting a spurious offset into _accumulated_rotation.
-        self._prev_joint_pos[env_ids] = self._robot.data.joint_pos[env_ids][:, self._albc_joint_ids]
-
-    def _set_debug_vis_impl(self, debug_vis: bool):
-        """Setup or toggle visibility of debug visualization markers."""
-        if debug_vis:
-            self._debug_vis.setup(enable_payload=True)
-        self._debug_vis.set_visibility(debug_vis)
-
-    def _debug_vis_callback(self, _event):
-        """Update debug marker positions each frame."""
-        self._debug_vis.update(
-            robot=self._robot,
-            body_id=self._body_id,
-            buoy_body_id=self._buoy_body_id,
-            hydro=self._hydro,
-            buoy_hydro=self._buoy_hydro,
-            gripper_body_id=self._gripper_body_id,
-            payload_mass=self._payload_mass,
-            payload_offset=self._payload_attachment_offset,
-            payload_cog_offset=self._payload_cog_offset,
-            default_payload_mass=self.cfg.payload_mass,
-        )

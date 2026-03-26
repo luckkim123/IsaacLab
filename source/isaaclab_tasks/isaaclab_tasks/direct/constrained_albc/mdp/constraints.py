@@ -3,13 +3,13 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Constraint cost functions for Lagrangian constrained RL.
+"""Constraint cost functions for IPO (Interior-Point Optimization).
 
-Provides cost functions (binary indicator or continuous) for the constrained
-RL pipeline. Each constraint has a per-step budget D_k.
+Two types following the paper's framework:
+    Probabilistic: C_k = I(violation) in {0, 1}, budget = max violation probability
+    Average:       C_k = f(s,a,s') in R, budget = max average value
 
-Registry pattern: ALBCConstraintCfg holds a list of ConstraintTermCfg,
-each referencing a cost function. compute_all_costs() iterates over them.
+All constraints satisfy: J_Ck(pi) = E[sum gamma^t C_k] <= d_k
 """
 
 from __future__ import annotations
@@ -28,44 +28,24 @@ if TYPE_CHECKING:
     from ..albc_env import ALBCEnv
 
 
-# =============================================================================
-# ConstraintTermCfg: per-term configuration
-# =============================================================================
+# --- Configuration ---
 
 
 @configclass
 class ConstraintTermCfg:
-    """Configuration for a single constraint term.
+    """Single constraint: cost function + per-step budget D_k."""
 
-    Attributes:
-        func: Cost function (robot, env, **params) -> (num_envs,) tensor.
-        params: Keyword arguments forwarded to func.
-        budget: Per-step budget D_k.
-        name: Logging name. Derived from func.__name__ if empty.
-    """
-
-    func: Callable = lambda _r, _e: torch.zeros(1)  # placeholder; overridden per term
+    func: Callable = lambda _r, _e: torch.zeros(1)
     params: dict = {}
     budget: float = 0.1
     name: str = ""
 
 
-# =============================================================================
-# ALBCConstraintCfg: top-level constraint configuration
-# =============================================================================
-
-
 @configclass
 class ALBCConstraintCfg:
-    """Configuration for ALBC constraint costs in C-TRPO pipeline.
-
-    Uses a registry pattern: ``terms`` is a list of ConstraintTermCfg.
-    ``num_constraints`` and ``constraint_budgets`` are derived properties.
-    """
+    """List of constraint terms for IPO barrier."""
 
     terms: list[ConstraintTermCfg] = []
-
-    # Cost GAE parameters
     cost_gamma: float = 0.99
     cost_lam: float = 0.95
 
@@ -82,139 +62,51 @@ class ALBCConstraintCfg:
         return tuple(t.name or t.func.__name__ for t in self.terms)
 
 
-# =============================================================================
-# Cost functions: per-step costs (binary or continuous)
-# =============================================================================
+# --- Probabilistic Constraints (binary indicator) ---
 
 
-def accumulated_rotation_cost(
+def attitude_limit_cost(
     _robot: Articulation,
-    env: ALBCEnv,
-    max_rotations: float = 2.0,
-) -> torch.Tensor:
-    """Binary cost: 1 if any joint accumulated rotation exceeds max.
-
-    Requires env._accumulated_rotation buffer (initialized in base_env).
-
-    Args:
-        env: Environment instance.
-        max_rotations: Maximum full rotations (2*pi each) before violation.
-
-    Returns:
-        (num_envs,) binary tensor.
-    """
-    threshold = max_rotations * 2.0 * torch.pi
-    return (env._accumulated_rotation.abs().max(dim=-1).values > threshold).float()
-
-
-def attitude_absolute_cost(
-    _robot: Articulation,
-    env: ALBCEnv,
+    _env: ALBCEnv,
     limit: float = 1.396,
 ) -> torch.Tensor:
-    """Binary cost: 1 if absolute roll or pitch exceeds limit (rad).
-
-    Safety constraint to prevent capsizing. Uses absolute body orientation.
-    Acts as a warning zone before episode termination (90 deg).
-
-    Args:
-        env: Environment instance.
-        limit: Maximum absolute roll/pitch in radians (~80 deg default).
-
-    Returns:
-        (num_envs,) binary tensor.
-    """
+    """C_com: I(max(|roll|, |pitch|) > limit). Maps to paper's c_com (tilt limit)."""
     roll, pitch, _ = euler_xyz_from_quat(_robot.data.root_quat_w)
     return (torch.max(roll.abs(), pitch.abs()) > limit).float()
 
 
-def effort_limit_cost(
+def torque_limit_cost(
     _robot: Articulation,
     env: ALBCEnv,
     limit_nm: float = 9.5,
 ) -> torch.Tensor:
-    """Binary cost: 1 if any ALBC joint computed torque exceeds motor spec limit.
-
-    Uses a fixed threshold (motor stall torque) independent of PhysX effort_limit_sim
-    and DR. PhysX hard cap (effort_limit_sim=13) allows higher torques in simulation
-    so the policy has headroom to operate below the constraint threshold.
-
-    Args:
-        env: Environment instance.
-        limit_nm: Motor torque limit in Nm (Dynamixel XW540 stall torque = 9.5 Nm).
-
-    Returns:
-        (num_envs,) binary tensor.
-    """
+    """C_jt: I(any |tau_j| > tau_max). Maps to paper's c_jt (joint torque limit)."""
     computed = _robot.data.computed_torque[:, env._albc_joint_ids]
     return (computed.abs() > limit_nm).any(dim=-1).float()
 
 
-def joint_velocity_limit_cost(
+def velocity_limit_cost(
     _robot: Articulation,
     env: ALBCEnv,
     limit_rad_per_s: float = 4.189,
 ) -> torch.Tensor:
-    """Binary cost: 1 if any ALBC joint velocity exceeds limit.
-
-    Hard velocity limit based on motor specs. 4.189 rad/s = 40 RPM.
-
-    Args:
-        env: Environment instance.
-        limit_rad_per_s: Maximum joint velocity in rad/s.
-
-    Returns:
-        (num_envs,) binary tensor.
-    """
+    """C_jv: I(any |q_dot_j| > q_dot_max). Maps to paper's c_jv (joint velocity limit)."""
     joint_vel = _robot.data.joint_vel[:, env._albc_joint_ids]
     return (joint_vel.abs().max(dim=-1).values > limit_rad_per_s).float()
 
 
-def overshoot_cost(
-    _robot: Articulation,
-    env: ALBCEnv,
-    threshold: float = 0.035,
-) -> torch.Tensor:
-    """Binary cost: 1 if attitude error sign flips with magnitude > threshold.
-
-    Detects overshoot: the error crosses zero (sign change on any axis)
-    while the current error exceeds threshold. Uses per-axis signed error
-    from env._prev_attitude_error_rp (roll/pitch).
-
-    Args:
-        env: Environment instance.
-        threshold: Minimum error magnitude (rad) to count as overshoot (~2 deg).
-
-    Returns:
-        (num_envs,) binary tensor.
-    """
-    curr = env._attitude_error[:, :2]
-    prev = env._prev_attitude_error_rp
-    # Per-axis conjunction: sign flip AND previous error > threshold (overshoot from significant error)
-    per_axis = (curr * prev < 0) & (prev.abs() > threshold)
-    return per_axis.any(dim=-1).float()
+# --- Average Constraints (continuous) ---
 
 
 def yaw_velocity_cost(
     _robot: Articulation,
-    env: ALBCEnv,
+    _env: ALBCEnv,
 ) -> torch.Tensor:
-    """Continuous cost: absolute yaw angular velocity (rad/s).
-
-    Average constraint -- budget D_k is the target mean yaw rate.
-    Buoyancy control cannot generate Z-axis torque, so yaw velocity
-    is purely from disturbances and coupling. Constraining it
-    prevents policies from exploiting yaw-coupled motions.
-
-    Returns:
-        (num_envs,) non-negative tensor in rad/s.
-    """
+    """C_ov: |w_z|. Maps to paper's c_ov (undesired orthogonal rotation)."""
     return _robot.data.root_ang_vel_b[:, 2].abs()
 
 
-# =============================================================================
-# compute_all_costs: registry-based dispatch
-# =============================================================================
+# --- Dispatch ---
 
 
 def compute_all_costs(
@@ -222,16 +114,5 @@ def compute_all_costs(
     env: ALBCEnv,
     cfg: ALBCConstraintCfg,
 ) -> torch.Tensor:
-    """Compute all K constraint costs and stack into (num_envs, K) tensor.
-
-    Iterates over cfg.terms and calls each term's func with its params.
-
-    Args:
-        robot: Robot articulation.
-        env: Environment instance.
-        cfg: Constraint configuration.
-
-    Returns:
-        (num_envs, K) cost tensor.
-    """
+    """Compute all K costs -> (num_envs, K) tensor."""
     return torch.stack([t.func(robot, env, **t.params) for t in cfg.terms], dim=-1)

@@ -3,17 +3,16 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""ActorCriticEncoder with multi-head cost value function for constrained RL.
+"""Constrained teacher policy with shared-backbone multi-head value network.
 
-Extends ActorCriticEncoder with a cost critic head that predicts per-constraint
-cost values V_C_k(s) for K constraints. The cost critic uses the same asymmetric
-input path as the reward critic: cat([policy_obs, hist_flat, privileged]).
+Extends ActorCriticEncoder with a shared value backbone for both reward and
+cost value estimation, following the paper's multi-head cost critic design:
+    Shared Backbone: cat([o_t, p_t]) -> MLP -> features
+    Reward Head:     features -> 1D (reward value)
+    Cost Head:       features -> KD (per-constraint cost values)
 
-Architecture:
-    Encoder:     cat([policy_obs, hist_flat, privileged]) = 280D -> MLP -> softsign -> z (13D)
-    Actor:       cat([policy_obs, hist_flat, z]) = 266D -> MLP -> actions
-    Critic:      cat([policy_obs, hist_flat, privileged]) = 280D -> MLP -> value (1D)
-    Cost Critic: cat([policy_obs, hist_flat, privileged]) = 280D -> MLP -> cost values (K)
+This reduces parameters compared to separate critic networks (~1/K savings
+on the backbone) while sharing learned representations across value functions.
 """
 
 from __future__ import annotations
@@ -22,6 +21,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 import torch
+import torch.nn as nn
 from rsl_rl.networks import MLP
 
 from .actor_critic_encoder import ActorCriticEncoder
@@ -33,77 +33,91 @@ if TYPE_CHECKING:
 
 
 class ActorCriticEncoderConstrained(ActorCriticEncoder):
-    """ActorCriticEncoder extended with cost value heads for constrained RL.
+    """Teacher policy with shared-backbone multi-head value function.
 
-    The cost critic outputs K values (one per constraint), used by
-    ConstraintTRPO for cost GAE and Lagrangian penalty computation.
+    Overrides the parent's separate critic with a shared backbone that feeds
+    both reward and cost value heads. The cost head outputs K values
+    (one per constraint) used by the TRPO + IPO algorithm for cost GAE.
     """
 
     def __init__(
         self,
         *args: Any,
-        num_constraints: int = 3,
-        cost_critic_hidden_dims: list[int] | tuple[int, ...] = (256, 128, 64),
+        num_constraints: int = 4,
+        cost_critic_hidden_dims: list[int] | tuple[int, ...] = (512, 256, 128, 64),
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
-
         self.num_constraints = num_constraints
 
-        # Cost critic: same input dimension as reward critic (asymmetric)
-        num_critic_obs = self.num_critic_obs
-        self.cost_critic = MLP(
-            num_critic_obs,
-            num_constraints,
-            list(cost_critic_hidden_dims),
+        # Replace parent's critic with shared backbone + heads.
+        # The backbone hidden dims come from cost_critic_hidden_dims.
+        backbone_output_dim = cost_critic_hidden_dims[-1]
+        backbone_hidden = list(cost_critic_hidden_dims[:-1])
+
+        # Delete parent's separate critic MLP
+        del self.critic
+
+        # Shared backbone: cat([o_t, p_t]) -> features
+        self.value_backbone = MLP(
+            self.num_critic_obs,
+            backbone_output_dim,
+            backbone_hidden,
             "elu",
         )
+
+        # Reward head: features -> 1D
+        self.reward_head = nn.Linear(backbone_output_dim, 1)
+
+        # Cost head: features -> K (one per constraint)
+        self.cost_head = nn.Linear(backbone_output_dim, num_constraints)
+
         logger.info(
-            "Cost critic MLP (history-asymmetric, %dD input, %d outputs): %s",
-            num_critic_obs,
+            "Shared value backbone: %dD -> %s -> %dD, reward_head(1), cost_head(%d)",
+            self.num_critic_obs,
+            cost_critic_hidden_dims,
+            backbone_output_dim,
             num_constraints,
-            self.cost_critic,
         )
 
-    def evaluate_costs(self, obs: TensorDict) -> torch.Tensor:
-        """Evaluate cost value function for all K constraints.
+    def _get_value_features(self, obs: TensorDict) -> torch.Tensor:
+        """Compute shared backbone features from critic observations."""
+        critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))
+        return self.value_backbone(critic_obs)
 
-        Uses the same asymmetric critic input: cat([policy_obs, hist_flat, privileged]).
+    def evaluate(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
+        """Evaluate reward value function via shared backbone + reward head."""
+        features = self._get_value_features(obs)
+        return self.reward_head(features)
+
+    def evaluate_costs(self, obs: TensorDict) -> torch.Tensor:
+        """Evaluate per-constraint cost values via shared backbone + cost head.
 
         Returns:
             Cost value predictions. Shape: (batch, K).
         """
-        critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))  # type: ignore[operator]
-        return self.cost_critic(critic_obs)
+        features = self._get_value_features(obs)
+        return self.cost_head(features)
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
-        """Load with backward compatibility for checkpoints without cost_critic or K/dim mismatch."""
-        cost_prefix = "cost_critic."
-        has_cost_keys = any(k.startswith(cost_prefix) for k in state_dict)
+        """Load model parameters, injecting defaults for missing value network keys."""
+        # Handle checkpoint from before shared backbone (separate critic + cost_critic)
+        cost_prefix = "cost_head."
+        backbone_prefix = "value_backbone."
+        has_new_keys = any(k.startswith(backbone_prefix) for k in state_dict)
 
-        if not has_cost_keys:
-            logger.info("Checkpoint lacks cost_critic keys; using random initialization.")
-            for k, v in self.cost_critic.state_dict().items():
+        if not has_new_keys:
+            logger.info("Checkpoint lacks shared value backbone; using random initialization.")
+            # Remove old critic keys if present
+            old_keys = [k for k in state_dict if k.startswith("critic.") or k.startswith("cost_critic.")]
+            for k in old_keys:
+                del state_dict[k]
+            # Inject new backbone + head keys
+            for k, v in self.value_backbone.state_dict().items():
+                state_dict[backbone_prefix + k] = v
+            for k, v in self.reward_head.state_dict().items():
+                state_dict["reward_head." + k] = v
+            for k, v in self.cost_head.state_dict().items():
                 state_dict[cost_prefix + k] = v
-        else:
-            # Detect K mismatch (e.g. K=3 checkpoint loaded into K=6 model)
-            weight_keys = sorted(
-                [k for k in state_dict if k.startswith(cost_prefix) and k.endswith(".weight")],
-                key=lambda k: int(k.removeprefix(cost_prefix).split(".")[0]),
-            )
-            if weight_keys:
-                output_key = weight_keys[-1]
-                if state_dict[output_key].shape[0] != self.num_constraints:
-                    old_k = state_dict[output_key].shape[0]
-                    logger.warning(
-                        "Cost critic K mismatch (%d -> %d), reinitializing cost_critic.",
-                        old_k,
-                        self.num_constraints,
-                    )
-                    for k, v in self.cost_critic.state_dict().items():
-                        state_dict[cost_prefix + k] = v
-
-            # Detect input dimension mismatch (reuse parent helper)
-            self._handle_dim_mismatch(state_dict, cost_prefix)
 
         return super().load_state_dict(state_dict, strict=strict)

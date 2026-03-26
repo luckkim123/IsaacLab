@@ -3,27 +3,19 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""MDP (Markov Decision Process) functions for ALBC environments.
-
-This module provides:
-- Event functions for domain randomization and reset
-- Reward system (manager, configuration, reward functions)
-"""
+"""MDP functions for ALBC environments: constraints, events, observations, rewards."""
 
 from .constraints import (
     ALBCConstraintCfg,
     ConstraintTermCfg,
-    accumulated_rotation_cost,
-    attitude_absolute_cost,
+    attitude_limit_cost,
     compute_all_costs,
-    effort_limit_cost,
-    joint_velocity_limit_cost,
-    overshoot_cost,
+    torque_limit_cost,
+    velocity_limit_cost,
     yaw_velocity_cost,
 )
 from .events import (
     DRSampler,
-    compute_equilibrium_joint_positions,
     randomize_body_mass,
     randomize_hydrodynamics,
     randomize_joint_effort_limit,
@@ -43,26 +35,24 @@ from .observations import (
 from .rewards import (
     ALBCRewardCfg,
     RewardManager,
-    RewardTermCfg,
-    action_smoothness_penalty,
-    command_reward,
-    joint_torque_penalty,
+    action_smoothness,
+    command_tracking,
+    joint_torque,
 )
 
 __all__ = [
-    # Constraints
     "ALBCConstraintCfg",
+    "ALBCRewardCfg",
     "ConstraintTermCfg",
-    "accumulated_rotation_cost",
-    "attitude_absolute_cost",
-    "compute_all_costs",
-    "effort_limit_cost",
-    "joint_velocity_limit_cost",
-    "overshoot_cost",
-    "yaw_velocity_cost",
-    # Events
     "DRSampler",
-    "compute_equilibrium_joint_positions",
+    "RewardManager",
+    "action_smoothness",
+    "attitude_limit_cost",
+    "command_tracking",
+    "compute_all_costs",
+    "compute_policy_obs",
+    "compute_privileged_obs",
+    "joint_torque",
     "randomize_body_mass",
     "randomize_hydrodynamics",
     "randomize_joint_effort_limit",
@@ -74,15 +64,7 @@ __all__ = [
     "randomize_robot_pose",
     "reset_joint_positions_default",
     "reset_robot_pose_default",
-    # Observations
-    "compute_policy_obs",
-    "compute_privileged_obs",
-    # Rewards (configs)
-    "ALBCRewardCfg",
-    "RewardManager",
-    "RewardTermCfg",
-    # Rewards (functions)
-    "action_smoothness_penalty",
-    "command_reward",
-    "joint_torque_penalty",
+    "torque_limit_cost",
+    "velocity_limit_cost",
+    "yaw_velocity_cost",
 ]

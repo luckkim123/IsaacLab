@@ -9,7 +9,7 @@ ALBC (Active Linear Buoyancy Controller) uses 2 revolute joints (joint1, joint2)
 to position a buoyancy element for attitude stabilization. No thrusters are used.
 
 Single registered task: Isaac-Constrained-ALBC-Encoder-v0
-    C-TRPO + encoder constrained RL with 6 constraint terms.
+    TRPO + IPO encoder constrained RL with 4 constraint terms.
 """
 
 from __future__ import annotations
@@ -34,17 +34,15 @@ from isaaclab_assets.robots.uuv import (
 )
 
 from .doraemon import DoraemonCfg
-from .mdp import (
+from .mdp.constraints import (
     ALBCConstraintCfg,
-    ALBCRewardCfg,
     ConstraintTermCfg,
-    accumulated_rotation_cost,
-    attitude_absolute_cost,
-    effort_limit_cost,
-    joint_velocity_limit_cost,
-    overshoot_cost,
+    attitude_limit_cost,
+    torque_limit_cost,
+    velocity_limit_cost,
     yaw_velocity_cost,
 )
+from .mdp.rewards import ALBCRewardCfg
 
 
 @configclass
@@ -109,21 +107,6 @@ class DomainRandomizationCfg:
     joint_viscous_friction_range: tuple[float, float] = (0.0, 0.2)
 
     # ==========================================================================
-    # Random Perturbation (per-step external disturbance, Tan et al. 2018)
-    # Periodically applies random wrench (force + torque) to the base body.
-    # ==========================================================================
-    enable_perturbation: bool = True
-    perturbation_force_range: tuple[float, float] = (0.0, 5.0)  # N
-    perturbation_torque_range: tuple[float, float] = (0.0, 0.4)  # Nm
-    perturbation_interval: int = 100  # physics steps between events (~0.5s at 200Hz)
-    perturbation_duration: int = 20  # physics steps active (~0.1s)
-
-    # ==========================================================================
-    # Action Latency (delays RL action application by random physics steps)
-    # ==========================================================================
-    action_latency_range: tuple[int, int] = (0, 4)  # physics steps (0-20ms at 200Hz)
-
-    # ==========================================================================
     # Payload Randomization
     # Payload is attached to the gripper body (fixed to base via base_to_gripper joint).
     # ==========================================================================
@@ -141,28 +124,33 @@ class DomainRandomizationCfg:
 class ALBCEnvCfg(DirectRLEnvCfg):
     """Base configuration for ALBC environment.
 
-    Used directly by ALBCEnv. Inheritable for specialized configs.
-
     The vehicle uses 2 revolute joints (joint1, joint2) to position a buoyancy
     element for attitude stabilization. No thrusters are used.
 
-    Network Input Dimensions (ActorCriticEncoder):
-        - observation_space (13): Used for gym.spaces.Box definition only
-        - state_space (27): Privileged info, returned as observations["privileged"]
-        - Encoder: cat([policy_obs(13), hist(240), privileged(27)]) = 280D -> softsign -> z(13D)
-        - Actor input: policy_obs(13) + hist(240) + z(13) = 266D
-        - Critic input: policy_obs(13) + hist(240) + privileged(27) = 280D
+    Network Input Dimensions (Teacher Policy):
+        - observation_space (14): o_t policy obs for gym.spaces.Box
+        - state_space (23): p_t privileged info, returned as observations["privileged"]
+        - Encoder: p_t(23D) -> MLP[256,128,64] -> softsign -> z(13D)
+        - Actor:   cat([o_t(14D), z(13D)]) = 27D -> MLP[256,128,64] -> a_t(2D)
+        - Action:  q_des = q_nominal + action_scale * a_t (Joint PD targets)
+        - Critic:  cat([o_t(14D), p_t(23D)]) = 37D -> Shared Backbone[512,256,128]->64D
+                   -> Reward Head(1D) + Cost Head(K=4)
+
+    Control Frequency (1:40 ratio):
+        - Physics: dt=0.0005s (2000Hz PD)
+        - Env step: decimation=40 -> 0.02s (50Hz)
+        - Policy: control_decimation=1 -> 50Hz
     """
 
     # ==========================================================================
     # Environment Settings
     # ==========================================================================
     episode_length_s: float = 15.0
-    decimation: int = 1  # 0.005 * 1 = 0.005s step; 50Hz control via control_decimation=4
+    decimation: int = 40  # 40 physics substeps per env step: 0.0005 * 40 = 0.02s (50Hz)
     action_space: int = 2
-    observation_space: int = 13
-    state_space: int = 27  # 27D privileged obs for encoder (+4: latency, friction x2, density)
-    debug_vis: bool = True
+    observation_space: int = 14  # o_t: euler(3) + ang_vel(3) + att_err(2) + jpos(2) + jvel(2) + prev_act(2)
+    state_space: int = 23  # p_t: hydro(6)+inertia(4)+damping(4)+mass(2)+payload(4)+joint(2)+density(1)
+    debug_vis: bool = False
 
     # Top-down camera view (looking down at robot from above)
     viewer: ViewerCfg = ViewerCfg(
@@ -174,8 +162,8 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     # Simulation
     # ==========================================================================
     sim: SimulationCfg = SimulationCfg(
-        dt=0.005,  # 200Hz sim (physics)
-        render_interval=4,
+        dt=0.0005,  # 2000Hz physics (PD control), 1:40 ratio with 50Hz policy
+        render_interval=40,  # render every 40 physics steps = 50Hz
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
@@ -214,34 +202,16 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     # ==========================================================================
     albc_joint_names: list[str] = HERO_AGENT_ALBC_JOINT_NAMES
     max_joint_velocity: float = 2.0 * math.pi  # rad/s, matches PhysX velocity_limit_sim=6.28
-    control_decimation: int = 4  # target updates every 4th step = 0.02s (50Hz control)
+    control_decimation: int = 1  # policy updates every env step (50Hz = 2000Hz / 40)
     initial_joint_pos_range: tuple[float, float] = (-math.pi, math.pi)
-    joint_init_mode: str = "random"  # "equilibrium" or "random"
-    equilibrium_joint_noise: tuple[float, float] = (-0.3, 0.3)  # rad, noise around equilibrium
 
-    # Action mode: "joint_velocity" (legacy), "ee_position", or "ee_delta"
-    action_mode: str = "ee_delta"
-    """Action interpretation:
-    "joint_velocity": actions are joint velocity commands, integrated to position targets.
-    "ee_position": actions are absolute EE position (x, y) in body frame, via IK.
-    "ee_delta": actions are EE displacement (dx, dy) per control step. Current EE
-        is computed via FK, delta is added, then converted to joint targets via IK.
-        Optimal steady-state is action=(0,0), avoiding tanh boundary saturation."""
+    nominal_joint_pos: tuple[float, float] = (0.0, math.pi)
+    """Nominal joint configuration (g1, g2). At (0, pi), EE is at body center (0, 0).
+    Actions offset from this: q_des = q_nominal + action_scale * a_t."""
 
-    workspace_radius: float = 0.461
-    """Maximum EE reach (meters). Used by ee_position mode for action scaling and
-    by ee_delta mode for workspace clamping. Set to kinematic limit minus small
-    margin (L1+L2-0.005 = 0.461m). IK singularity at full extension is avoided
-    by the workspace clamp safety net."""
-
-    ee_delta_scale: float = 0.02
-    """Per-control-step EE displacement scale (meters) for ee_delta mode. Actions
-    in [-1, 1] are scaled by this value. At 50Hz control (control_decimation=4),
-    action=1.0 moves EE by 0.02m/step = 1.0 m/s max velocity. Full workspace
-    traverse (~0.46m) takes ~0.46s at max action."""
-
-    # EMA alpha for constraint system joint velocity filtering
-    ema_joint_vel_alpha: float = 0.2
+    action_scale: float = math.pi
+    """Action scaling factor (sigma_a). Maps action [-1, 1] to joint offset [-pi, pi].
+    q_des = q_nominal + action_scale * a_t. PD controller tracks q_des at 2000Hz."""
 
     # ==========================================================================
     # Attitude Task and Rewards
@@ -250,14 +220,10 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     randomize_target_attitude: bool = True
     target_attitude_range: tuple[float, float, float] = (0.349, 0.349, 0.0)
 
-    # smoothness replaces joint_osc constraint (fixed weight avoids lambda competition).
     reward: ALBCRewardCfg = ALBCRewardCfg(
-        command_weight=-1.0,
-        command_type="quadratic",
-        command_coeff_roll=5.0,
-        command_coeff_pitch=7.5,
-        smoothness_weight=-0.05,
-        torque_weight=-0.001,
+        k_c=-1.0,
+        k_tau=-0.001,
+        k_s=-0.05,
     )
 
     # ==========================================================================
@@ -285,65 +251,52 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     payload_attachment_offset: tuple[float, float, float] = (0.0, 0.0, -0.05)  # m, gripper frame
 
     # ==========================================================================
-    # Proprioception History (for history-augmented encoder)
-    # ==========================================================================
-    proprio_history_len: int = 30
-    proprio_feature_dim: int = 8  # [roll, pitch, p, q, joint_pos_norm(2), prev_actions(2)]
-
-    # ==========================================================================
-    # IMU Sensor Noise
+    # IMU Sensor Noise (14D: euler(3), ang_vel(3), att_err(2), jpos(2), jvel(2), prev_act(2))
     # ==========================================================================
     observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
         noise_cfg=GaussianNoiseCfg(
             mean=0.0,
-            std=tuple([0.02] * 3 + [0.04] * 3 + [0.02] * 3 + [0.0] * 4),
+            std=tuple(
+                [0.02] * 3  # euler
+                + [0.04] * 3  # ang_vel
+                + [0.02] * 2  # att_err
+                + [0.02] * 2  # joint_pos
+                + [0.04] * 2  # joint_vel
+                + [0.0] * 2  # prev_actions (no noise)
+            ),
         ),
         bias_noise_cfg=UniformNoiseCfg(
-            n_min=tuple([-0.02] * 3 + [-0.03] * 3 + [-0.02] * 3 + [0] * 4),
-            n_max=tuple([0.02] * 3 + [0.03] * 3 + [0.02] * 3 + [0] * 4),
+            n_min=tuple([-0.02] * 3 + [-0.03] * 3 + [-0.02] * 2 + [-0.02] * 2 + [-0.03] * 2 + [0] * 2),
+            n_max=tuple([0.02] * 3 + [0.03] * 3 + [0.02] * 2 + [0.02] * 2 + [0.03] * 2 + [0] * 2),
         ),
     )
 
     # ==========================================================================
-    # Constraints (C-TRPO)
+    # Constraints (IPO): 3 probabilistic + 1 average = 4 terms
+    # Budget D_k is per-step; algorithm converts to d_k = D_k / (1 - gamma).
     # ==========================================================================
-    # Budget values are per-step raw budgets D_k. The algorithm transforms them to
-    # discounted budgets d_k = D_k / (1 - cost_gamma). With cost_gamma=0.99 (default),
-    # d_k = D_k * 100. Barrier penalty activates as mean cost return approaches d_k.
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(
         terms=[
-            # --- Binary constraints (5 terms) ---
+            # --- Probabilistic (binary indicator) ---
             ConstraintTermCfg(
-                func=accumulated_rotation_cost,
-                params={"max_rotations": 2.0},
-                budget=0.02,
-                name="accum_rot",
-            ),
-            ConstraintTermCfg(
-                func=attitude_absolute_cost,
-                params={"limit": 1.396},  # ~80 deg
+                func=attitude_limit_cost,
+                params={"limit": 1.396},
                 budget=0.01,
-                name="attitude_abs",
+                name="attitude",
             ),
             ConstraintTermCfg(
-                func=effort_limit_cost,
-                params={"limit_nm": 9.5},  # Dynamixel XW540 stall torque @ 12V
+                func=torque_limit_cost,
+                params={"limit_nm": 9.5},
                 budget=0.20,
-                name="joint_torque",
+                name="torque",
             ),
             ConstraintTermCfg(
-                func=joint_velocity_limit_cost,
-                params={"limit_rad_per_s": 4.189},  # 40 RPM (Dynamixel XW540 no-load)
+                func=velocity_limit_cost,
+                params={"limit_rad_per_s": 4.189},
                 budget=0.10,
-                name="joint_vel_limit",
+                name="velocity",
             ),
-            ConstraintTermCfg(
-                func=overshoot_cost,
-                params={"threshold": 0.087},
-                budget=0.20,
-                name="overshoot",
-            ),
-            # --- Continuous constraints (1 term) ---
+            # --- Average (continuous) ---
             ConstraintTermCfg(
                 func=yaw_velocity_cost,
                 budget=0.785,

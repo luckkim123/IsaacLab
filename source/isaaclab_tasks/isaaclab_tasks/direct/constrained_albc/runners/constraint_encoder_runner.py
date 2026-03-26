@@ -6,8 +6,8 @@
 """Single runner for constrained ALBC: encoder metrics + constraint state.
 
 Flat subclass of OnPolicyRunner that combines:
-    - HORA Phase 1 encoder metrics logging (if encoder present)
-    - Log-barrier constraint metrics (Modified IPO)
+    - Teacher encoder metrics logging (if encoder present)
+    - Log-barrier constraint metrics (TRPO + IPO)
     - Auto-sync of num_constraints from env config
 """
 
@@ -151,10 +151,6 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         if getattr(self.alg, "encoder_optimizer", None) is not None:
             self._save_aux_state(path, "encoder_optimizer.pt", self.alg.encoder_optimizer.state_dict())
 
-        # Save std optimizer state for seamless resume
-        if getattr(self.alg, "std_optimizer", None) is not None:
-            self._save_aux_state(path, "std_optimizer.pt", self.alg.std_optimizer.state_dict())
-
         # Save DORAEMON distribution state
         raw_env = self.env.unwrapped
         if hasattr(raw_env, "_doraemon") and raw_env._doraemon is not None:
@@ -170,13 +166,6 @@ class ConstraintEncoderRunner(OnPolicyRunner):
             if enc_opt_state is not None:
                 self.alg.encoder_optimizer.load_state_dict(enc_opt_state)
                 logger.info("Restored encoder optimizer state from checkpoint")
-
-        # Restore std optimizer state for seamless resume
-        if load_optimizer and getattr(self.alg, "std_optimizer", None) is not None:
-            std_opt_state = self._load_aux_state(path, "std_optimizer.pt", self.device)
-            if std_opt_state is not None:
-                self.alg.std_optimizer.load_state_dict(std_opt_state)
-                logger.info("Restored std optimizer state from checkpoint")
 
         # Restore DORAEMON distribution state
         raw_env = self.env.unwrapped
@@ -219,25 +208,6 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         # Policy diagnostics
         metrics["Policy/line_search_success"] = alg._last_line_search_success
         metrics["Policy/entropy"] = alg._last_mean_entropy
-        metrics["Policy/entropy_bonus"] = alg._last_entropy_bonus
         metrics["Policy/pre_encoder_kl"] = alg._last_pre_encoder_kl
-
-        # TRPO step quality diagnostics
-        metrics["TRPO/shs"] = alg._last_trpo_shs
-        metrics["TRPO/step_norm"] = alg._last_trpo_step_norm
-        metrics["TRPO/grad_norm"] = alg._last_trpo_grad_norm
-        metrics["TRPO/line_search_backtracks"] = float(alg._last_line_search_backtracks)
-        metrics["TRPO/value_grad_norm"] = alg._last_value_grad_norm
-        metrics["TRPO/encoder_grad_norm"] = alg._last_encoder_grad_norm
-        metrics["TRPO/surrogate_loss"] = alg._last_surrogate_loss
-
-        # Gradient decomposition diagnostics
-        metrics["Diag/reward_grad_norm"] = getattr(alg, "_diag_reward_grad_norm", 0.0)
-        metrics["Diag/barrier_grad_norm"] = getattr(alg, "_diag_barrier_grad_norm", 0.0)
-        metrics["Diag/ratio_mean"] = getattr(alg, "_diag_ratio_mean", 1.0)
-        metrics["Diag/ratio_max"] = getattr(alg, "_diag_ratio_max", 1.0)
-        metrics["Diag/ratio_min"] = getattr(alg, "_diag_ratio_min", 1.0)
-        metrics["Diag/reward_surr"] = getattr(alg, "_diag_reward_surr", 0.0)
-        metrics["Diag/margin_min"] = getattr(alg, "_diag_margin_min", 0.0)
 
         flush_metrics(self.writer, metrics, iteration, self.logger_type)
