@@ -109,7 +109,7 @@ class RslRlConstraintTRPOAlgorithmCfg:
 
     # Log barrier (IPO)
     barrier_t: float = 100.0
-    barrier_alpha: float = 0.02
+    barrier_alpha: float = 0.05
 
     # Noise floor
     min_std: float = 0.2

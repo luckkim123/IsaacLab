@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
+## [2026-03-27] Increase barrier_alpha to reduce barrier-to-reward gradient imbalance
+
+### Context
+Analysis of 3 consecutive runs revealed that per-constraint cost advantage standardization
+(restored in previous commit) combined with `1/(1-gamma)=100` and `barrier_t=100` creates
+a 9.2:1 barrier-to-reward gradient ratio (sum of `1/margin_k` across 4 constraints at floor).
+
+**3-run comparison:**
+| Run | Changes | reward | noise | entropy | enc_grad max | action_rate |
+|-----|---------|--------|-------|---------|-------------|-------------|
+| 00-09-23 | baseline | -78.80 | 0.64 | 1.41 | 1.0 | - |
+| 01-15-43 | +1/(1-γ)+enc_TRPO | -38.77 | 0.60 | 1.29 | 322 | 1.02 |
+| 01-38-08 | +standardization | -37.36 | 0.44 | 0.82 | 14097 | 2.00 |
+
+Run 3 showed exploration collapse (noise 0.44, entropy 0.82), action oscillation (rate 2.0,
+smoothness reward 4x worse), and encoder grad norm spike to 14097. Root cause: effective barrier
+weight = `[1/(1-γ)] / barrier_t / margin_k = 100/100/margin_k = 1/margin_k`. With deeply
+infeasible constraints at floor margins (0.20-1.57), total barrier weight = 9.2 vs reward = 1.
+
+**Fix: increase barrier_alpha** from 0.02 to 0.05. This enlarges the adaptive threshold floor
+margin (`alpha * d_k`), directly reducing `1/margin_k`:
+- torque: 0.40 -> 1.0, velocity: 0.20 -> 0.50, yaw_vel: 1.57 -> 3.93
+- Total barrier weight: 9.19 -> 2.26 (barrier:reward ≈ 2.3:1)
+
+Chosen over increasing barrier_t because alpha only affects deeply infeasible constraints
+(margin = alpha*d_k floor). When constraints become feasible (margin > alpha*d_k), the
+alpha value becomes irrelevant -- a self-deactivating mechanism.
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `barrier_alpha` 0.02 -> 0.05 (adaptive threshold floor margin)
+
+### Notes
+- Effective gradient balance: barrier:reward ≈ 2.3:1 (was 9.2:1)
+- If still too strong, alpha=0.10 gives 1.6:1 ratio
+- Classical IPM interpretation: larger alpha = larger trust region around current infeasible point,
+  allowing more reward optimization while maintaining directional constraint pressure
+
 ## [2026-03-27] Restore per-constraint cost advantage standardization (NORBC Sec IV-B)
 
 ### Context
