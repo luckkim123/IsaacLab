@@ -714,3 +714,82 @@ class ALBCDebugPPOQ1Q3NoEncNormRunnerCfg(ALBCDebugPPOQ1Q3RunnerCfg):
 
     experiment_name = "constrained_albc_debug_ppo_q1q3_no_enc_norm"
     policy = _Q1Q3NoEncNormPolicyCfg()
+
+
+# =============================================================================
+# Phase 2: Q4 (KL Management) - HORA-style LR range
+# =============================================================================
+
+
+@configclass
+class _Q4AlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """PPO with HORA-style adaptive LR range.
+
+    Key changes from _Q1Q3AlgorithmCfg:
+    - learning_rate=5e-3: HORA default, 17x more headroom than 3e-4.
+    - min_lr=1e-6: 22 halvings from 5e-3 (vs 9 from 3e-4 with min_lr=1e-5).
+    - desired_kl=0.02: unchanged from Q1Q3.
+
+    Rationale:
+    iter-0 KL is artificially low (encoder untrained) -> adaptive schedule
+    amplifies LR to ~5x init. iter-1 encoder first update -> KL 0.89 spike.
+    With init_lr=5e-3, post-spike LR settles at ~3e-4 (still viable).
+    With init_lr=3e-4, post-spike LR crashes to ~2.6e-5 (dead).
+    """
+
+    class_name: str = "PPO"
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 5e-3
+    min_lr: float = 1e-6
+    max_lr: float = 1e-2
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    entropy_coef: float = 0.0
+    desired_kl: float = 0.02
+    max_grad_norm: float = 1.0
+    value_loss_coef: float = 1.0
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+
+
+@configclass
+class ALBCDebugPPOQ4RunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 9a: Q1+Q3+Q4 with enc norm. HORA-style LR range.
+
+    Based on Step 8a (Q1+Q3, enc norm kept). Adds Q4:
+    - init_lr 3e-4 -> 5e-3 (HORA default)
+    - min_lr 1e-5 -> 1e-6 (22 halvings from init_lr)
+    - Expected: LR survives iter-1 KL spike, policy can learn.
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_q4"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _Q4AlgorithmCfg()
+    policy = _Q1Q3EncoderPolicyCfg()
+
+
+@configclass
+class _Q4NoEncNormPolicyCfg(_Q1Q3EncoderPolicyCfg):
+    """Q4 policy without encoder input normalization (raw p_t, HORA-style)."""
+
+    encoder_obs_normalization: bool = False
+
+
+@configclass
+class ALBCDebugPPOQ4NoEncNormRunnerCfg(ALBCDebugPPOQ4RunnerCfg):
+    """Step 9b: Q1+Q3+Q4 without enc norm. Tests HORA-style raw p_t with wider LR range."""
+
+    experiment_name = "constrained_albc_debug_ppo_q4_no_enc_norm"
+    policy = _Q4NoEncNormPolicyCfg()

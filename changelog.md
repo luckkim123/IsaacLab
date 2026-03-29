@@ -76,6 +76,63 @@ Next steps: Q2 (critic gradient to encoder) and Q4 (KL management).
 
 ---
 
+## [2026-03-29] Q4 KL Management: HORA-style LR Range (FAILED)
+
+### Context
+
+Hypothesis: the iter-0 KL spike that crashes adaptive LR could be survived with HORA-style
+LR range (init_lr=5e-3, min_lr=1e-6, giving 22 halvings vs ALBC's 9). Detailed iter-by-iter
+analysis of Step 8a revealed the failure mechanism:
+
+Step 8a (init_lr=3e-4) timeline:
+- iter 0: encoder untrained -> KL artificially low (0.008) -> adaptive LR doubles to 1.5e-3
+- iter 1: encoder first gradient -> z_std triples (0.15->0.48) -> KL=0.894 -> LR crashes
+
+Q4 hypothesis: with init_lr=5e-3, post-spike LR should settle at ~3e-4 (viable), not 2.6e-5.
+
+**Result: FAILED.** Higher init_lr made iter-0 KL WORSE (7.13 vs 0.008) because the first
+gradient step itself was 17x larger. The encoder gets its gradient at iter 0 (not iter 1 as
+previously thought). Both Q1Q3 and Q4 converge to the same equilibrium LR (~2.6e-5).
+
+Two experiments run (Steps 9a, 9b), both with 4096 envs, 500 max iters:
+
+| Step | Config | Roll/Pitch | noise_std | z_range | Eq. LR | KL iter-0 |
+|------|--------|-----------|-----------|---------|--------|-----------|
+| 8a | Q1Q3 (lr=3e-4) | 23/20 deg | 0.96 | [-0.86, 0.85] | 1.7e-5 | 0.008 |
+| 9a | Q4 (lr=5e-3, enc norm) | 31/27 deg | 0.97 | [-0.91, 0.92] | 2.4e-5 | **7.13** |
+| 9b | Q4 (lr=5e-3, no enc norm) | 26/26 deg | 0.96 | [-1.00, 1.00] SAT | 2.6e-5 | 5.77 |
+
+Key finding: **equilibrium LR is determined by network dynamics, not init_lr or min_lr.**
+The encoder gradient creates a fixed KL/LR relationship: at any LR where KL > desired_kl,
+LR halves until reaching ~2.6e-5 where KL stabilizes near 0.03. This equilibrium is
+independent of starting conditions.
+
+Surrogate loss exploded to 11M-24M at iter 1-2 (policy ratios extreme due to massive
+policy shift), normalizing only by iter 10+.
+
+### Added
+- `agents/rsl_rl_ppo_cfg.py`: `_Q4AlgorithmCfg` (learning_rate=5e-3, min_lr=1e-6, max_lr=1e-2),
+  `ALBCDebugPPOQ4RunnerCfg` (Step 9a), `_Q4NoEncNormPolicyCfg` + `ALBCDebugPPOQ4NoEncNormRunnerCfg`
+  (Step 9b).
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-Debug-PPO-Q4-v0` (Step 9a) and
+  `Isaac-Constrained-ALBC-Debug-PPO-Q4-NoEncNorm-v0` (Step 9b).
+
+### Changed
+- `rsl_rl/algorithms/ppo.py` (external dep, not git-tracked): Added `min_lr` (default 1e-5) and
+  `max_lr` (default 1e-2) constructor parameters. Replaced hardcoded `max(1e-5, ...)` and
+  `min(1e-2, ...)` in both standard and encoder PPO update paths. Backwards compatible (defaults
+  match original values). Needs reapply on container rebuild.
+
+### Notes
+- Q4 (LR range adjustment) alone cannot solve the encoder KL problem. The equilibrium
+  LR is network-determined, not hyperparameter-determined.
+- Step 9b confirms again: enc norm removal -> z saturation (consistent with 8b).
+- ppo.py min_lr/max_lr change is still useful for future experiments but insufficient alone.
+- Remaining approaches: encoder gradient scaling/clipping, separate encoder LR, delayed
+  encoder start, or init_noise_std increase (KL proportional to 1/sigma^2).
+
+---
+
 ## [2026-03-27] Encoder Ablation Study (Steps 0-7)
 
 ### Summary
