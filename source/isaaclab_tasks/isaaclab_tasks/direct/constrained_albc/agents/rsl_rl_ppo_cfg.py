@@ -387,3 +387,330 @@ class ALBCDebugPPOHistOnlyRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     algorithm = _PPOHistOnlyAlgorithmCfg()
     policy = _DebugPolicyCfg()
+
+
+# =============================================================================
+# Shared Backbone Experiment (Fix A + B)
+# =============================================================================
+
+
+@configclass
+class _SharedBackbonePolicyCfg(_EncoderPolicyCfg):
+    """Shared backbone encoder policy (HORA-style).
+
+    Actor and critic share an MLP backbone. Value gradient flows to encoder,
+    providing a stable MSE-based learning signal in addition to policy gradient.
+    """
+
+    class_name: str = "ALBCActorCriticEncoder"
+    shared_backbone: bool = True
+    z_bounds_coef: float = 1.0
+    z_bounds_soft_bound: float = 0.85
+
+
+@configclass
+class _SharedBackboneAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """PPO with HORA-aligned hyperparameters for encoder stability.
+
+    Key differences from _DebugAlgorithmCfg:
+    - entropy_coef=0.0: removes sigma upward pressure (HORA default)
+    - learning_rate=1e-3: moderate start, 16 LR decreases before min_lr
+    - desired_kl=0.02: wider trust region for encoder+actor joint updates
+    - Per-epoch LR and mu/sigma refresh auto-enabled by PPO encoder detection
+    - Single optimizer group (shared backbone detected): encoder slows with backbone
+    """
+
+    class_name: str = "PPO"
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 1e-3
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    entropy_coef: float = 0.0
+    desired_kl: float = 0.02
+    max_grad_norm: float = 1.0
+    value_loss_coef: float = 0.25
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+
+
+@configclass
+class ALBCDebugPPOSharedBackboneRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 5a: PPO + Encoder + Shared Backbone + DR (no history).
+
+    Fixes applied:
+    - Fix A: Shared backbone -> value gradient flows to encoder
+    - Fix B: Per-epoch LR + mu/sigma refresh (auto-enabled by PPO)
+    - HORA hyperparameters: ent=0, lr=5e-3, kl=0.02, normalize_value=True
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_shared_backbone"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _SharedBackboneAlgorithmCfg()
+    policy = _SharedBackbonePolicyCfg()
+
+
+@configclass
+class _SharedBackboneHistPolicyCfg(_SharedBackbonePolicyCfg):
+    """Shared backbone with proprio history.
+
+    10 steps * 8D = 80D. Actor input: 14+80+13 = 107D (HORA=104D).
+    """
+
+    proprio_hist_dim: int = 80
+
+
+@configclass
+class ALBCDebugPPOSharedBackboneHistRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 5b: PPO + Encoder + Shared Backbone + History + DR.
+
+    Same as 5a but with 30-step proprio history to further reduce z/input ratio.
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_shared_backbone_hist"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _SharedBackboneAlgorithmCfg()
+    policy = _SharedBackboneHistPolicyCfg()
+
+
+# =============================================================================
+# Step 6: Separate Network + Fix B + Combined Hyperparams
+# =============================================================================
+
+
+@configclass
+class _SeparateEncoderPolicyCfg(_EncoderPolicyCfg):
+    """Separate encoder policy with z_bounds_loss.
+
+    Standard architecture: separate actor/critic. Critic asymmetric (uses p_t).
+    Encoder gradient from surrogate loss only (no value gradient).
+    z_bounds_loss prevents softsign saturation.
+    """
+
+    class_name: str = "ALBCActorCriticEncoder"
+    shared_backbone: bool = False
+    z_bounds_coef: float = 1.0
+    z_bounds_soft_bound: float = 0.85
+    proprio_hist_dim: int = 80  # 10 steps * 8D
+
+
+@configclass
+class _SeparateEncoderAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """PPO with combined hyperparams from ablation study.
+
+    Based on Step 4c ablation: normalize_value was the only single variable
+    that improved BOTH roll and pitch. Combined with entropy_coef=0 (noise_std
+    downtrend) and desired_kl=0.02 (wider trust region).
+
+    Per-minibatch mu/sigma refresh + per-epoch LR auto-enabled by encoder detection.
+    Single optimizer group: encoder slows with actor when KL is high.
+    """
+
+    class_name: str = "PPO"
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 3e-4
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    entropy_coef: float = 0.0
+    desired_kl: float = 0.02
+    max_grad_norm: float = 1.0
+    value_loss_coef: float = 1.0
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+
+
+@configclass
+class ALBCDebugPPOSeparateEncHistRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 6: PPO + Encoder + History + Separate Networks + Fix B.
+
+    Separate actor/critic (no shared backbone). Encoder gets surrogate gradient only.
+    Key fixes:
+    - Fix B: Per-minibatch mu/sigma refresh + per-epoch LR (auto from encoder detection)
+    - Single optimizer group: encoder + actor under same adaptive LR (no asymmetric freeze)
+    - Combined hyperparams: entropy=0, normalize_value, desired_kl=0.02
+    - z_bounds_loss: prevents encoder saturation
+    - History 10 steps: actor input 107D, z ratio 12%
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_sep_enc_hist"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _SeparateEncoderAlgorithmCfg()
+    policy = _SeparateEncoderPolicyCfg()
+
+
+# =============================================================================
+# Step 7: Small Encoder (reduce encoder param fraction to ~5%)
+# =============================================================================
+
+
+@configclass
+class _SmallEncoderPolicyCfg(_EncoderPolicyCfg):
+    """HORA-matched encoder: 23D -> [256,128] -> 8D z. ~39K params (~15% of policy).
+
+    Current encoder [256,128,64]->13D is 48K params (41% of policy).
+    HORA encoder: 9->[256,128]->8D is 37K params (~15%).
+    This encoder: 23->[256,128]->8D is ~39K params (~15%).
+
+    Actor input: 14 + 80 + 8 = 102D (HORA=104D).
+    """
+
+    class_name: str = "ALBCActorCriticEncoder"
+    shared_backbone: bool = False
+    encoder_hidden_dims: list[int] = [256, 128]
+    encoder_latent_dim: int = 8
+    z_bounds_coef: float = 1.0
+    z_bounds_soft_bound: float = 0.85
+    proprio_hist_dim: int = 80  # 10 steps * 8D
+
+
+@configclass
+class ALBCDebugPPOSmallEncHistRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 7: PPO + Small Encoder + History + DR.
+
+    Encoder reduced from [256,128,64]->13D (48K, 41%) to [64,32]->8D (4K, 5%).
+    One gradient step now changes only 5% of policy params through encoder,
+    similar to HORA's encoder fraction (~15%).
+
+    All Fix B improvements retained: per-minibatch mu/sigma refresh, per-epoch LR,
+    single optimizer group, entropy=0, normalize_value, desired_kl=0.02.
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_small_enc_hist"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _SeparateEncoderAlgorithmCfg()
+    policy = _SmallEncoderPolicyCfg()
+
+
+# =============================================================================
+# Phase 1: Q1 (HORA-style normalization) + Q3 (strided proprio history)
+# =============================================================================
+
+
+@configclass
+class _Q1Q3EncoderPolicyCfg(_EncoderPolicyCfg):
+    """Encoder policy with Q1 (HORA-style norm) + Q3 (strided history).
+
+    Key changes from previous encoder configs:
+    - actor_obs_normalizer covers only o_t+hist (134D), excludes z (13D)
+    - proprio_hist_dim=120 (15 steps * 8 features, stride=5 at 50Hz -> 10Hz)
+    - z/input = 13/147 = 8.8% (vs 48.1% without history)
+    - No z_bounds_loss (isolate normalization + history effect)
+    """
+
+    class_name: str = "ALBCActorCriticEncoder"
+    shared_backbone: bool = False
+    proprio_hist_dim: int = 120  # 15 steps * 8 features
+    z_bounds_coef: float = 0.0
+
+
+@configclass
+class _Q1Q3AlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """PPO for Q1+Q3 encoder experiment.
+
+    entropy_coef=0.0 (HORA default, prevents sigma upward pressure).
+    desired_kl=0.02 (wider trust region for encoder+actor joint updates).
+    Per-epoch LR adaptation + per-minibatch mu/sigma refresh auto-enabled
+    by encoder detection in ppo.py.
+    """
+
+    class_name: str = "PPO"
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 3e-4
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    entropy_coef: float = 0.0
+    desired_kl: float = 0.02
+    max_grad_norm: float = 1.0
+    value_loss_coef: float = 1.0
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+
+
+@configclass
+class ALBCDebugPPOQ1Q3RunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 8a: PPO + Encoder + Q1 norm fix + Q3 strided history + DR.
+
+    Key changes from Step 4c/6:
+    - Q1: actor_obs_normalizer excludes z (HORA-style, normalizes only o_t+hist)
+    - Q3: history stride=5, len=15 (1.5s window, 10Hz sampling)
+    - entropy_coef=0.0 (HORA default)
+    - No z_bounds_loss (isolate effect)
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_q1q3"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _Q1Q3AlgorithmCfg()
+    policy = _Q1Q3EncoderPolicyCfg()
+
+
+# Phase 1b: Same as Q1Q3 but without encoder input normalization (raw p_t)
+
+
+@configclass
+class _Q1Q3NoEncNormPolicyCfg(_Q1Q3EncoderPolicyCfg):
+    """Same as Q1Q3 but encoder_obs_normalization=False (raw p_t to encoder, HORA-style)."""
+
+    encoder_obs_normalization: bool = False
+
+
+@configclass
+class ALBCDebugPPOQ1Q3NoEncNormRunnerCfg(ALBCDebugPPOQ1Q3RunnerCfg):
+    """Step 8b: Same as 8a but without p_t normalization before encoder."""
+
+    experiment_name = "constrained_albc_debug_ppo_q1q3_no_enc_norm"
+    policy = _Q1Q3NoEncNormPolicyCfg()

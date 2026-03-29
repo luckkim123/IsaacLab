@@ -229,6 +229,11 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     proprio_feature_dim: int = 8
     """Dimension of proprioceptive features per timestep."""
 
+    proprio_history_stride: int = 1
+    """Stride for proprioceptive history recording. 1 = every control step (default).
+    N = record every N-th control step. Effective temporal span = history_len * stride * step_dt.
+    Example: stride=5 at 50Hz -> 10Hz sampling, 15 entries = 1.5s window."""
+
     # ==========================================================================
     # Attitude Task and Rewards
     # ==========================================================================
@@ -387,10 +392,10 @@ class ALBCDebugEncoderHistEnvCfg(ALBCEnvCfg):
     """Step 4c: PPO + Encoder + DR + History (no constraints).
 
     Adds proprio history to actor input to reduce z/input ratio from 48% to 5%.
-    Actor input: cat([o_t(14D), hist_flat(240D), z(13D)]) = 267D.
+    Actor input: cat([o_t(14D), hist_flat(T*8D), z(13D)]).
     """
 
-    proprio_history_len: int = 30
+    proprio_history_len: int = 10
 
     doraemon: DoraemonCfg = DoraemonCfg(enable=False)
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
@@ -402,6 +407,22 @@ class ALBCDebugHistOnlyEnvCfg(ALBCEnvCfg):
 
     state_space: int = 0  # No privileged obs, no encoder
     proprio_history_len: int = 30
+
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
+
+
+@configclass
+class ALBCDebugEncoderHistStrideEnvCfg(ALBCEnvCfg):
+    """Step 8a: PPO + Encoder + Strided History + DR (no constraints).
+
+    History: 15 steps at stride 5 (10Hz sampling, 1.5s temporal window).
+    Actor input: cat([o_t(14D), hist_flat(120D), z(13D)]) = 147D.
+    z/input ratio: 13/147 = 8.8% (vs 48.1% without history).
+    """
+
+    proprio_history_len: int = 15
+    proprio_history_stride: int = 5
 
     doraemon: DoraemonCfg = DoraemonCfg(enable=False)
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])

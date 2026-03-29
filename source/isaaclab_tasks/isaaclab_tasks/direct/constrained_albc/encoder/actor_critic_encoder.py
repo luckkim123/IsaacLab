@@ -5,18 +5,25 @@
 
 """Teacher policy network: MLP Encoder + MLP Actor + MLP Critic.
 
-Following the paper's teacher-student framework (teacher only):
+Two modes of operation:
+    Separate (default): Encoder, Actor, and Critic are independent MLPs.
+    Shared backbone (HORA-style): Actor and Critic share an MLP backbone with
+        linear heads, enabling value gradient flow to the encoder.
+
+Architecture (separate mode, HORA-style normalization):
     Encoder: p_t (privileged) -> MLP -> softsign -> z (latent)
-    Actor:   cat([o_t, z]) -> MLP -> actions (Gaussian policy)
+    Actor:   cat([normalize(o_t), z]) -> MLP -> actions (Gaussian policy)
     Critic:  cat([o_t, p_t]) -> MLP -> value (asymmetric)
 
-The encoder receives only privileged information (DR parameters) and compresses
-it into a bounded latent z in (-1, 1). The actor combines policy observations
-with the latent z to produce actions. The critic uses full information
-(policy obs + privileged) for value estimation.
+    Normalization: Only o_t (+ proprio_hist if present) is normalized.
+    z is kept raw since softsign already bounds it to (-1, 1).
+    This prevents non-stationary EmpiricalNorm stats from destabilizing z.
 
-No proprioception history is used in the teacher -- history processing
-(GRU encoder) is reserved for the student policy (future implementation).
+Architecture (shared backbone mode):
+    Encoder: p_t (privileged) -> MLP -> softsign -> z (latent)
+    Backbone: cat([normalize(o_t), z]) -> shared MLP -> features
+    Action head: features -> Linear -> actions
+    Value head:  features -> Linear -> value
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from rsl_rl.networks import MLP, EmpiricalNormalization
 from torch.distributions import Normal
 
@@ -36,12 +44,15 @@ if TYPE_CHECKING:
 
 
 class ActorCriticEncoder(nn.Module):
-    """Teacher policy: MLP encoder compresses privileged info into latent z.
+    """Teacher policy with encoder for privileged-to-latent compression.
 
-    Architecture:
-        Encoder: p_t -> MLP -> softsign -> z in (-1, 1)
-        Actor:   cat([o_t, z]) -> MLP -> actions
-        Critic:  cat([o_t, p_t]) -> MLP -> value (asymmetric)
+    Supports two architectures:
+        shared_backbone=False (default): Separate actor/critic MLPs. Critic uses
+            privileged info directly (asymmetric). Encoder gradient comes only
+            from actor loss.
+        shared_backbone=True (HORA-style): Single backbone MLP with linear heads
+            for action and value. Both actor and critic losses flow gradient
+            through the encoder, providing a stronger learning signal.
     """
 
     is_recurrent: bool = False
@@ -66,6 +77,11 @@ class ActorCriticEncoder(nn.Module):
         critic_hidden_dims: list[int] | tuple[int, ...] = (512, 256, 128),
         activation: str = "elu",
         init_noise_std: float = 1.0,
+        # Shared backbone (HORA-style): actor+critic share MLP, value gradient to encoder
+        shared_backbone: bool = False,
+        # z bounds loss: soft quadratic penalty when |z| > soft_bound
+        z_bounds_coef: float = 0.0,
+        z_bounds_soft_bound: float = 0.85,
         **kwargs: Any,
     ) -> None:
         if kwargs:
@@ -78,6 +94,10 @@ class ActorCriticEncoder(nn.Module):
         self.privileged_dim = privileged_dim
         self.encoder_latent_dim = encoder_latent_dim
         self.proprio_hist_dim = proprio_hist_dim
+        self.shared_backbone_mode = shared_backbone
+        self.z_bounds_coef = z_bounds_coef
+        self.z_bounds_soft_bound = z_bounds_soft_bound
+        self._last_z: torch.Tensor | None = None
 
         # Parse obs_groups: require [policy_obs, privileged, (optional) proprio_hist]
         policy_groups = obs_groups["policy"]
@@ -104,22 +124,56 @@ class ActorCriticEncoder(nn.Module):
         self.encoder = MLP(privileged_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
         logger.info("Encoder: %dD -> %s -> softsign -> %dD", privileged_dim, encoder_hidden_dims, encoder_latent_dim)
 
-        # --- Actor: cat([o_t, (hist_flat,) z]) -> actions ---
+        # Actor input dimension (shared between modes)
         num_actor_obs = policy_obs_dim + proprio_hist_dim + encoder_latent_dim
-        self.actor_obs_normalization = actor_obs_normalization
-        self.actor_obs_normalizer = EmpiricalNormalization(num_actor_obs) if actor_obs_normalization else nn.Identity()
-        self.actor = MLP(num_actor_obs, num_actions, list(actor_hidden_dims), activation)
-        logger.info("Actor: %dD (obs=%d+hist=%d+z=%d) -> %s -> %dD", num_actor_obs, policy_obs_dim, proprio_hist_dim, encoder_latent_dim, actor_hidden_dims, num_actions)
+        # Normalizer covers only o_t + hist (excludes z which is already bounded by softsign).
+        # HORA-style: normalize observations, keep encoder latent raw.
+        num_actor_obs_norm = policy_obs_dim + proprio_hist_dim
+        self._num_actor_obs_norm = num_actor_obs_norm
 
-        # --- Critic: cat([o_t, p_t]) -> value (asymmetric) ---
-        num_critic_obs = policy_obs_dim + privileged_dim
-        self.num_critic_obs = num_critic_obs
-        self.critic_obs_normalization = critic_obs_normalization
-        self.critic_obs_normalizer = (
-            EmpiricalNormalization(num_critic_obs) if critic_obs_normalization else nn.Identity()
-        )
-        self.critic = MLP(num_critic_obs, 1, list(critic_hidden_dims), activation)
-        logger.info("Critic: %dD -> %s -> 1D", num_critic_obs, critic_hidden_dims)
+        if shared_backbone:
+            # --- Shared backbone: cat([normalize(o_t, hist), z]) -> backbone -> features -> heads ---
+            bb_dims = list(critic_hidden_dims)
+            feature_dim = bb_dims[-1]
+            self.actor_obs_normalization = actor_obs_normalization
+            self.actor_obs_normalizer = (
+                EmpiricalNormalization(num_actor_obs_norm) if actor_obs_normalization else nn.Identity()
+            )
+            self.backbone = MLP(
+                num_actor_obs, feature_dim, bb_dims[:-1], activation, last_activation=activation
+            )
+            self.action_head = nn.Linear(feature_dim, num_actions)
+            self.value_head = nn.Linear(feature_dim, 1)
+            nn.init.zeros_(self.action_head.bias)
+            nn.init.zeros_(self.value_head.bias)
+            logger.info(
+                "Shared backbone: %dD -> %s -> %dD features -> action(%dD) + value(1D)",
+                num_actor_obs, bb_dims, feature_dim, num_actions,
+            )
+            # Compatibility attrs
+            self.num_critic_obs = num_actor_obs
+            self.critic_obs_normalization = False
+        else:
+            # --- Separate actor and critic (original mode) ---
+            self.actor_obs_normalization = actor_obs_normalization
+            self.actor_obs_normalizer = (
+                EmpiricalNormalization(num_actor_obs_norm) if actor_obs_normalization else nn.Identity()
+            )
+            self.actor = MLP(num_actor_obs, num_actions, list(actor_hidden_dims), activation)
+            logger.info(
+                "Actor: %dD (obs=%d+hist=%d+z=%d) -> %s -> %dD",
+                num_actor_obs, policy_obs_dim, proprio_hist_dim,
+                encoder_latent_dim, actor_hidden_dims, num_actions,
+            )
+
+            num_critic_obs = policy_obs_dim + privileged_dim
+            self.num_critic_obs = num_critic_obs
+            self.critic_obs_normalization = critic_obs_normalization
+            self.critic_obs_normalizer = (
+                EmpiricalNormalization(num_critic_obs) if critic_obs_normalization else nn.Identity()
+            )
+            self.critic = MLP(num_critic_obs, 1, list(critic_hidden_dims), activation)
+            logger.info("Critic: %dD -> %s -> 1D", num_critic_obs, critic_hidden_dims)
 
         # Action noise (Gaussian policy with learned log_std)
         self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
@@ -153,25 +207,34 @@ class ActorCriticEncoder(nn.Module):
     def _encode(self, obs: TensorDict) -> torch.Tensor:
         """Encode privileged info into latent z: p_t -> MLP -> softsign -> z in (-1, 1)."""
         p_t = obs[self._privileged_key]
-        return torch.nn.functional.softsign(self.encoder(self.encoder_obs_normalizer(p_t)))
+        z = F.softsign(self.encoder(self.encoder_obs_normalizer(p_t)))
+        self._last_z = z
+        return z
 
     def _get_actor_obs(self, obs: TensorDict) -> torch.Tensor:
-        """Actor observation: cat([o_t, (hist_flat,) z])."""
+        """Actor observation: cat([normalize(o_t, hist), z_raw]).
+
+        HORA-style: only o_t (+ hist if present) is normalized via EmpiricalNorm.
+        z is kept raw since softsign already bounds it to (-1, 1), and normalizing
+        non-stationary encoder output with running stats causes KL instability.
+        """
         o_t = obs[self._policy_obs_key]
         z = self._encode(obs)
         if self._proprio_hist_key is not None and self._proprio_hist_key in obs:
             hist = obs[self._proprio_hist_key]  # Already flat (N, T*F) from env
-            return torch.cat([o_t, hist, z], dim=-1)
-        return torch.cat([o_t, z], dim=-1)
+            obs_part = torch.cat([o_t, hist], dim=-1)
+        else:
+            obs_part = o_t
+        obs_normed = self.actor_obs_normalizer(obs_part)
+        return torch.cat([obs_normed, z], dim=-1)
 
     def _get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
-        """Critic observation: cat([o_t, p_t]) (asymmetric, uses privileged directly)."""
+        """Critic observation (separate mode): cat([o_t, p_t]) (asymmetric)."""
         return torch.cat([obs[self._policy_obs_key], obs[self._privileged_key]], dim=-1)
 
     # --- Action distribution ---
 
-    def _update_distribution(self, actor_obs: torch.Tensor) -> None:
-        mean = self.actor(actor_obs)
+    def _update_distribution(self, mean: torch.Tensor) -> None:
         std = torch.exp(torch.nan_to_num(self.log_std, nan=0.0).clamp(-10.0, 5.0)).expand_as(mean)
         self.distribution = Normal(mean, std)
 
@@ -179,35 +242,70 @@ class ActorCriticEncoder(nn.Module):
 
     def act(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
         """Sample action from Gaussian policy, clipped to [-1, 1]."""
-        actor_obs = self.actor_obs_normalizer(self._get_actor_obs(obs))
-        self._update_distribution(actor_obs)
+        actor_obs = self._get_actor_obs(obs)  # normalization applied inside
+        if self.shared_backbone_mode:
+            features = self.backbone(actor_obs)
+            mean = self.action_head(features)
+        else:
+            mean = self.actor(actor_obs)
+        self._update_distribution(mean)
         assert self.distribution is not None
         return self.distribution.sample().clamp(-1.0, 1.0)
 
     def act_inference(self, obs: TensorDict) -> torch.Tensor:
         """Deterministic action (mean), clipped to [-1, 1]."""
-        actor_obs = self.actor_obs_normalizer(self._get_actor_obs(obs))
-        return self.actor(actor_obs).clamp(-1.0, 1.0)
+        actor_obs = self._get_actor_obs(obs)  # normalization applied inside
+        if self.shared_backbone_mode:
+            features = self.backbone(actor_obs)
+            return self.action_head(features).clamp(-1.0, 1.0)
+        else:
+            return self.actor(actor_obs).clamp(-1.0, 1.0)
 
     def evaluate(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
-        """Evaluate reward value function."""
-        critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))
-        return self.critic(critic_obs)
+        """Evaluate value function.
+
+        In shared backbone mode, value gradient flows through encoder (HORA-style).
+        In separate mode, critic uses privileged info directly (no encoder gradient).
+        """
+        if self.shared_backbone_mode:
+            # Backbone uses cat([o_t, z]) -- encoder gradient from value loss
+            actor_obs = self._get_actor_obs(obs)  # normalization applied inside
+            features = self.backbone(actor_obs)
+            return self.value_head(features)
+        else:
+            critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))
+            return self.critic(critic_obs)
 
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
         """Log probability of actions under current distribution."""
         assert self.distribution is not None
         return self.distribution.log_prob(actions).sum(dim=-1)
 
+    def z_bounds_loss(self) -> torch.Tensor:
+        """Soft quadratic penalty when |z| exceeds soft_bound. Prevents saturation."""
+        if self.z_bounds_coef == 0.0 or self._last_z is None:
+            return torch.tensor(0.0, device=self.log_std.device)
+        excess = torch.clamp_min(self._last_z.abs() - self.z_bounds_soft_bound, 0.0)
+        return self.z_bounds_coef * excess.pow(2).sum(dim=-1).mean()
+
     def update_normalization(self, obs: TensorDict) -> None:
-        """Update observation normalization running statistics."""
+        """Update observation normalization running statistics.
+
+        Actor normalizer updates only on o_t (+ hist) dimensions, excluding z.
+        This matches the HORA-style normalization where encoder output is raw.
+        """
         if self.encoder_obs_normalization:
             self.encoder_obs_normalizer.update(obs[self._privileged_key])
         if self.actor_obs_normalization:
             with torch.no_grad():
-                actor_obs = self._get_actor_obs(obs)
-            self.actor_obs_normalizer.update(actor_obs)
-        if self.critic_obs_normalization:
+                o_t = obs[self._policy_obs_key]
+                if self._proprio_hist_key is not None and self._proprio_hist_key in obs:
+                    hist = obs[self._proprio_hist_key]
+                    obs_part = torch.cat([o_t, hist], dim=-1)
+                else:
+                    obs_part = o_t
+            self.actor_obs_normalizer.update(obs_part)
+        if not self.shared_backbone_mode and self.critic_obs_normalization:
             self.critic_obs_normalizer.update(self._get_critic_obs(obs))
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
@@ -218,5 +316,19 @@ class ActorCriticEncoder(nn.Module):
                 logger.info("Checkpoint missing encoder_obs_normalizer; injecting defaults.")
                 for k, v in self.encoder_obs_normalizer.state_dict().items():
                     state_dict[prefix + k] = v
+        # Migrate actor_obs_normalizer from old (full o_t+z) to new (o_t only) dimension
+        if self.actor_obs_normalization:
+            norm_prefix = "actor_obs_normalizer."
+            mean_key = norm_prefix + "_mean"
+            if mean_key in state_dict:
+                old_dim = state_dict[mean_key].shape[-1]
+                new_dim = self._num_actor_obs_norm
+                if old_dim != new_dim:
+                    logger.info(
+                        "Actor obs normalizer dim mismatch (%d -> %d); resetting to defaults.",
+                        old_dim, new_dim,
+                    )
+                    for k, v in self.actor_obs_normalizer.state_dict().items():
+                        state_dict[norm_prefix + k] = v
         super().load_state_dict(state_dict, strict=False)
         return True

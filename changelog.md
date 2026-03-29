@@ -6,194 +6,89 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
-## [2026-03-27] Step 4d: history-only PPO succeeds, entropy_coef=0.0 improves exploration
-
-### Context
-Step 4d (PPO + History + DR, no encoder) confirmed that encoder is the sole cause of
-LR death. With 254D input (14D policy + 240D history), standard PPO converges to
-roll=3.6, pitch=3.3 deg -- nearly identical to Step 1 (PPO+DR, 14D input, 3.5/3.3 deg).
-
-However, noise_std plateaued at 0.81 (vs Step 1's 0.45) and was rising. Root cause:
-entropy_coef=0.01 pushes sigma up while LR death prevents the advantage gradient from
-pushing it down. Setting entropy_coef=0.0 (matching HORA) resolved this:
-
-| Metric | 4d (ent=0.01) | 4d (ent=0.0) |
-|--------|---------------|--------------|
-| roll | 3.57 | 3.03 |
-| pitch | 3.27 | 3.83 |
-| reward | -6.71 | -5.57 |
-| noise_std | 0.81 (rising) | 0.20 (falling) |
-| act_size | 1.10 | 0.33 |
-
-With ent=0.0, noise_std drops continuously from 1.0 to 0.20, action size shrinks 3x,
-and reward improves from -6.7 to -5.6 due to lower torque/smoothness penalties.
-
-### Added
-- `agents/rsl_rl_ppo_cfg.py`: `_PPOHistOnlyAlgorithmCfg` with `entropy_coef=0.0`,
-  dedicated algo config for Step 4d (avoids modifying shared `_DebugAlgorithmCfg`)
-
-### Notes
-- noise_std=0.20 triggered LOW warning -- may need min_std floor if it drops further
-- Step 4d proves: 254D input works fine, encoder integration is the problem
-- entropy_coef=0.0 should be the default for future encoder experiments
-- Next: either restructure encoder (HORA-style env_mlp inside actor) or combine
-  effective ablation variables (ent=0 + val_norm + higher LR) with encoder
-
 ---
 
-## [2026-03-27] HORA-informed ablation: encoder confirmed as LR death root cause
+## [2026-03-29] Q1+Q3 Encoder Fix: HORA-style Normalization + Strided Proprio History
 
 ### Context
-Systematic single-variable ablation of PPO+Encoder+History (Step 4c) to diagnose why
-encoder training fails. Compared HORA reference implementation to identify key differences.
-All 6 ablation experiments failed -- every single one hit LR death (adaptive LR crash to 1e-5)
-or NaN divergence (fixed schedule). Step 4d (history without encoder) succeeds, confirming
-encoder is the sole problem.
 
-**HORA vs ALBC comparison (key parameters):**
+Systematic analysis of why encoder destabilizes PPO training identified two structural
+issues: (1) `actor_obs_normalizer` applies EmpiricalNorm to `cat([o_t, z])`, normalizing
+the already-bounded softsign output z with non-stationary running stats, and (2) z/actor_input
+ratio of 48.1% (13D z / 27D total) causes excessive mu shift per encoder update.
 
-| Parameter | HORA | ALBC |
-|-----------|------|------|
-| entropy_coef | 0.0 | 0.01 |
-| init_lr | 5e-3 | 3e-4 |
-| kl_threshold | 0.02 | 0.01 |
-| horizon (steps/env) | 8 | 64 |
-| normalize_value | yes | no |
-| reward_scale | 0.01x | 1x |
-| min_lr | 1e-6 | 1e-5 |
+HORA reference comparison revealed: HORA normalizes only policy obs, passes z raw (no
+double normalization), and has z/input ratio of 1.4-7.7%. HORA also does NOT normalize
+privileged info before encoder (raw p_t to MLP).
 
-Note: HORA adaptive schedule structure is identical to RSL-RL (/1.5, *1.5).
-HORA survives because init_lr=5e-3 gives 21 consecutive decreases before hitting min_lr,
-while ALBC's 3e-4 dies after only 9.
+Two experiments run (Steps 8a, 8b), both with 4096 envs:
 
-**Single-variable ablation results (all with PPO+Encoder+History, 267D actor input):**
+| Step | Config | Roll/Pitch | noise_std | z_range | LR | KL iter-0 |
+|------|--------|-----------|-----------|---------|-----|-----------|
+| 8a | Q1+Q3 (enc norm kept) | 23/20 deg | 0.96 CEIL | [-0.86, 0.85] | 1.5e-5 | ~0.8 |
+| 8b | Q1+Q3 (enc norm removed) | 26/32 deg | 0.98 CEIL | [-1.00, 1.00] SAT | 4.0e-5 | ~0.8 |
 
-| Experiment | Changed variable | LR death | roll | pitch | Key observation |
-|------------|-----------------|:--------:|-----:|------:|----------------|
-| 4c baseline | (none) | YES | 41.5 | 32.5 | noise_std stuck at 0.97 ceiling |
-| 4c-1 | entropy_coef=0.0 | YES | 29.8 | 37.2 | noise_std downtrend (vvvv) but LR=5.1e-5 |
-| 4c-2 | ent=0.0 + lr=5e-3 | YES | 16.2 | 47.1 | roll improved, pitch worsened (asymmetric) |
-| 4c-3 | desired_kl=0.02 | YES | 15.9 | 40.3 | Best reward (-78.8), z SAT returned |
-| 4c-4 | num_steps_per_env=8 | YES | 13.3 | 53.0 | Roll/pitch anti-phase oscillation, NaN crash |
-| 4c-5 | normalize_value=True | YES | 24.3 | 22.0 | Best balanced (only run where BOTH improved) |
-| 4c-6 | schedule="fixed" | N/A | NaN | NaN | Complete divergence -- adaptive LR death was safety net |
+Both experiments show same failure pattern as Steps 4-7: iter-0 KL spike (~0.8) crashes
+adaptive LR, noise_std stays at ceiling, policy effectively random. The Q1 normalize fix
+did prevent z saturation in 8a (z_range [-0.86, 0.85] vs previous [-0.99, 0.99]), but
+KL spike magnitude unchanged. Removing p_t normalization (8b) caused z saturation,
+confirming encoder_obs_normalizer is necessary for 23D privileged input.
 
-None achieved meaningful learning (noise_std > 0.94 in all, policy effectively random).
-All "improvements" were initial condition variance, not actual convergence.
-
-**Step 4d: PPO + History + DR (NO encoder):**
-Actor input: policy(14D) + proprio_hist(240D) = 254D. Standard ActorCritic, standard PPO.
-Result: WORKS. Confirms 240D input is not the problem -- encoder is.
-
-**Key insight:** Adaptive LR death at 1e-5 is simultaneously the failure mode AND the
-safety net. It prevents learning but also prevents NaN divergence. Fixed LR removes both.
-The encoder destabilizes the loss landscape in a way that no single hyperparameter can fix.
+Key finding: Q1 and Q3 alone are insufficient. The iter-0 KL spike is caused by the
+encoder's first gradient step magnitude, not by normalization or z/input ratio.
+Next steps: Q2 (critic gradient to encoder) and Q4 (KL management).
 
 ### Added
-- `config.py`: `ALBCDebugHistOnlyEnvCfg` (Step 4d) with `state_space=0` (no privileged obs),
-  `proprio_history_len=30`, no encoder
-- `agents/rsl_rl_ppo_cfg.py`: `_PPOEncoderHistAlgorithmCfg` (dedicated algo cfg for 4c ablations),
-  `ALBCDebugPPOHistOnlyRunnerCfg` (Step 4d, standard PPO + standard ActorCritic)
-- `__init__.py`: Registered `Isaac-Constrained-ALBC-Debug-PPO-Hist-Only-v0` (Step 4d)
-- `runners/constraint_encoder_runner.py`: Value normalization feature (`normalize_value` flag
-  in train_cfg, `_normalize_storage_values()` using Welford running mean/std on returns/values)
+- `config.py`: `proprio_history_stride` field on `ALBCEnvCfg` (default 1). Controls
+  stride for proprioceptive history recording. stride=N records every N-th control step.
+- `config.py`: `ALBCDebugEncoderHistStrideEnvCfg` -- Step 8a env config with
+  `proprio_history_len=15`, `proprio_history_stride=5` (10Hz sampling, 1.5s window).
+- `agents/rsl_rl_ppo_cfg.py`: `_Q1Q3EncoderPolicyCfg` (proprio_hist_dim=120,
+  z_bounds_coef=0.0), `_Q1Q3AlgorithmCfg` (PPO, entropy_coef=0.0, desired_kl=0.02),
+  `ALBCDebugPPOQ1Q3RunnerCfg` (Step 8a runner).
+- `agents/rsl_rl_ppo_cfg.py`: Phase 1b configs: `_Q1Q3NoEncNormPolicyCfg`
+  (encoder_obs_normalization=False), `ALBCDebugPPOQ1Q3NoEncNormRunnerCfg` (Step 8b).
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-Debug-PPO-Q1Q3-v0` (Step 8a)
+  and `Isaac-Constrained-ALBC-Debug-PPO-Q1Q3-NoEncNorm-v0` (Step 8b).
 
 ### Changed
-- `albc_env.py`: `_get_observations()` now outputs `proprio_hist` as flat `(N, 240)` instead of
-  `(N, 30, 8)`. Flatten moved from encoder to env for compatibility with standard ActorCritic.
-- `encoder/actor_critic_encoder.py`: `_get_actor_obs()` no longer flattens hist (already flat from env).
-  Added `nan_to_num` + `clamp(-10, 5)` guard on `log_std` to prevent NaN crash in distribution sampling.
+- `encoder/actor_critic_encoder.py`: HORA-style normalization -- `actor_obs_normalizer`
+  now covers only `o_t + hist` dimensions (excludes z). Normalization moved inside
+  `_get_actor_obs()`: normalizes obs part, then concatenates raw z. Previously normalized
+  full `cat([o_t, z])` including the bounded softsign output.
+  - `__init__`: `EmpiricalNormalization(num_actor_obs)` -> `EmpiricalNormalization(num_actor_obs_norm)`
+    where `num_actor_obs_norm = policy_obs_dim + proprio_hist_dim` (z excluded).
+  - `_get_actor_obs()`: builds `obs_part = cat([o_t, hist])`, normalizes it, then `cat([obs_normed, z])`.
+  - `act()`, `act_inference()`, `evaluate()`: removed external `actor_obs_normalizer()` call.
+  - `update_normalization()`: updates normalizer on `o_t + hist` only (not z).
+  - `load_state_dict()`: added migration logic for normalizer dimension change (old->new reset).
+- `albc_env.py`: Strided proprioceptive history recording. Added `_proprio_step_counter`
+  (per-env torch.long). `_update_proprio_hist()` now increments counter and only records
+  on stride boundary (`counter % stride == 0`). Counter reset on episode reset.
 
 ### Notes
-- Step 4d success confirms: 240D input dimension is fine, encoder integration is the problem
-- Value normalization was the only single variable that improved BOTH roll and pitch simultaneously
-- HORA succeeds not from any single parameter but from their combination (ent=0, lr=5e-3, kl=0.02,
-  normalize_value, reward_scale=0.01, short horizon) providing enough headroom for adaptive LR
-- Next steps: either (a) combine effective variables, (b) restructure encoder as HORA-style env_mlp
-  inside actor (not separate module), or (c) use separate encoder optimizer with fixed LR
+- Step 8a confirmed: removing z from EmpiricalNorm prevents z saturation (z_range
+  [-0.86, 0.85] vs previous saturated runs). This fix is sound and should be kept.
+- Step 8b confirmed: encoder_obs_normalization is necessary for 23D p_t (removing it
+  causes z saturation to [-1.00, 1.00]). Unlike HORA's 9D p_t, 23D benefits from normalization.
+- Next experiments: Q2 (critic gradient to encoder via value loss path) and Q4
+  (KL management: desired_kl, min_lr, init_lr adjustments).
 
 ---
 
-## [2026-03-27] PPO+Encoder experiments and history-augmented actor input
+## [2026-03-27] Encoder Ablation Study (Steps 0-7)
 
-### Context
-After the ablation study confirmed encoder as root cause (Step 4: TRPO+Encoder diverged to
-45 deg pitch), two follow-up experiments were conducted to isolate whether the failure is
-TRPO-specific or encoder-general.
+### Summary
 
-**Step 4b: PPO + Encoder + DR (no constraints)**
-Same env as Step 4 but with PPO instead of TRPO. Result: also failed, but via a completely
-different mechanism.
+Systematic ablation to isolate why full constrained ALBC (TRPO+IPO+Encoder+DR) stagnates at
+17-27 deg attitude error. Components added incrementally: PPO (0.7 deg) -> +DR (3.7 deg)
+-> +TRPO (5.1 deg) -> +Barrier (6.3 deg) -> **+Encoder (45 deg, DIVERGED)**. 14 encoder
+experiments across TRPO, PPO, shared/separate backbone, large/small encoder, and with/without
+history all failed with the same pattern: encoder update at iter 1 creates ~0.14 KL (7x
+desired_kl), crashing adaptive LR. History-only PPO (no encoder, 254D input) converges to
+3.3 deg, confirming encoder integration as the sole problem.
 
-| Metric | Step 4 (TRPO+Enc) | Step 4b (PPO+Enc) |
-|--------|-------------------|--------------------|
-| Roll final | 14.7 deg | 32.5 deg |
-| Pitch final | 46.2 deg | 26.3 deg |
-| z_std final | 0.265 | 0.975 (saturated) |
-| LR final | N/A (TRPO) | 1e-5 (crashed) |
-| Failure mode | Fisher amplification -> pitch diverge | z saturation -> KL explosion -> LR death |
-
-TRPO failure: Fisher info ~0 for encoder params + CG damping=0.1 amplifies encoder gradient
-10x. Encoder takes disproportionately large param steps, z shifts disrupt actor, pitch
-diverges monotonically while line search succeeds 100%.
-
-PPO failure: 20 optimizer steps/iter (5 epochs x 4 minibatches) cause encoder z to expand
-from z_std=0.17 to 0.63 in just 10 iterations. KL explodes to 0.04 (4x desired_kl=0.01),
-adaptive LR crashes to 1e-5 at iter 2 and stays there. Both actor and encoder frozen.
-
-**Root cause analysis: z/actor_input ratio**
-Compared with HORA reference (which successfully uses vanilla PPO + encoder):
-
-| | HORA | ALBC |
-|--|------|------|
-| Base obs (o_t) | 96D | 14D |
-| Encoder z | 8D | 13D |
-| Actor input | 104D | 27D |
-| z ratio | 7.7% | 48.1% |
-
-HORA succeeds because 96D rich proprioception provides a stable actor foundation; 8D z is
-a minor correction signal. In ALBC, 14D obs is too sparse and 13D z dominates 48% of actor
-input, making training highly sensitive to any z change.
-
-**Solution: Add proprio history to actor input (matching NORBC paper)**
-The NORBC paper's actor receives o_t (with history) + l_t, not bare o_t + l_t.
-Adding 30-step x 8D flattened history (240D) to actor input reduces z ratio from 48% to 4.9%.
-
-### Added
-- `config.py`: `proprio_history_len` (default 0, disabled) and `proprio_feature_dim` (8)
-  config fields for optional proprioceptive history buffer
-- `config.py`: `ALBCDebugEncoderHistEnvCfg` (Step 4c) with `proprio_history_len=30`
-- `albc_env.py`: `_get_proprio_features()` extracting 8D per step:
-  [roll, pitch, p, q, joint_pos_norm(2), prev_actions(2)]
-- `albc_env.py`: `_update_proprio_hist()` ring buffer (shift-left + append), called in
-  `_pre_physics_step()`. Buffer reset to zero on episode reset.
-- `albc_env.py`: `_get_observations()` exposes `proprio_hist` as obs group when enabled
-- `encoder/actor_critic_encoder.py`: `proprio_hist_dim` parameter, `_proprio_hist_key`
-  parsing from obs_groups (optional 3rd group), `_get_actor_obs()` flattens history
-  `(N, 30, 8)` -> `(N, 240)` and concatenates as `cat([o_t, hist_flat, z])`
-- `agents/rsl_rl_ppo_cfg.py`: `_PPOEncoderPolicyCfg` (Step 4b), `_PPOEncoderHistPolicyCfg`
-  (Step 4c, proprio_hist_dim=240), `ALBCDebugPPOEncoderRunnerCfg`,
-  `ALBCDebugPPOEncoderHistRunnerCfg` with obs_groups including "proprio_hist"
-- `__init__.py`: Registered `Isaac-Constrained-ALBC-Debug-PPO-Encoder-v0` (Step 4b) and
-  `Isaac-Constrained-ALBC-Debug-PPO-Enc-Hist-v0` (Step 4c)
-
-### Notes
-- Step 4c actor input: o_t(14D) + hist(240D) + z(13D) = 267D. z ratio = 4.9%.
-- History features reuse the same quantities already computed in `compute_policy_obs()`
-  (roll, pitch, angular velocity, joint positions, previous actions).
-- Encoder input unchanged: privileged info (23D) only, matching NORBC paper.
-- Critic unchanged: asymmetric cat([o_t, p_t]) = 37D, no history needed.
-- PPO vanilla (no ppo_patch, no separate encoder optimizer). If Step 4c still fails,
-  next step is adding hero_agent-style encoder LR isolation and z_bounds_loss.
-
-## [2026-03-27] Ablation study: encoder identified as root cause of training failure
-
-### Context
-Full constrained ALBC system (TRPO+IPO+Encoder+DR) showed 17-27 deg attitude error after 141
-iterations, while the TDC controller achieves 0.2-6 deg on the same system. Systematic ablation
-study was conducted to isolate the problematic component by adding one feature at a time.
-
-**Ablation results (each row adds ONE component to the previous):**
+### Steps 0-3: Baseline Components
 
 | Step | Config | Roll | Pitch | Iters | Verdict |
 |------|--------|------|-------|-------|---------|
@@ -201,441 +96,408 @@ study was conducted to isolate the problematic component by adding one feature a
 | 1 | PPO + DR | 3.9 | 3.7 | 66 | PASS |
 | 2 | TRPO + DR | 5.4 | 5.1 | 83 | PASS (slower) |
 | 3 | TRPO + DR + Barrier (4 constraints) | 8.4 | 6.3 | 162 | PASS (tighter=slower) |
-| 4 | TRPO + DR + Encoder (no constraints) | 16.4 | 45.2 | 54 | **FAIL (diverged)** |
-| Full | TRPO + DR + Barrier + Encoder | 17 | 27 | 141 | **FAIL** |
 
-**Key findings:**
-1. RL approach is fundamentally sound: PPO solves the 2-DOF task in <75 iters (0.7 deg)
-2. DR adds ~3 deg error but converges cleanly (expected without adaptation)
-3. TRPO is slower than PPO but converges (~5 deg)
-4. Barrier constraints work correctly without encoder: 0 spike, all margins positive, cost
-   returns actively reduced. Adds ~2 deg error from restricted action space.
-5. **Encoder breaks training even WITHOUT barrier**: pitch diverges to 45 deg, reward -92.
-   The encoder and actor share the same TRPO KL budget (max_kl=0.005). Encoder update
-   consumes KL budget, leaving actor unable to improve. Encoder z shifts actor input
-   distribution, invalidating what the actor learned.
+Barrier works correctly: 0 spikes, all margins positive. Constraint budgets tightened from
+ablation data (torque 0.20->0.08, velocity 0.10->0.02, yaw_vel 0.785->0.40).
+Nominal position (0,pi)->(0,pi/2) tested: no difference (asymmetry from encoder, not kinematics).
 
-**Nominal position investigation (rejected):** Changed nominal_joint_pos from (0, pi) to
-(0, pi/2) hypothesizing singularity caused pitch-roll asymmetry. Results showed no difference
--- the asymmetry was caused by the encoder, not kinematics. The singularity only affects the
-first few steps of each 712-step episode.
+### Step 4: TRPO+Encoder (FAIL -- Pitch Diverges)
 
-**Constraint budget tuning:** With ablation data from Step 3, tightened budgets based on
-actual cost returns. Previous budgets had 4-62x margin (barrier gradient negligible).
+Roll 16.4, pitch 45.2 deg (diverged in 54 iters). Encoder and actor share TRPO KL budget
+(max_kl=0.005). Fisher info ~0 for encoder params + CG damping=0.1 amplifies encoder gradient
+10x, consuming KL budget and leaving actor unable to improve.
+
+### Step 4b: PPO+Encoder (FAIL -- Different Mechanism)
+
+| Metric | Step 4 (TRPO+Enc) | Step 4b (PPO+Enc) |
+|--------|-------------------|--------------------|
+| Roll / Pitch | 14.7 / 46.2 deg | 32.5 / 26.3 deg |
+| z_std | 0.265 | 0.975 (saturated) |
+| LR | N/A (TRPO) | 1e-5 (crashed) |
+| Failure mode | Fisher amplification | z saturation -> KL -> LR death |
+
+PPO: 20 steps/iter (5 epochs x 4 minibatches) cause z_std 0.17->0.63 in 10 iters, KL to 0.04
+(4x desired), LR crashes to 1e-5.
+
+**z/actor_input ratio -- root cause of sensitivity:**
+
+| | HORA | ALBC |
+|--|------|------|
+| Base obs / z / Actor input | 96D / 8D / 104D | 14D / 13D / 27D |
+| z ratio | 7.7% | 48.1% |
+
+Solution: add proprio history (30x8D=240D) -> z ratio 48.1% -> 4.9%.
+
+### Step 4c: PPO+Encoder+History -- 6 Ablations (All Failed)
+
+**HORA vs ALBC key differences:**
+
+| Parameter | HORA | ALBC |
+|-----------|------|------|
+| entropy_coef | 0.0 | 0.01 |
+| init_lr / min_lr | 5e-3 / 1e-6 | 3e-4 / 1e-5 |
+| kl_threshold | 0.02 | 0.01 |
+| horizon | 8 | 64 |
+| normalize_value | yes | no |
+| reward_scale | 0.01x | 1x |
+
+HORA's init_lr=5e-3 allows 21 consecutive LR decreases before min_lr; ALBC's 3e-4 dies after 9.
+
+**Single-variable ablation (all 267D actor input):**
+
+| Exp | Changed | LR death | Roll | Pitch | Observation |
+|-----|---------|:--------:|-----:|------:|-------------|
+| baseline | (none) | YES | 41.5 | 32.5 | noise_std 0.97 ceiling |
+| 4c-1 | entropy_coef=0.0 | YES | 29.8 | 37.2 | noise_std downtrend, LR=5.1e-5 |
+| 4c-2 | ent=0+lr=5e-3 | YES | 16.2 | 47.1 | roll improved, pitch worsened |
+| 4c-3 | desired_kl=0.02 | YES | 15.9 | 40.3 | Best reward, z SAT returned |
+| 4c-4 | steps_per_env=8 | YES | 13.3 | 53.0 | Anti-phase oscillation, NaN |
+| 4c-5 | normalize_value | YES | 24.3 | 22.0 | Best balanced (both improved) |
+| 4c-6 | fixed schedule | N/A | NaN | NaN | Diverged -- adaptive LR was safety net |
+
+All noise_std > 0.94 (policy effectively random).
+
+### Step 4d: History-Only PPO -- No Encoder (SUCCESS)
+
+Actor: policy(14D) + history(240D) = 254D. Standard ActorCritic, no encoder.
+
+| Metric | ent=0.01 | ent=0.0 |
+|--------|----------|---------|
+| Roll / Pitch | 3.57 / 3.27 | 3.03 / 3.83 |
+| reward | -6.71 | -5.57 |
+| noise_std | 0.81 (rising) | 0.20 (falling) |
+
+entropy_coef=0.0 (matching HORA) resolved sigma plateau. 254D input works fine.
+
+### Steps 5-7: Architecture Experiments (All Failed)
+
+**Step 5a-5b: Shared backbone (6 variants)**
+
+Consistent pattern: iter 0 KL ~0.02 -> iter 1 KL 0.3-1.5 -> LR crashes -> pitch diverges.
+
+| Variant | Key change | KL iter 1 | Result |
+|---------|-----------|-----------|--------|
+| 5a-v1 | 2-group opt, lr=1e-3 | 0.318 | LR death |
+| 5a-v2 | single group | 0.517 | NaN (surr 5.9e22) |
+| 5a-v3 | +log_ratio clamp | 0.835 | LR death |
+| 5a-v4 | +per-minibatch refresh | 0.835 | LR death |
+| 5b-v1 | +history(10) | 0.367 | LR death |
+| 5b-v2 | +asymmetric LR | 0.367 | LR death |
+
+Root cause: value loss shifts backbone features -> mu shifts -> unbounded KL not bounded by
+surrogate advantage. At 2D actions, KL concentrates on 2 dims (HORA's 16D disperses it).
+
+**Step 6: Separate network + per-minibatch refresh + combined hyperparams**
+
+iter 1: KL=0.139 (7x desired), LR crashes to 5.9e-5. Pitch 19->48 deg.
+Per-minibatch refresh reduced iter-1 KL from shared backbone's 0.835 to 0.139 (6x), still
+insufficient.
+
+**Step 7: Small encoder [256,128]->8D (15% of policy, matching HORA fraction)**
+
+iter 1: KL=0.144, nearly identical to Step 6's 0.139. Encoder SIZE is not the differentiator.
+
+### All 14 Experiments Summary
+
+| Step | Architecture | Encoder | KL iter1 | Outcome |
+|------|-------------|---------|----------|---------|
+| 0 | PPO | none | - | 0.7 deg (PASS) |
+| 1 | PPO+DR | none | - | 3.7 deg (PASS) |
+| 2 | TRPO+DR | none | - | 5.1 deg (PASS) |
+| 3 | TRPO+DR+Barrier | none | - | 6.3 deg (PASS) |
+| 4 | TRPO+DR+Enc | [256,128,64]->13 | N/A | 45 deg (FAIL) |
+| 4b | PPO+Enc | [256,128,64]->13 | high | z sat + LR death |
+| 4c (x6) | PPO+Enc+Hist | [256,128,64]->13 | high | 6 ablations all failed |
+| 4d | PPO+Hist (no enc) | none | - | 3.3 deg (PASS) |
+| 5a (x6) | PPO+Enc shared BB | various | 0.3-1.5 | shared BB amplifies KL |
+| 6 | PPO+Enc+Hist separate | [256,128,64]->13 | 0.139 | LR death |
+| 7 | PPO+Enc+Hist separate | [256,128]->8 | 0.144 | LR death |
+
+**Invariant finding**: Encoder update at iter 1 creates KL ~0.14 (7x desired_kl=0.02)
+regardless of encoder size, architecture, or optimizer configuration.
+
+### Unresolved Directions
+
+- (a) Cosine-decaying encoder LR (starts high, decays to near-zero)
+- (b) Freeze encoder for N iterations, let actor converge, then unfreeze
+- (c) Encoder inside actor MLP as conditional input (not concatenated)
+- (d) Abandon online encoder; use offline system identification
 
 ### Added
-- `encoder/actor_critic_constrained.py`: ActorCritic + cost critic wrapper (no encoder) for
-  barrier-only ablation testing
-- `config.py`: 4 debug env configs (`ALBCDebugEnvCfg`, `ALBCDebugDREnvCfg`,
-  `ALBCDebugBarrierEnvCfg`, `ALBCDebugEncoderEnvCfg`)
-- `agents/rsl_rl_ppo_cfg.py`: 4 debug runner configs (PPO, PPO+DR, TRPO, TRPO+Barrier,
-  TRPO+Encoder) with standard PPO algorithm configs
-- `__init__.py`: Registered 4 ablation tasks:
-  `Isaac-Constrained-ALBC-Debug-v0` (Step 0),
-  `Isaac-Constrained-ALBC-Debug-DR-v0` (Step 1),
-  `Isaac-Constrained-ALBC-Debug-TRPO-v0` (Step 2),
-  `Isaac-Constrained-ALBC-Debug-Barrier-v0` (Step 3),
-  `Isaac-Constrained-ALBC-Debug-Encoder-v0` (Step 4)
+
+- `encoder/actor_critic_encoder.py`: `shared_backbone` mode (backbone MLP + linear heads),
+  `z_bounds_loss()` method (soft quadratic penalty on |z| > 0.85)
+- `encoder/actor_critic_constrained.py`: ActorCritic + cost critic wrapper (no encoder)
+  for barrier-only ablation
+- `algorithms/ppo.py`: `_update_encoder_ppo()` with per-minibatch mu/sigma refresh,
+  per-epoch LR adaptation. Single optimizer group. Log-ratio clamp(-20, 20).
+- `config.py`: `proprio_history_len` (default 0), `proprio_feature_dim` (8);
+  debug env configs: `ALBCDebugEnvCfg`, `ALBCDebugDREnvCfg`, `ALBCDebugBarrierEnvCfg`,
+  `ALBCDebugEncoderEnvCfg`, `ALBCDebugEncoderHistEnvCfg` (4c, history_len 30->10),
+  `ALBCDebugHistOnlyEnvCfg` (4d, `state_space=0`)
+- `albc_env.py`: `_get_proprio_features()` (8D per step), `_update_proprio_hist()` ring buffer,
+  `_get_observations()` exposes `proprio_hist` as flat `(N, 240)`
+- `encoder/actor_critic_encoder.py`: `proprio_hist_dim`, `_proprio_hist_key` parsing,
+  `_get_actor_obs()` concatenates `cat([o_t, hist_flat, z])`.
+  Added `nan_to_num` + `clamp(-10, 5)` on `log_std`.
+- `agents/rsl_rl_ppo_cfg.py`: Runner/algorithm configs for Steps 4b/4c/4d/5a/5b/6/7.
+  `_PPOHistOnlyAlgorithmCfg` (`entropy_coef=0.0`),
+  `_PPOEncoderHistAlgorithmCfg` (4c ablation)
+- `runners/constraint_encoder_runner.py`: `normalize_value` flag with Welford running mean/std
+- `__init__.py`: Registered ablation tasks: `Isaac-Constrained-ALBC-Debug-v0` (0),
+  `-DR-v0` (1), `-TRPO-v0` (2), `-Barrier-v0` (3), `-Encoder-v0` (4),
+  `-PPO-Encoder-v0` (4b), `-PPO-Enc-Hist-v0` (4c), `-PPO-Hist-Only-v0` (4d),
+  `-PPO-SB-v0` (5a), `-PPO-SB-Hist-v0` (5b), `-PPO-Sep-Enc-Hist-v0` (6)
 
 ### Changed
-- `config.py`: `nominal_joint_pos` (0, pi) -> (0, pi/2) for non-singular FK Jacobian.
-  Did not fix the pitch-roll asymmetry (root cause was encoder, not kinematics).
-- `config.py`: Constraint budgets tightened from ablation data:
-  torque 0.20 -> 0.08 (was 4.3x margin, now ~1.7x),
-  velocity 0.10 -> 0.02 (was 62x margin, now ~12x),
-  yaw_vel 0.785 -> 0.40 (was 2.3x margin, now ~1.2x),
-  attitude 0.01 unchanged (safety critical).
-- `config.py`: Reward weights adjusted for constraint coexistence:
-  k_tau -0.01 -> -0.005 (constraint handles hard torque limit),
-  k_s -0.2 -> -0.1 (constraint handles velocity limit).
 
-### Fixed
-- `albc_env.py`: Guard `compute_all_costs()` with `num_constraints > 0` check to prevent
-  crash when constraints list is empty (needed for debug configs).
-- `algorithms/constraint_trpo.py`: Added `num_constraints > 0` guards in `act()`,
-  `process_env_step()`, `compute_returns()`, and `_update_values()` to support
-  ConstraintTRPO with 0 constraints (pure TRPO mode for ablation).
+- `config.py`: `nominal_joint_pos` (0,pi)->(0,pi/2); constraint budgets tightened
+  (torque 0.20->0.08, velocity 0.10->0.02, yaw_vel 0.785->0.40);
+  reward weights (k_tau -0.01->-0.005, k_s -0.2->-0.1)
+- `albc_env.py`: `_get_observations()` flattens `proprio_hist` to `(N,240)`.
+  Guard `compute_all_costs()` with `num_constraints > 0`.
+- `encoder/actor_critic_encoder.py`: `_get_actor_obs()` no longer flattens hist (already flat)
+- `algorithms/constraint_trpo.py`: `num_constraints > 0` guards in `act()`,
+  `process_env_step()`, `compute_returns()`, `_update_values()`
 
-### Notes
-- **Next step: separate encoder from TRPO trust region.** Options:
-  (a) Encoder uses separate Adam optimizer (like hero_agent PPO), actor uses TRPO
-  (b) Freeze encoder, train actor first, then fine-tune encoder
-  (c) Switch to PPO-based constrained RL (e.g., PPO-Lagrangian) to avoid KL budget issue
-- Barrier penalty spikes (max 0.455) in full system were caused by encoder gradient
-  flowing through log(margin), NOT by the barrier itself. Barrier-only test had 0 spikes.
-- The 2-DOF attitude control task is trivial for RL (0.7 deg in 75 iters with PPO).
-  All complexity comes from the constrained encoder architecture.
+### Key Lessons
 
-## [2026-03-27] Tune delta_scale and reward weights after delta action analysis
+1. **RL fundamentally sound**: PPO solves 2-DOF in <75 iters (0.7 deg). All complexity from
+   encoder integration.
+2. **Encoder destabilizes any optimizer**: TRPO (Fisher amplification), PPO (z expansion ->
+   KL -> LR death). Same iter-1 KL ~0.14 regardless of architecture.
+3. **z/actor_input ratio**: HORA 7.7% vs ALBC 48.1%. History reduces to 4.9%, insufficient.
+4. **Shared backbone incompatible with 2D actions**: value gradient -> unbounded KL via
+   backbone feature shift. HORA's 16D disperses KL.
+5. **HORA success non-transferable**: 16D actions, 16384 envs, reward_scale=0.01, horizon=8
+   provide stability margins ALBC cannot match.
+6. **Per-minibatch mu/sigma refresh**: reduces KL 6x, insufficient alone.
+7. **entropy_coef=0.0 required**: positive entropy_coef pushes sigma up while LR death
+   prevents pushing down. Resolved sigma plateau in Step 4d.
+8. **Adaptive LR death = failure mode AND safety net**: prevents learning but also NaN.
+9. **normalize_value**: only single variable improving both roll and pitch simultaneously.
 
-### Context
-Analysis of run `2026-03-27_02-40-36` (139 iters, first delta action run) showed dramatic
-improvements in actuator dynamics but attitude control regression:
+---
 
-**Dynamics success (delta action working):**
-- effort_saturation: 91% -> 2.2% (PD controller no longer saturated)
-- applied_torque_max: 12.3 -> 6.5 Nm (within 9.5 Nm constraint limit)
-- joint_vel_max: 6.0 -> 2.1 rad/s (within 4.189 constraint limit)
-- Torque cost_return: 92 -> 4.5 (within budget 20 for the first time!)
-- Velocity cost_return: 91 -> 0.02 (within budget 10, essentially zero violation)
+## [2026-03-27] Action Parameterization & Reward Tuning
 
-**Attitude regression:**
-- Roll error: 17 -> 21.6 deg, Pitch error: 13 -> 18.8 deg (worse than absolute action)
-- Per-step reward breakdown: command=-2.92 (97.3%), torque=-0.014 (0.5%), smoothness=-0.068 (2.3%)
-- The 160:1 ratio between tracking and smoothness means the policy has almost no incentive
-  to be smooth or energy-efficient -- only attitude matters in the reward landscape.
+### Summary
 
-**Two issues identified:**
-1. delta_scale=0.05 limits arm bandwidth: 2.9 deg/step means reaching 90 deg offset takes
-   0.62 seconds. Arm may be too slow to compensate for disturbances.
-2. Reward weight imbalance: k_tau and k_s contribute <3% combined to the total reward,
-   making torque efficiency and smoothness invisible to the optimizer.
+Three sequential fixes addressing action jitter and constraint feasibility:
+(1) Torque constraint measured PD controller's unbounded internal computation instead of actual
+motor output, making it 100% violated and unsatisfiable. (2) Gaussian policy noise in absolute
+joint targets created 115 deg/step jitter, causing 91% effort saturation. Switched to delta
+action where noise is bounded per step. (3) Tuned delta_scale and reward weights from first
+delta run analysis.
 
-### Changed
-- `config.py`: `delta_scale` 0.05 -> 0.08 (arm bandwidth +60%, max 4.6 deg/step, max PD
-  torque = 8.0 Nm still within 9.5 limit). Time to reach 90 deg offset: 0.39s (was 0.62s).
-- `config.py`: `k_tau` -0.001 -> -0.01 (10x increase, torque penalty ~5% of reward).
-  Encourages energy efficiency now that constraints handle hard limits.
-- `config.py`: `k_s` -0.05 -> -0.2 (4x increase, smoothness penalty ~10% of reward).
-  Discourages jerky acceleration in delta action space.
+### Fix: Torque Constraint (computed_torque -> applied_torque)
 
-### Notes
-- Reward contribution targets: command ~85%, smoothness ~10%, torque ~5%.
-  Previous: command 97.3%, smoothness 2.3%, torque 0.5%.
-- delta_scale=0.10 was considered but rejected: PD torque = 10 Nm exceeds 9.5 limit.
-- k_c=-8.0 intentionally unchanged: attitude tracking remains the primary objective.
+`torque_limit_cost()` checked `computed_torque` (PD output, 326-554 Nm) against 9.5 Nm limit
+-- 100% violated on every step, fundamentally unsatisfiable.
 
-## [2026-03-27] Switch from absolute to delta action parameterization
+| Metric | computed_torque | applied_torque |
+|--------|----------------|----------------|
+| Range | 326-554 Nm | 12.0-12.5 Nm |
+| Violation rate | ~100% | ~70-80% (improvable) |
+| effort_saturation | 78-95% | - |
 
-### Context
-Analysis of runs 01-51-47 (computed_torque) and 02-09-08 (applied_torque fix) revealed that
-while the torque constraint fix dramatically improved gradient stability (enc_grad max 19680->218,
-entropy 0.93->1.60), reward and constraint cost_returns showed no improvement. Per-step reward
-components were actually worsening: command -0.48->-1.74, smoothness -0.04->-0.35.
+Impact: constant barrier gradient with no directional info, dominated reward signal (4:1),
+collapsed exploration (noise_std 0.61->0.41), encoder grad_norm spikes to 19680.
 
-**Root cause: Gaussian policy noise creates high-frequency jitter in joint targets.**
+#### Fixed
+- `mdp/constraints.py`: `torque_limit_cost()` uses `applied_torque` instead of `computed_torque`
 
-The policy samples `a_t ~ N(mean, std)` independently each step. With `action_scale = pi` and
-`noise_std = 0.64`, this creates per-step target jumps of `0.64 * pi = 2.0 rad = 115 deg` from
-noise alone (even if the mean is perfectly stable). The PD controller (Kp=100) cannot track these
-rapid target changes, resulting in 91% effort saturation and permanent torque/velocity constraint
-violation.
+#### Notes
+- Velocity constraint (limit=4.189 rad/s) is correct: checks actual joint_vel against motor max.
+- Reward `joint_torque` already correctly used `applied_torque`.
 
-**Key calculation:** For `applied_torque < 9.5 Nm` with Kp=100, position error must be < 0.095 rad
-(5.4 deg). Even at min_std=0.2, noise amplitude = `0.2 * pi = 0.63 rad = 36 deg` -- 7x the
-constraint-feasible range.
+### Switch: Absolute -> Delta Action Parameterization
 
-**Reference comparison:** TDC controller achieves 0.2 deg (no DR) to 6 deg (max DR) attitude error
-on the same system, using small incremental IK-computed joint deltas. The RL policy at 17-18 deg
-is worse than the classical controller because of action jitter.
+With `action_scale=pi` and `noise_std=0.64`, per-step target jump = 0.64*pi = 2.0 rad = 115 deg.
+PD (Kp=100) needs position error < 0.095 rad (5.4 deg) for torque < 9.5 Nm. Even at min_std=0.2,
+noise = 0.2*pi = 36 deg -- 7x constraint-feasible range.
 
-**Paper reference (NORBC):** Uses `sigma_a = 0.4` (8x smaller than our pi) for legged robots.
-However, absolute scaling doesn't suit ALBC's continuous-rotation arm because +-23 deg range may
-be insufficient. Delta action is the right approach: limits per-step change while allowing any
-absolute position via accumulation.
+Reference: TDC achieves 0.2-6 deg using small incremental IK deltas. NORBC uses sigma_a=0.4
+(8x smaller), but absolute scaling doesn't suit continuous-rotation arm.
 
-### Changed
-- `config.py`: Replaced `action_scale: float = pi` with `delta_scale: float = 0.05`.
-  At 50Hz, max joint velocity = 0.05 * 50 = 2.5 rad/s (within 4.189 constraint).
-  With min_std=0.2, noise position change = 0.65 deg/step (within PD tracking range).
-- `albc_env.py`: `_apply_joint_pd_action()` changed from absolute
-  (`q_des = q_nominal + scale * a_t`) to delta accumulation
-  (`q_des += delta_scale * a_t`). Joint limits still enforced via clamp.
+Delta action: limits per-step change, allows any absolute position via accumulation. At 50Hz
+with delta_scale=0.05, max velocity = 2.5 rad/s (within 4.189 constraint). With min_std=0.2,
+noise = 0.65 deg/step (within PD tracking range).
 
-### Notes
-- Reward weights (k_c=-8.0, k_s=-0.05, k_tau=-0.001) intentionally unchanged to isolate
-  the effect of delta action. The 160:1 tracking/smoothness ratio may need adjustment later.
-- Reset behavior unchanged: on episode reset, q_des initializes to current joint position
-  (already the case in `_reset_action_buffers`).
+#### Changed
+- `config.py`: `action_scale: float = pi` -> `delta_scale: float = 0.05`
+- `albc_env.py`: `_apply_joint_pd_action()` from absolute (`q_des = q_nominal + scale * a_t`)
+  to delta accumulation (`q_des += delta_scale * a_t`, clamped to joint limits)
+
+#### Notes
 - Smoothness reward now penalizes acceleration (change in velocity command) rather than
-  change in absolute position target -- a more physically meaningful quantity with delta actions.
+  change in absolute position -- more physically meaningful with delta actions.
+- delta_scale=0.10 rejected: PD torque = 10 Nm exceeds 9.5 limit.
 
-## [2026-03-27] Fix torque constraint: computed_torque -> applied_torque
+### Tune: delta_scale and Reward Weights
 
-### Context
-Analysis of run `2026-03-27_01-51-47` (200 iters, post-standardization + alpha=0.05) revealed that
-torque and velocity cost_returns were not improving -- in fact worsening (torque: 30.7 -> 98.7,
-velocity: 28.3 -> 88.3) while reward also degraded (-9.2 -> -30.6).
+First delta run (`2026-03-27_02-40-36`, 139 iters) -- dynamics success, attitude regression:
 
-**Root cause:** `torque_limit_cost()` checked `_robot.data.computed_torque` (PD controller output
-BEFORE actuator clamping) against limit=9.5 Nm. With Kp=100 and ImplicitActuator, computed_torque
-ranges 326-554 Nm -- always exceeding 9.5 Nm on every step, making the constraint 100% violated
-and fundamentally unsatisfiable.
+| Category | Metric | Absolute | Delta |
+|----------|--------|----------|-------|
+| Dynamics | effort_saturation | 91% | 2.2% |
+| | applied_torque_max | 12.3 Nm | 6.5 Nm |
+| | torque cost_return | 92 | 4.5 (within budget!) |
+| | velocity cost_return | 91 | 0.02 |
+| Attitude | Roll / Pitch | 17 / 13 deg | 21.6 / 18.8 deg |
+| Reward | command:smoothness:torque | 97.3%:2.3%:0.5% | - |
 
-**Evidence:**
-- `computed_torque_abs_max`: 326-554 Nm (always >> 9.5 Nm limit)
-- `applied_torque_abs_max`: 12.0-12.5 Nm (post-clamp by effort_limit_sim=13 Nm)
-- `effort_saturation_frac`: 78-95% (PD almost always requests more than actuator can deliver)
-- Torque violation rate: ~100% (every step), budget: 20% -> unsatisfiable by 5x
+Issues: delta_scale=0.05 too slow (0.62s to reach 90 deg offset), 160:1 reward imbalance.
 
-**Impact on training:** The unsatisfiable constraint created constant barrier gradient at the
-alpha*d_k floor margin. This gradient:
-1. Provided no directional information (100% vs 99% violation = same barrier pressure)
-2. Dominated reward signal (barrier:reward ratio still ~4:1 even after alpha fix)
-3. Pushed exploration down (noise_std 0.61 -> 0.41, entropy 0.73)
-4. Caused encoder grad_norm spikes (19680 at iter 156) when cost_surrs pushed margin to clamp floor
+#### Changed
+- `config.py`: `delta_scale` 0.05 -> 0.08 (bandwidth +60%, 0.39s to 90 deg, PD torque 8.0 Nm
+  within 9.5 limit)
+- `config.py`: `k_tau` -0.001 -> -0.01 (10x), `k_s` -0.05 -> -0.2 (4x).
+  Target ratio: command ~85%, smoothness ~10%, torque ~5%.
 
-**Asset spec:** Hero Agent ALBC arm uses effort_limit_sim=13.0 Nm (PhysX hard cap, above motor
-stall torque 9.5 Nm). The constraint should measure actual motor output (applied_torque), not
-the PD controller's unbounded internal computation. The reward `joint_torque` already correctly
-uses `applied_torque`.
+### Key Lessons
 
-### Fixed
-- `mdp/constraints.py`: `torque_limit_cost()` now uses `_robot.data.applied_torque` instead of
-  `_robot.data.computed_torque`. With applied_torque, violation is achievable (~70-80% initially)
-  and decreases as the policy learns smoother control, providing actionable barrier gradient.
+1. **Constraint must measure actual output**: computed_torque (PD internal) is unbounded;
+   applied_torque (post-clamp) is the physical quantity.
+2. **Gaussian noise in absolute action = structural jitter**: noise amplitude > 7x
+   constraint-feasible range even at min_std. Delta action bounds per-step change.
+3. **Reward weight balance matters**: 97%:2%:0.5% gives no incentive for smoothness/efficiency.
 
-### Notes
-- Velocity constraint (limit=4.189 rad/s) is correct: checks actual joint_vel against real motor
-  max speed. 91% violation rate is high but physically achievable, not a metric error.
-- With torque constraint fixed, barrier gradient should focus on velocity + yaw_vel, allowing
-  reward (especially torque/smoothness components) to improve.
-- Encoder grad_norm spikes should reduce: the constant noise from the unsatisfiable torque
-  constraint was a major source of barrier gradient instability.
+---
 
-## [2026-03-27] Increase barrier_alpha to reduce barrier-to-reward gradient imbalance
+## [2026-03-27] TRPO+IPO Algorithm Fixes (NORBC Paper Alignment)
 
-### Context
-Analysis of 3 consecutive runs revealed that per-constraint cost advantage standardization
-(restored in previous commit) combined with `1/(1-gamma)=100` and `barrier_t=100` creates
-a 9.2:1 barrier-to-reward gradient ratio (sum of `1/margin_k` across 4 constraints at floor).
+### Summary
 
-**3-run comparison:**
-| Run | Changes | reward | noise | entropy | enc_grad max | action_rate |
-|-----|---------|--------|-------|---------|-------------|-------------|
-| 00-09-23 | baseline | -78.80 | 0.64 | 1.41 | 1.0 | - |
-| 01-15-43 | +1/(1-γ)+enc_TRPO | -38.77 | 0.60 | 1.29 | 322 | 1.02 |
-| 01-38-08 | +standardization | -37.36 | 0.44 | 0.82 | 14097 | 2.00 |
+Six structural fixes aligning ConstraintTRPO with the NORBC paper (Muller et al., ICML 2025).
+Fixes applied in order: (1) logging artifact, (2) cost critic normalization + encoder
+starvation, (3) encoder trust region integration, (4) missing 1/(1-gamma) factor,
+(5) cost advantage standardization, (6) barrier_alpha tuning.
 
-Run 3 showed exploration collapse (noise 0.44, entropy 0.82), action oscillation (rate 2.0,
-smoothness reward 4x worse), and encoder grad norm spike to 14097. Root cause: effective barrier
-weight = `[1/(1-γ)] / barrier_t / margin_k = 100/100/margin_k = 1/margin_k`. With deeply
-infeasible constraints at floor margins (0.20-1.57), total barrier weight = 9.2 vs reward = 1.
+Combined effect: reward -78.80 -> -37.36 (2x), roll 29.2 -> 18.0 deg (38%), pitch 26.5 ->
+11.9 deg (55%), z saturation eliminated ([-0.99,0.99] -> [-0.53,0.40]).
 
-**Fix: increase barrier_alpha** from 0.02 to 0.05. This enlarges the adaptive threshold floor
-margin (`alpha * d_k`), directly reducing `1/margin_k`:
-- torque: 0.40 -> 1.0, velocity: 0.20 -> 0.50, yaw_vel: 1.57 -> 3.93
-- Total barrier weight: 9.19 -> 2.26 (barrier:reward ≈ 2.3:1)
+### Fix 1: Line Search Logging Artifact
 
-Chosen over increasing barrier_t because alpha only affects deeply infeasible constraints
-(margin = alpha*d_k floor). When constraints become feasible (margin > alpha*d_k), the
-alpha value becomes irrelevant -- a self-deactivating mechanism.
+`surrogate()` closure sets `_last_barrier_penalty` and `_last_mean_entropy` on every call.
+During backtracking (up to 10 attempts), monitoring vars retain last rejected candidate's
+values -- inflated barrier from near-constraint-boundary proposals.
 
-### Changed
-- `agents/rsl_rl_ppo_cfg.py`: `barrier_alpha` 0.02 -> 0.05 (adaptive threshold floor margin)
+#### Fixed
+- `algorithms/constraint_trpo.py`: Recalculate `surrogate()` with reverted params after
+  line search failure
 
-### Notes
-- Effective gradient balance: barrier:reward ≈ 2.3:1 (was 9.2:1)
-- If still too strong, alpha=0.10 gives 1.6:1 ratio
-- Classical IPM interpretation: larger alpha = larger trust region around current infeasible point,
-  allowing more reward optimization while maintaining directional constraint pressure
+### Fix 2: Cost Critic d_k^2 Normalization + Encoder LS Gating
 
-## [2026-03-27] Restore per-constraint cost advantage standardization (NORBC Sec IV-B)
+**d_k^2 normalization**: Intended to prevent large-budget constraints from dominating.
+Actually ineffective: yaw_vel (d_k=78.5, d_k^2=6162) contributed 98.6% of loss. Raw MSE
+scales O(d_k^2), division merely cancels scaling. Non-standard -- OmniSafe, CPO, FOCOPS,
+IPO all use plain MSE.
 
-### Context
-Analysis of run `2026-03-27_01-15-43` (197 iters, post-1/(1-gamma) fix) revealed that while the
-barrier fix improved reward (2x), attitude error (38-55% better), and eliminated z saturation,
-3/4 constraints (torque, velocity, yaw_vel) remained deeply infeasible with margins stuck at the
-adaptive threshold floor (alpha*d_k).
+**Encoder LS gating**: Encoder received zero gradient on line search failure. No precedent
+in HORA/RMA/Extreme Parkour/RSL-RL/PPG. Creates starvation loop: bad z -> constraint
+violation -> LS fails -> encoder frozen -> worse z. Longest freeze: 8 iters, reward dropped
+4.3x faster.
 
-**Root cause:** Per-constraint cost advantage standardization was removed during the paper-aligned
-architecture overhaul (`8ba1827c`). Without it, constraints with different physical scales
-(binary 0/1 costs vs continuous |omega_z| costs) have vastly different gradient magnitudes.
-When deeply infeasible (e.g., 96% torque violation), the cost value function accurately predicts
-high costs, making raw cost advantages near-zero (A_Ck ≈ 0.04 for violating steps). This leaves
-the barrier gradient direction dominated by noise.
+#### Changed
+- `algorithms/constraint_trpo.py`: Cost value loss `(per_k_mse / d_k^2).mean()` ->
+  `per_k_mse.mean()`
+- `algorithms/constraint_trpo.py`: Removed `ls_success` gate on encoder update
 
-**Paper reference (NORBC Sec IV-B):** The paper explicitly standardizes per-constraint cost
-advantages: `A_hat_Ck = (A_Ck - mu) / sigma` per constraint k. This equalizes gradient scale
-across constraints so barrier weight 1/(t*margin_k) provides proximity-based prioritization only.
+### Fix 3: Encoder Integration into TRPO Trust Region
 
-**Synergy with adaptive threshold:** Zero-mean standardization means positive A_Ck = worse than
-average cost, negative = better. Combined with adaptive d_k^i ensuring positive margin at ratio=1
-(since standardized mean=0 gives cost_surrs=0), the barrier remains well-defined while providing
-balanced gradient direction across all constraints.
+Separate Adam encoder update (5 epochs, lr=3e-4) was destroying trust region:
+- Pre-encoder KL: 0.0035 avg (within budget)
+- Post-encoder KL: 0.138 avg (**27.6x budget**, max 1153.4x)
+- 11.4% of iterations: barrier_penalty = -inf
 
-### Fixed
-- `algorithms/constraint_trpo.py`: Restored per-constraint cost advantage standardization in
-  `update()`. Was: raw `cost_advantages_flat`. Now: standardized per constraint
-  `(A_Ck - mean) / (std + 1e-8)`. Originally added in `332eff85`, removed in `8ba1827c`.
+NORBC trains encoder jointly with actor (same optimizer, same KL constraint). Moved encoder
+params into TRPO CG + line search.
 
-### Notes
-- The 1/(1-gamma) factor (previous fix) and standardization serve complementary roles:
-  1/(1-gamma) provides correct barrier sensitivity to ratio changes; standardization
-  equalizes gradient magnitude across constraints
-- Run comparison (pre-fix vs post-fix): reward -78.80 -> -38.77, roll 29.20 -> 17.96 deg,
-  pitch 26.45 -> 11.91 deg, z_range [-0.99,0.99] -> [-0.53,0.40] (no saturation)
-- Encoder grad_norm 20-300 is expected: barrier amplifies by 1/(1-gamma)=100, encoder is
-  ~50% of policy params. Scalar gradient clipping preserves direction in TRPO.
-- z_std 0.08 -> 0.21 (steadily increasing) indicates genuine encoder learning
+#### Changed
+- `algorithms/constraint_trpo.py`: Encoder params moved from separate Adam into
+  `_policy_params`. Added `_encoder_param_offset`, `_encoder_param_count` for monitoring.
+- `utils/logging.py`: `log_encoder_metrics()` reads `_last_encoder_grad_norm` from TRPO
+- `runners/constraint_encoder_runner.py`: Removed encoder optimizer save/load, replaced
+  `pre_encoder_kl` with `encoder_grad_norm`
+- `agents/rsl_rl_ppo_cfg.py`: Removed `num_encoder_epochs`, `encoder_lr` config fields
 
-## [2026-03-27] Add missing 1/(1-gamma) factor to IPO barrier cost surrogate
+#### Removed
+- `algorithms/constraint_trpo.py`: `_update_encoder()` (22 lines), `encoder_optimizer`,
+  `_encoder_params`, `_has_encoder_params`, `_last_pre_encoder_kl`
 
-### Context
-Systematic comparison of the NORBC paper's Equation 10 against the current ConstraintTRPO
-implementation revealed the log-barrier's cost surrogate was missing the `1/(1-gamma)` factor
-from the performance difference lemma.
+#### Notes
+- CG Fisher matrix automatically captures encoder's KL contribution via natural gradient
+  curvature. Encoder weight_decay (1e-5 in Adam) now omitted.
 
-**Paper's formula (Eq. 10):**
-```
-margin_k = d_k^i - J_Ck(pi_i) - [1/(1-gamma)] * E[ratio * A_Ck]
-                                  ^^^^^^^^^^^^
-                                  MISSING in code
-```
+### Fix 4: Missing 1/(1-gamma) in IPO Barrier Cost Surrogate
 
-**Impact:** With `cost_gamma=0.99`, the factor `1/(1-gamma) = 100`. The barrier was estimating
-the constraint margin change as 100x smaller than reality, making it effectively inactive.
-The barrier could not detect that a proposed policy step would violate constraints.
+Paper Eq. 10: `margin_k = d_k^i - J_Ck - [1/(1-gamma)] * E[ratio * A_Ck]`
 
-**Example (attitude, d_k=1.0, barrier_base=0.5):**
-- Paper: margin = 0.5 - 100*0.003 = 0.2 (barrier detects shrinking margin)
-- Code:  margin = 0.5 - 0.003 = 0.497 (barrier sees almost no change)
+With cost_gamma=0.99, factor = 100. Barrier estimated margin change 100x too small.
+Example (attitude, d_k=1.0, barrier_base=0.5):
+- Paper: 0.5 - 100*0.003 = 0.2 (detects shrinking)
+- Code: 0.5 - 0.003 = 0.497 (sees no change)
 
-**barrier_t analysis:** Verified that `barrier_t=100` (paper default) remains correct after
-the fix. At margin floor (alpha*d_k), effective barrier weight = 50/d_k for attitude (strong
-enforcement when infeasible), dropping to ~2 when feasible (reward takes over). This is the
-intended log-barrier behavior. No adjustment needed.
+Reward surrogate intentionally omits factor (constant scale, direction-only). Cost term INSIDE
+log() changes barrier argument, not just scale.
 
-**Reward term asymmetry (intentional):** The paper omits `1/(1-gamma)` from the reward
-surrogate because it's a constant scale factor that doesn't affect the TRPO optimization
-direction. But for the cost term INSIDE the log(), the factor changes the argument, not just
-the scale -- it determines when the barrier approaches -inf.
+#### Fixed
+- `algorithms/constraint_trpo.py`: Added `inv_one_minus_gamma = 1/(1-cost_gamma)` to
+  `cost_surrs` in barrier surrogate
 
-### Fixed
-- `algorithms/constraint_trpo.py`: Added `inv_one_minus_gamma = 1/(1-cost_gamma)` factor
-  to `cost_surrs` in the IPO barrier surrogate function. Was: `E[ratio * A_Ck]`.
-  Now: `[1/(1-gamma)] * E[ratio * A_Ck]` (matching NORBC Eq. 10).
+#### Notes
+- `margin.clamp(min=1e-8)` kills gradient at margin <= 0 (OK at ratio=1, may need smooth
+  barrier if value function accuracy is poor)
 
-### Notes
-- Combined with the encoder TRPO integration (previous entry), this completes alignment
-  with the NORBC paper's TRPO+IPO formulation
-- The `1/(1-gamma)` was NOT needed in the reward surrogate (TRPO standard: direction-only,
-  step size from KL constraint)
-- Code reviewer identified 3 secondary items for future monitoring:
-  1. `margin.clamp(min=1e-8)` kills gradient when margin <= 0 (OK at ratio=1, may need
-     smooth barrier if value function accuracy is poor)
-  2. `mean_cost_returns.clamp(min=0)` slightly inflates margin (acceptable for non-negative costs)
-  3. Gradient clipping before CG (practical stabilization, not in paper)
+### Fix 5: Per-Constraint Cost Advantage Standardization (NORBC Sec IV-B)
 
-## [2026-03-27] Integrate encoder into TRPO trust region (joint natural gradient + line search)
+Removed during paper-aligned architecture overhaul (`8ba1827c`). Without it, constraints with
+different scales (binary 0/1 vs continuous |omega_z|) have vastly different gradient magnitudes.
+When deeply infeasible (96% violation), accurate cost value predictions make raw cost advantages
+near-zero (A_Ck ~ 0.04) -- barrier gradient dominated by noise.
 
-### Context
-Deep analysis of run `2026-03-27_00-09-23` (280 iters) revealed the root cause of training
-stagnation: the separate Adam-based encoder update was destroying the TRPO trust region.
+NORBC Sec IV-B: `A_hat_Ck = (A_Ck - mu) / sigma` per constraint k.
 
-**Evidence from TensorBoard data:**
-- TRPO pre_encoder_kl: 0.0035 avg (within max_kl=0.005 budget)
-- Post-encoder KL: 0.138 avg (**27.6x budget**, median 32.1x, max 1153.4x)
-- Encoder added 26.9x the TRPO KL budget per iteration on average
-- 11.4% of iterations had barrier_penalty = -inf (numerical degeneration from ratio overflow)
-- Reward flat at -67, all constraints 2-5x over budget, no convergence
+#### Fixed
+- `algorithms/constraint_trpo.py`: Restored `(A_Ck - mean) / (std + 1e-8)` per constraint.
+  Originally added in `332eff85`, removed in `8ba1827c`.
 
-**Root cause:** The encoder update ran 5 Adam epochs (lr=3e-4) after each TRPO step,
-changing z which shifts the actor input distribution without any KL constraint. This
-directly contradicts the NORBC paper's rationale for choosing TRPO+IPO:
-1. TRPO's line search verifies barrier feasibility -- encoder bypassed it entirely
-2. TRPO's KL constraint limits policy change -- encoder added 32x the budget
-3. TRPO protects log-barrier from numerical explosion -- encoder caused -inf values
+### Fix 6: Barrier Alpha Adjustment
 
-The NORBC paper trains encoder jointly with actor (same optimizer, same KL constraint).
-The separate encoder update was an implementation deviation that nullified the trust region.
+With 1/(1-gamma)=100 and barrier_t=100, effective barrier weight = 1/margin_k. Four deeply
+infeasible constraints at floor margins (0.20-1.57) gave total barrier weight = 9.2 vs
+reward = 1.
 
-### Changed
-- `algorithms/constraint_trpo.py`: Moved encoder params from separate Adam optimizer into
-  `_policy_params` (TRPO natural gradient group). CG + line search now jointly optimize
-  actor and encoder. KL constraint covers the combined distribution shift. Line search
-  verifies barrier feasibility for the joint actor+encoder update.
-- `algorithms/constraint_trpo.py`: Added encoder gradient norm extraction from TRPO flat
-  gradient vector (`_encoder_param_offset`, `_encoder_param_count`) for monitoring.
-- `utils/logging.py`: `log_encoder_metrics()` now accepts `alg` parameter to read
-  `_last_encoder_grad_norm` from the TRPO gradient (no `.grad` available after `autograd.grad`).
-- `runners/constraint_encoder_runner.py`: Removed encoder optimizer save/load. Replaced
-  `pre_encoder_kl` logging with `encoder_grad_norm`. Passes `alg` to `log_encoder_metrics`.
-- `agents/rsl_rl_ppo_cfg.py`: Removed `num_encoder_epochs` and `encoder_lr` config fields.
+Increased barrier_alpha 0.02 -> 0.05: enlarges floor margin (alpha*d_k), self-deactivating
+when constraints become feasible.
+- torque: 0.40->1.0, velocity: 0.20->0.50, yaw_vel: 1.57->3.93
+- Total barrier weight: 9.19 -> 2.26 (ratio 2.3:1)
 
-### Removed
-- `algorithms/constraint_trpo.py`: Deleted `_update_encoder()` method (22 lines).
-  Encoder no longer has a separate update loop.
-- `algorithms/constraint_trpo.py`: Removed `encoder_optimizer` (Adam), `_encoder_params`,
-  `_has_encoder_params`, `_last_pre_encoder_kl` fields.
-- `runners/constraint_encoder_runner.py`: Removed `encoder_optimizer.pt` checkpoint
-  save/load (no separate optimizer to persist).
+**3-run progression:**
 
-### Notes
-- CG Fisher matrix automatically captures encoder's KL contribution: params that strongly
-  affect the distribution get smaller steps via natural gradient curvature
-- Encoder weight_decay was 1e-5 in Adam; now omitted (TRPO has no optimizer). If needed,
-  L2 penalty can be added to the surrogate as future work
-- Previous encoder grad_norm=1.0 (always clipped) was post-clip from separate Adam update.
-  New metric reports pre-clip norm from the TRPO surrogate gradient, which is more informative
-- Backward compatible: old configs with `num_encoder_epochs`/`encoder_lr` are silently
-  ignored via `**_kwargs`
+| Run | Changes | reward | noise | entropy | enc_grad max |
+|-----|---------|--------|-------|---------|-------------|
+| 00-09-23 | baseline | -78.80 | 0.64 | 1.41 | 1.0 |
+| 01-15-43 | +Fix 3,4 | -38.77 | 0.60 | 1.29 | 322 |
+| 01-38-08 | +Fix 5 | -37.36 | 0.44 | 0.82 | 14097 |
 
-## [2026-03-27] Remove cost critic d_k^2 normalization and encoder line-search gating
+#### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `barrier_alpha` 0.02 -> 0.05
 
-### Context
-Training analysis of run `2026-03-26_23-45-24` (254 iters) revealed two structural issues
-in ConstraintTRPO:
+### Key Lessons
 
-**Issue A -- Cost critic `d_k^2` normalization**: The cost value loss divided per-constraint
-MSE by `d_k^2`, intended to prevent large-budget constraints from dominating. Numerical
-analysis showed the opposite effect: yaw_vel (`d_k=78.5`, `d_k^2=6162`) contributed 98.6%
-of cost critic loss, while attitude (`d_k=1.0`) contributed ~0%. The normalization was
-ineffective because raw MSE scales as `O(d_k^2)`, so dividing by `d_k^2` merely cancels
-the scaling rather than equalizing gradient contributions. Literature survey confirmed
-`d_k^2` normalization is non-standard -- OmniSafe, CPO, FOCOPS, and IPO all use plain MSE
-for cost value functions.
-
-**Issue B -- Encoder gated on `ls_success`**: Encoder update was hard-gated on line search
-success, meaning encoder received zero gradient when line search failed. Survey of all
-reference implementations (HORA, RMA, Extreme Parkour, RSL-RL PPO, PPG) found **no
-precedent** for gating encoder updates on policy step acceptance. HORA/RMA train encoder
-jointly with actor via PPO (no gating possible). Extreme Parkour uses periodic DAgger
-(fixed frequency, not conditioned on step success). The gating creates a starvation risk:
-encoder doesn't learn -> bad z -> bad actions -> constraint violation -> barrier dominates
--> line search fails -> encoder frozen (positive feedback loop). Current run showed 96.3%
-success rate but longest freeze streak was 8 iterations (iter 142-149), during which reward
-dropped 4.3x faster and z_std stagnated.
-
-### Changed
-- `algorithms/constraint_trpo.py`: Removed `d_k^2` normalization from cost value loss.
-  Was: `(per_k_mse / self.d_k.pow(2).clamp(min=0.01)).mean()`.
-  Now: `per_k_mse.mean()` (standard MSE, matching OmniSafe/CPO convention)
-- `algorithms/constraint_trpo.py`: Removed `ls_success` gate on encoder update.
-  Was: `if self.encoder_optimizer is not None and ls_success:`.
-  Now: `if self.encoder_optimizer is not None:` (encoder always updates, matching HORA/RMA)
-
-### Notes
-- Cost critic uses shared backbone with reward critic (multi-head). If gradient conflict
-  persists, consider separating into independent networks (OmniSafe standard)
-- Encoder update uses post-TRPO log_prob as baseline. When ls fails, params are reverted,
-  so post_trpo_lp equals old_log_prob, making ratio=1 and encoder gradient signal weak but
-  not harmful (centering only, no policy shift)
-- Barrier margins are narrowing (torque: 2.12->0.40, yaw_vel: 39.4->1.57), meaning line
-  search failure rate may increase in later training. The encoder ungating prevents the
-  starvation spiral in that scenario
-
-## [2026-03-27] Fix line search metric spike logging artifact in ConstraintTRPO
-
-### Context
-During constrained ALBC training, `barrier_penalty` and `entropy` metrics spiked
-sharply whenever line search failed. Investigation revealed this was a logging artifact,
-not a real policy instability. The `surrogate()` closure sets `_last_barrier_penalty` and
-`_last_mean_entropy` on every call. During backtracking line search (up to 10 attempts),
-each call to `surrogate()` with rejected candidate parameters overwrites these monitoring
-variables. On failure, `_line_search()` reverts policy params to `old_params`, but the
-monitoring vars retain the last rejected candidate's values -- often with inflated barrier
-penalty from near-constraint-boundary proposals. Literature confirms this is a known issue
-with interior point methods: log(margin) diverges as margin approaches zero (Boyd &
-Vandenberghe; Nocedal et al., SIAM 2008).
-
-### Fixed
-- `algorithms/constraint_trpo.py`: After line search failure, recalculate `surrogate()`
-  with reverted parameters so `_last_barrier_penalty` and `_last_mean_entropy` reflect
-  actual policy state, not rejected candidates
-
-### Notes
-- Only affects monitoring/logging -- actual policy update logic was already correct
-  (params properly reverted on failure, encoder update correctly gated on `ls_success`)
-- The structural causes of line search failure itself (adaptive threshold constant gradient,
-  TRPO scale invariance, barrier landscape ill-conditioning) remain separate issues
+1. **Separate encoder optimizer nullifies TRPO trust region**: encoder added 27.6x KL budget
+   per iteration. Joint CG + line search is mandatory.
+2. **1/(1-gamma) is critical in IPO barrier**: without it, barrier 100x too weak to detect
+   constraint-violating steps.
+3. **Cost advantage standardization required**: raw advantages near-zero when deeply infeasible.
+   NORBC Sec IV-B standardization provides balanced gradient across constraints.
+4. **d_k^2 normalization non-standard and ineffective**: raw MSE scales O(d_k^2), division
+   merely cancels. Use plain MSE (OmniSafe/CPO convention).
+5. **Encoder starvation from LS gating**: no precedent in literature, creates positive
+   feedback loop.
+6. **Monitoring must reflect accepted state**: in IPM, log(margin) diverges as margin->0.
+   Rejected candidates' metrics are misleading.
+7. **barrier_alpha controls deeply-infeasible behavior**: self-deactivating when feasible.
+   Preferable to barrier_t for infeasibility management.
