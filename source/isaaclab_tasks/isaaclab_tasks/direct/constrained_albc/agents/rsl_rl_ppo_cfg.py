@@ -793,3 +793,80 @@ class ALBCDebugPPOQ4NoEncNormRunnerCfg(ALBCDebugPPOQ4RunnerCfg):
 
     experiment_name = "constrained_albc_debug_ppo_q4_no_enc_norm"
     policy = _Q4NoEncNormPolicyCfg()
+
+
+# =============================================================================
+# Encoder Gradient Scaling (reduce encoder KL contribution)
+# =============================================================================
+
+
+@configclass
+class _EncScaleAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """PPO with encoder gradient scaling.
+
+    Encoder gradient scaled by 0.1x after loss.backward(), reducing encoder's
+    KL contribution by ~100x (scale^2). This raises the equilibrium LR from
+    ~2.6e-5 (encoder-dominated) toward the encoder-free equilibrium (~1e-4+),
+    allowing actor to learn normally while encoder learns slowly.
+
+    Key hyperparams:
+    - learning_rate=3e-4: proven init_lr (Q4 showed 5e-3 makes iter-0 worse)
+    - min_lr=1e-6: wide LR range for safety
+    - encoder_grad_scale=0.1: encoder gradient multiplied by 0.1 after backward
+    """
+
+    class_name: str = "PPO"
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 3e-4
+    min_lr: float = 1e-6
+    max_lr: float = 1e-2
+    encoder_grad_scale: float = 0.1
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    entropy_coef: float = 0.0
+    desired_kl: float = 0.02
+    max_grad_norm: float = 1.0
+    value_loss_coef: float = 1.0
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+
+
+@configclass
+class ALBCDebugPPOEncScaleRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 10a: Q1+Q3 + encoder gradient scaling (0.1x), enc norm kept.
+
+    Encoder gradient scaled 10x down to reduce KL contribution.
+    Expected: LR stays above 1e-4, noise_std decreases, policy learns.
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_enc_scale"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _EncScaleAlgorithmCfg()
+    policy = _Q1Q3EncoderPolicyCfg()
+
+
+@configclass
+class _EncScaleNoEncNormPolicyCfg(_Q1Q3EncoderPolicyCfg):
+    """EncScale policy without encoder input normalization (raw p_t)."""
+
+    encoder_obs_normalization: bool = False
+
+
+@configclass
+class ALBCDebugPPOEncScaleNoEncNormRunnerCfg(ALBCDebugPPOEncScaleRunnerCfg):
+    """Step 10b: Same as 10a but without p_t normalization before encoder."""
+
+    experiment_name = "constrained_albc_debug_ppo_enc_scale_no_enc_norm"
+    policy = _EncScaleNoEncNormPolicyCfg()

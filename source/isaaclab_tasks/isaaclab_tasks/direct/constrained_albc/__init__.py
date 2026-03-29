@@ -202,6 +202,26 @@ gym.register(
 )
 
 gym.register(
+    id="Isaac-Constrained-ALBC-Debug-PPO-EncScale-v0",
+    entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config:ALBCDebugEncoderHistStrideEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCDebugPPOEncScaleRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Constrained-ALBC-Debug-PPO-EncScale-NoEncNorm-v0",
+    entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config:ALBCDebugEncoderHistStrideEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCDebugPPOEncScaleNoEncNormRunnerCfg",
+    },
+)
+
+gym.register(
     id="Isaac-Constrained-ALBC-Encoder-v0",
     entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
     disable_env_checker=True,

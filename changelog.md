@@ -133,6 +133,71 @@ policy shift), normalizing only by iter 10+.
 
 ---
 
+## [2026-03-29] Encoder Gradient Scaling (FAILED - Root Cause Revision)
+
+### Context
+
+Hypothesis: encoder gradient dominates KL, causing low equilibrium LR (~2.6e-5).
+Scaling encoder gradient by 0.1x should reduce encoder KL contribution by 100x (scale^2),
+raising equilibrium LR toward the encoder-free level.
+
+**Result: FAILED.** Results identical to Step 8a baseline to 5 significant figures.
+encoder_grad_scale=0.1 verified: config saved correctly, code loaded correctly, gradient
+scaling mechanics validated in isolation (encoder grads scaled exactly 0.1x, actor grads
+untouched). Yet iter-by-iter KL, LR, z_std, and noise_std trajectories are byte-for-byte
+identical between Step 10a (scaled) and Step 8a (unscaled).
+
+| Step | Config | Roll/Pitch | noise_std | z_range | Eq. LR | KL iter-0/1 |
+|------|--------|-----------|-----------|---------|--------|-------------|
+| 8a | Q1Q3 baseline | 23/20 | 0.96 | [-0.86,0.85] | 1.7e-5 | 0.008/0.89 |
+| 10a | EncScale 0.1x, enc norm | 22/19 | 0.97 | [-0.86,0.85] | 1.8e-5 | 0.008/0.88 |
+| 10b | EncScale 0.1x, no enc norm | 23/32 | 0.97 | [-1.00,1.00] SAT | 2.6e-5 | - |
+
+Checkpoint comparison at iter 50: encoder weights differ by only 1-2% between 8a and 10a,
+confirming gradient scaling IS applied but encoder weight changes are negligible relative
+to initial weights (20 gradient steps with effective LR ~1e-4 change weights by ~0.1%).
+
+**Critical root cause revision:** The KL spike is NOT from encoder gradient magnitude.
+Comparison with Step 4d (encoder-free PPO+History, SUCCEEDS at 3.3 deg) reveals the real
+difference is the **PPO update path**, not the encoder:
+
+| Factor | Step 4d (success) | Steps 8a/10a (fail) |
+|--------|------------------|---------------------|
+| Update path | `update()` standard | `_update_encoder_ppo()` |
+| LR adaptation | per-minibatch (20x/iter) | per-epoch (5x/iter) |
+| mu/sigma refresh | none (old from rollout) | per-minibatch (rolling) |
+| iter-1 KL | 0.014 | 0.89 |
+| iter-1 LR | 6.7e-3 (healthy) | 2.0e-4 (crashing) |
+
+The `_update_encoder_ppo()` path uses per-EPOCH LR adaptation (5 adjustments per iteration),
+which is 4x slower at reacting to KL spikes than standard per-MINIBATCH adaptation (20
+adjustments). Within an epoch, 4 high-KL gradient steps proceed unchecked before LR halves.
+The per-minibatch mu/sigma refresh compounds this: each minibatch measures fresh KL that
+may be individually acceptable, but cumulative weight drift across the epoch is uncontrolled.
+
+### Added
+- `agents/rsl_rl_ppo_cfg.py`: `_EncScaleAlgorithmCfg` (encoder_grad_scale=0.1, lr=3e-4,
+  min_lr=1e-6), `ALBCDebugPPOEncScaleRunnerCfg` (Step 10a),
+  `_EncScaleNoEncNormPolicyCfg` + `ALBCDebugPPOEncScaleNoEncNormRunnerCfg` (Step 10b).
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-Debug-PPO-EncScale-v0` (Step 10a)
+  and `Isaac-Constrained-ALBC-Debug-PPO-EncScale-NoEncNorm-v0` (Step 10b).
+
+### Changed
+- `rsl_rl/algorithms/ppo.py` (external dep, not git-tracked): Added `encoder_grad_scale`
+  parameter (default 1.0) to `__init__`. In `_update_encoder_ppo()`, after `loss.backward()`,
+  scales encoder-named parameter gradients by `encoder_grad_scale` before `clip_grad_norm_`
+  and `optimizer.step()`. Needs reapply on container rebuild.
+
+### Notes
+- encoder_grad_scale is a valid mechanism (verified) but ineffective because encoder
+  gradient is NOT the KL spike cause.
+- The real bottleneck is the per-epoch LR adaptation in `_update_encoder_ppo()`.
+- Step 10b confirms again: enc norm removal -> z saturation (consistent across 8b/9b/10b).
+- Next approach: investigate per-minibatch vs per-epoch LR adaptation difference, or
+  run encoder config through standard `update()` path instead of `_update_encoder_ppo()`.
+
+---
+
 ## [2026-03-27] Encoder Ablation Study (Steps 0-7)
 
 ### Summary
