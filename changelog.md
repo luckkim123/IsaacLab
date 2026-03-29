@@ -8,6 +8,75 @@ For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
 ---
 
+## [2026-03-29] Step 11: Standard Update Path (DISPROVED) + Step 12: HORA Reward Scaling
+
+### Context
+
+Two experiments to diagnose encoder training failure root cause:
+
+**Step 11 (standard update path):** Hypothesis that `_update_encoder_ppo()` with per-epoch
+LR adaptation was causing failure. Bypassed custom encoder update path, routing encoder
+through standard `update()` (per-minibatch LR, no mu/sigma refresh). Result: **DISPROVED**.
+Standard path performed WORSE:
+
+| Step | Update Path | Roll/Pitch | noise_std | LR | z_range | KL |
+|------|------------|-----------|-----------|-----|---------|-----|
+| 8a (baseline) | `_update_encoder_ppo()` | 23/20 | 0.96 CEIL | 1.5e-5 | [-0.86,0.85] | 0.03 |
+| 11a (enc norm) | `update()` standard | 23/18 | 0.98 CEIL | **1.0e-5** | [-0.95,0.95] | 0.08 |
+| 11a (no enc) | `update()` standard | 15/**49** | 0.97 CEIL | **1.0e-5** | [-1.00,1.00] SAT | 0.13 |
+
+Key finding: per-minibatch mu/sigma refresh in `_update_encoder_ppo()` was actually HELPING
+by keeping reported KL lower (0.03 vs 0.08-0.13). Without refresh, cumulative KL from encoder
+z-drift is fully reflected, causing harder LR crash (1.0e-5 vs 1.5e-5).
+
+**Step 12 (HORA reward_scale=0.01):** Applied HORA's core design element: multiply all rewards
+by 0.01 before computing returns. Reduces surrogate gradient 100x, which should keep KL low
+and LR high even with encoder.
+
+| Step | Config | Roll/Pitch | noise_std | LR | z_range | KL |
+|------|--------|-----------|-----------|-----|---------|-----|
+| 8a (baseline) | Q1Q3 | 23/20 | 0.96 CEIL | 1.5e-5 | [-0.86,0.85] | 0.03 |
+| 12a (enc norm) | reward_scale=0.01 | **17.9**/43.8 | **0.92 ↓** | **4.0e-5** | [-0.96,0.95] | 0.04 |
+| 12b (no enc) | reward_scale=0.01 | 20.5/29.8 | **0.93 ↓** | **5.1e-5** | [-0.99,0.99] | 0.05 |
+
+**First positive signals across all encoder experiments:**
+- LR: 2.7-3.4x higher than baseline (4-5e-5 vs 1.5e-5)
+- noise_std: declining for the first time (0.92-0.93, trend v\\\), all previous CEILING
+- Roll improved in 12a (17.9 vs 23)
+
+**Remaining issues:**
+- Pitch degradation in 12a (43.8 deg, increasing trend) -- arm at extreme position (jnt_pos=5.38)
+- z_range wider than baseline (0.95 vs 0.85)
+- Encoder KL spike delayed but larger (~20 at iter 2-3 vs 0.88 at iter 1 in baseline)
+- value_loss extremely low (7.2e-4) due to scaled rewards -- critic may not learn effectively
+
+### Added
+- `agents/rsl_rl_ppo_cfg.py`: `_StdUpdateAlgorithmCfg` (use_encoder_update=False),
+  `ALBCDebugPPOStdUpdateRunnerCfg` (Step 11a), `ALBCDebugPPOStdUpdateNoEncNormRunnerCfg`.
+- `agents/rsl_rl_ppo_cfg.py`: `_RewardScaleAlgorithmCfg` (reward_scale=0.01),
+  `ALBCDebugPPORewardScaleRunnerCfg` (Step 12a), `ALBCDebugPPORewardScaleNoEncNormRunnerCfg`.
+- `__init__.py`: Registered 4 new tasks: `Isaac-Constrained-ALBC-Debug-PPO-StdUpdate-v0`,
+  `Isaac-Constrained-ALBC-Debug-PPO-StdUpdate-NoEncNorm-v0`,
+  `Isaac-Constrained-ALBC-Debug-PPO-RewardScale-v0`,
+  `Isaac-Constrained-ALBC-Debug-PPO-RewardScale-NoEncNorm-v0`.
+
+### Changed
+- `rsl_rl/algorithms/ppo.py` (external dep, not git-tracked): Added `use_encoder_update`
+  (default True) and `reward_scale` (default 1.0) parameters. `use_encoder_update=False`
+  bypasses `_update_encoder_ppo()`, routing encoder through standard `update()`.
+  `reward_scale` applied in `process_env_step()` before storing rewards (HORA line 332).
+
+### Notes
+- Step 11 conclusively proved `_update_encoder_ppo()` is NOT the bug. Its mu/sigma refresh
+  is a net positive. The custom path should be kept.
+- reward_scale=0.01 is the most promising direction so far. Only 120 iters run.
+- Pitch degradation in 12a may be transient (noise_std still declining, policy learning).
+- All no-enc-norm variants continue to show z saturation -- encoder_obs_normalization
+  is definitively required for 23D privileged input.
+- ppo.py changes (use_encoder_update, reward_scale) need reapply on container rebuild.
+
+---
+
 ## [2026-03-29] Q1+Q3 Encoder Fix: HORA-style Normalization + Strided Proprio History
 
 ### Context

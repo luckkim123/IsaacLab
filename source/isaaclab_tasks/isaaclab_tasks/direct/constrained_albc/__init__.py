@@ -222,6 +222,46 @@ gym.register(
 )
 
 gym.register(
+    id="Isaac-Constrained-ALBC-Debug-PPO-StdUpdate-v0",
+    entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config:ALBCDebugEncoderHistStrideEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCDebugPPOStdUpdateRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Constrained-ALBC-Debug-PPO-StdUpdate-NoEncNorm-v0",
+    entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config:ALBCDebugEncoderHistStrideEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCDebugPPOStdUpdateNoEncNormRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Constrained-ALBC-Debug-PPO-RewardScale-v0",
+    entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config:ALBCDebugEncoderHistStrideEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCDebugPPORewardScaleRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Constrained-ALBC-Debug-PPO-RewardScale-NoEncNorm-v0",
+    entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config:ALBCDebugEncoderHistStrideEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCDebugPPORewardScaleNoEncNormRunnerCfg",
+    },
+)
+
+gym.register(
     id="Isaac-Constrained-ALBC-Encoder-v0",
     entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
     disable_env_checker=True,

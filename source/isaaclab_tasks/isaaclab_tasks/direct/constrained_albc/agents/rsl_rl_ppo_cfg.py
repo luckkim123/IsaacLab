@@ -870,3 +870,154 @@ class ALBCDebugPPOEncScaleNoEncNormRunnerCfg(ALBCDebugPPOEncScaleRunnerCfg):
 
     experiment_name = "constrained_albc_debug_ppo_enc_scale_no_enc_norm"
     policy = _EncScaleNoEncNormPolicyCfg()
+
+
+# =============================================================================
+# Step 11: Standard update() path for encoder (bypass _update_encoder_ppo)
+# =============================================================================
+
+
+@configclass
+class _StdUpdateAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """PPO using standard update() path even with encoder present.
+
+    Bypasses _update_encoder_ppo() by setting use_encoder_update=False.
+    Standard path uses per-minibatch LR adaptation (20x/iter) and fixed
+    old_mu/sigma from rollout (no per-minibatch refresh).
+
+    Step 4d (PPO+History, no encoder) achieves 3.0 deg with this exact path.
+    Steps 8a-10b all use _update_encoder_ppo() and fail (21-32 deg).
+    This experiment tests whether the custom encoder update path itself
+    is the failure cause, not the encoder architecture.
+
+    Hyperparams identical to Q1Q3 baseline (lr=3e-4, desired_kl=0.02).
+    """
+
+    class_name: str = "PPO"
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 3e-4
+    use_encoder_update: bool = False
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    entropy_coef: float = 0.0
+    desired_kl: float = 0.02
+    max_grad_norm: float = 1.0
+    value_loss_coef: float = 1.0
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+
+
+@configclass
+class ALBCDebugPPOStdUpdateRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 11a: Encoder uses standard update() path, enc norm kept.
+
+    Tests hypothesis: _update_encoder_ppo() (per-epoch LR + mu/sigma refresh)
+    is the cause of encoder training failure, not encoder architecture.
+    Uses identical update path as Step 4d (PPO+History success at 3.0 deg).
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_std_update"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _StdUpdateAlgorithmCfg()
+    policy = _Q1Q3EncoderPolicyCfg()
+
+
+@configclass
+class _StdUpdateNoEncNormPolicyCfg(_Q1Q3EncoderPolicyCfg):
+    """Standard update policy without encoder input normalization."""
+
+    encoder_obs_normalization: bool = False
+
+
+@configclass
+class ALBCDebugPPOStdUpdateNoEncNormRunnerCfg(ALBCDebugPPOStdUpdateRunnerCfg):
+    """Step 11a-noenc: Same as 11a but without p_t normalization before encoder."""
+
+    experiment_name = "constrained_albc_debug_ppo_std_update_no_enc_norm"
+    policy = _StdUpdateNoEncNormPolicyCfg()
+
+
+# =============================================================================
+# Step 12: HORA-style reward scaling (reward_scale=0.01)
+# =============================================================================
+
+
+@configclass
+class _RewardScaleAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """PPO with HORA-style reward scaling.
+
+    HORA multiplies all rewards by 0.01 before computing returns/advantages.
+    This reduces surrogate gradient by 100x, which:
+    - Reduces z change per step by 100x -> KL contribution from encoder ~10000x smaller
+    - Allows adaptive LR to stay high (KL well below desired_kl)
+    - Actor can learn normally despite encoder shifting z
+
+    Baseline: Step 8a (Q1Q3, enc norm). Only change: reward_scale=0.01.
+    All other hyperparams identical to _Q1Q3AlgorithmCfg.
+    """
+
+    class_name: str = "PPO"
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 3e-4
+    reward_scale: float = 0.01
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    entropy_coef: float = 0.0
+    desired_kl: float = 0.02
+    max_grad_norm: float = 1.0
+    value_loss_coef: float = 1.0
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+
+
+@configclass
+class ALBCDebugPPORewardScaleRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 12a: Q1+Q3 + HORA reward_scale=0.01, enc norm kept.
+
+    Baseline: Step 8a (Q1Q3, best encoder result at 23/20 deg).
+    Expected: reward_scale=0.01 reduces gradient 100x -> LR stays high -> policy learns.
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_reward_scale"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _RewardScaleAlgorithmCfg()
+    policy = _Q1Q3EncoderPolicyCfg()
+
+
+@configclass
+class _RewardScaleNoEncNormPolicyCfg(_Q1Q3EncoderPolicyCfg):
+    """Reward scale policy without encoder input normalization."""
+
+    encoder_obs_normalization: bool = False
+
+
+@configclass
+class ALBCDebugPPORewardScaleNoEncNormRunnerCfg(ALBCDebugPPORewardScaleRunnerCfg):
+    """Step 12b: Same as 12a but without p_t normalization before encoder."""
+
+    experiment_name = "constrained_albc_debug_ppo_reward_scale_no_enc_norm"
+    policy = _RewardScaleNoEncNormPolicyCfg()
