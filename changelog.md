@@ -8,6 +8,83 @@ For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
 ---
 
+## [2026-03-29] Steps 15-17: Isolating ActorCriticEncoder Structural Root Cause
+
+### Context
+
+After Steps 13-14 disproved all HORA-aligned learning dynamics hypotheses, focus shifted
+to code-level structural differences between ActorCritic (Step 4d, 3.0 deg success) and
+ActorCriticEncoder (all encoder experiments, ~22 deg failure). Three isolation experiments:
+
+**Step 15: Symmetric Critic (DISPROVED)**
+Hypothesis: privileged critic's accurate advantages cause large gradients -> KL spike.
+Changed critic from asymmetric `cat([o_t, p_t])` to symmetric `cat([o_t, hist])` (134D,
+matching Step 4d's critic input).
+
+| Step | Config | Roll/Pitch | noise_std | LR | Encoder KL iter-0 |
+|------|--------|-----------|-----------|-----|-------------------|
+| 8a | Q1Q3 baseline | 23.3/20.0 | 0.96 | 1.5e-5 | 0.88 |
+| 15 | Symmetric critic | 22.9/21.0 | 0.97 | 1.8e-5 | 0.65 |
+
+Result: DISPROVED. Identical failure pattern. Critic asymmetry is not the cause.
+
+**Step 16: Scalar noise_std (DISPROVED)**
+Hypothesis: log_std parameterization (exp-based, multiplicative gradient) prevents
+noise_std from decreasing. Changed to scalar std (additive gradient, matching ActorCritic).
+
+| Step | Config | Roll/Pitch | noise_std | LR | Encoder KL iter-0 |
+|------|--------|-----------|-----------|-----|-------------------|
+| 8a | Q1Q3 baseline (log_std) | 23.3/20.0 | 0.96 | 1.5e-5 | 0.88 |
+| 16 | Scalar std | 22.9/18.6 | 0.98 | 2.6e-5 | 0.88 |
+
+Result: DISPROVED. Identical failure. noise_std parameterization is not the cause alone.
+
+**Step 17: No Action Clamp -> BREAKTHROUGH**
+Hypothesis: `sample().clamp(-1,1)` concentrates ~32% of actions at boundaries when
+noise_std=1.0, creating sharp log_prob gradients that amplify KL.
+
+| Step | Config | Roll/Pitch | noise_std | LR | Encoder KL iter-0 | KL |
+|------|--------|-----------|-----------|-----|-------------------|-----|
+| 8a | Q1Q3 (with clamp) | 23.3/20.0 | 0.96 CEIL | 1.5e-5 | 0.88 | 0.03 |
+| **17** | **No clamp** | **10.7/9.6** | **148 EXPLODED** | **0.01 MAX** | **0.003** | **0.01** |
+
+Result: **ACTION CLAMP CONFIRMED AS ROOT CAUSE OF KL SPIKE.**
+- First time EVER that encoder KL stayed below 0.015 (100x reduction from 0.88)
+- LR stable at max (0.01) throughout training -- no crash
+- Roll/Pitch actively decreasing (30->10 deg trend `vvv\`)
+- BUT: noise_std exploded to 148 (exp(5.0) = log_std upper clamp) because unconstrained
+  log_std grows without bound when actions are not clamped
+
+**Root cause mechanism confirmed:**
+With clamp: actions pile up at [-1,1] boundaries -> small mu shift causes large log_prob
+change at boundaries -> amplified surrogate gradient -> KL spike -> LR crash -> policy frozen.
+Without clamp: actions spread naturally per Normal distribution -> smooth log_prob surface ->
+KL stays in desired range -> LR healthy -> policy learns.
+
+**Next step:** Combine scalar std (Step 16, prevents std explosion) + no clamp (Step 17,
+prevents KL spike). This is exactly what ActorCritic (Step 4d) uses successfully.
+
+### Added
+- `encoder/actor_critic_encoder.py`: `noise_std_type` parameter ("log" default, "scalar" option). Scalar mode uses `self.std = Parameter(init_noise_std)` with additive gradient (matching ActorCritic). Log mode keeps existing `self.log_std` behavior.
+- `encoder/actor_critic_encoder.py`: `clamp_actions` parameter (default True). When False, `act()` returns raw `sample()` without `.clamp(-1, 1)`, matching ActorCritic behavior.
+- `encoder/actor_critic_encoder.py`: `symmetric_critic` parameter (default False). When True, critic uses `cat([o_t, hist])` instead of `cat([o_t, p_t])`.
+- `agents/rsl_rl_ppo_cfg.py`: `_SymCriticPolicyCfg` (symmetric_critic=True), `ALBCDebugPPOSymCriticRunnerCfg` (Step 15)
+- `agents/rsl_rl_ppo_cfg.py`: `_ScalarStdPolicyCfg` (noise_std_type="scalar"), `ALBCDebugPPOScalarStdRunnerCfg` (Step 16)
+- `agents/rsl_rl_ppo_cfg.py`: `_NoClampPolicyCfg` (clamp_actions=False), `ALBCDebugPPONoClampRunnerCfg` (Step 17)
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-Debug-PPO-SymCritic-v0` (Step 15), `Isaac-Constrained-ALBC-Debug-PPO-ScalarStd-v0` (Step 16), `Isaac-Constrained-ALBC-Debug-PPO-NoClamp-v0` (Step 17)
+
+### Fixed
+- `encoder/actor_critic_encoder.py`: `z_bounds_loss()` device reference fixed for scalar std mode (was hardcoded to `self.log_std.device`, now conditionally uses `self.std.device`).
+
+### Notes
+- Steps 15 and 16 individually are DISPROVED as root causes
+- Step 17 proves action clamp is the KL spike root cause but creates std explosion
+- The combination scalar_std + no_clamp (= ActorCritic's exact config) is the next experiment
+- Total hypotheses tested and disproved: 10 (EmpNorm, enc gradient, enc freeze, init LR, update path, history, critic asymmetry, normalization method, noise_std type, action clamp isolated)
+- Action clamp is confirmed as root cause but needs scalar std to prevent explosion
+
+---
+
 ## [2026-03-29] Steps 13-14: Static MinMax Norm (DISPROVED) + Encoder Freeze (DISPROVED)
 
 ### Context

@@ -1245,3 +1245,138 @@ class ALBCDebugPPOEncFreezeRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     algorithm = _EncFreezeAlgorithmCfg()
     policy = _StaticNormPolicyCfg()
+
+
+# =============================================================================
+# Step 15: Symmetric Critic (Critic Asymmetry KL Test)
+# =============================================================================
+
+
+@configclass
+class _SymCriticPolicyCfg(_Q1Q3EncoderPolicyCfg):
+    """Encoder policy with symmetric critic.
+
+    Critic sees cat([o_t, hist]) instead of cat([o_t, p_t]).
+    Same info as Step 4d's critic (134D), matching the actor input minus z.
+    Tests whether privileged critic's accurate advantages cause KL spike.
+    """
+
+    symmetric_critic: bool = True
+
+
+@configclass
+class ALBCDebugPPOSymCriticRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 15: Encoder + Symmetric Critic.
+
+    Tests hypothesis: privileged critic produces sharp advantages that cause
+    large policy gradients and KL spike. With symmetric critic, advantage
+    accuracy matches Step 4d (PPO+History, 3.0 deg success).
+
+    If KL normalizes and policy learns -> critic asymmetry interaction confirmed.
+    If still fails -> critic asymmetry is not the cause.
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_sym_critic"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "proprio_hist"],
+    }
+
+    algorithm = _Q1Q3AlgorithmCfg()
+    policy = _SymCriticPolicyCfg()
+
+
+# =============================================================================
+# Step 16: Scalar noise_std (log_std -> std parameterization test)
+# =============================================================================
+
+
+@configclass
+class _ScalarStdPolicyCfg(_Q1Q3EncoderPolicyCfg):
+    """Encoder policy with scalar std (matching ActorCritic's parameterization).
+
+    ActorCritic (Step 4d success) uses self.std = Parameter(1.0) (additive gradient).
+    ActorCriticEncoder uses self.log_std = Parameter(0.0) (multiplicative gradient via exp).
+    Tests whether log-space parameterization prevents noise_std from decreasing.
+    """
+
+    noise_std_type: str = "scalar"
+
+
+@configclass
+class ALBCDebugPPOScalarStdRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 16: Encoder + Scalar noise_std.
+
+    Tests hypothesis: log_std parameterization in ActorCriticEncoder structurally
+    prevents noise_std from decreasing, keeping policy at random (noise_std CEILING).
+    ActorCritic (Step 4d, 3.0 deg) uses scalar std with additive gradient updates.
+
+    If noise_std decreases and policy learns -> log_std is the root cause.
+    If still fails -> parameterization is not the cause, try next suspect.
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_scalar_std"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _Q1Q3AlgorithmCfg()
+    policy = _ScalarStdPolicyCfg()
+
+
+# =============================================================================
+# Step 17: No Action Clamp (action clamp removal test)
+# =============================================================================
+
+
+@configclass
+class _NoClampPolicyCfg(_Q1Q3EncoderPolicyCfg):
+    """Encoder policy without action clamping.
+
+    ActorCritic (Step 4d success) returns distribution.sample() with no clamp.
+    ActorCriticEncoder clamps to [-1, 1], truncating ~32% of samples at noise_std=1.0.
+    Clamped actions at boundaries create sharp log_prob gradients that amplify KL.
+    """
+
+    clamp_actions: bool = False
+
+
+@configclass
+class ALBCDebugPPONoClampRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 17: Encoder without action clamping.
+
+    Tests hypothesis: sample().clamp(-1,1) concentrates actions at boundaries,
+    amplifying log_prob sensitivity to mu changes -> KL spike -> LR death.
+    ActorCritic (Step 4d, 3.0 deg) has no action clamp.
+
+    If KL normalizes and policy learns -> action clamp is the root cause.
+    If still fails -> clamp is not the cause.
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_no_clamp"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _Q1Q3AlgorithmCfg()
+    policy = _NoClampPolicyCfg()
