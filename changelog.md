@@ -8,6 +8,122 @@ For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
 ---
 
+## [2026-03-29] Step 19: HORA-Aligned Encoder Training
+
+### Context
+
+Step 18 (scalar_std + no_clamp) confirmed KL fix works but revealed std explosion
+(1.0 -> 18.5, same direction as Step 17's 148). Investigation into the mechanism:
+
+**Root cause of std explosion: env-level clamp positive feedback.**
+- `albc_env.py:320` clamps actions to [-1,1] before physics
+- `ppo.py:182` stores UNCLAMPED actions in rollout buffer
+- `ppo.py:297` computes log_prob on UNCLAMPED actions during update
+- Reward comes from CLAMPED action outcome -> log_prob/advantage mismatch
+- When std > ~1.5: 62%+ actions clamped -> different unclamped actions produce
+  identical physical outcomes -> score function gradient loses corrective signal
+  -> std drifts upward -> more clamping -> positive feedback loop
+- Step 4d (no encoder): std decreases from 1.0 to 0.2 before reaching threshold
+  because advantage structure is stable (no encoder z changes)
+- With encoder: z changes make advantages noisy -> std fails to decrease early
+  -> crosses ~1.5 threshold -> positive feedback -> explosion
+
+**HORA code analysis confirms identical structure:**
+- `hora/algo/models/models.py:97`: act() returns unclamped sample (same as us)
+- `hora/algo/ppo/ppo.py:324-325`: stores unclamped actions (same mismatch)
+- `hora/algo/ppo/ppo.py:327`: clamps before env.step() (same as albc_env.py:320)
+- `hora/algo/ppo/ppo.py:332`: `shaped_rewards = 0.01 * rewards` (KEY DIFFERENCE)
+- HORA has the same mismatch but avoids positive feedback via reward_scale=0.01:
+  reduced gradient -> smaller encoder z changes -> stable advantages ->
+  std decreases before reaching ~1.5 threshold
+
+**scalar_std hypothesis disproved:** Step 18 showed scalar std explodes identically
+to log_std (18.5 vs 148, same mechanism). Reverted to log_std (RL standard,
+HORA default, guarantees std > 0).
+
+### Changed
+- `encoder/actor_critic_encoder.py`: Removed `log_std.clamp(-10.0, 5.0)` from
+  `_update_distribution()`. Now matches base ActorCritic: `std = exp(log_std)`.
+  The clamp was NOT present in HORA or rsl_rl's ActorCritic. exp(5)=148 was
+  the ceiling that Step 17 hit.
+
+### Added
+- `agents/rsl_rl_ppo_cfg.py`: `_HoraAlignedPolicyCfg` (clamp_actions=False,
+  log_std default), `_HoraAlignedAlgorithmCfg` (reward_scale=0.01, lr=5e-3,
+  min_lr=1e-6, desired_kl=0.02), `ALBCDebugPPOHoraAlignedRunnerCfg` (Step 19)
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-Debug-PPO-HoraAligned-v0`
+
+### Experimental Results
+
+**Step 18 (scalar_std + no_clamp, 151 iters):**
+KL=0.01 (fix confirmed), LR=0.01 (max, stable). But noise_std exploded to 18.5
+(monotonic ^^^^). Scalar std hypothesis DISPROVED -- both parameterizations explode
+with encoder. Roll/Pitch 16/14.5 deg, z_range [-1.0, 1.0] SAT. action_size=1.41
+(boundary). Env-level clamp positive feedback mechanism identified (see Context).
+
+**Step 19 (HORA-aligned, 500 iters):**
+
+| Metric | Value | vs Step 18 | vs Step 4d (target) |
+|--------|-------|-----------|---------------------|
+| KL | 9.9e-4 | = (both fixed) | = |
+| LR | 0.01 (max) | = | = |
+| noise_std | 7.66 (oscillating) | better (not monotonic) | 0.20 (target) |
+| Roll/Pitch | 16.8/14.5 | = | 3.0/3.8 |
+| value_loss | 0.16 | better (0.46) | - |
+| z_range | [-1.0, 1.0] SAT | = | N/A |
+
+Key finding: noise_std OSCILLATES instead of monotonically exploding.
+Periodic drops to ~0.3 (reward_scale corrective signal works!) then spikes
+back to 6-11 (env-clamp positive feedback wins). Amplitude growing (6->11->8).
+reward_scale=0.01 provides corrective signal but is insufficient to prevent
+re-entry into the positive feedback regime (std > ~1.5).
+
+Remaining HORA differences suspected to contribute to oscillation:
+- horizon: HORA=8 vs ours=64 (fresher advantages in HORA)
+- num_envs: HORA=16384 vs ours=4096 (lower variance in HORA)
+- bounds_loss: HORA=0.0001 on mu vs ours=none
+
+### Notes
+- reward_scale=0.01 is HORA's exact value. May need tuning for our 2D system
+  (HORA: 16D actions, horizon=8, 16384 envs vs our 2D, horizon=64, 4096 envs).
+- value_loss=0.16 is healthy (Step 12 had 7.2e-4 with clamp, critic was starved).
+- noise_std oscillation pattern suggests system is near stability boundary.
+  Reducing horizon or increasing reward_scale correction may push it to stable.
+- scalar_std hypothesis fully disproved: reverted to log_std (RL standard, HORA default).
+
+---
+
+## [2026-03-29] Step 18: Scalar Std + No Clamp (Combined Root Cause Fix)
+
+### Context
+
+Steps 16-17 individually isolated the two components of the KL spike root cause:
+- Step 16 (scalar_std alone): DISPROVED -- clamp still present, 32% boundary concentration
+- Step 17 (no_clamp alone): BREAKTHROUGH -- KL 100x reduced (0.88 -> 0.003), but
+  noise_std exploded to 148 (log_std exp() has no upper bound without clamp regularization)
+
+The combined fix matches rsl_rl's base ActorCritic exactly (Step 4d, 3.0 deg success):
+- `noise_std_type = "scalar"`: `self.std = Parameter(1.0)`, additive gradient, naturally bounded
+- `clamp_actions = False`: `act()` returns `distribution.sample()` without `.clamp(-1, 1)`
+
+Code-level verification:
+- rsl_rl ActorCritic (Step 4d): `noise_std_type="scalar"` (default), no clamp in `act()` (line 152)
+- ActorCriticEncoder (Steps 4-17): `noise_std_type="log"` (default), `sample.clamp(-1,1)` (line 311)
+- Environment safety: `albc_env.py:320` always applies `actions.clone().clamp(-1, 1)` regardless
+
+### Added
+- `agents/rsl_rl_ppo_cfg.py`: `_ScalarStdNoClampPolicyCfg` (noise_std_type="scalar", clamp_actions=False),
+  `ALBCDebugPPOScalarStdNoClampRunnerCfg` (Step 18 runner)
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-Debug-PPO-ScalarStdNoClamp-v0`
+
+### Notes
+- reward_scale=0.01 intentionally NOT combined -- root cause (clamp) is removed, gradient
+  reduction unnecessary. Available as contingency if Step 18 fails.
+- Total hypotheses tested: 12 (10 disproved, 1 breakthrough, 1 combined fix pending)
+- If successful, next step is encoder validation (z_sweep) then constraint reintegration
+
+---
+
 ## [2026-03-29] Steps 15-17: Isolating ActorCriticEncoder Structural Root Cause
 
 ### Context

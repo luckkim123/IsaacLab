@@ -292,7 +292,7 @@ class ActorCriticEncoder(nn.Module):
         if self.noise_std_type == "scalar":
             std = self.std.expand_as(mean)
         else:
-            std = torch.exp(torch.nan_to_num(self.log_std, nan=0.0).clamp(-10.0, 5.0)).expand_as(mean)
+            std = torch.exp(self.log_std).expand_as(mean)
         self.distribution = Normal(mean, std)
 
     # --- Core API ---

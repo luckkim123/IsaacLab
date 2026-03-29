@@ -1380,3 +1380,150 @@ class ALBCDebugPPONoClampRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     algorithm = _Q1Q3AlgorithmCfg()
     policy = _NoClampPolicyCfg()
+
+
+# =============================================================================
+# Step 18: Scalar std + No clamp (matching ActorCritic Step 4d exactly)
+# =============================================================================
+
+
+@configclass
+class _ScalarStdNoClampPolicyCfg(_Q1Q3EncoderPolicyCfg):
+    """Encoder policy matching ActorCritic's exact config: scalar std + no clamp.
+
+    Root cause confirmed in Steps 16-17:
+    - Step 16 (scalar_std alone): DISPROVED -- clamp still concentrates 32% at boundary
+    - Step 17 (no_clamp alone): BREAKTHROUGH -- KL 100x reduced, but noise_std exploded
+      to 148 because log_std has no upper bound
+    - Combined: scalar std prevents explosion (additive gradient, bounded), no clamp
+      prevents KL spike (smooth log_prob surface). This is exactly what rsl_rl's
+      ActorCritic uses by default (Step 4d, 3.0 deg success).
+    """
+
+    noise_std_type: str = "scalar"
+    clamp_actions: bool = False
+
+
+@configclass
+class ALBCDebugPPOScalarStdNoClampRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 18: scalar_std + no_clamp = ActorCritic (Step 4d) exact match.
+
+    Combines the two individually-tested fixes:
+    - scalar_std: self.std = Parameter(1.0), additive gradient (no exp explosion)
+    - no_clamp: act() returns distribution.sample() without .clamp(-1,1)
+
+    Success criteria:
+    - KL < 0.1 at iter 0-1 (vs baseline 0.88)
+    - LR > 1e-3 stable (vs baseline 1.5e-5 crashed)
+    - noise_std declining to 0.3-0.5 by iter 200 (vs baseline 0.96 CEILING)
+    - Roll/Pitch < 5 deg by iter 300 (vs Step 4d 3.0 deg)
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_scalar_std_no_clamp"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _Q1Q3AlgorithmCfg()
+    policy = _ScalarStdNoClampPolicyCfg()
+
+
+# =============================================================================
+# Step 19: HORA-aligned (log_std + no_clamp + reward_scale=0.01)
+# =============================================================================
+
+
+@configclass
+class _HoraAlignedPolicyCfg(_Q1Q3EncoderPolicyCfg):
+    """Encoder policy fully aligned with HORA reference implementation.
+
+    HORA code analysis (hora/algo/models/models.py, hora/algo/ppo/ppo.py):
+    - log_std parameterization: sigma = exp(log_std), init log_std=0 -> std=1.0
+    - No action clamp in act(): returns Normal(mu, sigma).sample()
+    - No log_std clamp in _update_distribution (unlike our previous .clamp(-10, 5))
+    - env-level clamp: actions = torch.clamp(actions, -1, 1) before env.step()
+    - bounds_loss_coef=0.0001 on mu (soft penalty when |mu| > 1.1)
+
+    Step 18 disproved scalar_std hypothesis (std still exploded to 18.5).
+    The real mechanism: env-level clamp creates positive feedback when std > ~1.5
+    (many-to-one mapping: different unclamped actions -> same clamped outcome ->
+    score function gradient loses corrective signal -> std drifts upward).
+    HORA avoids this via reward_scale=0.01 which keeps gradients small enough
+    for std to decrease before reaching the positive feedback threshold.
+    """
+
+    clamp_actions: bool = False
+    # noise_std_type = "log" inherited from _EncoderPolicyCfg (default)
+
+
+@configclass
+class _HoraAlignedAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """PPO algorithm config aligned with HORA reference.
+
+    Key HORA settings:
+    - reward_scale=0.01: shaped_rewards = 0.01 * rewards (ppo.py:332)
+      Reduces surrogate gradient 100x, keeping encoder z changes small enough
+      to maintain advantage structure -> std decreases naturally.
+    - entropy_coef=0.0: no entropy bonus (HORA default)
+    - desired_kl=0.02: wider trust region (HORA kl_threshold=0.02)
+    """
+
+    class_name: str = "PPO"
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 5e-3
+    min_lr: float = 1e-6
+    max_lr: float = 1e-2
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    entropy_coef: float = 0.0
+    desired_kl: float = 0.02
+    max_grad_norm: float = 1.0
+    value_loss_coef: float = 1.0
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+    reward_scale: float = 0.01
+
+
+@configclass
+class ALBCDebugPPOHoraAlignedRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 19: HORA-aligned encoder training.
+
+    Full HORA alignment:
+    - log_std (no clamp) + no action clamp + reward_scale=0.01
+    - init_lr=5e-3, min_lr=1e-6 (HORA LR range, 22 halvings)
+    - entropy_coef=0.0, desired_kl=0.02
+
+    Previous findings integrated:
+    - Step 17: no_clamp fixes KL spike (confirmed)
+    - Step 18: scalar_std does NOT prevent std explosion (disproved)
+    - Step 12: reward_scale=0.01 was first to show noise_std decline
+
+    Monitoring:
+    - noise_std: must decline from 1.0 (not explode). Key success indicator.
+    - value_loss: if < 1e-4, reward_scale too aggressive (try 0.1)
+    - KL: should stay < 0.05 (no spike)
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_hora_aligned"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _HoraAlignedAlgorithmCfg()
+    policy = _HoraAlignedPolicyCfg()
