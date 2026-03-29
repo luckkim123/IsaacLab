@@ -12,6 +12,7 @@ Registered tasks:
     Isaac-Constrained-ALBC-Encoder-v0:          TRPO + IPO + Encoder (production)
     Isaac-Constrained-ALBC-HardDR-HistOnly-v0:  History-only baseline (hard DR)
     Isaac-Constrained-ALBC-HardDR-FrozenEncoder-v0: Frozen encoder fine-tuning (hard DR)
+    Isaac-Constrained-ALBC-HardDR-SharedBackbone-v0: Shared backbone encoder (online E2E PPO)
 """
 
 import gymnasium as gym
@@ -21,6 +22,7 @@ from .config import (
     ALBCEnvCfg,
     ALBCHardDRFrozenEncoderEnvCfg,
     ALBCHardDRHistOnlyEnvCfg,
+    ALBCHardDRSharedBackboneEnvCfg,
     DomainRandomizationCfg,
     HardDomainRandomizationCfg,
 )
@@ -56,5 +58,15 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.config:ALBCHardDRFrozenEncoderEnvCfg",
         "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCHardDRFrozenEncoderRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Constrained-ALBC-HardDR-SharedBackbone-v0",
+    entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config:ALBCHardDRSharedBackboneEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCHardDRSharedBackboneRunnerCfg",
     },
 )

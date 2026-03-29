@@ -10,6 +10,72 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-03-30] Shared Backbone Encoder: Online End-to-End PPO
+
+### Context
+
+Offline encoder experiments showed that value prediction provides a strong learning
+signal for the encoder (R^2 0.088 -> 0.791). However, the existing online encoder
+architecture (separate mode) only gave the encoder gradient from the actor/policy
+loss -- the critic used privileged obs directly, bypassing the encoder entirely.
+
+Designed a shared backbone architecture where the encoder receives gradient from
+BOTH actor and critic losses. The critic uses z (not raw privileged obs) as its
+only path to privileged information, replicating the offline encoder's success
+condition (value-prediction trains encoder) in online end-to-end training.
+
+Previous online encoder experiments (Steps 5a-5b) failed with shared backbone due
+to `sample().clamp(-1,1)` causing KL death (root cause identified in Step 17, clamp
+since removed). With clamp removed + PPO single optimizer, shared backbone is stable.
+
+### Added
+- `config.py`: `ALBCHardDRSharedBackboneEnvCfg` -- Hard DR + 15-step strided
+  history (stride=5, 120D) for shared backbone experiments
+- `agents/rsl_rl_ppo_cfg.py`: `_SharedBackboneAlgorithmCfg` (PPO, use_encoder_update=False),
+  `_SharedBackbonePolicyCfg` (shared_backbone=True, static min-max norm, proprio_hist_dim=120),
+  `ALBCHardDRSharedBackboneRunnerCfg`
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-HardDR-SharedBackbone-v0`
+
+### Changed
+- `scripts/analysis/common.py`: Added `_build_constrained_albc_23d_sweep()` for 23D
+  privileged obs z sweep. Fixed activation detection: `input_dim >= 23` -> softsign
+  (was `>= 28`, missed 23D/27D). Added `enc_obs_lower`/`enc_obs_upper` params to
+  `build_sweep_params_from_checkpoint()`.
+- `scripts/analysis/encoder_z_sweep.py`: Rewritten to support static min-max
+  normalization. Added `NormMode` dataclass, `load_encoder()` now detects and uses
+  static bounds from checkpoint (`_enc_obs_lower`/`_enc_obs_upper` or top-level keys).
+
+### Experimental Results
+
+Training (shared backbone, 342 iters, PPO, HardDR):
+
+| Metric | Shared Backbone | Hist-Only (500 iters) | Delta |
+|--------|----------------|----------------------|-------|
+| Roll | 8.56 deg | 8.74 deg | -0.18 |
+| Pitch | 9.39 deg | 6.54 deg | +2.85 |
+| Reward | -13.60 | -10.75 | -2.85 |
+| noise_std | 0.21 | 0.15 | +0.06 |
+
+Encoder z sweep (model_350):
+- 75/299 active param-z pairs (range > 0.05)
+- 0/13 saturated dims
+- Top responsive: body_mass (10/13 active), main_vol (8/13), main_CoG_z (8/13)
+- z at nominal: 12/13 dims near |z| > 0.7 (boundary bias), only z_11 (-0.17)
+  has full dynamic range. Effective encoder capacity ~2-3 dimensions out of 13.
+
+### Notes
+- Training is stable (no KL death, no noise_std explosion) -- first successful
+  online encoder training since ablation Steps 5a-5b
+- Encoder IS learning domain info (z responds to DR parameters), but most z
+  dimensions are near softsign boundary, reducing effective capacity
+- Pitch 2.85 deg worse than hist-only, possibly due to history dimension gap
+  (120D vs 240D) and/or symmetric critic limitation
+- Offline encoder z sweep comparison was not properly validated -- inline analysis
+  had softsign not applied, producing incorrect z ranges. Needs re-run with
+  corrected `encoder_z_sweep.py` for fair comparison.
+
+---
+
 ## [2026-03-30] Frozen Encoder: Normalization Mismatch Fix + z_init_scale Experiment
 
 ### Context

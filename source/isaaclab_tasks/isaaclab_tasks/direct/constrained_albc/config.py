@@ -391,6 +391,28 @@ class ALBCHardDRHistOnlyEnvCfg(ALBCEnvCfg):
 
 
 @configclass
+class ALBCHardDRSharedBackboneEnvCfg(ALBCEnvCfg):
+    """Hard DR + Shared backbone encoder (online end-to-end PPO).
+
+    Encoder gets gradient from both actor and critic (value) losses via shared
+    backbone architecture. Strided proprioceptive history (15x5 = 120D) matches
+    HORA-style temporal coverage (1.5s window at 50Hz control).
+    state_space=23 for privileged obs (encoder input).
+    """
+
+    proprio_history_len: int = 15
+    proprio_history_stride: int = 5
+
+    randomization: HardDomainRandomizationCfg = HardDomainRandomizationCfg()
+    ocean_current: OceanCurrentCfg = OceanCurrentCfg(
+        max_velocity=(0.5, 0.5, 0.25, 0.0, 0.0, 0.0),
+        noise_scale=(0.1, 0.1, 0.05, 0.0, 0.0, 0.0),
+    )
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
+
+
+@configclass
 class ALBCHardDRFrozenEncoderEnvCfg(ALBCEnvCfg):
     """Hard DR + Frozen Encoder fine-tuning environment.
 

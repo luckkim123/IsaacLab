@@ -334,3 +334,72 @@ class ALBCHardDRFrozenEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     algorithm = _FrozenEncoderAlgorithmCfg()
     policy = _FrozenEncoderPolicyCfg()
+
+
+# =============================================================================
+# Hard DR: Shared Backbone Encoder (Online End-to-End PPO)
+# =============================================================================
+
+
+@configclass
+class _SharedBackboneAlgorithmCfg(_PPOHistOnlyAlgorithmCfg):
+    """PPO for shared backbone -- standard update path with single optimizer.
+
+    Encoder, backbone, and all heads are in one optimizer group.
+    Value loss gradient flows through backbone into encoder, providing
+    the value-prediction learning signal that worked in offline training.
+    """
+
+    use_encoder_update: bool = False
+
+
+@configclass
+class _SharedBackbonePolicyCfg(_EncoderPolicyCfg):
+    """Shared backbone encoder policy (HORA-style, symmetric critic).
+
+    Architecture:
+        Encoder: p_t(23D) -> static_minmax -> MLP[256,128,64] -> softsign -> z(13D)
+        Backbone: cat([o_t_norm(14D), hist_norm(120D), z(13D)]) = 147D -> MLP[512,256,128]
+        Action head: Linear(128, 2)
+        Value head:  Linear(128, 1)
+
+    Critic is symmetric (uses z, not raw privileged obs) so value loss
+    gradient flows through backbone into encoder. This replicates the
+    offline encoder's value-prediction training signal in online PPO.
+    """
+
+    class_name: str = "ALBCActorCriticEncoder"
+    shared_backbone: bool = True
+    proprio_hist_dim: int = 120  # 15 steps * 8 features
+    encoder_obs_normalization: bool = False  # using static min-max
+    encoder_obs_lower: list[float] = _PRIV_OBS_LOWER
+    encoder_obs_upper: list[float] = _PRIV_OBS_UPPER
+
+
+@configclass
+class ALBCHardDRSharedBackboneRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Hard DR + Shared backbone encoder (online end-to-end PPO).
+
+    Encoder gets gradient from BOTH actor and critic losses via shared backbone.
+    Replicates the offline encoder's success condition (value-prediction trains
+    encoder) in online end-to-end training.
+
+    Key differences from previous failed online experiments:
+    - No sample().clamp(-1,1) (root cause of KL death in Steps 5a-5b)
+    - PPO with single optimizer (no TRPO parameter split)
+    - Symmetric critic (encoder IS the value bottleneck)
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_hard_dr_shared_backbone"
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged", "proprio_hist"],
+    }
+
+    algorithm = _SharedBackboneAlgorithmCfg()
+    policy = _SharedBackbonePolicyCfg()
