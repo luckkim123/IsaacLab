@@ -413,6 +413,86 @@ class ALBCDebugHistOnlyEnvCfg(ALBCEnvCfg):
 
 
 @configclass
+class HardDomainRandomizationCfg(DomainRandomizationCfg):
+    """Aggressive DR for offline encoder experiments.
+
+    Widened ranges so that history-only policy degrades to ~10 deg attitude error,
+    creating a gap that encoder should fill. Key changes from base DR:
+    - added_mass: +-15% -> +-40% (real robot added mass is estimated, not measured)
+    - body_mass: +-10% -> +-25% (manufacturing tolerance + biofouling)
+    - volume: +-10% -> +-25% (affects buoyancy directly)
+    - CoG/CoB offsets: doubled (assembly tolerance)
+    - inertia: (0.75, 1.3) -> (0.5, 1.8) (uncertain geometry)
+    - payload: 0-1kg -> 0-2kg (20% body weight)
+    - ocean current: enabled (0.5 m/s xy, 0.25 m/s z)
+    """
+
+    enable: bool = True
+
+    # Hydrodynamic parameters -- significantly widened
+    added_mass_scale: tuple[float, float] = (0.6, 1.4)
+    volume_scale: tuple[float, float] = (0.75, 1.25)
+
+    # CoG/CoB offsets -- doubled
+    cob_offset_x: tuple[float, float] = (-0.02, 0.02)
+    cob_offset_y: tuple[float, float] = (-0.02, 0.02)
+    cob_offset_z: tuple[float, float] = (-0.04, 0.04)
+    cog_offset_x: tuple[float, float] = (-0.02, 0.02)
+    cog_offset_y: tuple[float, float] = (-0.02, 0.02)
+    cog_offset_z: tuple[float, float] = (-0.04, 0.04)
+
+    # Inertia -- wider range
+    inertia_scale: tuple[float, float] = (0.5, 1.8)
+
+    # Body mass -- wider
+    body_mass_scale: tuple[float, float] = (0.75, 1.25)
+
+    # Payload -- doubled
+    payload_mass_range: tuple[float, float] = (0.0, 2.0)
+    payload_cog_offset_xy_radius: float = 0.15
+    payload_cog_offset_z: tuple[float, float] = (-0.05, 0.0)
+
+
+@configclass
+class ALBCHardDRHistOnlyEnvCfg(ALBCEnvCfg):
+    """Hard DR + History-only (no encoder). Baseline for offline encoder experiments.
+
+    Target: ~10 deg attitude error (vs 3 deg with standard DR).
+    If error is < 5 deg, DR is not hard enough; if > 20 deg, DR is too aggressive.
+    """
+
+    state_space: int = 0
+    proprio_history_len: int = 30
+
+    randomization: HardDomainRandomizationCfg = HardDomainRandomizationCfg()
+    ocean_current: OceanCurrentCfg = OceanCurrentCfg(
+        max_velocity=(0.5, 0.5, 0.25, 0.0, 0.0, 0.0),
+        noise_scale=(0.1, 0.1, 0.05, 0.0, 0.0, 0.0),
+    )
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
+
+
+@configclass
+class ALBCHardDREncoderEnvCfg(ALBCEnvCfg):
+    """Hard DR + Encoder (for offline encoder fine-tuning).
+
+    Same DR as ALBCHardDRHistOnlyEnvCfg but with privileged obs for encoder.
+    """
+
+    proprio_history_len: int = 15
+    proprio_history_stride: int = 5
+
+    randomization: HardDomainRandomizationCfg = HardDomainRandomizationCfg()
+    ocean_current: OceanCurrentCfg = OceanCurrentCfg(
+        max_velocity=(0.5, 0.5, 0.25, 0.0, 0.0, 0.0),
+        noise_scale=(0.1, 0.1, 0.05, 0.0, 0.0, 0.0),
+    )
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
+
+
+@configclass
 class ALBCDebugEncoderHistStrideEnvCfg(ALBCEnvCfg):
     """Step 8a: PPO + Encoder + Strided History + DR (no constraints).
 

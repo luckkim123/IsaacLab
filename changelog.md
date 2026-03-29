@@ -8,6 +8,44 @@ For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
 ---
 
+## [2026-03-29] Hard DR Environment for Offline Encoder Experiments
+
+### Context
+
+After 15+ online encoder experiments (Steps 4-19) all failed to match history-only
+baseline (Step 4d, 3.0 deg), pivoted to offline encoder approach. The fundamental
+issue: 2D action space makes online encoder co-training structurally unstable
+(KL sensitivity, env-level clamp positive feedback on noise_std).
+
+Key insight: Step 4d's actor already operates without privileged info (uses only
+o_t + history). The encoder/adapt pipeline's purpose (deploy without privileged
+info) is already achieved. However, encoder still has value for online adaptation
+to dynamics outside DR range -- real robot parameters (added mass, CoG, CoB) are
+estimated, not measured, so DR range uncertainty is the primary motivation.
+
+Strategy: Create a "hard DR" environment where history-only degrades to ~10 deg
+(vs 3 deg with standard DR), then show offline encoder closes the gap.
+
+### Added
+- `config.py`: `HardDomainRandomizationCfg` -- aggressive DR with wider ranges:
+  added_mass +-40% (was +-15%), body_mass +-25% (was +-10%), volume +-25% (was +-10%),
+  CoG/CoB offsets doubled, inertia (0.5, 1.8) (was 0.75, 1.3), payload 0-2kg (was 0-1kg)
+- `config.py`: `ALBCHardDRHistOnlyEnvCfg` -- hard DR + history(30) + ocean current
+  (0.5/0.5/0.25 m/s) + no encoder
+- `config.py`: `ALBCHardDREncoderEnvCfg` -- hard DR + encoder + strided history(15x5)
+  for future offline encoder fine-tuning
+- `agents/rsl_rl_ppo_cfg.py`: `ALBCHardDRHistOnlyRunnerCfg` -- PPO runner for hard DR baseline
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-HardDR-HistOnly-v0`
+
+### Notes
+- DR ranges may need tuning after first run. Target: ~10 deg error (5 deg = too easy,
+  20 deg = too hard). Adjust added_mass_scale and volume_scale first.
+- Ocean current enabled for the first time in constrained_albc (was always 0,0,0).
+- Offline encoder pipeline (data collection, supervised training, fine-tuning) is next
+  step after hard DR baseline is established.
+
+---
+
 ## [2026-03-29] Step 19: HORA-Aligned Encoder Training
 
 ### Context

@@ -1527,3 +1527,31 @@ class ALBCDebugPPOHoraAlignedRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     algorithm = _HoraAlignedAlgorithmCfg()
     policy = _HoraAlignedPolicyCfg()
+
+
+# =============================================================================
+# Hard DR: Offline Encoder Experiments
+# =============================================================================
+
+
+@configclass
+class ALBCHardDRHistOnlyRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Hard DR baseline: history-only (no encoder).
+
+    Same structure as Step 4d but with aggressive DR + ocean current.
+    Target: ~10 deg attitude error. Establishes the performance gap
+    that offline encoder should close.
+    """
+
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_hard_dr_hist_only"
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "proprio_hist"],
+        "critic": ["policy", "proprio_hist"],
+    }
+
+    algorithm = _PPOHistOnlyAlgorithmCfg()
+    policy = _DebugPolicyCfg()
