@@ -16,10 +16,9 @@ from __future__ import annotations
 import logging
 import os
 
+import rsl_rl.runners.on_policy_runner as _runner_module
 import torch
 from rsl_rl.runners import OnPolicyRunner
-
-import rsl_rl.runners.on_policy_runner as _runner_module
 
 from ..encoder import ActorCriticEncoder, ActorCriticEncoderConstrained, ActorCriticFrozenEncoder
 from ..utils.logging import flush_metrics, log_encoder_metrics

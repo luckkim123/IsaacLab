@@ -13,7 +13,7 @@ Two modes of operation:
 Architecture (separate mode, HORA-style normalization):
     Encoder: p_t (privileged) -> normalize -> MLP -> softsign -> z (latent)
     Actor:   cat([normalize(o_t), z]) -> MLP -> actions (Gaussian policy)
-    Critic:  cat([o_t, p_t]) -> MLP -> value (asymmetric)
+    Critic:  cat([o_t, hist, p_t]) -> MLP -> value (asymmetric)
 
     Encoder input normalization modes:
       - Static min-max (HORA-style): (2*x - upper - lower) / (upper - lower) -> [-1, 1]
@@ -21,7 +21,7 @@ Architecture (separate mode, HORA-style normalization):
       - EmpiricalNormalization: Running mean/std (legacy, causes z drift -> KL spike).
       - None: Raw p_t input.
 
-    Actor normalization: Only o_t (+ proprio_hist if present) via EmpiricalNorm.
+    Actor normalization: Only o_t (+ hist if present) via EmpiricalNorm.
     z is kept raw since softsign already bounds it to (-1, 1).
 
 Architecture (shared backbone mode):
@@ -84,16 +84,8 @@ class ActorCriticEncoder(nn.Module):
         critic_hidden_dims: list[int] | tuple[int, ...] = (512, 256, 128),
         activation: str = "elu",
         init_noise_std: float = 1.0,
-        noise_std_type: str = "log",
         # Shared backbone (HORA-style): actor+critic share MLP, value gradient to encoder
         shared_backbone: bool = False,
-        # Symmetric critic: critic sees cat([o_t, hist]) instead of cat([o_t, p_t])
-        symmetric_critic: bool = False,
-        # Action clamping: clamp sampled actions to [-1, 1]
-        clamp_actions: bool = True,
-        # z bounds loss: soft quadratic penalty when |z| > soft_bound
-        z_bounds_coef: float = 0.0,
-        z_bounds_soft_bound: float = 0.85,
         **kwargs: Any,
     ) -> None:
         if kwargs:
@@ -107,11 +99,6 @@ class ActorCriticEncoder(nn.Module):
         self.encoder_latent_dim = encoder_latent_dim
         self.proprio_hist_dim = proprio_hist_dim
         self.shared_backbone_mode = shared_backbone
-        self.symmetric_critic = symmetric_critic
-        self.clamp_actions = clamp_actions
-        self.z_bounds_coef = z_bounds_coef
-        self.z_bounds_soft_bound = z_bounds_soft_bound
-        self._last_z: torch.Tensor | None = None
 
         # Parse obs_groups: require [policy_obs, privileged, (optional) proprio_hist]
         policy_groups = obs_groups["policy"]
@@ -169,16 +156,17 @@ class ActorCriticEncoder(nn.Module):
             self.actor_obs_normalizer = (
                 EmpiricalNormalization(num_actor_obs_norm) if actor_obs_normalization else nn.Identity()
             )
-            self.backbone = MLP(
-                num_actor_obs, feature_dim, bb_dims[:-1], activation, last_activation=activation
-            )
+            self.backbone = MLP(num_actor_obs, feature_dim, bb_dims[:-1], activation, last_activation=activation)
             self.action_head = nn.Linear(feature_dim, num_actions)
             self.value_head = nn.Linear(feature_dim, 1)
             nn.init.zeros_(self.action_head.bias)
             nn.init.zeros_(self.value_head.bias)
             logger.info(
                 "Shared backbone: %dD -> %s -> %dD features -> action(%dD) + value(1D)",
-                num_actor_obs, bb_dims, feature_dim, num_actions,
+                num_actor_obs,
+                bb_dims,
+                feature_dim,
+                num_actions,
             )
             # Compatibility attrs
             self.num_critic_obs = num_actor_obs
@@ -192,29 +180,26 @@ class ActorCriticEncoder(nn.Module):
             self.actor = MLP(num_actor_obs, num_actions, list(actor_hidden_dims), activation)
             logger.info(
                 "Actor: %dD (obs=%d+hist=%d+z=%d) -> %s -> %dD",
-                num_actor_obs, policy_obs_dim, proprio_hist_dim,
-                encoder_latent_dim, actor_hidden_dims, num_actions,
+                num_actor_obs,
+                policy_obs_dim,
+                proprio_hist_dim,
+                encoder_latent_dim,
+                actor_hidden_dims,
+                num_actions,
             )
 
-            if symmetric_critic:
-                num_critic_obs = policy_obs_dim + proprio_hist_dim
-            else:
-                num_critic_obs = policy_obs_dim + proprio_hist_dim + privileged_dim
+            # Asymmetric critic: cat([o_t, hist, p_t])
+            num_critic_obs = policy_obs_dim + proprio_hist_dim + privileged_dim
             self.num_critic_obs = num_critic_obs
             self.critic_obs_normalization = critic_obs_normalization
             self.critic_obs_normalizer = (
                 EmpiricalNormalization(num_critic_obs) if critic_obs_normalization else nn.Identity()
             )
             self.critic = MLP(num_critic_obs, 1, list(critic_hidden_dims), activation)
-            critic_type = "symmetric (o_t+hist)" if symmetric_critic else "asymmetric (o_t+hist+p_t)"
-            logger.info("Critic [%s]: %dD -> %s -> 1D", critic_type, num_critic_obs, critic_hidden_dims)
+            logger.info("Critic [asymmetric]: %dD -> %s -> 1D", num_critic_obs, critic_hidden_dims)
 
-        # Action noise (Gaussian policy)
-        self.noise_std_type = noise_std_type
-        if noise_std_type == "scalar":
-            self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
-        else:
-            self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
+        # Action noise (Gaussian policy, log_std parameterization)
+        self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
         self.distribution: Normal | None = None
         Normal.set_default_validate_args(False)
 
@@ -247,14 +232,10 @@ class ActorCriticEncoder(nn.Module):
         p_t = obs[self._privileged_key]
         if self._has_static_enc_norm:
             # Static min-max: [lower, upper] -> [-1, 1] (HORA-style, deterministic)
-            p_t = (2.0 * p_t - self._enc_obs_upper - self._enc_obs_lower) / (
-                self._enc_obs_upper - self._enc_obs_lower
-            )
+            p_t = (2.0 * p_t - self._enc_obs_upper - self._enc_obs_lower) / (self._enc_obs_upper - self._enc_obs_lower)
         else:
             p_t = self.encoder_obs_normalizer(p_t)
-        z = F.softsign(self.encoder(p_t))
-        self._last_z = z
-        return z
+        return F.softsign(self.encoder(p_t))
 
     def _get_actor_obs(self, obs: TensorDict) -> torch.Tensor:
         """Actor observation: cat([normalize(o_t, hist), z_raw]).
@@ -274,16 +255,7 @@ class ActorCriticEncoder(nn.Module):
         return torch.cat([obs_normed, z], dim=-1)
 
     def _get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
-        """Critic observation (separate mode).
-
-        Asymmetric (default): cat([o_t, hist, p_t]) -- all actor info + privileged.
-        Symmetric: cat([o_t, hist]) -- same info as actor (minus z).
-        """
-        if self.symmetric_critic:
-            o_t = obs[self._policy_obs_key]
-            if self._proprio_hist_key is not None and self._proprio_hist_key in obs:
-                return torch.cat([o_t, obs[self._proprio_hist_key]], dim=-1)
-            return o_t
+        """Critic observation (separate mode, asymmetric): cat([o_t, hist, p_t])."""
         parts = [obs[self._policy_obs_key]]
         if self._proprio_hist_key is not None and self._proprio_hist_key in obs:
             parts.append(obs[self._proprio_hist_key])
@@ -293,17 +265,14 @@ class ActorCriticEncoder(nn.Module):
     # --- Action distribution ---
 
     def _update_distribution(self, mean: torch.Tensor) -> None:
-        if self.noise_std_type == "scalar":
-            std = self.std.expand_as(mean)
-        else:
-            std = torch.exp(self.log_std).expand_as(mean)
+        std = torch.exp(self.log_std).expand_as(mean)
         self.distribution = Normal(mean, std)
 
     # --- Core API ---
 
     def act(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
-        """Sample action from Gaussian policy."""
-        actor_obs = self._get_actor_obs(obs)  # normalization applied inside
+        """Sample action from Gaussian policy (no action clamping)."""
+        actor_obs = self._get_actor_obs(obs)
         if self.shared_backbone_mode:
             features = self.backbone(actor_obs)
             mean = self.action_head(features)
@@ -311,18 +280,15 @@ class ActorCriticEncoder(nn.Module):
             mean = self.actor(actor_obs)
         self._update_distribution(mean)
         assert self.distribution is not None
-        sample = self.distribution.sample()
-        return sample.clamp(-1.0, 1.0) if self.clamp_actions else sample
+        return self.distribution.sample()
 
     def act_inference(self, obs: TensorDict) -> torch.Tensor:
-        """Deterministic action (mean)."""
-        actor_obs = self._get_actor_obs(obs)  # normalization applied inside
+        """Deterministic action (mean, no clamping)."""
+        actor_obs = self._get_actor_obs(obs)
         if self.shared_backbone_mode:
             features = self.backbone(actor_obs)
-            mean = self.action_head(features)
-        else:
-            mean = self.actor(actor_obs)
-        return mean.clamp(-1.0, 1.0) if self.clamp_actions else mean
+            return self.action_head(features)
+        return self.actor(actor_obs)
 
     def evaluate(self, obs: TensorDict, **_kwargs: Any) -> torch.Tensor:
         """Evaluate value function.
@@ -332,7 +298,7 @@ class ActorCriticEncoder(nn.Module):
         """
         if self.shared_backbone_mode:
             # Backbone uses cat([o_t, z]) -- encoder gradient from value loss
-            actor_obs = self._get_actor_obs(obs)  # normalization applied inside
+            actor_obs = self._get_actor_obs(obs)
             features = self.backbone(actor_obs)
             return self.value_head(features)
         else:
@@ -343,14 +309,6 @@ class ActorCriticEncoder(nn.Module):
         """Log probability of actions under current distribution."""
         assert self.distribution is not None
         return self.distribution.log_prob(actions).sum(dim=-1)
-
-    def z_bounds_loss(self) -> torch.Tensor:
-        """Soft quadratic penalty when |z| exceeds soft_bound. Prevents saturation."""
-        if self.z_bounds_coef == 0.0 or self._last_z is None:
-            device = self.std.device if self.noise_std_type == "scalar" else self.log_std.device
-            return torch.tensor(0.0, device=device)
-        excess = torch.clamp_min(self._last_z.abs() - self.z_bounds_soft_bound, 0.0)
-        return self.z_bounds_coef * excess.pow(2).sum(dim=-1).mean()
 
     def update_normalization(self, obs: TensorDict) -> None:
         """Update observation normalization running statistics.
@@ -390,7 +348,8 @@ class ActorCriticEncoder(nn.Module):
                 if old_dim != new_dim:
                     logger.info(
                         "Actor obs normalizer dim mismatch (%d -> %d); resetting to defaults.",
-                        old_dim, new_dim,
+                        old_dim,
+                        new_dim,
                     )
                     for k, v in self.actor_obs_normalizer.state_dict().items():
                         state_dict[norm_prefix + k] = v

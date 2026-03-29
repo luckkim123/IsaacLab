@@ -8,8 +8,10 @@
 ALBC (Active Linear Buoyancy Controller) uses 2 revolute joints (joint1, joint2)
 to position a buoyancy element for attitude stabilization. No thrusters are used.
 
-Single registered task: Isaac-Constrained-ALBC-Encoder-v0
-    TRPO + IPO encoder constrained RL with 4 constraint terms.
+Registered tasks:
+    Isaac-Constrained-ALBC-Encoder-v0:          TRPO + IPO + Encoder (production)
+    Isaac-Constrained-ALBC-HardDR-HistOnly-v0:  History-only baseline (hard DR)
+    Isaac-Constrained-ALBC-HardDR-FrozenEncoder-v0: Frozen encoder fine-tuning (hard DR)
 """
 
 from __future__ import annotations
@@ -299,117 +301,32 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(
         terms=[
             # --- Probabilistic (binary indicator) ---
-            # Budgets tuned from Step 3 ablation (barrier debug run):
-            #   Set at ~2-3x actual cost_return for meaningful barrier pressure.
             ConstraintTermCfg(
                 func=attitude_limit_cost,
                 params={"limit": 1.396},
-                budget=0.01,  # Was 20x margin, keep (attitude safety critical)
+                budget=0.01,
                 name="attitude",
             ),
             ConstraintTermCfg(
                 func=torque_limit_cost,
                 params={"limit_nm": 9.5},
-                budget=0.08,  # 0.20->0.08: was 4.3x margin, now ~1.7x (tighter)
+                budget=0.08,
                 name="torque",
             ),
             ConstraintTermCfg(
                 func=velocity_limit_cost,
                 params={"limit_rad_per_s": 4.189},
-                budget=0.02,  # 0.10->0.02: was 62x margin, now ~12x (much tighter)
+                budget=0.02,
                 name="velocity",
             ),
             # --- Average (continuous) ---
             ConstraintTermCfg(
                 func=yaw_velocity_cost,
-                budget=0.40,  # 0.785->0.40: was 2.3x margin, now ~1.2x (tighter)
+                budget=0.40,
                 name="yaw_vel",
             ),
         ],
     )
-
-
-@configclass
-class ALBCDebugEnvCfg(ALBCEnvCfg):
-    """Step 0: Pure RL baseline (no DR, no encoder, no constraints).
-
-    Validates that PPO can learn 2-DOF attitude control in clean physics.
-    Result: roll 0.6 deg, pitch 0.7 deg at 75 iters. PASSED.
-    """
-
-    state_space: int = 0
-    observation_noise_model: None = None
-
-    randomization: DomainRandomizationCfg = DomainRandomizationCfg(enable=False)
-    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
-    randomize_target_attitude: bool = False
-    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
-
-
-@configclass
-class ALBCDebugDREnvCfg(ALBCEnvCfg):
-    """Step 1: PPO + DR (no encoder, no constraints).
-
-    Tests whether domain randomization alone breaks learning.
-    Without encoder, policy must learn a single robust policy across all DR settings.
-    """
-
-    state_space: int = 0
-    # Keep observation noise (realistic sensor model)
-
-    randomization: DomainRandomizationCfg = DomainRandomizationCfg(enable=True)
-    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
-    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
-
-
-@configclass
-class ALBCDebugBarrierEnvCfg(ALBCEnvCfg):
-    """Step 3: TRPO + IPO barrier + DR (no encoder).
-
-    Tests whether the barrier constraints break learning, independent of encoder.
-    Uses full 4 constraints but no encoder (state_space=0).
-    """
-
-    state_space: int = 0  # No encoder
-
-    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
-
-
-@configclass
-class ALBCDebugEncoderEnvCfg(ALBCEnvCfg):
-    """Step 4: TRPO + Encoder + DR (no constraints).
-
-    Tests whether the encoder breaks learning, independent of barrier.
-    Full privileged obs (23D) for encoder, but no constraint enforcement.
-    """
-
-    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
-    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
-
-
-@configclass
-class ALBCDebugEncoderHistEnvCfg(ALBCEnvCfg):
-    """Step 4c: PPO + Encoder + DR + History (no constraints).
-
-    Adds proprio history to actor input to reduce z/input ratio from 48% to 5%.
-    Actor input: cat([o_t(14D), hist_flat(T*8D), z(13D)]).
-    """
-
-    proprio_history_len: int = 10
-
-    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
-    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
-
-
-@configclass
-class ALBCDebugHistOnlyEnvCfg(ALBCEnvCfg):
-    """Step 4d: PPO + History + DR (NO encoder). Tests if encoder causes LR death."""
-
-    state_space: int = 0  # No privileged obs, no encoder
-    proprio_history_len: int = 30
-
-    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
-    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
 
 
 @configclass
@@ -474,25 +391,6 @@ class ALBCHardDRHistOnlyEnvCfg(ALBCEnvCfg):
 
 
 @configclass
-class ALBCHardDREncoderEnvCfg(ALBCEnvCfg):
-    """Hard DR + Encoder (for offline encoder fine-tuning).
-
-    Same DR as ALBCHardDRHistOnlyEnvCfg but with privileged obs for encoder.
-    """
-
-    proprio_history_len: int = 15
-    proprio_history_stride: int = 5
-
-    randomization: HardDomainRandomizationCfg = HardDomainRandomizationCfg()
-    ocean_current: OceanCurrentCfg = OceanCurrentCfg(
-        max_velocity=(0.5, 0.5, 0.25, 0.0, 0.0, 0.0),
-        noise_scale=(0.1, 0.1, 0.05, 0.0, 0.0, 0.0),
-    )
-    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
-    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
-
-
-@configclass
 class ALBCHardDRFrozenEncoderEnvCfg(ALBCEnvCfg):
     """Hard DR + Frozen Encoder fine-tuning environment.
 
@@ -508,21 +406,5 @@ class ALBCHardDRFrozenEncoderEnvCfg(ALBCEnvCfg):
         max_velocity=(0.5, 0.5, 0.25, 0.0, 0.0, 0.0),
         noise_scale=(0.1, 0.1, 0.05, 0.0, 0.0, 0.0),
     )
-    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
-    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
-
-
-@configclass
-class ALBCDebugEncoderHistStrideEnvCfg(ALBCEnvCfg):
-    """Step 8a: PPO + Encoder + Strided History + DR (no constraints).
-
-    History: 15 steps at stride 5 (10Hz sampling, 1.5s temporal window).
-    Actor input: cat([o_t(14D), hist_flat(120D), z(13D)]) = 147D.
-    z/input ratio: 13/147 = 8.8% (vs 48.1% without history).
-    """
-
-    proprio_history_len: int = 15
-    proprio_history_stride: int = 5
-
     doraemon: DoraemonCfg = DoraemonCfg(enable=False)
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])

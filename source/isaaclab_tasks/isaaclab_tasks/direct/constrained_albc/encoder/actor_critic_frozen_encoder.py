@@ -19,7 +19,7 @@ During fine-tuning:
 from __future__ import annotations
 
 import logging
-from typing import Any, NoReturn
+from typing import Any
 
 import torch
 from tensordict import TensorDict
@@ -64,16 +64,27 @@ class ActorCriticFrozenEncoder(ActorCriticEncoder):
         self._init_z_weights(z_init_scale)
 
     def _load_pretrained_encoder(self, path: str) -> None:
-        """Load encoder weights from offline training checkpoint."""
+        """Load encoder weights and normalization bounds from offline training checkpoint."""
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
         encoder_sd = ckpt["encoder_state_dict"]
         self.encoder.load_state_dict(encoder_sd)
         logger.info("Loaded pre-trained encoder from %s (%d params)", path, len(encoder_sd))
 
-        # Load static normalization bounds if available
-        if "enc_obs_lower" in ckpt and self._has_static_enc_norm:
-            self._enc_obs_lower.copy_(ckpt["enc_obs_lower"])
-            self._enc_obs_upper.copy_(ckpt["enc_obs_upper"])
+        # Auto-load static normalization bounds from checkpoint.
+        # The offline encoder is trained with static min-max normalization;
+        # these bounds MUST be applied at inference to match the training input distribution.
+        if "enc_obs_lower" in ckpt and "enc_obs_upper" in ckpt:
+            lower = ckpt["enc_obs_lower"].float()
+            upper = ckpt["enc_obs_upper"].float()
+            if self._has_static_enc_norm:
+                # Buffers already registered by base class -- just copy values
+                self._enc_obs_lower.copy_(lower)
+                self._enc_obs_upper.copy_(upper)
+            else:
+                # Base class did not register buffers -- register them now
+                self.register_buffer("_enc_obs_lower", lower)
+                self.register_buffer("_enc_obs_upper", upper)
+                self._has_static_enc_norm = True
             logger.info("Loaded static normalization bounds from checkpoint")
 
     def _init_z_weights(self, scale: float) -> None:
@@ -96,7 +107,9 @@ class ActorCriticFrozenEncoder(ActorCriticEncoder):
 
         logger.info(
             "z-related actor weights (cols %d:%d) scaled by %.4f",
-            z_start, z_end, scale,
+            z_start,
+            z_end,
+            scale,
         )
 
     def _encode(self, obs: TensorDict) -> torch.Tensor:
@@ -142,10 +155,9 @@ class ActorCriticFrozenEncoder(ActorCriticEncoder):
         norm_prefix = "actor_obs_normalizer."
         for key in sd:
             if key.startswith(norm_prefix):
-                own_key = key
                 if hasattr(self, "actor_obs_normalizer"):
                     target = dict(self.actor_obs_normalizer.named_buffers())
-                    buf_name = key[len(norm_prefix):]
+                    buf_name = key[len(norm_prefix) :]
                     if buf_name in target and sd[key].shape == target[buf_name].shape:
                         target[buf_name].copy_(sd[key])
                         loaded += 1
