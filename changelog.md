@@ -8,6 +8,68 @@ For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
 ---
 
+## [2026-03-29] Offline Encoder Pipeline Implementation
+
+### Context
+
+After 15+ online encoder experiments failed due to 2D action space instability,
+pivoted to offline encoder training: (1) collect rollouts from trained history-only
+policy, (2) train encoder supervised with value prediction bottleneck, (3) fine-tune
+actor with frozen encoder.
+
+Hard DR baseline (history-only, no encoder) achieves 8.7/6.5 deg attitude error --
+the gap that encoder should close. Offline encoder trained successfully:
+loss 13.67->2.43 (converged), z_std=0.315 (non-trivial, not collapsed).
+
+Frozen encoder fine-tuning encountered noise_std explosion (>3000). Root cause:
+PPO detected encoder parameters and used `_update_encoder_ppo()` path (per-epoch
+LR adaptation, weight_decay=0) even though encoder is frozen. Fixed by adding
+`use_encoder_update=False` via `_FrozenEncoderAlgorithmCfg`. Second run still
+shows noise_std increase -- investigation ongoing (may be the same env-level clamp
+positive feedback issue; encoder quality also needs verification).
+
+### Added
+- `scripts/analysis/collect_rollouts.py`: Rollout data collection from trained policy.
+  Collects (o_t, privileged, V_critic) per step. Uses `--resume_path` for direct
+  checkpoint path. Overrides `state_space=23` to access privileged obs from
+  history-only env (which has state_space=0).
+- `scripts/analysis/train_offline_encoder.py`: Supervised encoder training with
+  value prediction bottleneck. Architecture: p_t(23D)->MLP[256,128,64]->softsign->z(13D),
+  value head: cat([o_t, z])->Linear->V_hat, loss=MSE(V_hat, V_critic). Pure PyTorch
+  (no Isaac Sim). Empirical static norm bounds from data.
+- `encoder/actor_critic_frozen_encoder.py`: `ActorCriticFrozenEncoder` subclass of
+  `ActorCriticEncoder`. Encoder frozen (requires_grad=False), pre-trained weights
+  loaded from offline checkpoint. z-related actor weights init to near-zero (scale=0.01).
+  `load_history_only_weights()` for warm-start from history-only checkpoint.
+- `config.py`: `ALBCHardDRFrozenEncoderEnvCfg` -- Hard DR + state_space=23 +
+  history(30, stride=1) matching history-only baseline for actor warm-start.
+- `agents/rsl_rl_ppo_cfg.py`: `_FrozenEncoderAlgorithmCfg` (use_encoder_update=False),
+  `_FrozenEncoderPolicyCfg` (pretrained_encoder_path, z_init_scale=0.01,
+  clamp_actions=False), `ALBCHardDRFrozenEncoderRunnerCfg`.
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-HardDR-FrozenEncoder-v0`.
+
+### Changed
+- `encoder/__init__.py`: Added `ActorCriticFrozenEncoder` export.
+- `runners/constraint_encoder_runner.py`: Added policy class registration in
+  `_runner_module` namespace (ALBCActorCriticEncoder, ALBCActorCriticEncoderConstrained,
+  ALBCActorCriticFrozenEncoder) for `eval()` resolution in OnPolicyRunner.
+
+### Experimental Results
+- Rollout collection: 207,360 transitions from 50 episodes (512 envs).
+- Offline encoder training: val_loss 2.43, z_std=0.315 (encoder producing varied output).
+- Frozen encoder fine-tuning: noise_std explosion persists even with use_encoder_update=False.
+  Root cause under investigation.
+
+### Notes
+- noise_std explosion in frozen encoder run needs root cause analysis. Possible causes:
+  (1) ActorCriticEncoder class has other differences from ActorCritic beyond update path,
+  (2) env-level clamp positive feedback still applies even with frozen encoder,
+  (3) offline encoder quality may be insufficient (z_std=0.315, need z_sweep analysis).
+- `pretrained_encoder_path` hardcoded to `logs/offline_encoder/encoder.pt` in config.
+  Should be parameterized for production use.
+
+---
+
 ## [2026-03-29] Hard DR Environment for Offline Encoder Experiments
 
 ### Context

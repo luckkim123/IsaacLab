@@ -1555,3 +1555,70 @@ class ALBCHardDRHistOnlyRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     algorithm = _PPOHistOnlyAlgorithmCfg()
     policy = _DebugPolicyCfg()
+
+
+# =============================================================================
+# Hard DR: Offline Encoder (Frozen) Fine-tuning
+# =============================================================================
+
+
+@configclass
+@configclass
+class _FrozenEncoderAlgorithmCfg(_PPOHistOnlyAlgorithmCfg):
+    """PPO for frozen encoder -- uses standard update path (not encoder update).
+
+    Encoder is frozen so _update_encoder_ppo() is unnecessary and harmful:
+    it uses per-epoch LR adaptation (4x slower reaction) and weight_decay=0
+    optimizer, causing noise_std explosion identical to online encoder.
+    """
+
+    use_encoder_update: bool = False
+
+
+@configclass
+class _FrozenEncoderPolicyCfg(_EncoderPolicyCfg):
+    """Encoder policy with pre-trained frozen encoder.
+
+    Actor input: cat([o_t_norm(14D), hist(240D), z_frozen(13D)]) = 267D.
+    Encoder: frozen, loaded from offline checkpoint via pretrained_encoder_path.
+    z-related actor weights initialized to near-zero for smooth integration.
+    History: 30 steps stride 1, matching history-only baseline for warm-start.
+    """
+
+    class_name: str = "ALBCActorCriticFrozenEncoder"
+    shared_backbone: bool = False
+    proprio_hist_dim: int = 240  # 30 steps * 8 features (matches history-only)
+    encoder_obs_normalization: bool = False  # static norm loaded from checkpoint
+    pretrained_encoder_path: str = "logs/offline_encoder/encoder.pt"
+    z_init_scale: float = 0.01
+    clamp_actions: bool = False  # no action clamp (confirmed fix)
+
+
+@configclass
+class ALBCHardDRFrozenEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Hard DR + Frozen encoder fine-tuning.
+
+    Offline encoder pipeline Step 3:
+    1. Encoder frozen, loaded from offline-trained checkpoint
+    2. Actor warm-started from history-only checkpoint (optional)
+    3. z-related weights near-zero -> gradual z integration
+    4. Standard PPO training (encoder frozen = no KL spike, no std explosion)
+
+    Set pretrained_encoder_path in policy config before training:
+        cfg.policy.pretrained_encoder_path = "path/to/encoder.pt"
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_hard_dr_frozen_encoder"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _FrozenEncoderAlgorithmCfg()
+    policy = _FrozenEncoderPolicyCfg()

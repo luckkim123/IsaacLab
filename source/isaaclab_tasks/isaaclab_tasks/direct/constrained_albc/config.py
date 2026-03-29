@@ -493,6 +493,26 @@ class ALBCHardDREncoderEnvCfg(ALBCEnvCfg):
 
 
 @configclass
+class ALBCHardDRFrozenEncoderEnvCfg(ALBCEnvCfg):
+    """Hard DR + Frozen Encoder fine-tuning environment.
+
+    History: 30 steps, stride 1 (matches history-only baseline for warm-start).
+    state_space=23 for privileged obs (encoder input).
+    """
+
+    proprio_history_len: int = 30
+    proprio_history_stride: int = 1
+
+    randomization: HardDomainRandomizationCfg = HardDomainRandomizationCfg()
+    ocean_current: OceanCurrentCfg = OceanCurrentCfg(
+        max_velocity=(0.5, 0.5, 0.25, 0.0, 0.0, 0.0),
+        noise_scale=(0.1, 0.1, 0.05, 0.0, 0.0, 0.0),
+    )
+    doraemon: DoraemonCfg = DoraemonCfg(enable=False)
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
+
+
+@configclass
 class ALBCDebugEncoderHistStrideEnvCfg(ALBCEnvCfg):
     """Step 8a: PPO + Encoder + Strided History + DR (no constraints).
 

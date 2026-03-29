@@ -19,7 +19,16 @@ import os
 import torch
 from rsl_rl.runners import OnPolicyRunner
 
+import rsl_rl.runners.on_policy_runner as _runner_module
+
+from ..encoder import ActorCriticEncoder, ActorCriticEncoderConstrained, ActorCriticFrozenEncoder
 from ..utils.logging import flush_metrics, log_encoder_metrics
+
+# Register policy classes in rsl_rl runner module namespace for eval() resolution.
+# OnPolicyRunner._construct_algorithm uses eval(class_name) to instantiate policies.
+_runner_module.ALBCActorCriticEncoder = ActorCriticEncoder
+_runner_module.ALBCActorCriticEncoderConstrained = ActorCriticEncoderConstrained
+_runner_module.ALBCActorCriticFrozenEncoder = ActorCriticFrozenEncoder
 
 logger = logging.getLogger(__name__)
 
