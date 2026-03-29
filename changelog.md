@@ -88,14 +88,36 @@ collapse. Final performance still worse than hist-only baseline.
 | Softsign gradient mean | 0.548 | 0.063 |
 | Encoder weight std (hidden) | 0.04-0.07 | 0.12-0.13 |
 
+**Asymmetric Critic + LayerNorm (500 iters):**
+
+Previous asymmetric run (no LayerNorm) showed z_std -> 1 immediately (shortcut +
+saturation confounded). Re-ran with LayerNorm to isolate the shortcut effect.
+Result: encoder DOES learn -- z_std=0.70 (stable), z responds to DR parameters.
+Shortcut is not total: actor gradient alone (with LayerNorm) is sufficient to
+train the encoder. Encoder even shows broader DR sensitivity than shared backbone
+(quad_damp_roll 0.06->0.47, water_density 0.04->0.26, buoy_cog_z 0.02->0.14).
+
+| Metric | Hist-Only | Shared BB + LN | Asymmetric + LN |
+|--------|:---------:|:--------------:|:---------------:|
+| Roll | **8.74** | 9.96 | 9.77 |
+| Pitch | **6.54** | 9.74 | 10.16 |
+| Reward | **-10.75** | -18.22 | -19.74 |
+| noise_std | 0.15 | 0.15 | 0.14 |
+| z_std | -- | 0.56 | 0.70 |
+
+Encoder z sweep (asymmetric + LN, iter 499): Body Mass 10/13 active (max 1.06),
+Main CoG Z 8/13 (max 0.90), Quad Damp Roll 3/13 (max 0.47), Water Density 2/13
+(max 0.26). More diverse than shared backbone but still no performance gain.
+
 ### Notes
-- Asymmetric critic (z + p_t) conclusively disproves the approach: shortcut problem
-  is real and immediate. Critic ignores z when p_t is available.
-- LayerNorm solves encoder saturation but doesn't solve policy performance.
-  Performance gap vs hist-only is primarily from noise_std collapse + 120D vs 240D
-  history gap.
-- Next steps: (1) add entropy_coef=0.001 to maintain exploration, (2) try smaller
-  encoder [128, 64] to reduce parameter count and redundancy.
+- Asymmetric critic WITHOUT LayerNorm: shortcut + saturation -> encoder fails.
+  WITH LayerNorm: encoder learns via actor gradient alone. The earlier "shortcut
+  conclusively disproved" conclusion was wrong -- the issue was saturation, not
+  shortcut exclusively.
+- Both encoder architectures (shared BB, asymmetric) learn encoder representations
+  but neither beats hist-only. Common bottleneck: noise_std collapse (entropy_coef=0,
+  no min_std floor).
+- Next steps: (1) entropy_coef=0.001, (2) encoder [128, 64] (2 hidden layers).
 - encoder_z_sweep.py verified to produce identical output as training forward pass
   (max diff = 0.00e+00).
 
