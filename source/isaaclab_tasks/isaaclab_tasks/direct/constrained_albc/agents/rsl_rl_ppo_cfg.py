@@ -1021,3 +1021,227 @@ class ALBCDebugPPORewardScaleNoEncNormRunnerCfg(ALBCDebugPPORewardScaleRunnerCfg
 
     experiment_name = "constrained_albc_debug_ppo_reward_scale_no_enc_norm"
     policy = _RewardScaleNoEncNormPolicyCfg()
+
+
+# =============================================================================
+# Step 13: Static min-max normalization (HORA-style, replaces EmpiricalNorm)
+# =============================================================================
+
+# 23D privileged obs bounds derived from DomainRandomizationCfg + HydrodynamicsCfg.
+# Each pair is (lower, upper) with ~10% margin beyond actual DR range.
+# Layout: hydro(6) + inertia(4) + damping(4) + body(2) + payload(4) + actuator(2) + env(1)
+_PRIV_OBS_LOWER: list[float] = [
+    # Hydrodynamics (6D): main [volume, CoG_z, CoB_z], buoy [volume, CoG_z, CoB_z]
+    0.007,    # [0] main volume: nom=0.009, DR*0.9=0.0081
+    -0.08,    # [1] main CoG_z: nom=-0.05, offset=(-0.02,0.02)
+    -0.03,    # [2] main CoB_z: nom=0.0, offset=(-0.02,0.02)
+    0.002,    # [3] buoy volume: nom=0.00268, DR*0.9=0.00241
+    0.03,     # [4] buoy CoG_z: nom=0.059, offset=(-0.02,0.02)
+    0.03,     # [5] buoy CoB_z: nom=0.059, offset=(-0.02,0.02)
+    # Inertia (4D): main [Ixx, Iyy], buoy [Ixx, Iyy]
+    0.06,     # [6] main Ixx: nom=0.0994, DR*0.75=0.0746
+    0.06,     # [7] main Iyy: same
+    0.0015,   # [8] buoy Ixx: nom=0.00278, DR*0.75=0.00209
+    0.0015,   # [9] buoy Iyy: same
+    # Damping (4D): linear [roll, pitch], quadratic [roll, pitch]
+    0.10,     # [10] lin_damp roll: nom=0.3, DR*0.5=0.15
+    0.10,     # [11] lin_damp pitch: same
+    0.3,      # [12] quad_damp roll: nom=1.0, DR*0.5=0.5
+    0.3,      # [13] quad_damp pitch: same
+    # Body properties (2D): mass, added_mass_surge
+    7.0,      # [14] body_mass: nom=9.18, DR*0.9=8.26
+    5.0,      # [15] added_mass_surge: nom=8.0, DR*0.85=6.8
+    # Payload (4D): mass, cog_offset [x, y, z]
+    -0.1,     # [16] payload_mass: DR range (0.0, 1.0)
+    -0.12,    # [17] payload_cog_x: disk r=0.10
+    -0.12,    # [18] payload_cog_y: disk r=0.10
+    -0.04,    # [19] payload_cog_z: DR range (-0.03, 0.0)
+    # Actuator (2D): stiffness, damping
+    30.0,     # [20] joint_stiffness: DR range (40, 120)
+    0.3,      # [21] joint_damping: DR range (0.5, 5.0)
+    # Environment (1D): water_density
+    990.0,    # [22] water_density: DR range (995, 1025)
+]
+
+_PRIV_OBS_UPPER: list[float] = [
+    # Hydrodynamics (6D)
+    0.011,    # [0] main volume: DR*1.1=0.0099
+    -0.02,    # [1] main CoG_z: nom=-0.05+0.02=-0.03
+    0.03,     # [2] main CoB_z: nom=0.0+0.02=0.02
+    0.0035,   # [3] buoy volume: DR*1.1=0.00295
+    0.09,     # [4] buoy CoG_z: nom=0.059+0.02=0.079
+    0.09,     # [5] buoy CoB_z: nom=0.059+0.02=0.079
+    # Inertia (4D)
+    0.15,     # [6] main Ixx: DR*1.3=0.1292
+    0.15,     # [7] main Iyy: same
+    0.004,    # [8] buoy Ixx: DR*1.3=0.00361
+    0.004,    # [9] buoy Iyy: same
+    # Damping (4D)
+    0.50,     # [10] lin_damp roll: DR*1.5=0.45
+    0.50,     # [11] lin_damp pitch: same
+    1.8,      # [12] quad_damp roll: DR*1.5=1.5
+    1.8,      # [13] quad_damp pitch: same
+    # Body properties (2D)
+    12.0,     # [14] body_mass: DR*1.1=10.10
+    11.0,     # [15] added_mass_surge: DR*1.15=9.2
+    # Payload (4D)
+    1.2,      # [16] payload_mass: DR max=1.0
+    0.12,     # [17] payload_cog_x: disk r=0.10
+    0.12,     # [18] payload_cog_y: disk r=0.10
+    0.01,     # [19] payload_cog_z: DR max=0.0
+    # Actuator (2D)
+    130.0,    # [20] joint_stiffness: DR max=120
+    6.0,      # [21] joint_damping: DR max=5.0
+    # Environment (1D)
+    1030.0,   # [22] water_density: DR max=1025
+]
+
+
+@configclass
+class _StaticNormPolicyCfg(_Q1Q3EncoderPolicyCfg):
+    """Q1Q3 encoder policy with HORA-style static min-max normalization.
+
+    Replaces EmpiricalNormalization with deterministic min-max scaling.
+    EmpiricalNorm causes z drift via running stats updates every env step,
+    which is the hidden cause of KL spike (independent of encoder gradient).
+    Static normalization eliminates this drift entirely.
+    """
+
+    encoder_obs_normalization: bool = False
+    encoder_obs_lower: list[float] = _PRIV_OBS_LOWER
+    encoder_obs_upper: list[float] = _PRIV_OBS_UPPER
+
+
+@configclass
+class _StaticNormRewardScaleAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """PPO with static normalization + HORA reward scaling.
+
+    Combines two key HORA elements:
+    - reward_scale=0.01: reduces gradient 100x, prevents KL spike from large updates
+    - Static encoder normalization: eliminates normalizer-induced z drift
+
+    Step 12a showed reward_scale=0.01 alone gives first positive signal (noise_std 0.92).
+    Step 13a adds static normalization to eliminate the remaining KL source.
+    """
+
+    class_name: str = "PPO"
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 3e-4
+    reward_scale: float = 0.01
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    entropy_coef: float = 0.0
+    desired_kl: float = 0.02
+    max_grad_norm: float = 1.0
+    value_loss_coef: float = 1.0
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+
+
+@configclass
+class ALBCDebugPPOStaticNormRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 13b: Q1+Q3 + static min-max normalization (no reward scaling).
+
+    Isolates the effect of replacing EmpiricalNorm with static min-max.
+    Baseline: Step 8a (Q1Q3, EmpiricalNorm, 23/20 deg).
+    Expected: static norm eliminates normalizer z drift -> lower KL -> higher LR.
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_static_norm"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _Q1Q3AlgorithmCfg()
+    policy = _StaticNormPolicyCfg()
+
+
+@configclass
+class ALBCDebugPPOStaticNormRSRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 13a: Q1+Q3 + static min-max + HORA reward_scale=0.01.
+
+    Full HORA alignment: static normalization + reward scaling.
+    Baseline: Step 12a (reward_scale=0.01 + EmpiricalNorm, 17.9/43.8 deg).
+    Expected: eliminating z drift + small gradient -> encoder and actor both learn.
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_static_norm_rs"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _StaticNormRewardScaleAlgorithmCfg()
+    policy = _StaticNormPolicyCfg()
+
+
+# =============================================================================
+# Step 14: Encoder freeze (encoder_grad_scale=0.0, validate root cause)
+# =============================================================================
+
+
+@configclass
+class _EncFreezeAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    """PPO with encoder completely frozen (grad_scale=0.0).
+
+    Hypothesis validation: if encoder weight changes cause KL spike,
+    then freezing encoder should restore normal PPO learning.
+    Actor should learn using o_t + history, treating z as fixed noise.
+    Expected: noise_std decreases, LR stays high, roll/pitch approach Step 4d (3 deg).
+    """
+
+    class_name: str = "PPO"
+    num_learning_epochs: int = 5
+    num_mini_batches: int = 4
+    learning_rate: float = 3e-4
+    encoder_grad_scale: float = 0.0
+    schedule: str = "adaptive"
+    gamma: float = 0.99
+    lam: float = 0.95
+    entropy_coef: float = 0.0
+    desired_kl: float = 0.02
+    max_grad_norm: float = 1.0
+    value_loss_coef: float = 1.0
+    use_clipped_value_loss: bool = True
+    clip_param: float = 0.2
+
+
+@configclass
+class ALBCDebugPPOEncFreezeRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Step 14: Encoder completely frozen (grad_scale=0.0).
+
+    Root cause validation experiment.
+    If PPO learns normally with frozen encoder -> encoder weight changes ARE the KL cause.
+    If still fails -> diagnosis is wrong, other factor at play.
+    Baseline: Step 4d (PPO+History, no encoder, 3.0/3.8 deg).
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 300
+    save_interval = 50
+    experiment_name = "constrained_albc_debug_ppo_enc_freeze"
+    normalize_value: bool = True
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged"],
+    }
+
+    algorithm = _EncFreezeAlgorithmCfg()
+    policy = _StaticNormPolicyCfg()

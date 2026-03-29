@@ -11,16 +11,21 @@ Two modes of operation:
         linear heads, enabling value gradient flow to the encoder.
 
 Architecture (separate mode, HORA-style normalization):
-    Encoder: p_t (privileged) -> MLP -> softsign -> z (latent)
+    Encoder: p_t (privileged) -> normalize -> MLP -> softsign -> z (latent)
     Actor:   cat([normalize(o_t), z]) -> MLP -> actions (Gaussian policy)
     Critic:  cat([o_t, p_t]) -> MLP -> value (asymmetric)
 
-    Normalization: Only o_t (+ proprio_hist if present) is normalized.
+    Encoder input normalization modes:
+      - Static min-max (HORA-style): (2*x - upper - lower) / (upper - lower) -> [-1, 1]
+        Deterministic, no running stats, no z drift. Preferred.
+      - EmpiricalNormalization: Running mean/std (legacy, causes z drift -> KL spike).
+      - None: Raw p_t input.
+
+    Actor normalization: Only o_t (+ proprio_hist if present) via EmpiricalNorm.
     z is kept raw since softsign already bounds it to (-1, 1).
-    This prevents non-stationary EmpiricalNorm stats from destabilizing z.
 
 Architecture (shared backbone mode):
-    Encoder: p_t (privileged) -> MLP -> softsign -> z (latent)
+    Encoder: p_t (privileged) -> normalize -> MLP -> softsign -> z (latent)
     Backbone: cat([normalize(o_t), z]) -> shared MLP -> features
     Action head: features -> Linear -> actions
     Value head:  features -> Linear -> value
@@ -70,6 +75,8 @@ class ActorCriticEncoder(nn.Module):
         encoder_latent_dim: int = 13,
         encoder_activation: str = "elu",
         encoder_obs_normalization: bool = False,
+        encoder_obs_lower: list[float] | None = None,
+        encoder_obs_upper: list[float] | None = None,
         # Actor-Critic
         actor_obs_normalization: bool = False,
         critic_obs_normalization: bool = False,
@@ -116,11 +123,27 @@ class ActorCriticEncoder(nn.Module):
         if obs[self._privileged_key].shape[-1] != privileged_dim:
             raise ValueError(f"Privileged dim {obs[self._privileged_key].shape[-1]} != expected {privileged_dim}")
 
-        # --- Encoder: p_t -> softsign -> z ---
-        self.encoder_obs_normalization = encoder_obs_normalization
-        self.encoder_obs_normalizer = (
-            EmpiricalNormalization(privileged_dim) if encoder_obs_normalization else nn.Identity()
-        )
+        # --- Encoder: p_t -> normalize -> MLP -> softsign -> z ---
+        self._has_static_enc_norm = encoder_obs_lower is not None and encoder_obs_upper is not None
+        if self._has_static_enc_norm:
+            # Static min-max normalization (HORA-style): deterministic, no running stats
+            lower = torch.tensor(encoder_obs_lower, dtype=torch.float32)
+            upper = torch.tensor(encoder_obs_upper, dtype=torch.float32)
+            if lower.shape[0] != privileged_dim or upper.shape[0] != privileged_dim:
+                raise ValueError(
+                    f"encoder_obs_lower/upper dim {lower.shape[0]}/{upper.shape[0]} != privileged_dim {privileged_dim}"
+                )
+            self.register_buffer("_enc_obs_lower", lower)
+            self.register_buffer("_enc_obs_upper", upper)
+            self.encoder_obs_normalizer = nn.Identity()
+            self.encoder_obs_normalization = False
+            logger.info("Encoder normalization: static min-max (HORA-style) -> [-1, 1]")
+        else:
+            self.encoder_obs_normalization = encoder_obs_normalization
+            self.encoder_obs_normalizer = (
+                EmpiricalNormalization(privileged_dim) if encoder_obs_normalization else nn.Identity()
+            )
+            logger.info("Encoder normalization: %s", "EmpiricalNorm" if encoder_obs_normalization else "none")
         self.encoder = MLP(privileged_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
         logger.info("Encoder: %dD -> %s -> softsign -> %dD", privileged_dim, encoder_hidden_dims, encoder_latent_dim)
 
@@ -205,9 +228,16 @@ class ActorCriticEncoder(nn.Module):
     # --- Observation processing ---
 
     def _encode(self, obs: TensorDict) -> torch.Tensor:
-        """Encode privileged info into latent z: p_t -> MLP -> softsign -> z in (-1, 1)."""
+        """Encode privileged info into latent z: p_t -> normalize -> MLP -> softsign -> z in (-1, 1)."""
         p_t = obs[self._privileged_key]
-        z = F.softsign(self.encoder(self.encoder_obs_normalizer(p_t)))
+        if self._has_static_enc_norm:
+            # Static min-max: [lower, upper] -> [-1, 1] (HORA-style, deterministic)
+            p_t = (2.0 * p_t - self._enc_obs_upper - self._enc_obs_lower) / (
+                self._enc_obs_upper - self._enc_obs_lower
+            )
+        else:
+            p_t = self.encoder_obs_normalizer(p_t)
+        z = F.softsign(self.encoder(p_t))
         self._last_z = z
         return z
 
@@ -291,10 +321,10 @@ class ActorCriticEncoder(nn.Module):
     def update_normalization(self, obs: TensorDict) -> None:
         """Update observation normalization running statistics.
 
+        Static min-max encoder normalization has no running stats (no-op).
         Actor normalizer updates only on o_t (+ hist) dimensions, excluding z.
-        This matches the HORA-style normalization where encoder output is raw.
         """
-        if self.encoder_obs_normalization:
+        if self.encoder_obs_normalization and not self._has_static_enc_norm:
             self.encoder_obs_normalizer.update(obs[self._privileged_key])
         if self.actor_obs_normalization:
             with torch.no_grad():
@@ -310,7 +340,7 @@ class ActorCriticEncoder(nn.Module):
 
     def load_state_dict(self, state_dict: dict, strict: bool = True) -> bool:
         """Load model parameters. Returns True (RSL-RL API contract)."""
-        if self.encoder_obs_normalization:
+        if self.encoder_obs_normalization and not self._has_static_enc_norm:
             prefix = "encoder_obs_normalizer."
             if not any(k.startswith(prefix) for k in state_dict):
                 logger.info("Checkpoint missing encoder_obs_normalizer; injecting defaults.")

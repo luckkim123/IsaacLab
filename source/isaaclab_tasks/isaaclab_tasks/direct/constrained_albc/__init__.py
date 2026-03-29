@@ -19,6 +19,8 @@ Registered tasks (ablation ladder):
     Isaac-Constrained-ALBC-Debug-PPO-Hist-Only-v0:Step 4d - PPO + History + DR (no encoder)
     Isaac-Constrained-ALBC-Debug-PPO-SB-v0:      Step 5a - PPO + Shared Backbone + DR (Fix A+B)
     Isaac-Constrained-ALBC-Debug-PPO-SB-Hist-v0: Step 5b - PPO + Shared Backbone + History + DR
+    Isaac-Constrained-ALBC-Debug-PPO-StaticNorm-v0:    Step 13b - PPO + Static MinMax Norm + DR
+    Isaac-Constrained-ALBC-Debug-PPO-StaticNorm-RS-v0: Step 13a - PPO + Static MinMax Norm + reward_scale=0.01
     Isaac-Constrained-ALBC-Encoder-v0:           Full    - TRPO + IPO + Encoder + DR
 """
 
@@ -258,6 +260,36 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.config:ALBCDebugEncoderHistStrideEnvCfg",
         "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCDebugPPORewardScaleNoEncNormRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Constrained-ALBC-Debug-PPO-StaticNorm-v0",
+    entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config:ALBCDebugEncoderHistStrideEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCDebugPPOStaticNormRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Constrained-ALBC-Debug-PPO-EncFreeze-v0",
+    entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config:ALBCDebugEncoderHistStrideEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCDebugPPOEncFreezeRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Isaac-Constrained-ALBC-Debug-PPO-StaticNorm-RS-v0",
+    entry_point="isaaclab_tasks.direct.constrained_albc:ALBCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config:ALBCDebugEncoderHistStrideEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.rsl_rl_ppo_cfg:ALBCDebugPPOStaticNormRSRunnerCfg",
     },
 )
 

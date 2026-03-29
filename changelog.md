@@ -8,6 +8,73 @@ For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
 ---
 
+## [2026-03-29] Steps 13-14: Static MinMax Norm (DISPROVED) + Encoder Freeze (DISPROVED)
+
+### Context
+
+Three experiments to test remaining HORA-aligned hypotheses for encoder KL spike:
+
+**Step 13: Static min-max normalization (HORA-style)**
+Hypothesis: EmpiricalNormalization's running stats update every env step causes z drift,
+which is the hidden KL source (independent of encoder gradient). Replaced with HORA's
+deterministic formula: `(2*x - upper - lower) / (upper - lower)` -> [-1, 1].
+
+| Step | Config | Roll/Pitch | noise_std | LR | z_range |
+|------|--------|-----------|-----------|-----|---------|
+| 8a (baseline) | Q1Q3 + EmpiricalNorm | 23.3/20.0 | 0.96 | 1.5e-5 | [-0.86,0.85] |
+| 13b | Q1Q3 + StaticNorm | 22.5/20.9 | 0.98 | 2.6e-5 | [-0.93,0.92] |
+| 13a | Q1Q3 + StaticNorm + RS=0.01 | 22.0/30.6 | 0.92 | 4.0e-5 | [-0.93,0.91] |
+| 12a (prev session) | Q1Q3 + EmpNorm + RS=0.01 | 17.9/43.8 | 0.92 | 4.0e-5 | [-0.96,0.95] |
+
+Result: **DISPROVED**. Static norm vs EmpiricalNorm -> essentially identical results.
+Improvement in 13a came entirely from reward_scale, not normalization method.
+
+**Step 14: Encoder freeze (encoder_grad_scale=0.0)**
+Critical validation: if encoder weight changes cause KL spike, then freezing encoder
+(zero gradient) should restore normal PPO learning. Actor should learn using o_t + history,
+treating z as fixed random noise.
+
+| Step | Config | Roll/Pitch | noise_std | LR | z_range |
+|------|--------|-----------|-----------|-----|---------|
+| 4d (no encoder) | PPO + History 30x1 | 3.0/3.8 | 0.20 | 1e-2 | N/A |
+| **14 (freeze)** | **PPO + Frozen encoder** | **21.5/19.5** | **0.97** | **1.8e-5** | [-0.20,0.17] |
+
+Result: **DISPROVED**. Even with encoder completely frozen (z fixed, z_std=0.08),
+PPO still fails identically: LR crashes to 1.8e-5, noise_std at 0.97 CEILING.
+Encoder weight changes are NOT the root cause of KL spike.
+
+**Implications:**
+All HORA-aligned hypotheses have now been tested and either disproved or shown insufficient:
+- EmpiricalNorm z drift: DISPROVED (Step 13)
+- Encoder gradient magnitude: DISPROVED (Step 10, encoder_grad_scale=0.1)
+- Encoder weight changes: DISPROVED (Step 14, encoder_grad_scale=0.0)
+- reward_scale=0.01: partial improvement only (noise_std 0.92, still ~20 deg)
+- Update path: DISPROVED (Step 11)
+- History/normalization configs: insufficient (Steps 8-9)
+
+The failure occurs whenever ActorCriticEncoder class is used, regardless of whether
+the encoder is learning, frozen, or how observations are normalized. Root cause is
+structural/architectural, not learning-dynamics. Remaining suspects:
+1. Policy class (ActorCriticEncoder vs ActorCritic)
+2. `_update_encoder_ppo()` path with frozen encoder (untested combination)
+3. Interaction between obs_groups/TensorDict processing and PPO update
+
+### Added
+- `encoder/actor_critic_encoder.py`: Static min-max normalization via `encoder_obs_lower`/`encoder_obs_upper` params. When provided, uses deterministic `(2*x - upper - lower) / (upper - lower)` instead of EmpiricalNormalization. Registered as buffers for device placement.
+- `agents/rsl_rl_ppo_cfg.py`: 23D privileged obs bounds (`_PRIV_OBS_LOWER`, `_PRIV_OBS_UPPER`) derived from DomainRandomizationCfg + HydrodynamicsCfg with 10% margin
+- `agents/rsl_rl_ppo_cfg.py`: `_StaticNormPolicyCfg` -- Q1Q3 encoder policy with static min-max normalization
+- `agents/rsl_rl_ppo_cfg.py`: `ALBCDebugPPOStaticNormRunnerCfg` (Step 13b), `ALBCDebugPPOStaticNormRSRunnerCfg` (Step 13a)
+- `agents/rsl_rl_ppo_cfg.py`: `_EncFreezeAlgorithmCfg` with `encoder_grad_scale=0.0`, `ALBCDebugPPOEncFreezeRunnerCfg` (Step 14)
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-Debug-PPO-StaticNorm-v0`, `Isaac-Constrained-ALBC-Debug-PPO-StaticNorm-RS-v0`, `Isaac-Constrained-ALBC-Debug-PPO-EncFreeze-v0`
+
+### Notes
+- All HORA elements that can be replicated in 2D action space have been tested
+- Critic asymmetry is confirmed as correct design (not a suspect)
+- History size variation ruled out (all encoder experiments fail regardless of history config)
+- Next investigation: isolate whether the `_update_encoder_ppo()` code path itself (vs standard `update()`) is the structural cause, tested with frozen encoder
+
+---
+
 ## [2026-03-29] Step 11: Standard Update Path (DISPROVED) + Step 12: HORA Reward Scaling
 
 ### Context
