@@ -150,7 +150,17 @@ class ActorCriticFrozenEncoder(ActorCriticEncoder):
                         target[buf_name].copy_(sd[key])
                         loaded += 1
 
-        # Transfer critic weights
+        # Transfer log_std / std parameter
+        for std_key in ("log_std", "std"):
+            if std_key in sd:
+                own_param = dict(self.named_parameters()).get(std_key)
+                if own_param is not None and sd[std_key].shape == own_param.shape:
+                    with torch.no_grad():
+                        own_param.copy_(sd[std_key])
+                    loaded += 1
+                    logger.info("Copied %s from history-only: %s", std_key, sd[std_key].tolist())
+
+        # Transfer critic weights (skip if shape mismatch, e.g. asymmetric critic)
         for key in sd:
             if key.startswith("critic.") or key.startswith("critic_obs_normalizer."):
                 if key in dict(self.named_parameters()) or key in dict(self.named_buffers()):

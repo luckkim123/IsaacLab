@@ -8,6 +8,91 @@ For entries before 2026-03-27, see [changelog_legacy.md](changelog_legacy.md).
 
 ---
 
+## [2026-03-30] Frozen Encoder: Three Critical Fixes
+
+### Context
+
+Frozen encoder fine-tuning (offline pipeline Step 3) had noise_std explosion
+preventing any learning. Systematic investigation found three independent bugs,
+each requiring a separate fix. All three fixed in this session.
+
+**Bug 1: `_normalize_storage_values()` overwrote normalized advantages.**
+`storage.compute_returns()` normalizes advantages (mean=0, std=1), then
+`_normalize_storage_values()` recomputed advantages as `returns_norm - values_norm`,
+introducing systematic bias (mean ~-0.66). This caused surrogate loss of ~1.0 at
+iter 0 (normal: ~0.002), driving immediate noise_std explosion.
+Fix: removed advantages recomputation, preserving already-normalized values.
+
+**Bug 2: Critic received less information than actor.**
+`_get_critic_obs()` returned `cat([o_t, p_t])` = 37D while actor received
+`cat([o_t, hist, z])` = 267D. Critic was blind to 240D of proprioceptive history.
+This made advantages poorly correlated with actor behavior, destabilizing sigma.
+All previous encoder experiments (Steps 4-19 ablation study) were affected.
+Fix: critic now receives `cat([o_t, hist, p_t])` = 277D.
+
+**Bug 3: Missing denormalization during rollout (HORA mismatch).**
+HORA denormalizes critic output during rollout (`value_mean_std(v, unnorm=True)`)
+so GAE operates on raw-scale values. Our implementation stored normalized values
+directly, causing GAE to mix raw rewards with normalized values as critic converged.
+Fix: denormalize stored values before GAE, compute raw-scale last_values for
+bootstrap, then re-normalize after GAE for critic targets.
+
+**After all three fixes:** noise_std monotonically decreases (0.999 -> 0.065),
+training stable for 499 iterations. Performance: roll 6.9 deg best (vs hist_only
+7.0), pitch 5.7 deg best (vs hist_only 5.6). Final performance similar to
+hist_only baseline -- encoder z not yet providing additional benefit, but training
+is now stable.
+
+Also added actor warm-start mechanism (`load_history_only_weights()` in runner)
+and log_std transfer from hist_only checkpoint. These are available via
+`hist_only_checkpoint` config but currently disabled (empty string).
+
+### Fixed
+- `runners/constraint_encoder_runner.py`: Removed advantages recomputation in
+  `_normalize_storage_values()` (was overwriting normalized advantages with biased
+  values, causing surrogate ~1.0 and noise_std explosion)
+- `encoder/actor_critic_encoder.py`: `_get_critic_obs()` now returns
+  `cat([o_t, hist, p_t])` = 277D instead of `cat([o_t, p_t])` = 37D. Critic
+  `num_critic_obs` calculation updated to include `proprio_hist_dim`.
+- `runners/constraint_encoder_runner.py`: HORA-style value normalization --
+  denormalize stored values before GAE, denormalize last_values for bootstrap,
+  then normalize values/returns after GAE for critic targets.
+
+### Changed
+- `agents/rsl_rl_ppo_cfg.py`: `ALBCHardDRFrozenEncoderRunnerCfg` obs_groups
+  critic now includes `proprio_hist`. Added `hist_only_checkpoint` field (default
+  empty, for optional actor warm-start).
+- `encoder/actor_critic_frozen_encoder.py`: `load_history_only_weights()` now
+  copies `log_std`/`std` parameter from hist_only checkpoint.
+
+### Experimental Results
+
+**Frozen encoder (499 iters, Hard DR, no warm-start):**
+
+| Metric | Frozen Encoder | Hist Only | Delta |
+|--------|---------------|-----------|-------|
+| Best roll | 6.9 deg | 7.0 deg | -0.1 |
+| Best pitch | 5.7 deg | 5.6 deg | +0.1 |
+| Final roll | 11.8 deg | 8.7 deg | +3.1 |
+| Final pitch | 6.9 deg | 6.5 deg | +0.4 |
+| noise_std | 0.065 | 0.153 | -0.088 |
+
+Best performance is comparable but frozen encoder has more variance in later
+iterations (roll oscillates 7-12 deg vs hist_only stable 8-9 deg). Encoder z
+is not yet providing measurable advantage over history-only baseline.
+
+### Notes
+- All previous encoder experiments (Steps 4-19) had the critic bug (37D instead
+  of 277D). The "encoder destabilizes training" conclusion may need revision.
+- Actor warm-start from hist_only available but not tested in this session
+  (`hist_only_checkpoint = ""`).
+- Offline encoder quality verified: z explains 70.3% additional V_critic variance
+  beyond o_t alone (R^2: 0.088 -> 0.791). Encoder captures meaningful information.
+- Next steps: (1) test actor warm-start, (2) test encoder unfreezing after
+  actor convergence, (3) revisit online encoder training with fixed critic.
+
+---
+
 ## [2026-03-29] Offline Encoder Pipeline Implementation
 
 ### Context

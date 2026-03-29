@@ -1596,13 +1596,13 @@ class _FrozenEncoderPolicyCfg(_EncoderPolicyCfg):
 
 @configclass
 class ALBCHardDRFrozenEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
-    """Hard DR + Frozen encoder fine-tuning.
+    """Hard DR + Frozen encoder fine-tuning with actor warm-start.
 
     Offline encoder pipeline Step 3:
     1. Encoder frozen, loaded from offline-trained checkpoint
-    2. Actor warm-started from history-only checkpoint (optional)
+    2. Actor warm-started from history-only checkpoint
     3. z-related weights near-zero -> gradual z integration
-    4. Standard PPO training (encoder frozen = no KL spike, no std explosion)
+    4. Standard PPO training (actor already competent -> stable sigma)
 
     Set pretrained_encoder_path in policy config before training:
         cfg.policy.pretrained_encoder_path = "path/to/encoder.pt"
@@ -1615,9 +1615,10 @@ class ALBCHardDRFrozenEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 50
     experiment_name = "constrained_albc_hard_dr_frozen_encoder"
     normalize_value: bool = True
+    hist_only_checkpoint: str = ""
     obs_groups: dict[str, list[str]] = {
         "policy": ["policy", "privileged", "proprio_hist"],
-        "critic": ["policy", "privileged"],
+        "critic": ["policy", "privileged", "proprio_hist"],
     }
 
     algorithm = _FrozenEncoderAlgorithmCfg()

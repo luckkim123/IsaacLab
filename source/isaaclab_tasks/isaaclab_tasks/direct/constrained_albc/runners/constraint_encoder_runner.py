@@ -79,35 +79,70 @@ class ConstraintEncoderRunner(OnPolicyRunner):
 
         super().__init__(env, train_cfg, log_dir, device)
 
+        # Warm-start actor from history-only checkpoint if configured.
+        # Must run after super().__init__ (which creates self.alg.policy)
+        # and before training starts.
+        hist_ckpt = train_cfg.get("hist_only_checkpoint", "")
+        if hist_ckpt and hasattr(self.alg.policy, "load_history_only_weights"):
+            self.alg.policy.load_history_only_weights(hist_ckpt)
+
         # Detect encoder for conditional metrics logging
         self._has_encoder = hasattr(self.alg.policy, "encoder")
         if self._has_encoder:
             logger.info("[ConstraintEncoderRunner] Encoder detected. Encoder metrics logging enabled.")
 
-        # Set up value normalization (running mean/std on returns)
+        # Set up value normalization (HORA-style running mean/std).
+        #
+        # HORA flow (hora/algo/ppo/ppo.py:152-159, 364-368):
+        #   Rollout: critic -> denormalize (v*std+mean) -> raw values stored
+        #   GAE:     raw values -> returns, advantages (normalized mean=0,std=1)
+        #   Post-GAE: normalize values/returns in-place (critic targets)
+        #   Update:  critic learns to predict normalized values
+        #
+        # Without denormalization during rollout, GAE mixes raw rewards with
+        # normalized values once the critic converges, corrupting advantages.
         if self._normalize_value:
             self._value_running_mean = torch.zeros(1, device=device)
             self._value_running_var = torch.ones(1, device=device)
             self._value_count = 1e-4
-            # Wrap alg.compute_returns to normalize after GAE
-            original_compute_returns = self.alg.compute_returns
 
-            def _compute_returns_normalized(obs):
-                original_compute_returns(obs)
+            def _compute_returns_with_value_norm(obs):
+                storage = self.alg.storage
+                std = torch.sqrt(self._value_running_var + 1e-8)
+                mean = self._value_running_mean
+
+                # 1. Denormalize stored values (critic outputs normalized scale
+                #    after training). On iter 0: mean=0, std=1, so identity.
+                storage.values[:] = storage.values * std + mean
+
+                # 2. Compute last_values and denormalize for GAE bootstrap.
+                last_values = self.alg.policy.evaluate(obs).detach()
+                last_values = last_values * std + mean
+
+                # 3. GAE on raw-scale values -> normalized advantages (mean=0).
+                storage.compute_returns(
+                    last_values,
+                    self.alg.gamma,
+                    self.alg.lam,
+                    normalize_advantage=not self.alg.normalize_advantage_per_mini_batch,
+                )
+
+                # 4. Update running stats from raw returns, then normalize
+                #    values/returns in-place for critic loss targets.
                 self._normalize_storage_values()
 
-            self.alg.compute_returns = _compute_returns_normalized
-            logger.info("[ConstraintEncoderRunner] Value normalization enabled.")
+            self.alg.compute_returns = _compute_returns_with_value_norm
+            logger.info("[ConstraintEncoderRunner] Value normalization enabled (HORA-style).")
 
     # ------------------------------------------------------------------
     # Value normalization
     # ------------------------------------------------------------------
 
     def _normalize_storage_values(self) -> None:
-        """Normalize values and returns in storage using running mean/std.
+        """Update running stats and normalize values/returns for critic targets.
 
-        Mirrors HORA's normalize_value: update running stats from returns,
-        then normalize both values and returns in-place.
+        Called after GAE (which uses raw-scale values). Advantages are already
+        normalized by storage.compute_returns() and are NOT touched here.
         """
         storage = self.alg.storage
         returns_flat = storage.returns.flatten()
@@ -126,12 +161,11 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         self._value_running_var = m2 / total_count
         self._value_count = total_count
 
-        # Normalize in-place
+        # Normalize values and returns in-place (for critic targets).
+        # Do NOT recompute advantages -- they are already normalized.
         std = torch.sqrt(self._value_running_var + 1e-8)
         storage.values[:] = (storage.values - self._value_running_mean) / std
         storage.returns[:] = (storage.returns - self._value_running_mean) / std
-        # Recompute advantages from normalized values/returns
-        storage.advantages = storage.returns - storage.values
 
     # ------------------------------------------------------------------
     # Properties

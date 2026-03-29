@@ -199,14 +199,14 @@ class ActorCriticEncoder(nn.Module):
             if symmetric_critic:
                 num_critic_obs = policy_obs_dim + proprio_hist_dim
             else:
-                num_critic_obs = policy_obs_dim + privileged_dim
+                num_critic_obs = policy_obs_dim + proprio_hist_dim + privileged_dim
             self.num_critic_obs = num_critic_obs
             self.critic_obs_normalization = critic_obs_normalization
             self.critic_obs_normalizer = (
                 EmpiricalNormalization(num_critic_obs) if critic_obs_normalization else nn.Identity()
             )
             self.critic = MLP(num_critic_obs, 1, list(critic_hidden_dims), activation)
-            critic_type = "symmetric (o_t+hist)" if symmetric_critic else "asymmetric (o_t+p_t)"
+            critic_type = "symmetric (o_t+hist)" if symmetric_critic else "asymmetric (o_t+hist+p_t)"
             logger.info("Critic [%s]: %dD -> %s -> 1D", critic_type, num_critic_obs, critic_hidden_dims)
 
         # Action noise (Gaussian policy)
@@ -276,7 +276,7 @@ class ActorCriticEncoder(nn.Module):
     def _get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
         """Critic observation (separate mode).
 
-        Asymmetric (default): cat([o_t, p_t]) -- privileged info for accurate values.
+        Asymmetric (default): cat([o_t, hist, p_t]) -- all actor info + privileged.
         Symmetric: cat([o_t, hist]) -- same info as actor (minus z).
         """
         if self.symmetric_critic:
@@ -284,7 +284,11 @@ class ActorCriticEncoder(nn.Module):
             if self._proprio_hist_key is not None and self._proprio_hist_key in obs:
                 return torch.cat([o_t, obs[self._proprio_hist_key]], dim=-1)
             return o_t
-        return torch.cat([obs[self._policy_obs_key], obs[self._privileged_key]], dim=-1)
+        parts = [obs[self._policy_obs_key]]
+        if self._proprio_hist_key is not None and self._proprio_hist_key in obs:
+            parts.append(obs[self._proprio_hist_key])
+        parts.append(obs[self._privileged_key])
+        return torch.cat(parts, dim=-1)
 
     # --- Action distribution ---
 
