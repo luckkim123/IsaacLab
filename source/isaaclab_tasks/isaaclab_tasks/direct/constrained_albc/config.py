@@ -12,6 +12,8 @@ Registered tasks:
     Isaac-Constrained-ALBC-Encoder-v0:          TRPO + IPO + Encoder (production)
     Isaac-Constrained-ALBC-HardDR-HistOnly-v0:  History-only baseline (hard DR)
     Isaac-Constrained-ALBC-HardDR-FrozenEncoder-v0: Frozen encoder fine-tuning (hard DR)
+    Isaac-Constrained-ALBC-HardDR-SharedBackbone-v0: Shared backbone encoder (online E2E PPO)
+    Isaac-Constrained-ALBC-HardDR-AsymmetricEncoder-v0: Asymmetric critic with z (online E2E PPO)
 """
 
 from __future__ import annotations
@@ -430,3 +432,15 @@ class ALBCHardDRFrozenEncoderEnvCfg(ALBCEnvCfg):
     )
     doraemon: DoraemonCfg = DoraemonCfg(enable=False)
     constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=[])
+
+
+@configclass
+class ALBCHardDRAsymmetricEncoderEnvCfg(ALBCHardDRSharedBackboneEnvCfg):
+    """Hard DR + Asymmetric encoder (separate MLPs, critic sees z + p_t).
+
+    Same env settings as shared backbone (hard DR, hist 15*5=120D, no constraints).
+    Architecture differs only in the policy network: separate actor/critic MLPs
+    where critic gets cat([o_t, hist, z, p_t]) for encoder gradient from value loss.
+    """
+
+    pass

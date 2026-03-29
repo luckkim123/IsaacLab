@@ -358,7 +358,7 @@ class _SharedBackbonePolicyCfg(_EncoderPolicyCfg):
     """Shared backbone encoder policy (HORA-style, symmetric critic).
 
     Architecture:
-        Encoder: p_t(23D) -> static_minmax -> MLP[256,128,64] -> softsign -> z(13D)
+        Encoder: p_t(23D) -> static_minmax -> MLP[256,128,64] -> LayerNorm -> softsign -> z(13D)
         Backbone: cat([o_t_norm(14D), hist_norm(120D), z(13D)]) = 147D -> MLP[512,256,128]
         Action head: Linear(128, 2)
         Value head:  Linear(128, 1)
@@ -366,12 +366,17 @@ class _SharedBackbonePolicyCfg(_EncoderPolicyCfg):
     Critic is symmetric (uses z, not raw privileged obs) so value loss
     gradient flows through backbone into encoder. This replicates the
     offline encoder's value-prediction training signal in online PPO.
+
+    Pre-softsign LayerNorm prevents encoder weight growth from saturating
+    softsign activation. Without it, MLP output grows to |x|>10 causing
+    softsign gradient to vanish (1/(1+|x|)^2 < 0.01).
     """
 
     class_name: str = "ALBCActorCriticEncoder"
     shared_backbone: bool = True
     proprio_hist_dim: int = 120  # 15 steps * 8 features
     encoder_obs_normalization: bool = False  # using static min-max
+    encoder_output_norm: bool = True  # LayerNorm before softsign
     encoder_obs_lower: list[float] = _PRIV_OBS_LOWER
     encoder_obs_upper: list[float] = _PRIV_OBS_UPPER
 
@@ -403,3 +408,60 @@ class ALBCHardDRSharedBackboneRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     algorithm = _SharedBackboneAlgorithmCfg()
     policy = _SharedBackbonePolicyCfg()
+
+
+# =============================================================================
+# Hard DR: Asymmetric Encoder (Online E2E PPO, critic sees z + p_t)
+# =============================================================================
+
+
+@configclass
+class _AsymmetricEncoderPolicyCfg(_EncoderPolicyCfg):
+    """Asymmetric encoder: separate actor/critic, critic sees z + p_t.
+
+    Architecture:
+        Encoder: p_t(23D) -> static_minmax -> MLP[256,128,64] -> softsign -> z(13D)
+        Actor:   cat([o_t_norm(14D), hist_norm(120D), z(13D)]) = 147D -> MLP[256,128,64] -> 2D
+        Critic:  cat([o_t(14D), hist(120D), z(13D), p_t(23D)]) = 170D -> MLP[512,256,128] -> 1D
+
+    Critic receives BOTH z and raw privileged obs p_t. Value loss gradient
+    flows through z to encoder, providing value-prediction learning signal.
+    Test: does the critic ignore z when p_t is available (shortcut problem)?
+    """
+
+    class_name: str = "ALBCActorCriticEncoder"
+    shared_backbone: bool = False
+    critic_uses_z: bool = True
+    proprio_hist_dim: int = 120  # 15 steps * 8 features
+    encoder_obs_normalization: bool = False  # using static min-max
+    encoder_output_norm: bool = True  # LayerNorm before softsign
+    critic_obs_normalization: bool = False
+    encoder_obs_lower: list[float] = _PRIV_OBS_LOWER
+    encoder_obs_upper: list[float] = _PRIV_OBS_UPPER
+
+
+@configclass
+class ALBCHardDRAsymmetricEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Hard DR + Asymmetric encoder (online end-to-end PPO).
+
+    Separate actor/critic MLPs where critic sees cat([o_t, hist, z, p_t]).
+    Encoder gets gradient from BOTH actor (surrogate loss) and critic (value loss).
+
+    Tests the shortcut hypothesis: with p_t available, does the critic
+    learn to use z or ignore it in favor of the raw privileged obs?
+    Compare encoder gradient norms with shared backbone run.
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 500
+    save_interval = 50
+    experiment_name = "constrained_albc_hard_dr_asymmetric_encoder"
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged", "proprio_hist"],
+    }
+
+    algorithm = _SharedBackboneAlgorithmCfg()
+    policy = _AsymmetricEncoderPolicyCfg()

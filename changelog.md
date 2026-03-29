@@ -10,6 +10,97 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-03-30] Asymmetric Critic Test + Pre-Softsign LayerNorm
+
+### Context
+
+Two experiments to improve online encoder training:
+
+**Experiment 1: Asymmetric critic (critic sees z + p_t).**
+Tested whether critic receiving both z and raw privileged obs p_t would provide
+encoder gradient from value loss while using separate actor/critic MLPs.
+Result: **shortcut problem confirmed.** Critic immediately ignores z in favor of
+p_t (easier path to value prediction). z_std goes to ~1 instantly and stays
+constant -- encoder receives no meaningful gradient from either path. Actor also
+can't leverage z (chicken-and-egg: z is noise -> actor ignores z -> no gradient
+to shape z).
+
+**Experiment 2: Pre-softsign LayerNorm (shared backbone).**
+Root cause analysis of z saturation in original shared backbone run: encoder
+weight growth causes pre-softsign MLP output to explode (|x| mean: 0.44 at init
+-> 8.50 at iter 499). Softsign gradient = 1/(1+|x|)^2 vanishes (75% of outputs
+have gradient < 0.05 by iter 350), trapping z near boundaries.
+
+Added LayerNorm between encoder MLP output and softsign activation. LayerNorm
+normalizes output to ~N(0,1), keeping softsign in its responsive range regardless
+of weight magnitude.
+
+Result: z saturation eliminated. Encoder learns meaningful representations --
+Body Mass 12/13 active dims, Main Volume 10/13, CoG/CoB 10/13. However, noise_std
+drops too fast (entropy_coef=0.0, no min_std floor), causing premature exploration
+collapse. Final performance still worse than hist-only baseline.
+
+### Added
+- `config.py`: `ALBCHardDRAsymmetricEncoderEnvCfg` -- inherits SharedBackbone env
+- `agents/rsl_rl_ppo_cfg.py`: `_AsymmetricEncoderPolicyCfg` (critic_uses_z=True,
+  shared_backbone=False, critic_obs_normalization=False),
+  `ALBCHardDRAsymmetricEncoderRunnerCfg`
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-HardDR-AsymmetricEncoder-v0`
+
+### Changed
+- `encoder/actor_critic_encoder.py`: Added `critic_uses_z` param -- when True,
+  `_get_critic_obs()` includes z via `_encode(obs)`, making critic input
+  cat([o_t, hist, z, p_t]). Added `encoder_output_norm` param -- when True,
+  inserts `nn.LayerNorm(latent_dim)` between encoder MLP and softsign activation.
+  Updated `_encode()` flow: MLP -> LayerNorm -> softsign.
+- `agents/rsl_rl_ppo_cfg.py`: `_SharedBackbonePolicyCfg` now sets
+  `encoder_output_norm: bool = True`. Both shared backbone and asymmetric configs
+  use LayerNorm.
+- `scripts/analysis/encoder_z_sweep.py`: Detects `_encoder_output_norm` in
+  checkpoint and includes LayerNorm in reconstructed encoder Sequential.
+  `build_encoder_mlp()` gains `output_norm` parameter.
+
+### Experimental Results
+
+**Shared Backbone + LayerNorm (500 iters) vs Hist-Only (500 iters):**
+
+| Metric | Shared BB + LN | Hist-Only | Delta |
+|--------|:--------------:|:---------:|:-----:|
+| Roll | 9.96 deg | 8.74 deg | +1.22 |
+| Pitch | 9.74 deg | 6.54 deg | +3.20 |
+| Reward | -18.22 | -10.75 | -7.47 |
+| noise_std | 0.15 | 0.15 | 0 |
+| z_std | 0.56 | -- | -- |
+
+**Encoder z sweep comparison (shared backbone, iter 499):**
+
+| Condition | |z|>0.9 | Softsign grad mean | Body Mass active | Main Vol active |
+|-----------|:------:|:-----------------:|:----------------:|:--------------:|
+| No LayerNorm | 44% | 0.063 | 12/13 (saturated) | 10/13 (saturated) |
+| With LayerNorm | ~0% | ~0.25 (healthy) | 12/13 (real variation) | 10/13 (real variation) |
+
+**Root cause data (no LayerNorm, model_0 vs model_499):**
+
+| Metric | Init (iter 0) | Trained (iter 499) |
+|--------|:------------:|:-----------------:|
+| Pre-softsign |x| mean | 0.44 | 8.50 |
+| |x| > 3 fraction | 0% | 80% |
+| Softsign gradient mean | 0.548 | 0.063 |
+| Encoder weight std (hidden) | 0.04-0.07 | 0.12-0.13 |
+
+### Notes
+- Asymmetric critic (z + p_t) conclusively disproves the approach: shortcut problem
+  is real and immediate. Critic ignores z when p_t is available.
+- LayerNorm solves encoder saturation but doesn't solve policy performance.
+  Performance gap vs hist-only is primarily from noise_std collapse + 120D vs 240D
+  history gap.
+- Next steps: (1) add entropy_coef=0.001 to maintain exploration, (2) try smaller
+  encoder [128, 64] to reduce parameter count and redundancy.
+- encoder_z_sweep.py verified to produce identical output as training forward pass
+  (max diff = 0.00e+00).
+
+---
+
 ## [2026-03-30] Shared Backbone Encoder: Online End-to-End PPO
 
 ### Context

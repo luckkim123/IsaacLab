@@ -13,7 +13,12 @@ Two modes of operation:
 Architecture (separate mode, HORA-style normalization):
     Encoder: p_t (privileged) -> normalize -> MLP -> softsign -> z (latent)
     Actor:   cat([normalize(o_t), z]) -> MLP -> actions (Gaussian policy)
-    Critic:  cat([o_t, hist, p_t]) -> MLP -> value (asymmetric)
+    Critic:  cat([o_t, hist, p_t]) -> MLP -> value (asymmetric, no encoder gradient)
+
+    critic_uses_z=True variant (asymmetric with encoder gradient):
+    Critic:  cat([o_t, hist, z, p_t]) -> MLP -> value
+    Value loss gradient flows through z to encoder, providing learning signal
+    from both actor (surrogate loss) and critic (value loss).
 
     Encoder input normalization modes:
       - Static min-max (HORA-style): (2*x - upper - lower) / (upper - lower) -> [-1, 1]
@@ -77,6 +82,7 @@ class ActorCriticEncoder(nn.Module):
         encoder_obs_normalization: bool = False,
         encoder_obs_lower: list[float] | None = None,
         encoder_obs_upper: list[float] | None = None,
+        encoder_output_norm: bool = False,
         # Actor-Critic
         actor_obs_normalization: bool = False,
         critic_obs_normalization: bool = False,
@@ -86,6 +92,8 @@ class ActorCriticEncoder(nn.Module):
         init_noise_std: float = 1.0,
         # Shared backbone (HORA-style): actor+critic share MLP, value gradient to encoder
         shared_backbone: bool = False,
+        # Asymmetric critic with z: cat([o_t, hist, z, p_t]), value gradient to encoder
+        critic_uses_z: bool = False,
         **kwargs: Any,
     ) -> None:
         if kwargs:
@@ -99,6 +107,7 @@ class ActorCriticEncoder(nn.Module):
         self.encoder_latent_dim = encoder_latent_dim
         self.proprio_hist_dim = proprio_hist_dim
         self.shared_backbone_mode = shared_backbone
+        self._critic_uses_z = critic_uses_z
 
         # Parse obs_groups: require [policy_obs, privileged, (optional) proprio_hist]
         policy_groups = obs_groups["policy"]
@@ -139,7 +148,14 @@ class ActorCriticEncoder(nn.Module):
             )
             logger.info("Encoder normalization: %s", "EmpiricalNorm" if encoder_obs_normalization else "none")
         self.encoder = MLP(privileged_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
-        logger.info("Encoder: %dD -> %s -> softsign -> %dD", privileged_dim, encoder_hidden_dims, encoder_latent_dim)
+        # Pre-softsign LayerNorm: prevents weight growth from causing activation saturation.
+        # LayerNorm normalizes MLP output to ~N(0,1), keeping softsign in its responsive range.
+        self._encoder_output_norm = nn.LayerNorm(encoder_latent_dim) if encoder_output_norm else nn.Identity()
+        norm_str = " -> LayerNorm" if encoder_output_norm else ""
+        logger.info(
+            "Encoder: %dD -> %s%s -> softsign -> %dD",
+            privileged_dim, encoder_hidden_dims, norm_str, encoder_latent_dim,
+        )
 
         # Actor input dimension (shared between modes)
         num_actor_obs = policy_obs_dim + proprio_hist_dim + encoder_latent_dim
@@ -188,15 +204,19 @@ class ActorCriticEncoder(nn.Module):
                 num_actions,
             )
 
-            # Asymmetric critic: cat([o_t, hist, p_t])
+            # Asymmetric critic
             num_critic_obs = policy_obs_dim + proprio_hist_dim + privileged_dim
+            if critic_uses_z:
+                # cat([o_t, hist, z, p_t]): value gradient flows to encoder via z
+                num_critic_obs += encoder_latent_dim
             self.num_critic_obs = num_critic_obs
             self.critic_obs_normalization = critic_obs_normalization
             self.critic_obs_normalizer = (
                 EmpiricalNormalization(num_critic_obs) if critic_obs_normalization else nn.Identity()
             )
             self.critic = MLP(num_critic_obs, 1, list(critic_hidden_dims), activation)
-            logger.info("Critic [asymmetric]: %dD -> %s -> 1D", num_critic_obs, critic_hidden_dims)
+            critic_desc = "asymmetric+z" if critic_uses_z else "asymmetric"
+            logger.info("Critic [%s]: %dD -> %s -> 1D", critic_desc, num_critic_obs, critic_hidden_dims)
 
         # Action noise (Gaussian policy, log_std parameterization)
         self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
@@ -228,14 +248,14 @@ class ActorCriticEncoder(nn.Module):
     # --- Observation processing ---
 
     def _encode(self, obs: TensorDict) -> torch.Tensor:
-        """Encode privileged info into latent z: p_t -> normalize -> MLP -> softsign -> z in (-1, 1)."""
+        """Encode privileged info into latent z: p_t -> normalize -> MLP -> [LayerNorm] -> softsign -> z."""
         p_t = obs[self._privileged_key]
         if self._has_static_enc_norm:
             # Static min-max: [lower, upper] -> [-1, 1] (HORA-style, deterministic)
             p_t = (2.0 * p_t - self._enc_obs_upper - self._enc_obs_lower) / (self._enc_obs_upper - self._enc_obs_lower)
         else:
             p_t = self.encoder_obs_normalizer(p_t)
-        return F.softsign(self.encoder(p_t))
+        return F.softsign(self._encoder_output_norm(self.encoder(p_t)))
 
     def _get_actor_obs(self, obs: TensorDict) -> torch.Tensor:
         """Actor observation: cat([normalize(o_t, hist), z_raw]).
@@ -255,10 +275,16 @@ class ActorCriticEncoder(nn.Module):
         return torch.cat([obs_normed, z], dim=-1)
 
     def _get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
-        """Critic observation (separate mode, asymmetric): cat([o_t, hist, p_t])."""
+        """Critic observation (separate mode).
+
+        critic_uses_z=False: cat([o_t, hist, p_t]) -- no encoder gradient from value loss.
+        critic_uses_z=True:  cat([o_t, hist, z, p_t]) -- value gradient flows to encoder via z.
+        """
         parts = [obs[self._policy_obs_key]]
         if self._proprio_hist_key is not None and self._proprio_hist_key in obs:
             parts.append(obs[self._proprio_hist_key])
+        if self._critic_uses_z:
+            parts.append(self._encode(obs))
         parts.append(obs[self._privileged_key])
         return torch.cat(parts, dim=-1)
 
@@ -294,7 +320,8 @@ class ActorCriticEncoder(nn.Module):
         """Evaluate value function.
 
         In shared backbone mode, value gradient flows through encoder (HORA-style).
-        In separate mode, critic uses privileged info directly (no encoder gradient).
+        In separate mode with critic_uses_z, value gradient flows to encoder via z.
+        In separate mode without critic_uses_z, critic uses privileged info only.
         """
         if self.shared_backbone_mode:
             # Backbone uses cat([o_t, z]) -- encoder gradient from value loss
