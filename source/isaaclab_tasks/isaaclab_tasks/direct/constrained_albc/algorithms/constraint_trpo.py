@@ -112,6 +112,15 @@ class ConstraintTRPO:
         self._last_mean_entropy = 0.0
         self._last_surrogate_loss = 0.0
         self._last_encoder_grad_norm = 0.0
+        # Gradient decomposition: vanilla vs natural gradient for encoder
+        self._last_enc_vanilla_norm = 0.0
+        self._last_enc_natgrad_norm = 0.0
+        self._last_enc_step_norm = 0.0
+        self._last_actor_vanilla_norm = 0.0
+        self._last_actor_natgrad_norm = 0.0
+        self._last_actor_step_norm = 0.0
+        self._last_enc_cos_vanilla_natgrad = 0.0
+        self._last_enc_cos_vanilla_step = 0.0
 
         if cost_gamma >= 1.0:
             raise ValueError(f"cost_gamma must be < 1.0, got {cost_gamma}")
@@ -505,6 +514,37 @@ class ConstraintTRPO:
         if not torch.isfinite(step_dir).all():
             logger.warning("TRPO: step_dir contains NaN/Inf, skipping")
             return False
+
+        # --- Gradient decomposition: encoder vs actor ---
+        if self._encoder_param_count > 0:
+            s, e = self._encoder_param_offset, self._encoder_param_offset + self._encoder_param_count
+            g_enc = g[s:e]
+            g_actor = torch.cat([g[:s], g[e:]])
+            ng_enc = nat_grad[s:e]
+            ng_actor = torch.cat([nat_grad[:s], nat_grad[e:]])
+            sd_enc = step_dir[s:e]
+            sd_actor = torch.cat([step_dir[:s], step_dir[e:]])
+
+            self._last_enc_vanilla_norm = g_enc.norm().item()
+            self._last_enc_natgrad_norm = ng_enc.norm().item()
+            self._last_enc_step_norm = sd_enc.norm().item()
+            self._last_actor_vanilla_norm = g_actor.norm().item()
+            self._last_actor_natgrad_norm = ng_actor.norm().item()
+            self._last_actor_step_norm = sd_actor.norm().item()
+
+            # Cosine similarity: vanilla vs natural gradient (encoder)
+            # < 0 means FIM rotates encoder gradient direction
+            g_enc_norm = g_enc.norm()
+            ng_enc_norm = ng_enc.norm()
+            sd_enc_norm = sd_enc.norm()
+            if g_enc_norm > 1e-10 and ng_enc_norm > 1e-10:
+                self._last_enc_cos_vanilla_natgrad = (g_enc.dot(ng_enc) / (g_enc_norm * ng_enc_norm)).item()
+            else:
+                self._last_enc_cos_vanilla_natgrad = 0.0
+            if g_enc_norm > 1e-10 and sd_enc_norm > 1e-10:
+                self._last_enc_cos_vanilla_step = (g_enc.dot(sd_enc) / (g_enc_norm * sd_enc_norm)).item()
+            else:
+                self._last_enc_cos_vanilla_step = 0.0
 
         with torch.no_grad():
             old_loss = surrogate_fn()

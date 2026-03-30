@@ -294,4 +294,14 @@ class ConstraintEncoderRunner(OnPolicyRunner):
         metrics["Policy/entropy"] = alg._last_mean_entropy
         metrics["Policy/encoder_grad_norm"] = alg._last_encoder_grad_norm
 
+        # Gradient decomposition: vanilla vs natural gradient
+        metrics["GradDecomp/enc_vanilla_norm"] = alg._last_enc_vanilla_norm
+        metrics["GradDecomp/enc_natgrad_norm"] = alg._last_enc_natgrad_norm
+        metrics["GradDecomp/enc_step_norm"] = alg._last_enc_step_norm
+        metrics["GradDecomp/actor_vanilla_norm"] = alg._last_actor_vanilla_norm
+        metrics["GradDecomp/actor_natgrad_norm"] = alg._last_actor_natgrad_norm
+        metrics["GradDecomp/actor_step_norm"] = alg._last_actor_step_norm
+        metrics["GradDecomp/enc_cos_vanilla_natgrad"] = alg._last_enc_cos_vanilla_natgrad
+        metrics["GradDecomp/enc_cos_vanilla_step"] = alg._last_enc_cos_vanilla_step
+
         flush_metrics(self.writer, metrics, iteration, self.logger_type)

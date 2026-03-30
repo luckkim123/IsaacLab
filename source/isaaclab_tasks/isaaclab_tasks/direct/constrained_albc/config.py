@@ -36,6 +36,7 @@ from isaaclab_assets.robots.uuv import (
     HeroAgentHydrodynamicsCfg,
     HydrodynamicsCfg,
     OceanCurrentCfg,
+    ThrusterCfg,
 )
 
 from .doraemon import DoraemonCfg
@@ -57,6 +58,33 @@ _STANDARD_CONSTRAINT_TERMS: list[ConstraintTermCfg] = [
     ConstraintTermCfg(func=velocity_limit_cost, params={"limit_rad_per_s": 4.189}, budget=0.02, name="velocity"),
     ConstraintTermCfg(func=yaw_velocity_cost, budget=0.40, name="yaw_vel"),
 ]
+
+
+@configclass
+class HeroAgentThrusterCfg(ThrusterCfg):
+    """Hero Agent 6-thruster configuration.
+
+    TAM from hero_agent_control/config/TAM.yaml (verified against actuators.xacro).
+    Thruster parameters use BlueROV T200 as baseline; DR covers real-robot differences.
+
+    Layout:
+        T0-T3: Horizontal (45-degree vectored) for surge, sway, yaw
+        T4-T5: Vertical for heave, pitch
+    """
+
+    num_thrusters: int = 6
+    max_thrust: float = 50.0
+    thrust_coefficient: float = 40.0
+    time_constant_up: float = 0.1
+    time_constant_down: float = 0.05
+    allocation_matrix: tuple[tuple[float, ...], ...] = (
+        (0.707, -0.707, 0.707, -0.707, 0.0, 0.0),  # Fx surge
+        (-0.707, -0.707, 0.707, 0.707, 0.0, 0.0),  # Fy sway
+        (0.0, 0.0, 0.0, 0.0, 1.0, 1.0),  # Fz heave
+        (0.007, 0.007, -0.007, -0.007, 0.0, 0.0),  # Mx roll
+        (0.007, -0.007, 0.007, -0.007, 0.145, -0.145),  # My pitch
+        (0.144, 0.144, 0.144, 0.144, 0.0, 0.0),  # Mz yaw
+    )
 
 
 @configclass
@@ -132,6 +160,12 @@ class DomainRandomizationCfg:
 
     # Physical constant: CoG-to-ABPC vertical offset for buoy moment calculation.
     buoy_moment_arm: float = 0.180  # m (matches TDCControllerCfg.h)
+
+    # ==========================================================================
+    # Thruster Randomization
+    # ==========================================================================
+    thrust_coefficient_scale: tuple[float, float] = (0.8, 1.2)
+    time_constant_scale: tuple[float, float] = (0.8, 1.2)
 
 
 @configclass
@@ -210,6 +244,8 @@ class ALBCEnvCfg(DirectRLEnvCfg):
         max_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         noise_scale=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
     )
+    thrusters: HeroAgentThrusterCfg | None = None
+    """Thruster configuration. None = ALBC arm only (backward compatible)."""
 
     # ==========================================================================
     # ALBC Joint Control

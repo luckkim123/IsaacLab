@@ -10,6 +10,55 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-03-30] Thruster Integration (Stage 1) + TRPO Gradient Decomposition
+
+### Context
+
+Added 6 thrusters to the Hero Agent UUV simulator, matching the real robot's actuator
+layout (4 horizontal vectored + 2 vertical). Motivation: the 2D ALBC-only action space
+is too simple -- adding thrusters enables position/velocity/heading control and expands
+action space to 8D, which also improves KL budget distribution for RL (sigma occupancy
+drops from ~33% to ~8%).
+
+Thruster positions and TAM (Thrust Allocation Matrix) derived from the real robot's
+`hero_agent_control/config/TAM.yaml` and `actuators.xacro`, verified against the URDF
+geometry. Thruster parameters use BlueROV T200 as baseline (max_thrust=50N, coeff=40,
+time_constant_up=0.1s) with DR covering real-robot differences.
+
+Also added TRPO gradient decomposition logging to diagnose why encoder sensitivity
+decreases over training (iter 550->750: most DR parameters lost 10-40% sensitivity).
+Hypothesis: TRPO natural gradient actively reduces encoder sensitivity because the
+policy finds a "robust average" strategy. The FIM may rotate the encoder gradient
+direction. New `GradDecomp/` metrics will test this in the next training run.
+
+Thruster visualization test confirmed correct force directions for all 6 DOF
+(surge, sway, heave, roll, pitch, yaw) with minor position offsets acceptable
+for DR coverage.
+
+### Added
+- `config.py`: `HeroAgentThrusterCfg` with 6-thruster TAM from real robot, BlueROV T200 parameters
+- `config.py`: `ALBCEnvCfg.thrusters` field (default None = backward compatible, no thrusters)
+- `config.py`: `DomainRandomizationCfg.thrust_coefficient_scale` and `time_constant_scale` for thruster DR
+- `albc_env.py`: `_init_thrusters()` method using existing `ThrusterModel` from `isaaclab_tasks.models`
+- `constraint_trpo.py`: 8 new `GradDecomp/` monitoring metrics -- vanilla/natural gradient norms for encoder vs actor, cosine similarity between vanilla and natural gradient (encoder), cosine similarity between vanilla gradient and step direction (encoder)
+- `constraint_encoder_runner.py`: TB/WandB logging for `GradDecomp/` metrics
+- `scripts/demos/test_hero_thruster.py`: Standalone thruster verification script with two modes: `viz` (static arrow visualization of thruster layout) and `test` (directional force test, 5s per direction)
+
+### Changed
+- `albc_env.py`: `_pre_physics_step()` now splits actions into arm (first 2D) and thruster (remaining 6D), applies thruster dynamics via `ThrusterModel.apply_dynamics()`
+- `albc_env.py`: `_apply_action()` pre-combines hydro + thruster forces before single `set_forces_and_torques()` call (critical: `set` overwrites, cannot call twice on same body)
+- `albc_env.py`: `_reset_physics()` resets thruster state and randomizes thruster parameters when DR enabled
+
+### Notes
+- Stage 1 (this session): thruster forces working, visualization confirmed, backward compatible
+- Stage 2 (next): expand observation space (position, velocity, heading target), reward structure, constraints, encoder privileged obs for thruster DR parameters
+- Target task: track xyzrpy + vxvyvz in body frame, angular velocity targets always 0
+- URDF dimensions differ slightly between Isaac Lab (9.18kg, r=0.09m) and reference (8.6kg, r=0.0825m) -- TAM is still valid since it encodes thruster geometry, and DR covers parameter differences
+- `GradDecomp/enc_cos_vanilla_natgrad < 0` would confirm FIM rotates encoder gradient (TRPO actively harms encoding)
+- Encoder z sweep @750: sensitivity declined from @550 peak (most params -10 to -40%), suggesting the current TRPO co-training degrades encoding after noise_std drops sufficiently
+
+---
+
 ## [2026-03-30] TRPO + IPO + Asymmetric Encoder: Integration and Sigma Decoupling
 
 ### Context

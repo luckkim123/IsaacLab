@@ -99,6 +99,7 @@ class ALBCEnv(DirectRLEnv):
         self._init_joints()
         self._init_task_and_rewards()
         self._init_state_buffers()
+        self._init_thrusters()
         self._init_doraemon()
 
         # Cache constraint config (avoids getattr on every _get_rewards call)
@@ -234,6 +235,20 @@ class ALBCEnv(DirectRLEnv):
         self._buoy_hydro_forces = torch.zeros(self.num_envs, 3, device=self.device)
         self._buoy_hydro_torques = torch.zeros(self.num_envs, 3, device=self.device)
 
+    def _init_thrusters(self) -> None:
+        """Initialize thruster model if configured (None = ALBC arm only)."""
+        if self.cfg.thrusters is None:
+            self._thruster = None
+            return
+        from isaaclab_tasks.models import ThrusterModel
+
+        self._thruster = ThrusterModel(
+            cfg=self.cfg.thrusters,
+            num_envs=self.num_envs,
+            device=self.device,
+            enable_randomization=self.cfg.randomization.enable,
+        )
+
     def _init_doraemon(self) -> None:
         """Initialize DORAEMON adaptive DR scheduler if enabled."""
         doraemon_cfg = getattr(self.cfg, "doraemon", None)
@@ -358,19 +373,24 @@ class ALBCEnv(DirectRLEnv):
         self._proprio_hist[ids, -1] = new_entry[ids]
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        """Process actions: compute joint PD targets from policy output.
+        """Process actions: compute joint PD targets and thruster dynamics.
 
         Called once per env step (50Hz). With decimation=40, the subsequent
         _apply_action() runs 40 times (2000Hz PD) tracking these targets.
 
         Args:
-            actions: Action commands [-1, 1]. Shape: (num_envs, 2).
+            actions: Action commands [-1, 1]. Shape: (num_envs, action_space).
+                     First 2 dims = arm delta, remaining = thruster commands.
         """
-        self._update_action_buffers(actions)
+        self._update_action_buffers(actions, obs_action_slice=slice(0, 2))
         self._update_proprio_hist()
 
+        arm_actions = self._actions[:, :2]
         if self._control_step_counter % self.cfg.control_decimation == 0:
-            self._apply_joint_pd_action(self._actions)
+            self._apply_joint_pd_action(arm_actions)
+
+        if self._thruster is not None:
+            self._thruster.apply_dynamics(self._actions[:, 2:], self.physics_dt)
 
     def _apply_joint_pd_action(self, actions: torch.Tensor) -> None:
         """Accumulate delta joint targets: q_des += delta_scale * a_t.
@@ -408,10 +428,19 @@ class ALBCEnv(DirectRLEnv):
             root_ang_vel_w=self._robot.data.root_ang_vel_w,
             root_quat_w=self._robot.data.root_quat_w,
         )
+
+        # Combine hydro + thruster forces on main body (set overwrites, must pre-combine)
+        main_forces = self._hydro_forces
+        main_torques = self._hydro_torques
+        if self._thruster is not None:
+            thrust_f, thrust_t = self._thruster.compute_wrench()
+            main_forces = main_forces + thrust_f
+            main_torques = main_torques + thrust_t
+
         self._robot.permanent_wrench_composer.set_forces_and_torques(
             body_ids=self._body_id,
-            forces=self._hydro_forces.unsqueeze(1),
-            torques=self._hydro_torques.unsqueeze(1),
+            forces=main_forces.unsqueeze(1),
+            torques=main_torques.unsqueeze(1),
         )
 
         # Buoy hydrodynamics
@@ -695,9 +724,11 @@ class ALBCEnv(DirectRLEnv):
             self._proprio_step_counter[env_ids] = 0
 
     def _reset_physics(self, env_ids: torch.Tensor) -> None:
-        """Reset hydrodynamics, payload, and apply domain randomization."""
+        """Reset hydrodynamics, thrusters, payload, and apply domain randomization."""
         self._hydro.reset(env_ids)
         self._buoy_hydro.reset(env_ids)
+        if self._thruster is not None:
+            self._thruster.reset(env_ids)
 
         self._payload_mass[env_ids] = self.cfg.payload_mass
         offset = torch.tensor(self.cfg.payload_attachment_offset, device=self.device, dtype=torch.float32)
@@ -734,6 +765,13 @@ class ALBCEnv(DirectRLEnv):
         has_ocean_current = any(v > 0 for v in self.cfg.ocean_current.max_velocity)
         if has_ocean_current:
             randomize_ocean_current(env=self, env_ids=env_ids)
+
+        if self._thruster is not None:
+            self._thruster.randomize_parameters(
+                env_ids=env_ids,
+                thrust_coeff_scale=rand_cfg.thrust_coefficient_scale,
+                time_constant_scale=rand_cfg.time_constant_scale,
+            )
 
     def _reset_task_and_state(self, env_ids: torch.Tensor) -> None:
         """Reset attitude targets, robot pose, joint DR, and initialize error buffers."""
