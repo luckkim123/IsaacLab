@@ -274,6 +274,47 @@ _PRIV_OBS_UPPER: list[float] = [
     1030.0,  # [22] water_density: DR max=1025
 ]
 
+# 15D reduced encoder input: selected by z-sweep sensitivity analysis.
+# Indices into 23D: [0,1,2,3, 10,11,12,13, 14,15, 16,17,18, 20,21]
+# Dropped (8D): buoy CoG/CoB Z, main/buoy Ixx/Iyy, payload CoG Z, water density
+_ENC_OBS_INDICES_15D: list[int] = [0, 1, 2, 3, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 21]
+
+_ENC_OBS_15D_LOWER: list[float] = [
+    0.007,  # [0] main volume
+    -0.08,  # [1] main CoG_z
+    -0.03,  # [2] main CoB_z
+    0.002,  # [3] buoy volume
+    0.10,  # [4] lin_damp roll
+    0.10,  # [5] lin_damp pitch
+    0.3,  # [6] quad_damp roll
+    0.3,  # [7] quad_damp pitch
+    7.0,  # [8] body_mass
+    5.0,  # [9] added_mass_surge
+    -0.1,  # [10] payload_mass
+    -0.12,  # [11] payload_cog_x
+    -0.12,  # [12] payload_cog_y
+    30.0,  # [13] joint_stiffness
+    0.3,  # [14] joint_damping
+]
+
+_ENC_OBS_15D_UPPER: list[float] = [
+    0.011,  # [0] main volume
+    -0.02,  # [1] main CoG_z
+    0.03,  # [2] main CoB_z
+    0.0035,  # [3] buoy volume
+    0.50,  # [4] lin_damp roll
+    0.50,  # [5] lin_damp pitch
+    1.8,  # [6] quad_damp roll
+    1.8,  # [7] quad_damp pitch
+    12.0,  # [8] body_mass
+    11.0,  # [9] added_mass_surge
+    1.2,  # [10] payload_mass
+    0.12,  # [11] payload_cog_x
+    0.12,  # [12] payload_cog_y
+    130.0,  # [13] joint_stiffness
+    6.0,  # [14] joint_damping
+]
+
 
 @configclass
 class _FrozenEncoderAlgorithmCfg(_PPOHistOnlyAlgorithmCfg):
@@ -419,25 +460,26 @@ class ALBCHardDRSharedBackboneRunnerCfg(RslRlOnPolicyRunnerCfg):
 class _AsymmetricEncoderPolicyCfg(_EncoderPolicyCfg):
     """Asymmetric encoder: separate actor/critic, critic sees z + p_t.
 
-    Architecture:
-        Encoder: p_t(23D) -> static_minmax -> MLP[256,128,64] -> softsign -> z(13D)
-        Actor:   cat([o_t_norm(14D), hist_norm(120D), z(13D)]) = 147D -> MLP[256,128,64] -> 2D
-        Critic:  cat([o_t(14D), hist(120D), z(13D), p_t(23D)]) = 170D -> MLP[512,256,128] -> 1D
+    Architecture (15D->9D reduced encoder):
+        Encoder: p_t(23D) -> select(15D) -> static_minmax -> MLP[256,128,64] -> LN -> softsign -> z(9D)
+        Actor:   cat([o_t_norm(14D), hist_norm(120D), z(9D)]) = 143D -> MLP[256,128,64] -> 2D
+        Critic:  cat([o_t(14D), hist(120D), z(9D), p_t(23D)]) = 166D -> MLP[512,256,128] -> 1D
 
-    Critic receives BOTH z and raw privileged obs p_t. Value loss gradient
-    flows through z to encoder, providing value-prediction learning signal.
-    Test: does the critic ignore z when p_t is available (shortcut problem)?
+    15D input selected by z-sweep sensitivity analysis: dropped 8 dims with
+    near-zero encoder response (buoy CoG/CoB, inertias, payload CoG Z, water density).
     """
 
     class_name: str = "ALBCActorCriticEncoder"
     shared_backbone: bool = False
     critic_uses_z: bool = True
+    encoder_latent_dim: int = 9
     proprio_hist_dim: int = 120  # 15 steps * 8 features
     encoder_obs_normalization: bool = False  # using static min-max
     encoder_output_norm: bool = True  # LayerNorm before softsign
     critic_obs_normalization: bool = False
-    encoder_obs_lower: list[float] = _PRIV_OBS_LOWER
-    encoder_obs_upper: list[float] = _PRIV_OBS_UPPER
+    encoder_obs_indices: list[int] = _ENC_OBS_INDICES_15D
+    encoder_obs_lower: list[float] = _ENC_OBS_15D_LOWER
+    encoder_obs_upper: list[float] = _ENC_OBS_15D_UPPER
 
 
 @configclass

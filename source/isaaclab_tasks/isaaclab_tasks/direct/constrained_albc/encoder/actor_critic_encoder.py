@@ -83,6 +83,7 @@ class ActorCriticEncoder(nn.Module):
         encoder_obs_lower: list[float] | None = None,
         encoder_obs_upper: list[float] | None = None,
         encoder_output_norm: bool = False,
+        encoder_obs_indices: list[int] | None = None,
         # Actor-Critic
         actor_obs_normalization: bool = False,
         critic_obs_normalization: bool = False,
@@ -126,15 +127,28 @@ class ActorCriticEncoder(nn.Module):
         if obs[self._privileged_key].shape[-1] != privileged_dim:
             raise ValueError(f"Privileged dim {obs[self._privileged_key].shape[-1]} != expected {privileged_dim}")
 
-        # --- Encoder: p_t -> normalize -> MLP -> softsign -> z ---
+        # --- Encoder input selection: optionally use a subset of privileged dims ---
+        if encoder_obs_indices is not None:
+            self.register_buffer("_enc_obs_indices", torch.tensor(encoder_obs_indices, dtype=torch.long))
+            encoder_input_dim = len(encoder_obs_indices)
+            logger.info(
+                "Encoder input selection: %d/%d dims %s",
+                encoder_input_dim, privileged_dim, encoder_obs_indices,
+            )
+        else:
+            self._enc_obs_indices = None
+            encoder_input_dim = privileged_dim
+
+        # --- Encoder: p_t -> [select] -> normalize -> MLP -> softsign -> z ---
         self._has_static_enc_norm = encoder_obs_lower is not None and encoder_obs_upper is not None
         if self._has_static_enc_norm:
             # Static min-max normalization (HORA-style): deterministic, no running stats
             lower = torch.tensor(encoder_obs_lower, dtype=torch.float32)
             upper = torch.tensor(encoder_obs_upper, dtype=torch.float32)
-            if lower.shape[0] != privileged_dim or upper.shape[0] != privileged_dim:
+            if lower.shape[0] != encoder_input_dim or upper.shape[0] != encoder_input_dim:
                 raise ValueError(
-                    f"encoder_obs_lower/upper dim {lower.shape[0]}/{upper.shape[0]} != privileged_dim {privileged_dim}"
+                    f"encoder_obs_lower/upper dim {lower.shape[0]}/{upper.shape[0]} "
+                    f"!= encoder_input_dim {encoder_input_dim}"
                 )
             self.register_buffer("_enc_obs_lower", lower)
             self.register_buffer("_enc_obs_upper", upper)
@@ -144,10 +158,10 @@ class ActorCriticEncoder(nn.Module):
         else:
             self.encoder_obs_normalization = encoder_obs_normalization
             self.encoder_obs_normalizer = (
-                EmpiricalNormalization(privileged_dim) if encoder_obs_normalization else nn.Identity()
+                EmpiricalNormalization(encoder_input_dim) if encoder_obs_normalization else nn.Identity()
             )
             logger.info("Encoder normalization: %s", "EmpiricalNorm" if encoder_obs_normalization else "none")
-        self.encoder = MLP(privileged_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
+        self.encoder = MLP(encoder_input_dim, encoder_latent_dim, list(encoder_hidden_dims), encoder_activation)
         # Pre-softsign LayerNorm: prevents weight growth from causing activation saturation.
         # LayerNorm normalizes MLP output to ~N(0,1), keeping softsign in its responsive range.
         self._encoder_output_norm = nn.LayerNorm(encoder_latent_dim) if encoder_output_norm else nn.Identity()
@@ -248,8 +262,10 @@ class ActorCriticEncoder(nn.Module):
     # --- Observation processing ---
 
     def _encode(self, obs: TensorDict) -> torch.Tensor:
-        """Encode privileged info into latent z: p_t -> normalize -> MLP -> [LayerNorm] -> softsign -> z."""
+        """Encode privileged info into latent z: p_t -> [select] -> normalize -> MLP -> [LayerNorm] -> softsign -> z."""
         p_t = obs[self._privileged_key]
+        if self._enc_obs_indices is not None:
+            p_t = p_t[:, self._enc_obs_indices]
         if self._has_static_enc_norm:
             # Static min-max: [lower, upper] -> [-1, 1] (HORA-style, deterministic)
             p_t = (2.0 * p_t - self._enc_obs_upper - self._enc_obs_lower) / (self._enc_obs_upper - self._enc_obs_lower)

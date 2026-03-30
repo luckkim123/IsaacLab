@@ -438,9 +438,11 @@ class ALBCHardDRFrozenEncoderEnvCfg(ALBCEnvCfg):
 class ALBCHardDRAsymmetricEncoderEnvCfg(ALBCHardDRSharedBackboneEnvCfg):
     """Hard DR + Asymmetric encoder (separate MLPs, critic sees z + p_t).
 
-    Same env settings as shared backbone (hard DR, hist 15*5=120D, no constraints).
-    Architecture differs only in the policy network: separate actor/critic MLPs
-    where critic gets cat([o_t, hist, z, p_t]) for encoder gradient from value loss.
+    Same env settings as shared backbone but WITHOUT ocean current.
+    Reduced encoder input (15D from 23D) focuses on physically meaningful params.
     """
 
-    pass
+    ocean_current: OceanCurrentCfg = OceanCurrentCfg(
+        max_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        noise_scale=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    )

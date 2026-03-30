@@ -117,9 +117,92 @@ Main CoG Z 8/13 (max 0.90), Quad Damp Roll 3/13 (max 0.47), Water Density 2/13
 - Both encoder architectures (shared BB, asymmetric) learn encoder representations
   but neither beats hist-only. Common bottleneck: noise_std collapse (entropy_coef=0,
   no min_std floor).
-- Next steps: (1) entropy_coef=0.001, (2) encoder [128, 64] (2 hidden layers).
 - encoder_z_sweep.py verified to produce identical output as training forward pass
   (max diff = 0.00e+00).
+
+---
+
+## [2026-03-30] Encoder Input Reduction + Hyperparameter Ablations
+
+### Context
+
+Continued encoder experiments from previous session. Three ablations tested on
+the asymmetric critic + LayerNorm architecture to improve encoder-based policy:
+
+**Experiment 3: entropy_coef=0.001 (asymmetric + LN, 23D->13D, 500 iters).**
+Hypothesis: noise_std collapse (0.14, LOW) is the bottleneck. Small entropy bonus
+should maintain exploration. Result: noise_std improved marginally (0.14->0.17) but
+still LOW. Roll WORSENED (9.77->13.59 deg), pitch slightly better (10.16->9.69 deg).
+Entropy bonus interfered with exploitation without sufficiently maintaining exploration.
+
+**Experiment 4: encoder [128, 64] 2-hidden layer (asymmetric + LN, 23D->13D, 500 iters).**
+Hypothesis: 3-layer [256,128,64] encoder (~49K params) is over-parameterized for
+23D->13D compression. Smaller encoder should learn faster. Result: performance degraded
+(not fully analyzed, user observed instability and moved on).
+
+**Experiment 5: Reduced encoder input 15D->6D (asymmetric + LN, no ocean current).**
+Based on z-sweep sensitivity analysis, dropped 8 input dims with near-zero encoder
+response (buoy CoG/CoB Z, main/buoy Ixx/Iyy, payload CoG Z, water density). Kept
+10 clearly important + 3 borderline/suspicious + 2 physically important (payload CoG XY).
+Also removed ocean current from DR. Result: severe instability at 145 iters (roll 23 deg,
+pitch 39 deg), compression ratio 2.5:1 likely too aggressive.
+
+**Experiment 6: Increased output to 9D (15D->9D, asymmetric + LN, no ocean current, 500 iters).**
+Raised latent dim from 6 to 9 (compression ratio 1.67:1, close to original 1.77:1).
+Result: much better than 6D -- roll 12.96 deg, pitch 11.06 deg. Encoder z sweep shows
+improved sensitivity to CoG Z (3.5x), CoB Z (2.9x), and Lin Damp Roll (0->0.46) vs
+23D->13D. But performance still worse than hist-only and 23D->13D asymmetric.
+noise_std=0.13 (LOW) remains the common bottleneck across ALL encoder experiments.
+
+### Added
+- `agents/rsl_rl_ppo_cfg.py`: 15D encoder bounds (`_ENC_OBS_INDICES_15D`,
+  `_ENC_OBS_15D_LOWER`, `_ENC_OBS_15D_UPPER`) selected by z-sweep sensitivity analysis
+- `scripts/analysis/common.py`: `_build_reduced_encoder_sweep()` for reduced encoder
+  z sweep parameter mapping
+
+### Changed
+- `encoder/actor_critic_encoder.py`: Added `encoder_obs_indices` parameter.
+  When provided, `_encode()` selects subset of privileged dims before normalization.
+  Encoder input_dim matches len(indices), bounds validated against selected dims.
+- `agents/rsl_rl_ppo_cfg.py`: `_AsymmetricEncoderPolicyCfg` updated to use 15D input
+  (encoder_obs_indices), 9D output (encoder_latent_dim=9), entropy_coef=0.0 (restored).
+  Encoder hidden dims restored to [256,128,64].
+- `config.py`: `ALBCHardDRAsymmetricEncoderEnvCfg` now disables ocean current
+  (max_velocity=0, noise_scale=0)
+- `scripts/analysis/common.py`: `get_encoder_architecture_from_checkpoint()` detects
+  softsign for 15D+ encoders with static bounds. `build_sweep_params_from_checkpoint()`
+  routes non-23D static-bound encoders to reduced sweep builder.
+
+### Experimental Results
+
+**All experiments: asymmetric critic + LayerNorm, 500 iters unless noted:**
+
+| Metric | Hist-Only | 23D->13D (ent=0) | 23D->13D (ent=0.001) | **15D->9D (ent=0)** |
+|--------|:---------:|:----------------:|:--------------------:|:-------------------:|
+| Roll | **8.74** | **9.77** | 13.59 | 12.96 |
+| Pitch | **6.54** | **10.16** | 9.69 | 11.06 |
+| Reward | **-10.75** | **-19.74** | -17.49 | -19.75 |
+| noise_std | 0.15 | 0.14 | 0.17 | 0.13 |
+| z_std | -- | 0.70 | 0.75 | 0.70 |
+
+**15D->9D encoder z sweep improvements vs 23D->13D:**
+
+| Parameter | 23D->13D max range | 15D->9D max range | Change |
+|-----------|:------------------:|:-----------------:|:------:|
+| Main CoG Z | 0.32 | **1.13** | 3.5x |
+| Main CoB Z | 0.35 | **1.00** | 2.9x |
+| Lin Damp Roll | 0.04 | **0.46** | 11x |
+| Body Mass | 1.75 | 1.59 | -9% |
+| Main Volume | 1.70 | 1.40 | -18% |
+
+### Notes
+- Input reduction improved encoder's sensitivity to secondary parameters (CoG, CoB,
+  damping) by removing noise from uninformative dims. But performance did not improve.
+- All encoder experiments share noise_std collapse (entropy_coef=0, no min_std floor).
+  This is likely the fundamental bottleneck -- encoder produces good z but policy
+  can't explore to exploit it.
+- 15D->6D was too aggressive (pitch 39 deg at 145 iters). 15D->9D is viable.
+- Ocean current removed from asymmetric env to focus on pure DR adaptation.
 
 ---
 
