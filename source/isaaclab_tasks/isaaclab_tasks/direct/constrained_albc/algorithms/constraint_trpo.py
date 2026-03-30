@@ -64,8 +64,8 @@ class ConstraintTRPO:
         barrier_t: float = 100.0,
         barrier_alpha: float = 0.02,
         # Sigma (decoupled from TRPO trust region)
-        min_std: float = 0.2,
-        std_lr: float = 3e-3,
+        min_std: float = 0.01,
+        std_lr: float = 1e-3,
         # Device
         device: str = "cpu",
         **_kwargs,
@@ -126,9 +126,11 @@ class ConstraintTRPO:
         # --- Parameter groups ---
         # Three groups:
         #   1. Policy (actor + encoder): TRPO natural gradient (no optimizer)
+        #      Encoder decoupling was tested (run 2026-03-30_12-27-19) and failed:
+        #      enc_grad dropped 85% because actor->z gradient path is too weak.
+        #      Keeping encoder in TRPO where it gets indirect gradient from CG.
         #   2. Sigma (log_std): Decoupled Adam (score-function gradient)
         #      In 2D action space, sigma consumes ~33% of KL budget if inside TRPO.
-        #      Decoupling lets TRPO use full KL budget for mean improvement.
         #   3. Value (critic + cost_critic): Adam
         value_prefixes = ("critic.", "cost_critic.", "value_backbone.", "reward_head.", "cost_head.")
         value_params = []
@@ -156,8 +158,6 @@ class ConstraintTRPO:
         self.value_optimizer = optim.Adam(value_params, lr=value_lr)
 
         # Sigma optimizer: separate Adam for log_std with score-function gradient.
-        # After TRPO step, re-snapshot baseline and update sigma independently.
-        # Score-function equilibrium: sigma adjusts to match advantage landscape.
         self._std_lr = std_lr
         self.std_optimizer = optim.Adam([self.policy.log_std], lr=std_lr)
 
@@ -176,7 +176,7 @@ class ConstraintTRPO:
         self.rnd = None
         self.learning_rate = value_lr
         self.optimizer = self.value_optimizer
-        self.encoder_optimizer = None  # no separate encoder optimizer
+        self.encoder_optimizer = None
 
         # Storage
         self.storage: RolloutStorage | None = None
@@ -377,7 +377,7 @@ class ConstraintTRPO:
     # ==================================================================
 
     def update(self) -> dict[str, float]:
-        """One iteration: TRPO step with IPO barrier (joint actor+encoder) -> value update."""
+        """One iteration: TRPO step (actor+encoder) -> sigma (Adam) -> values."""
         obs_flat = self.storage.observations.flatten(0, 1).clone()
         actions_flat = self.storage.actions.flatten(0, 1).clone()
         returns_flat = self.storage.returns.flatten(0, 1).clone()
@@ -396,13 +396,7 @@ class ConstraintTRPO:
         cost_advantages_flat = self.storage.cost_advantages.flatten(0, 1).clone()
 
         # Per-constraint cost advantage standardization (NORBC Sec IV-B).
-        # Equalizes gradient magnitude across constraints with different physical
-        # units/scales so barrier 1/margin_k provides proximity-based prioritization.
-        # Zero-mean ensures: positive A_Ck = worse than average, negative = better.
-        # clamp(min=1.0): binary constraints (attitude/torque/velocity) can have near-zero
-        # std when all envs agree (all 0 or all 1). Without clamp, 1/(0+1e-8) = 1e8
-        # amplification causes gradient explosion (confirmed in legacy Phase 6).
-        # With clamp(min=1.0), binary constraints get centering only, no scaling.
+        # clamp(min=1.0): binary constraints can have near-zero std, causing 1e8 amplification.
         ca_std = cost_advantages_flat.std(dim=0, keepdim=True).clamp(min=1.0)
         cost_advantages_flat = (cost_advantages_flat - cost_advantages_flat.mean(dim=0, keepdim=True)) / ca_std
 
@@ -421,19 +415,13 @@ class ConstraintTRPO:
         old_lp = old_log_prob_flat.squeeze(-1)
         adv = advantages_flat.squeeze(-1)
         barrier_base = adaptive_d_k - mean_cost_returns  # (K,) static margin
-        # Performance difference lemma: J_Ck(pi') ~ J_Ck(pi) + [1/(1-gamma)] * E[r*A_Ck]
-        # The 1/(1-gamma) converts per-step advantage into total discounted return change.
-        # Required inside log-barrier to correctly estimate constraint margin under new policy.
         inv_one_minus_gamma = 1.0 / (1.0 - self.cost_gamma)
 
         def surrogate() -> torch.Tensor:
             self.policy.act(obs_flat)
             log_prob = self.policy.get_actions_log_prob(actions_flat)
             ratio = torch.exp(log_prob - old_lp)
-            # E[A(s,a)] term (minimization -> negate)
             reward_surr = -(adv * ratio).mean()
-            # (1/t) * sum_k log(d_k^i - J_hat_Ck) term (minimization -> negate log)
-            # J_hat_Ck = J_Ck + [1/(1-gamma)] * E[ratio * A_Ck]  (Eq. 10 in NORBC)
             cost_surrs = inv_one_minus_gamma * (ratio.unsqueeze(-1) * cost_advantages_flat).mean(dim=0)
             margin = barrier_base - cost_surrs
             barrier = -torch.log(margin.clamp(min=1e-8)).sum() / self._barrier_t
@@ -443,17 +431,11 @@ class ConstraintTRPO:
 
         ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate)
 
-        # --- Sigma update (decoupled from TRPO) ---
-        # TRPO changed mu (actor + encoder) but NOT sigma. Now update sigma
-        # via score-function gradient with reward advantages only (no barrier).
-        # Re-snapshot baseline so IS ratio starts at 1.0 for sigma update.
+        # --- 3. Sigma update (decoupled from TRPO) ---
         with torch.no_grad():
             self.policy.act(obs_flat)
             post_trpo_lp = self.policy.get_actions_log_prob(actions_flat).detach()
 
-        # Sigma surrogate: reward-only (barrier excluded to prevent sigma collapse).
-        # Score-function equilibrium: ((a-mu)^2/sigma^2 - 1) * advantage = 0
-        # naturally finds the sigma that balances exploration vs exploitation.
         self.policy.act(obs_flat)
         sigma_log_prob = self.policy.get_actions_log_prob(actions_flat)
         sigma_ratio = torch.exp(sigma_log_prob - post_trpo_lp)
@@ -464,15 +446,14 @@ class ConstraintTRPO:
         self.policy.log_std.grad = sigma_grad
         self.std_optimizer.step()
 
-        # Noise floor clamp (min_std)
         with torch.no_grad():
             self.policy.log_std.data.clamp_(min=math.log(self.min_std))
 
-        # --- 3. KL after joint update (should be within trust region) ---
+        # --- 4. KL after joint update ---
         with torch.no_grad():
             mean_kl = self._kl_divergence(obs_flat, old_mu_flat, old_sigma_flat).item()
 
-        # --- 4. Value function update (MSE) ---
+        # --- 5. Value function update (MSE) ---
         mean_value_loss, mean_cost_value_loss = self._update_values(
             obs_flat, returns_flat, cost_returns_flat, batch_size
         )

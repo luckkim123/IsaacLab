@@ -98,8 +98,98 @@ weights. TRPO+IPO is operating as actor-only, without encoder benefit.
   (yaw_vel oscillates 7.7->47->27->43), critic can't track.
 - At current improvement rate (~0.03 deg/iter), 2500 iters would reach ~10-11 deg.
   PPO hist-only baseline achieves 8.7 deg. Encoder not contributing.
-- Next investigation: encoder gradient scaling or separate encoder optimizer with
-  post-TRPO re-snapshot to provide sufficient encoder learning signal.
+
+## [2026-03-30] Encoder Decoupling Experiment + std_lr Tuning
+
+### Context
+
+Continued investigation into encoder not learning within TRPO. Two hypotheses tested:
+1. TRPO natural gradient distorts encoder step direction (Fisher matrix is over action
+   distribution, not feature space). Separating encoder to Adam should preserve encoding.
+2. noise_std reaching min_std floor (0.2) too early (~500 iter) starves exploration.
+
+**Run 3: Encoder decoupled (11-51-27 continued to 637 iter):**
+Run 11-51-27 ran to completion with original settings (std_lr=3e-3, encoder in TRPO).
+Z sweep at iter 450 vs iter 0 showed encoding COLLAPSE: most DR parameters lost
+60-80% sensitivity. Main Volume max z range: 0.88->0.34, Body Mass: 0.70->0.29,
+Added Mass: 0.66->0.20, Joint Damping: 0.66->0.18. Only Payload CoG X/Y survived.
+noise_std hit floor (0.2) at ~500 iter, after which roll improvement slowed 5x
+(0.032->0.006 deg/iter). Pitch continued improving (0.026 deg/iter at floor).
+Final: roll 14.2, pitch 13.0 at iter 637.
+
+**Run 4: Encoder decoupled from TRPO (12-27-19, 270 iter, killed):**
+Separated encoder params from `_policy_params`, gave encoder its own Adam optimizer
+(lr=3e-3, wd=1e-5) with post-TRPO re-snapshot and full surrogate (reward+barrier).
+Result: FAILED. enc_grad dropped 85% (0.040->0.006) because actor->z gradient path
+is inherently weak when decoupled. Z sweep @250 showed worse encoding than OLD @250:
+Lin Damp Pitch 0/9 active (was 6/9), Payload CoG X 1/9 (was 5/9). Performance also
+worse: reward -46.1 (vs -40.9 OLD), pitch 21.6 (vs 20.0 OLD).
+Root cause: with re-snapshot, IS ratio starts at 1.0, and the gradient from surrogate
+through actor->z to encoder is too attenuated. TRPO's CG solver at least gives
+encoder an indirect signal through the shared Fisher Hessian.
+
+**Run 5: std_lr reduced, encoder back in TRPO (12-47-41, ongoing):**
+Reverted encoder decoupling. Changed std_lr from 3e-3 to 1e-3. At 171 iter:
+noise_std=0.84 (vs OLD 0.65 at same iter). Floor estimated at ~824 iter (vs ~500).
+Exploration preserved longer. Z sweep @150 showed sensitivity maintained (Joint
+Damping 0.75, Joint Stiffness 0.69, Payload CoG Y 0.56). Z sweep @300 showed
+sensitivity INCREASING: Body Mass 0.51->1.01, Joint Stiffness 0.69->1.03, Payload
+CoG Y 0.56->0.99, Main Volume 0.39->0.87. This contrasts sharply with run 3 where
+sensitivity collapsed. The key difference: slower noise_std decay means more diverse
+actions, providing encoder with richer gradient signal.
+
+Further change: min_std reduced from 0.2 to 0.01 (safety net only). With std_lr=1e-3,
+score-function gradient naturally finds equilibrium without needing artificial floor.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Encoder decoupling implemented then reverted.
+  Final state: encoder in TRPO `_policy_params` (original design). `std_lr` default
+  changed from 3e-3 to 1e-3. `min_std` default changed from 0.2 to 0.01.
+- `agents/rsl_rl_ppo_cfg.py`: `std_lr` changed from 3e-3 to 1e-3. `min_std` changed
+  from 0.2 to 0.01. Runner docstring updated with experiment results.
+
+### Experimental Results
+
+**Run 3: Original settings continued (11-51-27, 637 iters):**
+
+| Metric | Iter 100 | Iter 300 | Iter 500 | Iter 637 |
+|--------|----------|----------|----------|----------|
+| Roll | 25.3 deg | 19.5 deg | 15.0 deg | 14.2 deg |
+| Pitch | 23.6 deg | 19.0 deg | 16.5 deg | 13.0 deg |
+| noise_std | 0.776 | 0.390 | 0.214 | 0.200 (floor) |
+| Encoder z_std | 0.452 | 0.457 | 0.450 | 0.460 |
+| Z sweep max | 0.91 (init) | -- | -- | 0.34 (collapsed) |
+
+**Run 4: Encoder decoupled (12-27-19, 270 iters, killed):**
+
+| Metric | @150 (OLD) | @150 (NEW) | Diff |
+|--------|-----------|-----------|------|
+| Roll | 22.7 deg | 18.2 deg | -4.5 (better) |
+| Reward | -49.3 | -46.1 | worse |
+| enc_grad | 0.040 | 0.006 | -85% |
+
+**Run 5: std_lr=1e-3 (12-47-41, 300+ iters, ongoing):**
+
+| Metric | Iter 100 | Iter 150 | Iter 300 (est) |
+|--------|----------|----------|----------|
+| Roll | 20.9 deg | 20.4 deg | ~19.5 deg |
+| Pitch | 24.1 deg | 24.3 deg | ~23.8 deg |
+| noise_std | 0.909 | 0.856 | ~0.75 |
+| Z sweep max | -- | 0.75 | 1.03 (improving!) |
+
+### Notes
+- z_std=0.45 constant does NOT mean "encoder not learning". z_std is the statistical
+  spread of softsign output, not encoding quality. Z sweep heatmaps are the only
+  reliable measure of encoder learning.
+- Encoder decoupling from TRPO failed because actor->z gradient path is too weak when
+  using re-snapshot IS ratio. The CG solver in TRPO provides indirect but sufficient
+  encoder signal through shared Hessian-vector products.
+- Slower noise_std decay (std_lr 3e-3->1e-3) is the key enabler for encoder learning:
+  more exploration = more diverse actions = richer gradient signal through actor->z->encoder.
+- min_std floor (0.2->0.01): with slow std_lr, score-function gradient equilibrium
+  naturally determines optimal sigma. Floor was only needed with fast std_lr=3e-3.
+- PPO and TRPO use identical normalization: EmpiricalNorm on o_t(14D)+hist(120D),
+  z(9D) raw (softsign bounded). critic_obs_normalization=False.
 
 ---
 

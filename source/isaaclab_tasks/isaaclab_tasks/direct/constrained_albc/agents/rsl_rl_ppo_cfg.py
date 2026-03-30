@@ -113,8 +113,8 @@ class RslRlConstraintTRPOAlgorithmCfg:
     barrier_alpha: float = 0.05
 
     # Sigma (decoupled from TRPO)
-    min_std: float = 0.2
-    std_lr: float = 3e-3
+    min_std: float = 0.01  # safety net only; score-function equilibrium with std_lr=1e-3
+    std_lr: float = 1e-3
 
 
 # =============================================================================
@@ -535,8 +535,14 @@ class ALBCHardDRAsymmetricEncoderTRPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """Hard DR + Asymmetric encoder + TRPO + IPO (constrained RL).
 
     Combines the asymmetric encoder architecture (15D->9D, LayerNorm, critic_uses_z)
-    with TRPO + IPO log-barrier constraint enforcement. Encoder params are inside
-    the TRPO trust region (natural gradient covers actor + encoder jointly).
+    with TRPO + IPO log-barrier constraint enforcement.
+
+    Update groups:
+    - Actor + Encoder: TRPO natural gradient (trust region)
+      Encoder decoupling tested (run 12-27-19) and failed: enc_grad dropped 85%
+      because actor->z gradient path is too weak when decoupled.
+    - Sigma: Adam (score-function gradient, reward-only, std_lr=1e-3)
+      Reduced from 3e-3 to slow noise_std decay: floor@~1500iter instead of ~500.
 
     Key design choices from changelog experiments:
     - Asymmetric critic: critic sees raw p_t (no shortcut problem with LayerNorm)
