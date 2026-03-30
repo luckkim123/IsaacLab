@@ -63,8 +63,9 @@ class ConstraintTRPO:
         line_search_kl_margin: float = 1.5,
         barrier_t: float = 100.0,
         barrier_alpha: float = 0.02,
-        # Noise floor
+        # Sigma (decoupled from TRPO trust region)
         min_std: float = 0.2,
+        std_lr: float = 3e-3,
         # Device
         device: str = "cpu",
         **_kwargs,
@@ -123,11 +124,13 @@ class ConstraintTRPO:
         )
 
         # --- Parameter groups ---
-        # Policy (actor + encoder + log_std): TRPO natural gradient (no optimizer)
-        #   Encoder is inside the trust region so line search verifies barrier feasibility
-        #   for the combined actor+encoder update, and KL constraint covers both.
-        # Value (shared backbone + reward/cost heads): Adam
-        value_prefixes = ("critic", "cost_critic", "value_backbone", "reward_head", "cost_head")
+        # Three groups:
+        #   1. Policy (actor + encoder): TRPO natural gradient (no optimizer)
+        #   2. Sigma (log_std): Decoupled Adam (score-function gradient)
+        #      In 2D action space, sigma consumes ~33% of KL budget if inside TRPO.
+        #      Decoupling lets TRPO use full KL budget for mean improvement.
+        #   3. Value (critic + cost_critic): Adam
+        value_prefixes = ("critic.", "cost_critic.", "value_backbone.", "reward_head.", "cost_head.")
         value_params = []
         self._policy_params = []
         self._encoder_param_offset = 0
@@ -136,6 +139,8 @@ class ConstraintTRPO:
         offset = 0
         enc_start = None
         for name, param in self.policy.named_parameters():
+            if name == "log_std":
+                continue  # handled by std_optimizer
             if any(name.startswith(p) for p in value_prefixes):
                 value_params.append(param)
             else:
@@ -150,11 +155,18 @@ class ConstraintTRPO:
         self._value_params = value_params
         self.value_optimizer = optim.Adam(value_params, lr=value_lr)
 
+        # Sigma optimizer: separate Adam for log_std with score-function gradient.
+        # After TRPO step, re-snapshot baseline and update sigma independently.
+        # Score-function equilibrium: sigma adjusts to match advantage landscape.
+        self._std_lr = std_lr
+        self.std_optimizer = optim.Adam([self.policy.log_std], lr=std_lr)
+
         logger.info(
-            "ConstraintTRPO: %d policy params (TRPO, incl encoder), %d value params (Adam), "
-            "encoder slice [%d:%d] (%d params)",
+            "ConstraintTRPO: %d policy params (TRPO), %d value params (Adam), "
+            "log_std decoupled (Adam, lr=%.4f), encoder slice [%d:%d] (%d params)",
             sum(p.numel() for p in self._policy_params),
             sum(p.numel() for p in value_params),
+            std_lr,
             self._encoder_param_offset,
             self._encoder_param_offset + self._encoder_param_count,
             self._encoder_param_count,
@@ -387,10 +399,12 @@ class ConstraintTRPO:
         # Equalizes gradient magnitude across constraints with different physical
         # units/scales so barrier 1/margin_k provides proximity-based prioritization.
         # Zero-mean ensures: positive A_Ck = worse than average, negative = better.
-        ca_std = cost_advantages_flat.std(dim=0, keepdim=True)
-        cost_advantages_flat = (cost_advantages_flat - cost_advantages_flat.mean(dim=0, keepdim=True)) / (
-            ca_std + 1e-8
-        )
+        # clamp(min=1.0): binary constraints (attitude/torque/velocity) can have near-zero
+        # std when all envs agree (all 0 or all 1). Without clamp, 1/(0+1e-8) = 1e8
+        # amplification causes gradient explosion (confirmed in legacy Phase 6).
+        # With clamp(min=1.0), binary constraints get centering only, no scaling.
+        ca_std = cost_advantages_flat.std(dim=0, keepdim=True).clamp(min=1.0)
+        cost_advantages_flat = (cost_advantages_flat - cost_advantages_flat.mean(dim=0, keepdim=True)) / ca_std
 
         batch_size = obs_flat.batch_size[0]
 
@@ -428,6 +442,27 @@ class ConstraintTRPO:
             return reward_surr + barrier
 
         ls_success = self._trpo_step(obs_flat, old_mu_flat, old_sigma_flat, surrogate)
+
+        # --- Sigma update (decoupled from TRPO) ---
+        # TRPO changed mu (actor + encoder) but NOT sigma. Now update sigma
+        # via score-function gradient with reward advantages only (no barrier).
+        # Re-snapshot baseline so IS ratio starts at 1.0 for sigma update.
+        with torch.no_grad():
+            self.policy.act(obs_flat)
+            post_trpo_lp = self.policy.get_actions_log_prob(actions_flat).detach()
+
+        # Sigma surrogate: reward-only (barrier excluded to prevent sigma collapse).
+        # Score-function equilibrium: ((a-mu)^2/sigma^2 - 1) * advantage = 0
+        # naturally finds the sigma that balances exploration vs exploitation.
+        self.policy.act(obs_flat)
+        sigma_log_prob = self.policy.get_actions_log_prob(actions_flat)
+        sigma_ratio = torch.exp(sigma_log_prob - post_trpo_lp)
+        sigma_surrogate = -(adv * sigma_ratio).mean()
+
+        self.std_optimizer.zero_grad()
+        sigma_grad = torch.autograd.grad(sigma_surrogate, self.policy.log_std)[0]
+        self.policy.log_std.grad = sigma_grad
+        self.std_optimizer.step()
 
         # Noise floor clamp (min_std)
         with torch.no_grad():

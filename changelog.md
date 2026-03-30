@@ -10,6 +10,99 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-03-30] TRPO + IPO + Asymmetric Encoder: Integration and Sigma Decoupling
+
+### Context
+
+Combined the asymmetric encoder architecture (15D->9D, LayerNorm+softsign, critic_uses_z)
+with TRPO + IPO constrained RL. Previously these existed separately: asymmetric encoder
+used PPO, while TRPO+IPO used shared backbone multi-head critic. The new task
+`Isaac-Constrained-ALBC-HardDR-AsymmetricEncoder-TRPO-v0` combines both.
+
+**First run (no sigma decoupling, 334 iters):** TRPO consumed KL budget reducing sigma
+instead of improving action mean. noise_std dropped 0.99->0.28 while attitude error
+stagnated at ~20 deg. Encoder z_std remained constant at 0.4498 (no learning). Reward
+worsened from -8 to -47. Root cause: 2D action space makes sigma changes ~33% of KL
+budget, so TRPO preferentially reduces sigma over improving mean.
+
+**Second run (sigma decoupling, 248 iters):** noise_std decays slower (0.0022/iter vs
+0.0036/iter), reward slightly better (-44.9 vs -48.2 at iter 200). Sigma decoupling
+partially effective. However encoder z_std still constant at 0.456 -- encoder receives
+insufficient gradient through TRPO natural gradient. Attitude error ~20 deg, improving
+at ~0.03 deg/iter.
+
+**Remaining issue:** Encoder gradient (0.005-0.04) is too small for meaningful updates
+within TRPO trust region. The encoder is essentially producing random z from initialization
+weights. TRPO+IPO is operating as actor-only, without encoder benefit.
+
+### Added
+- `encoder/actor_critic_encoder.py`: `num_constraints` and `cost_critic_hidden_dims`
+  params. Separate cost critic MLP in asymmetric mode: same input as reward critic
+  `cat([o_t, hist, z, p_t])=166D -> MLP[512,256,128] -> K`. `evaluate_costs()` method.
+  `load_state_dict()` backward compat for missing cost_critic. `num_constraints=0` and
+  `cost_critic=None` in shared_backbone mode.
+- `agents/rsl_rl_ppo_cfg.py`: `_AsymmetricEncoderConstrainedPolicyCfg` (adds
+  num_constraints, cost_critic_hidden_dims to asymmetric policy).
+  `ALBCHardDRAsymmetricEncoderTRPORunnerCfg` (TRPO+IPO algorithm + asymmetric encoder).
+- `config.py`: `_STANDARD_CONSTRAINT_TERMS` module-level constant (DRY: shared between
+  ALBCEnvCfg and constrained variants). `ALBCHardDRAsymmetricEncoderConstrainedEnvCfg`
+  (Hard DR + constraints enabled).
+- `__init__.py`: Registered `Isaac-Constrained-ALBC-HardDR-AsymmetricEncoder-TRPO-v0`.
+
+### Changed
+- `algorithms/constraint_trpo.py`: **Sigma decoupling** -- `log_std` removed from
+  `_policy_params`, separate Adam optimizer (`std_lr=3e-3`). After TRPO step, re-snapshot
+  baseline (IS ratio=1.0), compute reward-only score-function gradient, Adam step on
+  log_std, then min_std clamp. TRPO KL budget now fully used for mean improvement.
+- `algorithms/constraint_trpo.py`: **Binary constraint std clamp** -- `ca_std + 1e-8`
+  changed to `ca_std.clamp(min=1.0)`. Prevents gradient explosion when binary constraints
+  (attitude/torque/velocity) have near-zero std (all envs agree on 0 or 1).
+- `algorithms/constraint_trpo.py`: **value_prefixes trailing dot** -- `"critic"` changed
+  to `"critic."` to prevent `critic_obs_normalizer` from being misclassified as value
+  param (pre-existing bug, not triggered when `critic_obs_normalization=False`).
+- `agents/rsl_rl_ppo_cfg.py`: Added `std_lr: float = 3e-3` to
+  `RslRlConstraintTRPOAlgorithmCfg`.
+- `config.py`: `ALBCEnvCfg.constraints` now uses `_STANDARD_CONSTRAINT_TERMS` constant.
+
+### Experimental Results
+
+**Run 1: No sigma decoupling (334 iters, killed):**
+
+| Metric | Iter 0 | Iter 150 | Iter 334 |
+|--------|--------|----------|----------|
+| Roll | 28.7 deg | 21.7 deg | 19.6 deg |
+| Pitch | 22.5 deg | 22.4 deg | 22.3 deg |
+| noise_std | 0.99 | 0.42 | 0.28 |
+| Encoder z_std | 0.4498 | 0.4479 | 0.4493 |
+| Reward | -8.0 | -52.6 | -41.3 |
+
+**Run 2: Sigma decoupling applied (248 iters, ongoing):**
+
+| Metric | Iter 0 | Iter 150 | Iter 248 |
+|--------|--------|----------|----------|
+| Roll | 28.7 deg | 22.7 deg | 21.3 deg |
+| Pitch | 22.5 deg | 22.4 deg | 19.7 deg |
+| noise_std | 1.00 | 0.65 | 0.46 |
+| Encoder z_std | 0.450 | 0.449 | 0.456 |
+| Reward | -8.0 | -49.3 | -54.8 |
+| cost_value loss | 13.7 | 5.7 | 8.9 (increasing) |
+| KL | 0.003 | 0.004 | 0.005 (at max_kl) |
+
+### Notes
+- Sigma decoupling slowed noise_std decay (0.0036 -> 0.0022/iter), confirming the
+  KL budget was being consumed by sigma changes.
+- Encoder is not learning in either run: z_std constant at ~0.45 = softsign(N(0,1))
+  natural spread. Encoder gradient (0.005-0.04) is too small relative to actor gradient
+  within the TRPO natural gradient framework.
+- cost_value loss increasing after iter 100: cost return distribution is non-stationary
+  (yaw_vel oscillates 7.7->47->27->43), critic can't track.
+- At current improvement rate (~0.03 deg/iter), 2500 iters would reach ~10-11 deg.
+  PPO hist-only baseline achieves 8.7 deg. Encoder not contributing.
+- Next investigation: encoder gradient scaling or separate encoder optimizer with
+  post-TRPO re-snapshot to provide sufficient encoder learning signal.
+
+---
+
 ## [2026-03-30] Asymmetric Critic Test + Pre-Softsign LayerNorm
 
 ### Context

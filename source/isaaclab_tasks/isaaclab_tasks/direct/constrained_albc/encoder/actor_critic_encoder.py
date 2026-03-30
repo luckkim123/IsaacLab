@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Teacher policy network: MLP Encoder + MLP Actor + MLP Critic.
+"""Teacher policy network: MLP Encoder + MLP Actor + MLP Critic + optional Cost Critic.
 
 Two modes of operation:
     Separate (default): Encoder, Actor, and Critic are independent MLPs.
@@ -19,6 +19,11 @@ Architecture (separate mode, HORA-style normalization):
     Critic:  cat([o_t, hist, z, p_t]) -> MLP -> value
     Value loss gradient flows through z to encoder, providing learning signal
     from both actor (surrogate loss) and critic (value loss).
+
+    Cost Critic (when num_constraints > 0, separate mode only):
+    Cost Critic: cat([o_t, hist, z, p_t]) -> MLP -> K (multi-head, one per constraint)
+    Shares the same input as the reward critic. Named "cost_critic" so that
+    ConstraintTRPO classifies it as a value parameter (Adam, not TRPO).
 
     Encoder input normalization modes:
       - Static min-max (HORA-style): (2*x - upper - lower) / (upper - lower) -> [-1, 1]
@@ -95,6 +100,9 @@ class ActorCriticEncoder(nn.Module):
         shared_backbone: bool = False,
         # Asymmetric critic with z: cat([o_t, hist, z, p_t]), value gradient to encoder
         critic_uses_z: bool = False,
+        # Cost critic (IPO constraints, separate mode only)
+        num_constraints: int = 0,
+        cost_critic_hidden_dims: list[int] | tuple[int, ...] = (512, 256, 128),
         **kwargs: Any,
     ) -> None:
         if kwargs:
@@ -180,6 +188,9 @@ class ActorCriticEncoder(nn.Module):
 
         if shared_backbone:
             # --- Shared backbone: cat([normalize(o_t, hist), z]) -> backbone -> features -> heads ---
+            # Cost critic not supported in shared backbone mode (use ActorCriticEncoderConstrained).
+            self.num_constraints = 0
+            self.cost_critic = None
             bb_dims = list(critic_hidden_dims)
             feature_dim = bb_dims[-1]
             self.actor_obs_normalization = actor_obs_normalization
@@ -231,6 +242,20 @@ class ActorCriticEncoder(nn.Module):
             self.critic = MLP(num_critic_obs, 1, list(critic_hidden_dims), activation)
             critic_desc = "asymmetric+z" if critic_uses_z else "asymmetric"
             logger.info("Critic [%s]: %dD -> %s -> 1D", critic_desc, num_critic_obs, critic_hidden_dims)
+
+            # Cost critic (multi-head): same input as reward critic -> K outputs.
+            # Named "cost_critic" so ConstraintTRPO classifies it as value param.
+            self.num_constraints = num_constraints
+            if num_constraints > 0:
+                self.cost_critic = MLP(
+                    num_critic_obs, num_constraints, list(cost_critic_hidden_dims), activation
+                )
+                logger.info(
+                    "Cost critic [multi-head]: %dD -> %s -> %dD",
+                    num_critic_obs, cost_critic_hidden_dims, num_constraints,
+                )
+            else:
+                self.cost_critic = None
 
         # Action noise (Gaussian policy, log_std parameterization)
         self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
@@ -348,6 +373,20 @@ class ActorCriticEncoder(nn.Module):
             critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))
             return self.critic(critic_obs)
 
+    def evaluate_costs(self, obs: TensorDict) -> torch.Tensor:
+        """Evaluate per-constraint cost values via separate cost critic MLP.
+
+        Uses the same input as the reward critic (asymmetric obs).
+        Multi-head output: one value per constraint.
+
+        Returns:
+            Cost value predictions. Shape: (batch, K).
+        """
+        if self.cost_critic is None:
+            raise RuntimeError("evaluate_costs() called but num_constraints=0 (no cost critic)")
+        critic_obs = self.critic_obs_normalizer(self._get_critic_obs(obs))
+        return self.cost_critic(critic_obs)
+
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
         """Log probability of actions under current distribution."""
         assert self.distribution is not None
@@ -396,5 +435,12 @@ class ActorCriticEncoder(nn.Module):
                     )
                     for k, v in self.actor_obs_normalizer.state_dict().items():
                         state_dict[norm_prefix + k] = v
+        # Inject cost_critic defaults if loading checkpoint without cost critic
+        if self.cost_critic is not None:
+            cc_prefix = "cost_critic."
+            if not any(k.startswith(cc_prefix) for k in state_dict):
+                logger.info("Checkpoint lacks cost_critic; using random initialization.")
+                for k, v in self.cost_critic.state_dict().items():
+                    state_dict[cc_prefix + k] = v
         super().load_state_dict(state_dict, strict=False)
         return True

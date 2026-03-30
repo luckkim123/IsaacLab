@@ -112,8 +112,9 @@ class RslRlConstraintTRPOAlgorithmCfg:
     barrier_t: float = 100.0
     barrier_alpha: float = 0.05
 
-    # Noise floor
+    # Sigma (decoupled from TRPO)
     min_std: float = 0.2
+    std_lr: float = 3e-3
 
 
 # =============================================================================
@@ -507,3 +508,55 @@ class ALBCHardDRAsymmetricEncoderRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     algorithm = _SharedBackboneAlgorithmCfg()
     policy = _AsymmetricEncoderPolicyCfg()
+
+
+# =============================================================================
+# Hard DR: TRPO + IPO + Asymmetric Encoder (Constrained RL)
+# =============================================================================
+
+
+@configclass
+class _AsymmetricEncoderConstrainedPolicyCfg(_AsymmetricEncoderPolicyCfg):
+    """Asymmetric encoder with separate cost critic for TRPO + IPO.
+
+    Extends _AsymmetricEncoderPolicyCfg with cost critic support:
+        Cost Critic: cat([o_t(14D), hist(120D), z(9D), p_t(23D)]) = 166D
+                     -> MLP[512,256,128] -> K (multi-head, one per constraint)
+
+    num_constraints is auto-synced from env config by ConstraintEncoderRunner.
+    """
+
+    num_constraints: int = 0  # Auto-synced from env config
+    cost_critic_hidden_dims: list[int] = [512, 256, 128]
+
+
+@configclass
+class ALBCHardDRAsymmetricEncoderTRPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Hard DR + Asymmetric encoder + TRPO + IPO (constrained RL).
+
+    Combines the asymmetric encoder architecture (15D->9D, LayerNorm, critic_uses_z)
+    with TRPO + IPO log-barrier constraint enforcement. Encoder params are inside
+    the TRPO trust region (natural gradient covers actor + encoder jointly).
+
+    Key design choices from changelog experiments:
+    - Asymmetric critic: critic sees raw p_t (no shortcut problem with LayerNorm)
+    - Separate cost critic MLP: same input as reward critic, multi-head K output
+    - No action clamping (KL death root cause)
+    - Static min-max encoder normalization (no KL drift)
+    - Pre-softsign LayerNorm (prevents activation saturation)
+    - min_std=0.2 noise floor (prevents barrier-induced sigma collapse)
+    """
+
+    class_name: str = "ALBCConstraintEncoderRunner"
+    seed = 30
+    num_steps_per_env = 64
+    max_iterations = 2500
+    save_interval = 50
+    experiment_name = "constrained_albc_hard_dr_asymmetric_trpo"
+    obs_groups: dict[str, list[str]] = {
+        "policy": ["policy", "privileged", "proprio_hist"],
+        "critic": ["policy", "privileged", "proprio_hist"],
+    }
+
+    algorithm = RslRlConstraintTRPOAlgorithmCfg()
+    policy = _AsymmetricEncoderConstrainedPolicyCfg()

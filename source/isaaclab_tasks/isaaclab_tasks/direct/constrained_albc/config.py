@@ -14,6 +14,7 @@ Registered tasks:
     Isaac-Constrained-ALBC-HardDR-FrozenEncoder-v0: Frozen encoder fine-tuning (hard DR)
     Isaac-Constrained-ALBC-HardDR-SharedBackbone-v0: Shared backbone encoder (online E2E PPO)
     Isaac-Constrained-ALBC-HardDR-AsymmetricEncoder-v0: Asymmetric critic with z (online E2E PPO)
+    Isaac-Constrained-ALBC-HardDR-AsymmetricEncoder-TRPO-v0: Asymmetric + TRPO + IPO (constrained RL)
 """
 
 from __future__ import annotations
@@ -47,6 +48,15 @@ from .mdp.constraints import (
     yaw_velocity_cost,
 )
 from .mdp.rewards import ALBCRewardCfg
+
+# Standard constraint terms for IPO barrier: 3 probabilistic + 1 average.
+# Shared between ALBCEnvCfg (production) and Hard DR constrained variants.
+_STANDARD_CONSTRAINT_TERMS: list[ConstraintTermCfg] = [
+    ConstraintTermCfg(func=attitude_limit_cost, params={"limit": 1.396}, budget=0.01, name="attitude"),
+    ConstraintTermCfg(func=torque_limit_cost, params={"limit_nm": 9.5}, budget=0.08, name="torque"),
+    ConstraintTermCfg(func=velocity_limit_cost, params={"limit_rad_per_s": 4.189}, budget=0.02, name="velocity"),
+    ConstraintTermCfg(func=yaw_velocity_cost, budget=0.40, name="yaw_vel"),
+]
 
 
 @configclass
@@ -300,35 +310,7 @@ class ALBCEnvCfg(DirectRLEnvCfg):
     # Constraints (IPO): 3 probabilistic + 1 average = 4 terms
     # Budget D_k is per-step; algorithm converts to d_k = D_k / (1 - gamma).
     # ==========================================================================
-    constraints: ALBCConstraintCfg = ALBCConstraintCfg(
-        terms=[
-            # --- Probabilistic (binary indicator) ---
-            ConstraintTermCfg(
-                func=attitude_limit_cost,
-                params={"limit": 1.396},
-                budget=0.01,
-                name="attitude",
-            ),
-            ConstraintTermCfg(
-                func=torque_limit_cost,
-                params={"limit_nm": 9.5},
-                budget=0.08,
-                name="torque",
-            ),
-            ConstraintTermCfg(
-                func=velocity_limit_cost,
-                params={"limit_rad_per_s": 4.189},
-                budget=0.02,
-                name="velocity",
-            ),
-            # --- Average (continuous) ---
-            ConstraintTermCfg(
-                func=yaw_velocity_cost,
-                budget=0.40,
-                name="yaw_vel",
-            ),
-        ],
-    )
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=_STANDARD_CONSTRAINT_TERMS)
 
 
 @configclass
@@ -446,3 +428,14 @@ class ALBCHardDRAsymmetricEncoderEnvCfg(ALBCHardDRSharedBackboneEnvCfg):
         max_velocity=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         noise_scale=(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
     )
+
+
+@configclass
+class ALBCHardDRAsymmetricEncoderConstrainedEnvCfg(ALBCHardDRAsymmetricEncoderEnvCfg):
+    """Hard DR + Asymmetric encoder + TRPO/IPO constraints.
+
+    Same as ALBCHardDRAsymmetricEncoderEnvCfg but with 4 constraint terms enabled
+    for IPO log-barrier enforcement via ConstraintTRPO.
+    """
+
+    constraints: ALBCConstraintCfg = ALBCConstraintCfg(terms=_STANDARD_CONSTRAINT_TERMS)
