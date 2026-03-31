@@ -15,6 +15,46 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-01] Revert Wrench-Space, Remove Velocity Termination, Direct Thruster + std=0.5
+
+### Context
+Following the wrench-space experiment (see below), analysis concluded that:
+1. Wrench-space adds complexity (TAM inverse, saturation handling, roll singularity) without
+   clear benefit over simply adjusting init_noise_std.
+2. Velocity-based hard termination (too_fast_ang > pi, too_fast_lin > 2 m/s) is the root cause
+   of the death spiral: all-negative rewards make early death optimal. Soft constraints already
+   provide per-step gradient for velocity control.
+3. PhysX rigid body `max_angular_velocity=720 deg/s (4*pi)` provides the hard physical clamp.
+   The Python termination at pi was 4x more conservative and redundant.
+4. Arm uses delta parameterization (rate-limited by delta_scale), but thrusters use absolute
+   commands with no scaling. Applying action_scale to thrusters would permanently limit thrust
+   authority, which is theoretically incorrect. The proper control is init_noise_std.
+
+Decision: revert wrench-space, remove velocity termination, keep direct thruster control with
+lower init_noise_std. This eliminates the death spiral while preserving full thrust authority.
+
+### Changed
+- `albc_env.py`: Removed wrench-to-thruster transformation (`_init_wrench_transform`,
+  `_wrench_to_thruster`), reverted to direct `apply_dynamics(actions[:, 2:])`.
+- `albc_env.py`: `_get_dones()` now terminates only on `bad_state` (NaN/Inf) and
+  `excessive_tilt` (>90 deg). Velocity flags (`too_fast_ang`, `too_fast_lin`) computed
+  for diagnostics only, no longer trigger termination.
+- `agents/rsl_rl_ppo_cfg.py`: `init_noise_std` 0.3 -> 0.5 (balance exploration vs stability).
+- `mdp/rewards.py`: `termination_penalty` -50.0 -> 0.0 (no velocity termination = no penalty needed).
+- `config.py`: Reverted action_space docstring to "6D thruster".
+- `albc_env.py`: Reverted logging labels `Action/wrench_*` -> `Action/thruster_*`.
+
+### Notes
+- `too_fast_ang` and `too_fast_lin` diagnostic flags are still computed and logged via
+  `_collect_termination_metrics`. They just don't trigger episode reset.
+- Remaining termination conditions: `bad_state` (PhysX failure), `excessive_tilt` (>90 deg,
+  buoyancy/gravity reversal). Both are non-recoverable simulation states.
+- Soft constraints providing velocity gradient: `ang_vel_cost` (threshold 1.5),
+  `yaw_rate_cost` (threshold 1.0), `body_lin_vel_cost` (threshold 1.0).
+- Thruster `apply_dynamics` dt bug (physics_dt vs step_dt) still present.
+
+---
+
 ## [2026-04-01] Wrench-Space Experiment + init_noise_std Root Cause Analysis
 
 ### Context
