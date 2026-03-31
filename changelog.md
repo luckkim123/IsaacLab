@@ -15,39 +15,48 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
-## [2026-04-01] Attitude Command Review Fixes: DORAEMON Normalization + Noise Bias Symmetry
+## [2026-04-01] Attitude Command Review: Reward Unification, Constraint Redesign, Bug Fixes
 
 ### Context
 Code review of the velocity-to-attitude command conversion in `constrained_full_albc`.
-The prior session converted roll/pitch from angular velocity commands to attitude commands
-(target angle in radians, +-45 deg range) with exp kernel reward, while yaw remained a
-rate command. Review found three bugs: (1) DORAEMON settling error added m/s and radians
-directly without normalization, causing the success_threshold (calibrated for m/s) to
-misclassify well-tracking episodes as failures; (2) `_OBS_BIAS_MIN` for body tracking
-history was not updated alongside `_OBS_BIAS_MAX`, creating asymmetric bias [-0.03, +0.04];
-(3) several comments still referenced `ang_vel_err` instead of `ang_err`.
+Three categories of issues addressed:
+
+1. **Reward asymmetry**: Only roll/pitch used exp kernel (positive [0,1]), while lin_vel
+   and yaw used quadratic penalties (negative, unbounded). This caused inconsistent reward
+   scale across command types and made zero-command episodes structurally more rewarding.
+   Decision: unify all tracking rewards to exp kernel for consistent [0,1] positive rewards.
+
+2. **Constraint mismatch**: `angular_velocity_cost` used max(|p|,|q|,|r|) > 1.5, treating
+   all axes identically. With attitude commands for roll/pitch, angular velocity is a tracking
+   byproduct (not the command), so roll/pitch should have a tighter constraint. Yaw already
+   had its own `yaw_rate_cost(r > 1.0)`. Decision: replace with `rp_rate_cost(max(|p|,|q|) > 1.0)`.
+
+3. **Bug fixes**: DORAEMON settling error mixed m/s + radians; `_OBS_BIAS_MIN` had asymmetry
+   from partial update; stale `ang_vel_err` comments.
+
+### Changed
+- `mdp/rewards.py`: All 3 tracking rewards now use exp kernel (positive [0,1]):
+  `lin_vel` k=4.0 sigma=0.3 m/s, `att_rp` k=4.0 sigma=0.4 rad, `yaw_vel` k=1.0 sigma=0.3 rad/s.
+  Previously lin_vel (k=-4.0 quadratic) and yaw (k=-1.0 quadratic) were negative penalties.
+- `mdp/constraints.py`: `angular_velocity_cost(max(p,q,r) > 1.5)` replaced by
+  `rp_rate_cost(max(p,q) > 1.0)`. Roll/pitch-only, tighter threshold for attitude tracking.
+  Yaw covered by existing `yaw_rate_cost(r > 1.0)`.
+- `config.py`: Import and constraint list updated for `rp_rate_cost`. Section header updated.
+  Noise comments `ang_vel_err` -> `ang_err [att_rp+yaw_rate]`.
 
 ### Fixed
 - `albc_env.py`: DORAEMON settling error now normalizes each channel by its command range
-  before averaging: `0.5 * (lin_err/0.5 + att_err/(pi/4))`. The resulting dimensionless
-  metric (0=perfect, 1=full-range error) makes the threshold and tau scale-independent.
-- `config.py`: `_OBS_BIAS_MIN` body tracking history ang_err portion changed from
-  `[-0.03]*3` to `[-0.04]*3` to match `_OBS_BIAS_MAX` (`[0.04]*3`), restoring symmetry.
-- `doraemon.py`: Updated `success_threshold` and `traversability_tau` comments from
-  "m/s" units to "dimensionless" to reflect the normalized metric.
-
-### Changed
-- `config.py`: Updated noise comments: `ang_vel_err` -> `ang_err [att_rp+yaw_rate]` in
-  `_OBS_NOISE_STD`, `_OBS_BIAS_MIN`, `_OBS_BIAS_MAX` body tracking history sections.
-- `config.py`: Section header `Velocity Command Tracking` -> `Command Tracking (velocity + attitude)`.
-- `albc_env.py`: Termination docstring `ang_vel_cost` -> `angular_velocity_cost` (actual function name).
+  before averaging: `0.5 * (lin_err/0.5 + att_err/(pi/4))`. Dimensionless metric makes
+  threshold=0.25 and tau=0.035 scale-independent.
+- `config.py`: `_OBS_BIAS_MIN` body tracking history `[-0.03]*3` -> `[-0.04]*3` to match
+  `_OBS_BIAS_MAX`, restoring symmetry.
+- `doraemon.py`: Updated threshold/tau comments from "m/s" to "dimensionless".
 
 ### Notes
-- DORAEMON threshold=0.25 and tau=0.035 retain equivalent behavior for pure velocity tracking
-  (lin_err=0.25 m/s -> normalized 0.5 -> avg 0.25 when att_err=0). The normalization strictly
-  extends correctness to the mixed attitude+velocity case.
-- Attitude constraint `attitude_limit_cost(limit=1.396 rad = 80 deg)` is well above the
-  command range (+-45 deg), so no constraint parameter changes were needed.
+- Exp kernel sigma rationale: ~60% of command range gives good gradient at typical errors.
+  sigma=0.3 for lin_vel/yaw (0.5 m/s or rad/s range), sigma=0.4 for att_rp (0.785 rad range).
+- `attitude_limit_cost(limit=80 deg)` unchanged -- well above +-45 deg command range.
+- DORAEMON threshold=0.25 retains equivalent behavior for pure velocity tracking.
 
 ---
 
