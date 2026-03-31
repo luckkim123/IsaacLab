@@ -15,6 +15,42 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-01] Attitude Command Review Fixes: DORAEMON Normalization + Noise Bias Symmetry
+
+### Context
+Code review of the velocity-to-attitude command conversion in `constrained_full_albc`.
+The prior session converted roll/pitch from angular velocity commands to attitude commands
+(target angle in radians, +-45 deg range) with exp kernel reward, while yaw remained a
+rate command. Review found three bugs: (1) DORAEMON settling error added m/s and radians
+directly without normalization, causing the success_threshold (calibrated for m/s) to
+misclassify well-tracking episodes as failures; (2) `_OBS_BIAS_MIN` for body tracking
+history was not updated alongside `_OBS_BIAS_MAX`, creating asymmetric bias [-0.03, +0.04];
+(3) several comments still referenced `ang_vel_err` instead of `ang_err`.
+
+### Fixed
+- `albc_env.py`: DORAEMON settling error now normalizes each channel by its command range
+  before averaging: `0.5 * (lin_err/0.5 + att_err/(pi/4))`. The resulting dimensionless
+  metric (0=perfect, 1=full-range error) makes the threshold and tau scale-independent.
+- `config.py`: `_OBS_BIAS_MIN` body tracking history ang_err portion changed from
+  `[-0.03]*3` to `[-0.04]*3` to match `_OBS_BIAS_MAX` (`[0.04]*3`), restoring symmetry.
+- `doraemon.py`: Updated `success_threshold` and `traversability_tau` comments from
+  "m/s" units to "dimensionless" to reflect the normalized metric.
+
+### Changed
+- `config.py`: Updated noise comments: `ang_vel_err` -> `ang_err [att_rp+yaw_rate]` in
+  `_OBS_NOISE_STD`, `_OBS_BIAS_MIN`, `_OBS_BIAS_MAX` body tracking history sections.
+- `config.py`: Section header `Velocity Command Tracking` -> `Command Tracking (velocity + attitude)`.
+- `albc_env.py`: Termination docstring `ang_vel_cost` -> `angular_velocity_cost` (actual function name).
+
+### Notes
+- DORAEMON threshold=0.25 and tau=0.035 retain equivalent behavior for pure velocity tracking
+  (lin_err=0.25 m/s -> normalized 0.5 -> avg 0.25 when att_err=0). The normalization strictly
+  extends correctness to the mixed attitude+velocity case.
+- Attitude constraint `attitude_limit_cost(limit=1.396 rad = 80 deg)` is well above the
+  command range (+-45 deg), so no constraint parameter changes were needed.
+
+---
+
 ## [2026-04-01] Revert Wrench-Space, Remove Velocity Termination, Direct Thruster + std=0.5
 
 ### Context
