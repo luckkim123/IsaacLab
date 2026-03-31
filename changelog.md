@@ -36,8 +36,10 @@ Three categories of issues addressed:
 
 ### Changed
 - `mdp/rewards.py`: All 3 tracking rewards now use exp kernel (positive [0,1]):
-  `lin_vel` k=4.0 sigma=0.3 m/s, `att_rp` k=4.0 sigma=0.4 rad, `yaw_vel` k=1.0 sigma=0.3 rad/s.
+  `lin_vel` k=4.0 sigma=0.3 m/s, `att_rp` k=6.0 sigma=0.4 rad, `yaw_vel` k=4.0 sigma=0.3 rad/s.
   Previously lin_vel (k=-4.0 quadratic) and yaw (k=-1.0 quadratic) were negative penalties.
+  Weights tuned after unification: att_rp 4.0->6.0 (x1.5), yaw 1.0->4.0 (x4) to emphasize
+  attitude stability and yaw tracking relative to linear velocity.
 - `mdp/constraints.py`: `angular_velocity_cost(max(p,q,r) > 1.5)` replaced by
   `rp_rate_cost(max(p,q) > 1.0)`. Roll/pitch-only, tighter threshold for attitude tracking.
   Yaw covered by existing `yaw_rate_cost(r > 1.0)`.
