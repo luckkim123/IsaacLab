@@ -54,3 +54,48 @@ in depth and cleared (OK after numerical verification), 3 minor issues found and
 - Encoder static-only input (24D privileged): Intentional HORA Phase 1 design.
   z/actor_input ratio = 10% (vs 48% that caused KL dominance in 2D ALBC).
   4096 unique z per iteration is sufficient with `ca_std.clamp(min=1.0)` guard.
+
+## [2026-03-31] Code Simplification: constrained_full_albc
+
+### Context
+Systematic code cleanup of `constrained_full_albc` (4,968 lines, 19 files). Package was
+forked from `constrained_albc` through 8 rapid development steps. Three parallel code
+explorer agents analyzed: dead/legacy code, code duplication, and structural complexity.
+
+Result: Package was already quite clean (no true dead code found). Changes focused on
+removing backward compat shims, splitting long methods, and improving documentation.
+Behavioral changes: none -- readability/maintainability only.
+
+### Changed
+- `albc_env.py`: Split `_collect_episode_metrics` (97 lines) into dispatcher + 4 helpers:
+  `_log_tracking_metrics`, `_log_action_metrics`, `_log_dynamics_metrics`,
+  `_log_midep_metrics`. Main method reduced to ~30 lines.
+- `albc_env.py`: Split `_init_state_buffers` (59 lines) into dispatcher + 5 helpers:
+  `_init_action_buffers`, `_init_history_buffers`, `_init_velocity_buffers`,
+  `_init_tracking_buffers`, `_init_force_buffers`. Main method reduced to 5 lines.
+- `doraemon.py`: Simplified `load_state_dict` from ~35 lines (dimension mismatch recovery,
+  field rename compat, buffer partial restore) to ~15 lines (strict loading with ValueError
+  on dimension mismatch). New package has no legacy checkpoints to support.
+- `doraemon.py`: Improved PARAM_SPECS formatting (aligned columns) and added SYNC comment
+  noting manual synchronization requirement with `DomainRandomizationCfg`.
+- `config.py`: Added observation dimension breakdown comment
+  (cmd=6 + body=9 + arm=5 + thruster=6 = 26D current + 55D history).
+- `config.py`: Fixed stale comment "ReLU threshold" to "soft threshold".
+
+### Removed
+- `config.py`: Removed unused `max_joint_velocity` field (not referenced anywhere).
+- `encoder/actor_critic_encoder.py`: Removed `proprio_hist_dim` backward compat shim
+  (`kwargs.pop("proprio_hist_dim", None)`). No config in this package uses that field.
+- `runners/constraint_encoder_runner.py`: Removed duplicate
+  `_runner_module.FullDOFActorCriticEncoder = ActorCriticEncoder` class registration
+  (already done in `agents/rsl_rl_ppo_cfg.py`). Removed now-unused `_runner_module` and
+  `ActorCriticEncoder` imports.
+- `doraemon.py`: Removed checkpoint backward compat handling: `current_threshold_deg`
+  field rename fallback, buffer dimension mismatch partial restore, distribution dimension
+  mismatch partial restore.
+
+### Notes
+- DORAEMON `PARAM_SPECS` bounds are duplicated with `DomainRandomizationCfg`. Dynamic
+  derivation was considered but rejected as over-engineering (parameter name mapping is
+  non-trivial, nominal values differ from config midpoints). Added SYNC comment instead.
+- `ruff check` passed, `ruff format` applied to 5 files.
