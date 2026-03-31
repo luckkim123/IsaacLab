@@ -15,6 +15,77 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-01] Logging System Overhaul + Spin-Out Death Spiral Fix
+
+### Context
+First training run of `constrained_full_albc` (Isaac-FullDOF-TRPO-v0) showed 100%
+early termination from angular velocity (`too_fast_ang=1.0`, `time_out=0.0`). Min
+episode length converged DOWN to 4 steps, indicating the policy was actively learning
+to spin out.
+
+Root cause analysis revealed two issues:
+1. **Reward death spiral**: All-negative rewards with `termination_penalty=-10` made
+   early death optimal when per-step penalty > -0.10 (common with DR). Discounted
+   return from dying at step 4 (-10.4) beat surviving (-15 to -20 with bad tracking).
+2. **Missing angular velocity soft constraint**: Hard termination at `max_angular_velocity=pi`
+   had no corresponding soft constraint. The policy received zero gradient signal before
+   hitting the wall. Only `yaw_rate` (1 axis) was constrained; roll/pitch rate were
+   completely unprotected.
+
+Contributing factor: Hero Agent allocation matrix has all-same-sign yaw torque row
+`(+0.144, +0.144, +0.144, +0.144)` (unlike BlueROV's alternating `+0.19, -0.19`),
+combined with extremely low yaw inertia (Izz=0.037 kg*m^2). Max yaw angular
+acceleration = 319 rad/s^2, reaching pi in ~4-5 env steps even through first-order
+thruster filter.
+
+Separately, the WandB logging system was reviewed and overhauled. The system had
+~141 metrics inherited from constrained_albc, with mixed 8D action norms, no
+per-axis velocity tracking, no thruster diagnostics, and one duplicate metric.
+
+### Added
+- `mdp/constraints.py`: New `angular_velocity_cost(soft_threshold=1.5)` function.
+  Uses `max(|p|,|q|,|r|)` (not mean) to match the hard termination condition.
+  Provides IPO barrier gradient on ALL 3 axes before the hard wall at pi.
+- `config.py`: Added `[5] ang_vel` constraint term (budget=0.10, threshold=1.5).
+  Constraint count: 9 -> 10 (5 prob + 5 avg). Runner auto-syncs via env config.
+- `albc_env.py`: Added per-axis velocity tracking: `Vel_Tracking/lin_err_x/y/z`,
+  `ang_err_roll/pitch/yaw` for surge/sway/heave and roll/pitch/yaw rate diagnostics.
+- `albc_env.py`: Added thruster diagnostics: `Thruster/utilization_mean`, `_max`,
+  `_std` (std captures whether thrust is distributed vs concentrated).
+- `albc_env.py`: Added `Control/cumulative_yaw_deg` (tether wrapping indicator).
+- `runners/constraint_encoder_runner.py`: Added `Policy/surrogate_loss` (was computed
+  in constraint_trpo.py but never logged).
+
+### Changed
+- `mdp/rewards.py`: `termination_penalty` -10.0 -> -50.0. Moves death spiral breakeven
+  from per-step penalty -0.10 to -0.50, covering all realistic DR scenarios.
+- `albc_env.py`: Replaced mixed 8D `Action/size_mean` + `Action/rate_mean` with
+  per-subsystem split: `Action/arm_norm`, `arm_rate` (2D) and `Action/thruster_norm`,
+  `thruster_rate` (6D). The 8D combined norm was meaningless (arm delta scale=0.08
+  mixed with thruster commands in [-1,1]).
+- `utils/logging.py`: Removed `alg` parameter from `log_encoder_metrics()` (no longer
+  needed after grad_norm dedup). Updated docstring: 5 metrics -> 4 metrics.
+
+### Removed
+- `utils/logging.py`: Removed duplicate `Encoder/grad_norm` (identical to
+  `Policy/encoder_grad_norm` in runner, both read `alg._last_encoder_grad_norm`).
+- `albc_env.py`: Removed `Vel_Tracking/lin_vel_cmd_norm` and `ang_vel_cmd_norm`
+  (command magnitude context metrics, low diagnostic value vs per-axis errors).
+
+### Notes
+- New constraint defense structure:
+  `ang_vel 0 --[1.5 soft]-- pi [hard kill, -50 penalty]`
+  vs previous: `ang_vel 0 -------------- pi [hard kill, -10 penalty]` (no soft)
+- `yaw_rate` (threshold 1.0) kept alongside `ang_vel` (threshold 1.5): yaw gets
+  tighter protection due to Hero Agent's structurally weak yaw axis (Izz=0.072 total).
+- Mean vs max for angular velocity cost: max chosen to match termination condition.
+  Mean would allow single-axis spin (2.5 rad/s) to go unpenalized if other axes are 0.
+- Thruster `apply_dynamics` uses `physics_dt` (0.005s) instead of `step_dt` (0.02s),
+  making thruster 4x slower than intended. Not fixed this session -- accidentally
+  helpful (slower ramp = less spin-out), but is a real bug for future reference.
+- Total WandB metrics: ~141 -> ~151 (net +10). More metrics but better organized
+  with per-axis, per-subsystem splits replacing mixed aggregates.
+
 ## [2026-03-31] Gap Analysis: constrained_full_albc vs Historical Lessons
 
 ### Context
