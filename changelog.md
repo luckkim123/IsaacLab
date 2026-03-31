@@ -15,6 +15,51 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-01] Wrench-Space Experiment + init_noise_std Root Cause Analysis
+
+### Context
+Previous session's fixes (ang_vel constraint + termination_penalty -50) did not resolve
+100% `too_fast_ang` termination. Systematic debugging revealed the root cause:
+
+1. **NOT reward/constraint**: penalty=-50 mathematically prevents death spiral (breakeven
+   at per-step -0.50, typical is -0.10).
+2. **Physical TAM structure**: Hero Agent yaw row is all-same-sign (+0.144 x4). Any
+   horizontal thrust produces yaw torque. Random policy with std=1.0 generates
+   |T0+T1+T2+T3| ~ 1.05, causing yaw acceleration of 84 rad/s^2.
+3. **TRPO KL constraint**: std 1.0->0.3 requires ~40 iterations at KL=0.005. Intermediate
+   std values (0.5-0.7) produce WORSE returns than dying early (reward valley).
+4. **Root cause confirmed**: init_noise_std=0.3 resolved too_fast_ang=1.0 immediately.
+
+Wrench-space action transformation was implemented (TAM pseudo-inverse mapping
+policy output to [surge,sway,heave,roll,pitch,yaw]) to structurally decouple yaw.
+However, analysis showed:
+- TAM roll row (Mx) is linearly dependent on sway (Fy) for co-planar thrusters
+  (Mx = -0.0099 * Fy), making 4x4 sub-TAM singular.
+- Per-axis scaling with std=0.7 still caused 41% thruster saturation, corrupting
+  wrench allocation. std=0.3 was needed regardless.
+- Wrench-space adds complexity (TAM inverse, saturation handling) without clear
+  benefit over simply lowering init_noise_std.
+
+Decision: wrench-space will be reverted in favor of direct thruster control + lower std.
+
+### Changed
+- `albc_env.py`: Added wrench-to-thruster transformation (`_init_wrench_transform`,
+  `_wrench_to_thruster`) using subsystem decomposition: horizontal 4x4 pinv (rank 3)
+  + vertical 2x2 inv. Per-axis scaling normalizes policy output to max achievable wrench.
+- `albc_env.py`: Logging labels `Action/thruster_*` -> `Action/wrench_*`.
+- `config.py`: Updated action_space docstring for wrench-space layout.
+- `agents/rsl_rl_ppo_cfg.py`: `init_noise_std` 1.0 -> 0.3.
+
+### Notes
+- PhysX rigid body `max_angular_velocity=720 deg/s (4*pi)`, while Python termination
+  fires at pi. The Python check is 4x more conservative than PhysX.
+- Arm uses delta parameterization (rate-limited by delta_scale=0.10), but thrusters
+  use absolute commands with no scaling -- this asymmetry is the fundamental cause of
+  the spin-out at high init_noise_std.
+- Thruster `apply_dynamics` dt bug (physics_dt vs step_dt) still present.
+
+---
+
 ## [2026-04-01] Logging System Overhaul + Spin-Out Death Spiral Fix
 
 ### Context
