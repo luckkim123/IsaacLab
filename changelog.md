@@ -15,6 +15,69 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-02] Reward Revert, URDF Continuous Joints, Eval Tooling, Docs Reorganization
+
+### Context
+Post-session review found multiple uncommitted changes across sessions that were not
+recorded in the changelog. Key decisions: (1) reverting exp kernel unification for
+lin_vel/yaw tracking back to quadratic penalties based on training observation that
+quadratic provides stronger gradient at large errors, (2) changing URDF joint types
+from revolute to continuous for cable-aware constraint modeling, (3) refactoring
+eval/compare scripts from hero_agent to constrained_albc, and (4) consolidating
+scattered hero_agent documentation into centralized `docs/hero/` structure.
+
+### Changed
+- `agent.urdf`: joint1/joint2 changed from `revolute` to `continuous` type, joint
+  limits (`lower`/`upper`) removed. Enables cable-aware constraint modeling without
+  artificial +-2*pi limits. Software constraints must enforce any needed range.
+- `constrained_full_albc/mdp/rewards.py`: Reverted lin_vel and yaw tracking from exp
+  kernel back to quadratic penalty. `k_lin` 4.0 -> -4.0 (quadratic), `k_yaw` 4.0 ->
+  -2.0 (quadratic). Removed `lin_sigma` and `yaw_sigma` fields. Only `att_rp` retains
+  exp kernel (positive [0,1]). Contradicts 2026-04-01 exp unification -- later decision
+  based on training results showing quadratic is better for velocity/yaw.
+- `scripts/analysis/eval_dr.py`: Refactored from hero_agent to constrained_albc task
+  support. Updated imports and class registrations to `ALBC*` prefix. Added
+  `matplotlib.use("Agg")` before pyplot import for headless stability. Removed
+  hero_agent-specific classes (BaseRunner, EncoderRunner, AdaptRunner).
+- `scripts/analysis/compare_dr.py`: Per-segment steady-state computation (last 50% of
+  each segment) replacing whole-trajectory last-50% averaging. Backward compat fallback
+  for old .npz files without `steps_per_segment`. ruff format applied.
+- `scripts/reinforcement_learning/rsl_rl/train.py`: Added `FullDOFConstraintEncoderRunner`
+  mapping for constrained_full_albc runner resolution in the global runner dispatch table.
+- `hero_agent/algorithms/ppo_patch.py`: ruff format applied (no behavioral change).
+
+### Added
+- `scripts/demos/test_full_dof_env.py`: Verification script for full-DOF velocity
+  tracking ALBC environment (smoke test, obs dims, thruster motion, reward response,
+  manipulability index, command resampling, constraint thresholds).
+- `docs/hero/`: Centralized documentation structure with subdirectories (architecture/,
+  archive/, environment/, experiments/, history/, plans/). Consolidates previously
+  scattered hero_agent and constrained_albc docs.
+- `constrained_albc/docs/README.md`, `hero_agent/docs/README.md`: Documentation index.
+
+### Removed
+- `hero_agent/docs/`: 13 standalone design documents (ARCHITECTURE.md, TDC_CONTROL_LAW.md,
+  DOMAIN_RANDOMIZATION.md, DYNAMICS_ANALYSIS.md, PHYSICS_ENVIRONMENT.md, REWARD_FUNCTIONS.md,
+  RL_TDC_COMPARISON.md, SAC_MPC_MONITORING.md, SIM_TO_REAL.md, TDC_LITERATURE_SURVEY.md,
+  THEORETICAL_ANALYSIS.md, TRAINING_PIPELINE.md, code-simplification-log.md,
+  tdc-tuning-history.md) -- consolidated into `docs/hero/`.
+- `constrained_albc/docs/arm-freeze-analysis.md`, `constrained_albc/docs/changelog.md`:
+  Archived into `docs/hero/`.
+- `constrained_albc/encoder/actor_critic_constrained.py` (42 lines): Unused encoder variant.
+- `docs/plans/`: 4 old plan files (2026-02 through 2026-03).
+  `docs/superpowers/plans/`: 2 old plan files.
+- `changelog_legacy.md` (root): Moved to `docs/hero/changelog_legacy.md`.
+
+### Notes
+- URDF `continuous` joint type removes PhysX joint limit enforcement. Constraint cost
+  functions or action clamping must handle range limits in software.
+- Reward revert timeline: 04-01 unified all to exp kernel -> later reverted lin_vel/yaw
+  to quadratic. The exp kernel entry in 04-01 changelog reflects the state at that commit,
+  not the final decision.
+- Thruster `apply_dynamics` dt bug (physics_dt vs step_dt) still present.
+
+---
+
 ## [2026-04-01] Attitude Command Review: Reward Unification, Constraint Redesign, Bug Fixes
 
 ### Context
