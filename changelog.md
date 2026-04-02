@@ -60,6 +60,11 @@ improve lin_vel_z tracking. Fixed missing lin vel command logging.
   Both are acceptable variants. The buffer.clear() was the only critical divergence.
 - Checkpoint incompatibility: existing checkpoints have 10 constraints, new config has 11.
   Fresh training run required.
+- **rp_vel_settling budget 0.05 -> 0.20**: Run `2026-04-02_17-29-18` (120 iter) showed budget
+  0.05 was catastrophically tight. cost_return=11.34 >> d_k=5.0, barrier gradient overwhelmed
+  reward signal. Roll/pitch errors diverged to 20-25 deg (vs 7 deg in previous run). DORAEMON
+  success collapsed to 2.8e-06. Root cause: budget 0.05 allows only 2.9 deg/s average angular
+  velocity, but attitude tracking with +-45 deg commands requires ~6-11 deg/s.
 
 ## [2026-04-02] Reward Revert, URDF Continuous Joints, Eval Tooling, Docs Reorganization
 
