@@ -15,6 +15,62 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-02] DORAEMON Optimizer Fix (trust-constr -> SLSQP) + Step Interval
+
+### Context
+Deep analysis of run `full_dof_trpo/2026-04-02_17-38-38` (960+ iter) revealed DORAEMON
+was completely frozen since iter 674: `kl_step=0` for 290+ consecutive iterations despite
+`success_rate=0.72` (well above `alpha=0.5`) and `mode=1` (EXPAND). All 18 dimensions
+froze simultaneously -- not a per-dimension issue.
+
+Root cause investigation disproved initial IS weight collapse hypothesis (ESS ratio >97%
+even at 10% perturbation). Gradient was non-zero (norm=0.37). Constraints had ample slack
+(success 45% above alpha). The actual root cause: `keep_feasible=True` on the KL
+`NonlinearConstraint` in scipy `trust-constr`. This forced every intermediate iteration to
+satisfy `KL <= kl_ub`, causing the optimizer to rely on inaccurate numerical Jacobians
+(36 params, 72+ finite-difference evals per iteration) for feasibility projection. Result:
+optimizer consistently moved to WORSE objective (+0.136 entropy loss) and the update was
+discarded (`result.success=False` AND `result.fun > x0_fun`).
+
+Verified fix empirically: `keep_feasible=False` -> entropy improved 0.775 nats in 113 iter.
+SLSQP optimizer -> same improvement in just 30 iterations with `result.success=True`.
+SLSQP has no `keep_feasible` concept and handles constraints via SQP final-solution check.
+
+Additionally, even with kl_ub reduced to 0.01, success still crashed from 0.93 to 0.0002
+in 13 iterations because DORAEMON was updating every single RL iteration. Policy needs
+~50+ iterations to adapt to any difficulty change. Added `step_interval` parameter.
+
+Paper reference: Appendix A.2 (gradient vanishing near Beta(1,1)) confirmed -- 13/18 dims
+at concentration 2.6-2.7 with per-param gradient ~0.06. But this was secondary to the
+optimizer bug. Appendix A.2 epsilon sensitivity advice (smaller epsilon) was applied but
+insufficient alone without fixing the optimizer.
+
+### Fixed
+- `doraemon.py`: Replaced `trust-constr` optimizer with `SLSQP` in `_run_scipy_step()`.
+  Converts `NonlinearConstraint` objects to SLSQP dict format. Eliminates `keep_feasible`
+  overhead that caused complete optimizer stall in 36-parameter Beta space. SLSQP converges
+  in ~30 iterations vs trust-constr failing after 50-300. `maxiter` 50 -> 200.
+
+### Changed
+- `config.py`: `kl_ub` 0.18 -> 0.01. Previous value caused success to crash from 0.93 to
+  ~0 in a few EXPAND steps. Paper Figure 8 recommends 0.005-0.01 for stability.
+- `runners/constraint_encoder_runner.py`: DORAEMON `step()` now gated by
+  `iteration % step_interval == 0`. Previously called every RL iteration.
+
+### Added
+- `doraemon.py`: `step_interval: int = 50` in `DoraemonCfg`. Controls how often DORAEMON
+  optimization runs. Policy needs time to adapt between DR distribution changes. Default 50
+  gives ~50 RL iterations of stable training between each DORAEMON update.
+
+### Notes
+- Diagnostic script at `/tmp/doraemon_diagnostic.py` was used for IS weight, gradient, and
+  constraint feasibility analysis. Not committed.
+- The paper (Tiboni et al., ICLR 2024) does not specify its optimizer implementation.
+  Likely does not use `keep_feasible=True` or uses a different solver than scipy trust-constr.
+- Entropy utilization was 96.6% at freeze point (-29.44 vs max -26.93). Gap breakdown:
+  71.8% in 3 concentrated dims (cog_offset_z, volume_scale, cmd_att_scale), 14.4% moderate,
+  13.8% near-uniform. All dims frozen simultaneously despite different concentrations.
+
 ## [2026-04-02] DORAEMON Buffer Fix, KL Budget Scaling, Settling Constraint, Reward Tuning
 
 ### Context
