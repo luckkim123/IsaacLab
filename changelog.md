@@ -15,6 +15,52 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-02] DORAEMON Buffer Fix, KL Budget Scaling, Settling Constraint, Reward Tuning
+
+### Context
+Deep analysis of run `full_dof_trpo/2026-04-02_16-36-08` (712 iter) cross-referenced with
+DORAEMON paper (Tiboni et al., ICLR 2024) revealed critical implementation issues. Paper
+Algorithm 1 uses importance sampling to reuse ALL collected data for distribution optimization,
+but code was calling `buffer.clear()` after every `step()`, discarding all data. This caused
+44% of iterations to skip DORAEMON optimization entirely (buffer_size < min_episodes=200).
+Even when optimization ran, `kl_ub=0.01` shared across 18 dimensions gave per-dim KL budget
+of 0.00056 -- too small for meaningful Beta distribution change. Result: cmd_scale only moved
+0.30 -> 0.42 in 712 iterations, DORAEMON effectively stalled. `kl_step=0` in 63% of all
+iterations. ESS revert never triggered (ess_ratio ~1.0), confirming the bottleneck was
+skip + tiny KL budget, not IS weight variance.
+
+Also added rp_vel_settling constraint (agreed in prior session): roll/pitch are position
+targets, so angular velocity should average near zero. Reduced thruster penalty weight to
+improve lin_vel_z tracking. Fixed missing lin vel command logging.
+
+### Changed
+- `doraemon.py`: Removed `buffer.clear()` from `step()` method. Ring buffer (capacity=2000)
+  naturally overwrites old data. Paper's IS mechanism corrects for distribution shift. ESS
+  check guards against extreme staleness. This is the single most impactful fix -- eliminates
+  44% skip rate.
+- `config.py`: `kl_ub` 0.01 -> 0.18 (per-dim 0.01 * 18 dims). Allows meaningful per-dim
+  Beta distribution change while maintaining trust region stability. Previous value gave
+  per-dim budget of 0.00056, practically freezing the distribution.
+- `mdp/rewards.py`: `k_thr` -0.5 -> -0.35 (0.7x reduction). Thruster energy penalty was
+  suppressing lin_vel_z tracking -- policy avoided vertical thrust to minimize penalty.
+
+### Added
+- `mdp/constraints.py`: `rp_vel_settling_cost()` -- average constraint `(|p|+|q|)/2` for
+  roll/pitch angular velocity settling. Budget=0.05 (~3 deg/s average). Complements existing
+  `rp_rate_cost` which only penalizes >1.0 rad/s. Total constraints: 10 -> 11.
+- `config.py`: Registered `rp_vel_settling` constraint term (5 prob + 6 avg = 11 total).
+- `albc_env.py`: Added `Command/lin_vel_x,y,z` logging in `_log_tracking_metrics()`. Previously
+  only att_roll_deg, att_pitch_deg, yaw_rate were logged -- lin vel commands were missing.
+
+### Notes
+- `num_constraints` auto-synced by runner (constraint_encoder_runner.py:42-61), no manual
+  update needed in rsl_rl_ppo_cfg.py.
+- DORAEMON paper vs code: structure matches (entropy max + backup + KL trust region). Key
+  differences: continuous sigmoid success (vs binary), self-normalized IS (vs unnormalized).
+  Both are acceptable variants. The buffer.clear() was the only critical divergence.
+- Checkpoint incompatibility: existing checkpoints have 10 constraints, new config has 11.
+  Fresh training run required.
+
 ## [2026-04-02] Reward Revert, URDF Continuous Joints, Eval Tooling, Docs Reorganization
 
 ### Context
