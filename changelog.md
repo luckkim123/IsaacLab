@@ -15,6 +15,65 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-02] DORAEMON Success Criterion: Fake Episode Fix + 3-Component Weighted Settling Error
+
+### Context
+Continued DORAEMON investigation after SLSQP fix (previous session). New training runs
+showed success_rate crashing from 0.97 to 0.02 within 15 iterations despite DR distribution
+being frozen (step_interval=50 prevented optimization). Multiple failed hypotheses tested:
+
+1. **threshold/tau too strict** (0.25/0.035): Raised to 0.6/0.1 -- still crashed.
+2. **lin_vel dominates settling error** (66% of range): Removed lin_vel, att-only -- still crashed.
+3. **Exploration increases error**: User corrected -- TB showed att_err=25.7 deg from iter 0.
+
+Root cause found via discrepancy analysis: at iter 0, DORAEMON success=0.976 but TB
+att_err=25.7 deg. For success=0.976, settling_err must be ~0.23 (implying ~10 deg), not
+25.7 deg. The real cause: `learn()` calls `env.reset()` which triggers `_log_and_reset_rewards()`
+for all 4096 envs with `settling_idx=0` (no steps taken). `mean_settling_err = 0/1 = 0` gives
+`success = sigmoid(-(0 - threshold)/tau) ~= 1.0`. These 4096 fake episodes (success ~1.0)
+fill the 2000-capacity ring buffer. As real episodes (with actual errors) replace fake ones over
+~11 iterations, buffer-average success drops from 0.97 to real levels (~0.09), creating the
+appearance of a crash.
+
+IS diagnostic on previous run's checkpoint (17-38-38, frozen at iter 674) confirmed SLSQP
+works correctly: success_constraint feasible at x0 (0.78 vs alpha=0.5), optimizer found
++0.20 entropy improvement using full KL budget (0.01), ESS=1959/2000, IS weights nearly
+uniform (Gini=0.076). IS estimation is NOT a problem.
+
+After the settling filter fix, run 21-18-55 showed correct DORAEMON behavior: BACKUP at
+iter 2 (success=0.38), policy learns, success crosses alpha=0.5 at iter 35, EXPAND at
+iter 52 (entropy -45.76 -> -45.35). However, with att-only threshold=0.6, success saturated
+at 0.975 while distribution barely changed -- criterion too loose.
+
+Final design: 3-component weighted settling error (att=0.5, ang=0.3, lin=0.2) with
+threshold=0.40, tau=0.08. At iter 170 policy level (att=7.7 deg, lin=0.31 m/s,
+ang=17.8 deg/s), settling_err=0.396 gives success=0.514 -- right at EXPAND boundary.
+
+### Fixed
+- `albc_env.py`: Filter out episodes with `settling_idx < settling_window` from DORAEMON
+  buffer recording. Initial `env.reset()` produced 4096 fake episodes with settling_err=0
+  (success ~1.0) that polluted the buffer and caused artificial success rate crash.
+
+### Changed
+- `albc_env.py`: Settling error from `0.5*(att+lin)` to weighted `0.5*att + 0.3*ang + 0.2*lin`.
+  Added yaw_rate_err component. Priority: attitude > angular velocity > linear velocity.
+- `doraemon.py`: `success_threshold` 0.25 -> 0.40 (weighted formula calibrated to current
+  policy level). `traversability_tau` 0.035 -> 0.08 (softer sigmoid for multi-component error).
+- `doraemon.py`: `step()` restructured -- metrics always returned every call, optimization
+  gated by `step_count % step_interval`. Fixes WandB logging gap from previous session's
+  runner-side interval check.
+- `doraemon.py`: Per-parameter distribution stats (mean/std) now logged every iteration
+  (not just on optimization steps).
+
+### Notes
+- Settling filter verified: buffer starts at 32 episodes (not 2000 fake), fills to 2000 by iter 12
+- Success trajectory with filter: 0.00 (iter 0-6) -> 0.16 (iter 49) -> policy learning dependent
+- BACKUP during early training is expected (policy can't track yet, not DR's fault)
+- BACKUP on already-tight initial distribution (concentration=30) is effectively a no-op
+- User's final performance targets: att < 5 deg, lin_vel < 0.05 m/s, ang_vel < 5 deg/s
+- Attempted and reverted: warmup_iters (unnecessary after settling filter fix),
+  entropy floor clamp (no literature basis)
+
 ## [2026-04-02] DORAEMON Optimizer Fix (trust-constr -> SLSQP) + Step Interval
 
 ### Context
