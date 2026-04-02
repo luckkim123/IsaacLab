@@ -76,6 +76,50 @@ scattered hero_agent documentation into centralized `docs/hero/` structure.
   not the final decision.
 - Thruster `apply_dynamics` dt bug (physics_dt vs step_dt) still present.
 
+## [2026-04-02] Exploration Recovery + Command Difficulty Curriculum
+
+### Context
+Analysis of run `full_dof_trpo/2026-04-01_06-03-44` (10k iter) revealed a coupled failure
+mode: noise_std collapsed to 0.01 (floor) by step 5000 because the sigma optimizer had
+no entropy incentive. With deterministic policy, DORAEMON success_rate dropped 0.60 -> 0.13
+despite DR contraction (entropy -29 -> -62). Root cause: score-function gradient equilibrium
+drove sigma to floor when reward plateaued (step ~1300). DORAEMON contracted DR slower
+(kl_ub=0.0015) than policy degraded. Additionally, command difficulty was fixed at full
+range regardless of policy capability. Three changes address the coupled problem: (1) entropy
+bonus for sigma adaptive exploration, (2) DORAEMON-managed command difficulty, (3) faster
+DR adaptation.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Added `entropy_coef` parameter (default 0.005) to sigma
+  optimizer. sigma_surrogate now includes `- entropy_coef * log_std.sum()`, providing soft
+  upward pressure on sigma proportional to how low it is. Decoupled from TRPO trust region --
+  only affects the separate Adam sigma optimizer. Score-function equilibrium shifts higher:
+  when learning is poor (weak reward gradient), entropy bonus dominates -> sigma increases.
+  When learning is good, reward gradient dominates -> sigma decreases for precision.
+- `agents/rsl_rl_ppo_cfg.py`: `min_std` 0.01 -> 0.05 (safety floor, not primary mechanism).
+  Added `entropy_coef: float = 0.005` to algorithm config.
+- `doraemon.py`: PARAM_SPECS expanded from 15 to 18 dimensions. Added 3 command range
+  scale parameters: `cmd_lin_scale`, `cmd_att_scale`, `cmd_yaw_scale` (range [0.1, 1.2],
+  nominal=0.3). Commands start at ~30% of full range. DORAEMON entropy maximization pushes
+  toward harder commands as success allows; backup contracts toward easier commands when
+  policy struggles. Settling error normalization uses global (config) range, so easy commands
+  naturally yield higher DORAEMON success -- no changes needed to success metric.
+- `albc_env.py`: Added per-env command scale buffers (`_cmd_lin_scale`, `_cmd_att_scale`,
+  `_cmd_yaw_scale`). Stored from DORAEMON sample at reset. `_sample_velocity_command()`
+  now samples `uniform(-1, 1) * (max_range * per_env_scale)` instead of fixed
+  `uniform(range_min, range_max)`. Mid-episode resampling uses same per-env scale.
+- `config.py`: DORAEMON `kl_ub` 0.0015 -> 0.01 (~7x faster DR adaptation). Per 18 dims:
+  0.00056 KL per dimension per step, enough for meaningful distribution shifts in 50-100 iter.
+
+### Notes
+- Existing checkpoints have 15-dim DORAEMON state; new 18-dim config will fail on load
+  (intentional -- new runs require fresh start).
+- No parameters scale with max_iterations. 2500 and 20000+ iter runs both work without
+  config changes (use `--save_interval 200` for long runs).
+- entropy_coef=0.005 matches RSL-RL PPO default for AnymalC/Allegro. In TRPO context this
+  is safe because sigma is fully decoupled from trust region.
+- DORAEMON cmd scales auto-logged as `DORAEMON/mean/cmd_lin_scale` etc. via get_stats().
+
 ---
 
 ## [2026-04-01] Attitude Command Review: Reward Unification, Constraint Redesign, Bug Fixes
