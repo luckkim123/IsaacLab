@@ -15,6 +15,70 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-02] DORAEMON Reference Implementation Alignment: Heuristic Removal + Binary Success
+
+### Context
+Cloned reference DORAEMON implementation (github.com/gabrieletiboni/doraemon) and performed
+detailed code-level comparison against our implementation. Found critical structural divergences:
+
+1. **Success indicator**: Reference uses binary `sigma(tau) = 1{J(tau) >= J_LB}` based on
+   cumulative episode return. Our code used continuous sigmoid of weighted settling error
+   (att*0.5 + ang*0.3 + lin*0.2), which misaligns DORAEMON's evaluation metric from the
+   RL reward signal the agent actually optimizes.
+
+2. **IS estimation**: Reference uses unnormalized IS `(1/K) sum w_k * sigma_k`. Our code
+   used self-normalized IS `sum (w_k/sum_w) * sigma_k`, which is biased.
+
+3. **Algorithm structure**: Reference has a single constrained optimization problem
+   `min KL(phi||phi_target) s.t. performance >= lb, KL_step <= eps` with an inverted
+   problem fallback when infeasible. Our code had separate BACKUP and EXPAND modes with
+   a heuristic backup-then-expand pattern not in the paper.
+
+4. **Optimizer**: Reference uses trust-constr with `keep_feasible=False` on main problem
+   and analytical Jacobians. Our code used SLSQP (workaround for keep_feasible=True stall).
+   Root cause was keep_feasible=True, not trust-constr itself.
+
+5. **Heuristic additions**: `step_interval=50` (not in paper), threshold annealing (not in
+   paper), 3-component weighted settling error + sigmoid temperature (task-specific tuning).
+
+Paper-analysis AI confirmed: DORAEMON paper uses binary success from cumulative reward
+threshold J_LB, set at ~50-80% of expert performance (Hopper: J_LB=1600, expert ~2500).
+
+J_LB=80 chosen based on training data: random policy ~-100, minimally competent ~50,
+mature ~150. J_LB=80 corresponds to ~53% of mature performance.
+
+### Changed
+- `doraemon.py`: Complete DoraemonScheduler restructure to match reference implementation.
+  Single optimization (max entropy s.t. success >= alpha, KL <= eps) + inverted problem
+  when infeasible. trust-constr optimizer with analytical Jacobians and keep_feasible=False.
+  Unnormalized IS using stored per-episode log_probs (correct for ring buffer with
+  heterogeneous sampling distributions). DoraemonCfg simplified: added `performance_lb=80.0`,
+  `hard_performance_constraint=True`.
+- `albc_env.py`: Episode recording switched from settling error + sigmoid to binary
+  `episode_return >= performance_lb`. Removed settling error infrastructure (window, errors
+  buffer, index tracking). Episode filter changed from `settling_idx >= window` to
+  `episode_length > 0` (sufficient since binary success(return=0)=0, no fake inflation).
+- `config.py`: DoraemonCfg instantiation updated with `performance_lb=80.0`.
+
+### Removed
+- `doraemon.py`: `step_interval` (paper runs every step), `success_threshold` +
+  `success_threshold_final` + `success_threshold_anneal_steps` + `_anneal_threshold()`
+  (threshold annealing not in paper), backup-then-expand pattern, `_backup()` and
+  `_maximize_entropy()` replaced by `_optimize_entropy()` and `_find_feasible_start()`,
+  `_run_scipy_step()` (SLSQP helper), self-normalized IS, `traversability_tau`.
+- `albc_env.py`: `_settling_window`, `_settling_errors`, `_settling_idx` buffers.
+  Weighted settling error computation (att*0.5 + ang*0.3 + lin*0.2 + sigmoid).
+
+### Notes
+- Reference uses `KL(old||new)` for trust region but paper says `KL(new||old)`. Our code
+  matches the paper (KL(new||old)).
+- Ring buffer kept (vs reference's clear-after-each-step) because our PPO architecture
+  produces only ~87 episodes per RL iteration (vs reference's thousands). IS with stored
+  log_probs corrects for distribution mismatch.
+- Reference repo cloned to `/workspace/references/doraemon/` for ongoing comparison.
+- Checkpoint incompatibility: state_dict changed (removed threshold/backup fields).
+  Fresh training required.
+
 ## [2026-04-02] DORAEMON Success Criterion: Fake Episode Fix + 3-Component Weighted Settling Error
 
 ### Context
