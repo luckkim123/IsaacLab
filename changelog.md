@@ -71,11 +71,13 @@ action noise difference E[max|da| over 6 thrusters] = 2.18, threshold=0.5. Noise
 makes the constraint impossible to satisfy. The barrier gradient then suppresses all
 thruster output, causing lin_vel reward to collapse (-0.89 -> -7.02 vs Run A at same iter).
 
-- `config.py`: Removed `thruster_rate_cost` from constraint list (11 -> 10 terms,
-  6 prob + 4 avg). Thruster smoothness already handled by action_smoothness reward
-  (`k_s=-0.1`, 8D) + first-order dynamics (tau_up=0.1s physical low-pass filter)
-- `mdp/constraints.py`: Updated docstring layout (11 -> 10 constraints). Function
-  `thruster_rate_cost` kept in code for potential future use
+- `config.py`: Removed `thruster_rate_cost` from constraint list. Thruster smoothness
+  already handled by action_smoothness reward (`k_s=-0.1`) + first-order dynamics
+- `config.py`: Reverted `thruster_sat` (Probabilistic, budget=0.05) back to original
+  `thruster_util` (Average, budget=0.40). Final: 10 terms (5 prob + 5 avg)
+- `mdp/constraints.py`: Restored `thruster_utilization_cost` (replaces `thruster_saturation_cost`).
+  Updated docstring layout
+- `mdp/__init__.py`: Updated export (`thruster_saturation_cost` -> `thruster_utilization_cost`)
 
 ---
 
