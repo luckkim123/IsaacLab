@@ -15,6 +15,52 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-04] Constraint Analysis + Reward/Constraint Additions (session 4)
+
+### Context (session 4)
+Deep code-level analysis of the constraint system in response to 7 design questions:
+barrier/budget tuning, thruster_util necessity, DORAEMON-budget coupling risks,
+rp_vel_settling impact, thruster contribution to attitude response, new constraint
+proposals (rise time, overshoot, SS error), and thruster smoothness.
+
+Key findings from run `full_dof_trpo/2026-04-04_16-06-48` (2500 iter):
+- thruster_util is the tightest constraint (margin=18.4%), thruster_rate had no
+  dedicated limiting mechanism beyond the shared action_smoothness penalty
+- att_rp SS error ~3 deg persists because exp kernel (sigma=0.4) gives reward=0.9915
+  at 3 deg error -- policy sees this as "99% perfect" with minimal incentive to improve
+- DORAEMON cmd_att_scale=0.55 -> effective training command range +-24.7 deg (not +-45 deg)
+- Coupling constraint budgets to DORAEMON success_rate would cause gradient instability
+  (non-stationary optimization, positive feedback loops, dual-curriculum conflict)
+- TAM analysis: thruster pitch torque is strong (0.145m arm, ~11.6Nm), roll is weak
+  (0.007m arm, ~0.56Nm)
+
+### Added
+- `mdp/constraints.py`: `thruster_rate_cost()` -- ReLU threshold=0.5, penalizes peak
+  per-step thruster command change >50% of full range. Protects motors from rapid
+  command cycling. Initial budget 0.15 was too tight (converged policy already at
+  d_k violation), changed to ReLU threshold approach with budget=0.10
+- `mdp/rewards.py`: `att_rp_quadratic()` -- quadratic attitude penalty (k=-5.0) to
+  complement exp kernel's weak gradient near zero error. Adds ~27% gradient increase
+  across all error magnitudes. Provides persistent SS error convergence pressure
+- `mdp/rewards.py`: `k_att_rp_quad` config field in `ALBCRewardCfg`
+
+### Changed
+- `config.py`: 11 -> 12 constraints (5 prob + 7 avg). Added `thruster_rate_cost`
+  registration with `soft_threshold=0.5`, `budget=0.10`
+- `mdp/rewards.py`: `RewardManager` expanded from 6-term to 7-term (added att_rp_quad)
+
+### Notes
+- DORAEMON-budget coupling rejected: budget should be physical safety constants, not
+  adaptive. Alternative for future: include constraint violations in DORAEMON success
+  criterion (budget stays fixed, DORAEMON learns constraint-safe DR ranges)
+- Overshoot constraint deferred to next run results. Design ready: avg type, budget=0.02,
+  penalizes velocity opposing error direction when near target (<5 deg)
+- Thruster rate budget=0.10 with ReLU threshold=0.5 means only extreme rate changes
+  (>50%/step) are penalized. Random policy initially violates but adaptive threshold
+  handles it (barrier_margin=0.50 via alpha*d_k expansion)
+
+---
+
 ## [2026-04-04] DORAEMON Tuning + Training Analysis (3 sessions)
 
 ### Context (session 3)
