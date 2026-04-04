@@ -15,6 +15,40 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-04] DORAEMON Bug Fixes + Training Analysis
+
+### Context
+Analyzed 20k iteration run (full_dof_trpo/2026-04-02_23-29-50) with comprehensive diagnostics.
+Key findings:
+- DORAEMON expanded to maximum entropy (uniform) by iter ~5000 due to J_LB=80 being far too low
+  (reward range 108-150, so virtually all episodes counted as "success")
+- After reaching uniform, kl_step=0 permanently -- DORAEMON stopped adapting for remaining 15k iter
+- noise_std exploded from 0.26 (iter 2k) to 1.57 (iter 20k) due to entropy_coef=0.005 being too strong
+- Reference code comparison revealed: keep_feasible was incorrectly False, lb=0.0 instead of -np.inf,
+  inverted->main optimization path used wrong IS reference distribution
+- KL direction: reference code uses forward KL (KL(current||proposed)) but paper Algorithm 1 specifies
+  reverse KL (KL(proposed||current)). Kept reverse KL as it penalizes expansion more heavily,
+  better matching our slow-adapting TRPO (vs reference's fast SAC)
+- Encoder z sweep showed healthy 9/9 active dimensions; z convergence to +/-0.74 is natural
+  softsign gradient equilibrium, not architectural constraint
+
+### Changed
+- `doraemon.py`: Main optimization KL constraint lb=0.0 -> lb=-np.inf, keep_feasible=False -> True
+- `doraemon.py`: Inverted problem KL constraint lb=0.0 -> lb=-np.inf, ub=kl_ub -> kl_ub-1e-5, keep_feasible=False -> True
+- `doraemon.py`: Inverted->main path now passes original prev_dist as IS/KL reference (was self.dist.clone())
+- `config.py`: performance_lb (J_LB) 80.0 -> 120.0 (closer to actual reward mean, so success constraint binds)
+- `rsl_rl_ppo_cfg.py`: entropy_coef 0.005 -> 0.001 (prevent noise_std explosion)
+- `analyze_training.py` (skill): Added --stride option for subsampling long runs while preserving time range
+- `SKILL.md` (train-analyze): Documented --stride usage
+
+### Notes
+- keep_feasible=True previously caused stalls with kl_ub=0.01 + lb=0.0; now kl_ub=0.5 + lb=-np.inf should be safe
+- If keep_feasible=True still causes issues, revert to False as fallback
+- Paper vs reference code KL direction discrepancy: paper says KL(phi||phi_i) (reverse), code does KL(phi_i||phi) (forward)
+- J_LB=120 with current reward ~108-150: roughly half of episodes should fail, matching alpha=0.5
+
+---
+
 ## [2026-04-02] DORAEMON Reference Implementation Alignment (4 commits)
 
 ### Context
