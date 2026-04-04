@@ -15,6 +15,44 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-04] DORAEMON Tuning + Training Analysis (2 sessions)
+
+### Context (session 2)
+Analyzed 2360-iter run (full_dof_trpo/2026-04-04_16-06-48) -- the first run after
+the DORAEMON bug fixes from session 1. DORAEMON confirmed working correctly: 9/9
+scheduled updates all succeeded (mode=0), kl_step=kl_ub=0.5 (full budget used each
+time), entropy increased from -45.66 to -27.33 (near uniform=-26.93). cmd_scale
+accelerated: 0.30->0.48, with each DORAEMON step making a larger jump than the
+previous (last step: +0.048).
+
+Two issues identified:
+1. noise_std collapsed 0.70->0.15 (entropy_coef=0.001 too conservative). Chose 0.003
+   as middle ground (0.001=collapse, 0.005=explosion in previous 20k run).
+2. DORAEMON used full kl_ub=0.5 every step (bottleneck). Increased to 1.0 for faster
+   DR expansion.
+
+Also corrected previous analysis error: enc_cos_vanilla_step=-0.57 was incorrectly
+interpreted as "TRPO distorts encoder gradient direction." Code inspection (line 516:
+step_dir = -sqrt(max_kl/shs) * nat_grad) shows cos_vs = -cos_vn by mathematical
+identity. The negative sign is standard gradient descent. Data confirmed: 0/2440
+mismatches. Encoder compression ratio (natgrad/vanilla=5.1%) matches actor (4.1%),
+confirming encoder is learning proportionally.
+
+### Changed
+- `config.py`: DORAEMON kl_ub 0.5 -> 1.0 (bottleneck: every step used full budget)
+- `rsl_rl_ppo_cfg.py`: entropy_coef 0.001 -> 0.003 (noise_std collapsed to 0.15)
+
+### Notes
+- entropy_coef history: 0.005 (explosion) -> 0.001 (collapse) -> 0.003 (current)
+- kl_ub history: 0.01 (too small per-iter) -> 0.5 (with step_interval=250) -> 1.0 (bottleneck)
+- GradDecomp/enc_cos_vanilla_step is redundant (always = -enc_cos_vanilla_natgrad). Can be
+  removed from logging or ignored in analysis.
+- Constraint health: 9/11 improving, thruster_util (33.8/40) and rp_rate (0.49/10) rising
+  but within budget. thruster_util may violate at cmd_scale>0.6.
+- Encoder healthy: z_range [-0.73,0.74], z_std increasing Q3-Q4, not suppressed by TRPO
+
+---
+
 ## [2026-04-04] DORAEMON Bug Fixes + Training Analysis
 
 ### Context
