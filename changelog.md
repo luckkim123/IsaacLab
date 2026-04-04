@@ -39,15 +39,18 @@ Key findings from run `full_dof_trpo/2026-04-04_16-06-48` (2500 iter):
   per-step thruster command change >50% of full range. Protects motors from rapid
   command cycling. Initial budget 0.15 was too tight (converged policy already at
   d_k violation), changed to ReLU threshold approach with budget=0.10
-- `mdp/rewards.py`: `att_rp_quadratic()` -- quadratic attitude penalty (k=-5.0) to
-  complement exp kernel's weak gradient near zero error. Adds ~27% gradient increase
-  across all error magnitudes. Provides persistent SS error convergence pressure
-- `mdp/rewards.py`: `k_att_rp_quad` config field in `ALBCRewardCfg`
 
 ### Changed
 - `config.py`: 11 -> 12 constraints (5 prob + 7 avg). Added `thruster_rate_cost`
   registration with `soft_threshold=0.5`, `budget=0.10`
-- `mdp/rewards.py`: `RewardManager` expanded from 6-term to 7-term (added att_rp_quad)
+- `mdp/rewards.py`: Merged separate `att_rp_tracking` (exp kernel, k=6.0) and
+  `att_rp_quadratic` (quadratic penalty, k=-5.0) into a single combined function:
+  `att_rp_tracking` now returns `exp(-e^2/2s^2) - ratio*e^2`. Config changed from
+  two independent weights (`k_att_rp=6.0`, `k_att_rp_quad=-5.0`) to one weight +
+  ratio (`k_att_rp=6.0`, `att_rp_quad_ratio=0.833`). Mathematically equivalent:
+  `6.0*(exp - 0.833*err^2) = 6.0*exp - 5.0*err^2`. RewardManager stays 6-term.
+  Trade-off: lost independent weight tuning, gained code simplicity. Previous training
+  showed att_rp=5.5, att_rp_quad=-2.5 (healthy ~45% penalty ratio)
 
 ### Notes
 - DORAEMON-budget coupling rejected: budget should be physical safety constants, not
