@@ -15,6 +15,48 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-04] DORAEMON Tuning + Training Analysis (3 sessions)
+
+### Context (session 3)
+eval_dr results showed almost no difference between none/soft/medium/hard DR levels
+(att error 3.3-3.7 deg, 100% survival across all). Root cause: DORAEMON reached
+near-uniform distribution over PARAM_SPEC bounds (entropy -27.3 ≈ uniform -26.93),
+but those bounds were hardcoded copies of DomainRandomizationCfg defaults. Policy
+already handles full default DR range at 98% success rate, so expanding within those
+bounds has no effect.
+
+Two structural fixes:
+1. DORAEMON PARAM_SPEC auto-sync: bounds now read from DomainRandomizationCfg at init
+   time via `build_param_specs(dr_cfg)`. Using HardDomainRandomizationCfg or custom DR
+   automatically widens DORAEMON's exploration bounds.
+2. eval_dr 6-DOF trajectory: extended from attitude-only (roll/pitch ±15°, lin_vel=0,
+   yaw=0) to full 6-DOF testing (att ±15°, lin_vel ±0.25 m/s per axis, yaw ±0.25 rad/s).
+   14 segments testing each channel independently for cross-coupling analysis.
+
+### Added
+- `doraemon.py`: `build_param_specs(dr_cfg)` function and `_PHYSICS_PARAM_DR_FIELDS` mapping
+  to auto-derive PARAM_SPEC bounds from any DomainRandomizationCfg instance
+- `eval_dr_fulldof.py`: 6-DOF step trajectory (14 segments: 5 attitude + 6 lin_vel + 2 yaw + 1 neutral)
+- `eval_dr_fulldof.py`: `--doraemon-dr` flag to use DORAEMON-learned DR as hard level
+- `eval_dr_fulldof.py`: Target overlays on lin_vel and yaw_rate plots
+
+### Changed
+- `doraemon.py`: `DoraemonScheduler.__init__` accepts optional `dr_cfg` parameter; when
+  provided, physics bounds auto-sync from DR config instead of using hardcoded defaults
+- `albc_env.py`: Passes `dr_cfg=self.cfg.randomization` when creating DoraemonScheduler
+- `eval_dr_fulldof.py`: `build_step_trajectory` returns 6-DOF target dict instead of 2D arrays
+- `eval_dr_fulldof.py`: `run_evaluation` injects all 6 command channels from trajectory
+
+### Notes
+- PARAM_SPEC bounds were the DORAEMON ceiling: even with kl_ub=1.0, it can't expand beyond
+  these bounds. Auto-sync with DR config removes this limitation.
+- Command scales (cmd_lin/att/yaw_scale) remain fixed bounds (0.1, 1.2) since they're not
+  in DomainRandomizationCfg.
+- Next step: train with wider DR config (e.g. HardDomainRandomizationCfg) so DORAEMON can
+  actually challenge the policy and drive success_rate toward 0.5.
+
+---
+
 ## [2026-04-04] DORAEMON Tuning + Training Analysis (2 sessions)
 
 ### Context (session 2)
