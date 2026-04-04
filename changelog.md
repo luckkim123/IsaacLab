@@ -103,6 +103,19 @@ Design: sigma set at target error for max gradient at the convergence point.
 - `mdp/rewards.py`: `att_rp_sigma` 0.4 -> 0.15 (gradient at 5 deg target: 40x stronger)
 - `config.py`: `performance_lb` 100.0 -> 120.0 (reward shift from exp kernels)
 
+### Changed (reward weight tuning from run 22:53)
+
+Run `2026-04-04_22-53-06` (1038 iter) validated exp+quad structure. lin_vel err_norm
+reached 0.085 (target 0.087), yaw err plateaued at 0.188 (target 0.1). Reward balance
+needed adjustment: lin_vel converged at 3.0 (want 2.0), yaw at 1.15 (want 2.0).
+DORAEMON success=1.00 with kl_step=1.0 every update -- expanding too slowly.
+
+- `mdp/rewards.py`: `k_lin` 4.0 -> 2.7 (lin_vel reward 3.0 -> 2.0 convergence target)
+- `mdp/rewards.py`: `k_yaw` 2.0 -> 3.5 (yaw reward 1.15 -> 2.0 convergence target)
+- `mdp/rewards.py`: `yaw_vel_sigma` 0.20 -> 0.17 (tighter for yaw err plateau at 0.19)
+- `config.py`: `performance_lb` 120.0 -> 200.0 (accounts for increased total reward)
+- `config.py`: `kl_ub` 1.0 -> 2.0 (DORAEMON success=1.0, DR expanding too slowly)
+
 ---
 
 ## [2026-04-04] Constraint Redesign: thruster_util -> Probabilistic, Remove body_lin_vel (session 5)
