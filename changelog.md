@@ -15,6 +15,54 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-04] Constraint Redesign: thruster_util -> Probabilistic, Remove body_lin_vel (session 5)
+
+### Context
+Training run `full_dof_trpo/2026-04-04_19-39-11` (381 iter) showed thruster_util
+constraint massively over budget (cr=99.30 vs dk=40.00, 2.5x over). Root cause:
+`entropy_coef=0.003` keeps exploration noise high (noise_std=0.69), which naturally
+pushes max thruster utilization to ~1.0 every step. The old Average-type constraint
+(no ReLU threshold, always-on cost) was structurally incompatible with high-entropy
+exploration -- noise alone exceeded the budget.
+
+Compared iter 380 across runs: previous run (no entropy_coef) had util_mean=0.12,
+util_max=0.31. Current run has util_mean=0.79, util_max=1.00 (saturated). The
+difference is entirely due to exploration noise, not policy intent.
+
+Design decision: align thruster constraint with arm constraint pattern. arm_torque
+and arm_joint_vel use Probabilistic (binary limit check only), with energy/usage
+optimization left to rewards. thruster_util should follow the same pattern -- only
+fire at saturation boundary, let `k_thr=-0.35` reward handle efficiency.
+
+Also removed body_lin_vel constraint (completely inactive, cr=0.00, already covered
+by PhysX clamp + no velocity termination in this env).
+
+### Changed
+- `mdp/constraints.py`: Renamed `thruster_utilization_cost` -> `thruster_saturation_cost`.
+  Changed from Average (continuous `max(|state|)`) to Probabilistic (binary
+  `I(max(|state|) > 0.95)`). Only fires when a thruster is near-saturated (>95% output).
+  Energy efficiency remains the reward's job (`k_thr=-0.35`)
+- `config.py`: Constraint list 12 -> 11 terms (6 prob + 5 avg). Removed `body_lin_vel`
+  entry. Changed `thruster_util` (avg, budget=0.40) to `thruster_sat` (prob, budget=0.05,
+  limit=0.95)
+- `mdp/__init__.py`: Updated exports (removed `body_linear_velocity_cost`,
+  `thruster_utilization_cost`; added `thruster_saturation_cost`)
+- `albc_env.py`: Updated termination docstring to remove body_linear_velocity_cost reference
+
+### Removed
+- `body_linear_velocity_cost` from active constraint list (function kept in constraints.py
+  for potential future use). Rationale: cost_return=0.00 in all training runs, termination
+  threshold (2.0 m/s) already removed, PhysX clamp provides hard physical limit
+
+### Notes
+- Termination conditions remain: bad_state (NaN/Inf) + excessive_tilt (>90 deg) only.
+  No velocity termination (neither angular nor linear) -- soft constraints + PhysX clamp
+- `thruster_rate_cost` (avg, budget=0.10) is unchanged -- still limits rapid command changes
+- With thruster_sat as Probabilistic, exploration noise won't cause massive barrier penalty.
+  Binary cost I(>0.95) is insensitive to noise magnitude, only to whether saturation occurs
+
+---
+
 ## [2026-04-04] Constraint Analysis + Reward/Constraint Additions (session 4)
 
 ### Context (session 4)
