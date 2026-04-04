@@ -62,6 +62,21 @@ Verified with controlled experiments:
   training), IS weights are near 1.0 and clamp rarely activates. Previous value 20.0 was
   needed only for out-of-distribution data (which shouldn't occur with proper ring buffer)
 
+### Removed (thruster_rate constraint)
+
+Run `full_dof_trpo/2026-04-04_21-10-13` (98 iter) showed thruster_rate constraint
+massively over budget: cr=50.11 vs dk=10.0 (5x over). Same structural problem as the
+original thruster_util issue: with noise_std=0.69 (entropy_coef=0.003), consecutive
+action noise difference E[max|da| over 6 thrusters] = 2.18, threshold=0.5. Noise alone
+makes the constraint impossible to satisfy. The barrier gradient then suppresses all
+thruster output, causing lin_vel reward to collapse (-0.89 -> -7.02 vs Run A at same iter).
+
+- `config.py`: Removed `thruster_rate_cost` from constraint list (11 -> 10 terms,
+  6 prob + 4 avg). Thruster smoothness already handled by action_smoothness reward
+  (`k_s=-0.1`, 8D) + first-order dynamics (tau_up=0.1s physical low-pass filter)
+- `mdp/constraints.py`: Updated docstring layout (11 -> 10 constraints). Function
+  `thruster_rate_cost` kept in code for potential future use
+
 ---
 
 ## [2026-04-04] Constraint Redesign: thruster_util -> Probabilistic, Remove body_lin_vel (session 5)
