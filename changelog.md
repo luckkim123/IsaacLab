@@ -79,6 +79,30 @@ thruster output, causing lin_vel reward to collapse (-0.89 -> -7.02 vs Run A at 
   Updated docstring layout
 - `mdp/__init__.py`: Updated export (`thruster_saturation_cost` -> `thruster_utilization_cost`)
 
+### Changed (tracking rewards: exp + quadratic for all)
+
+Run `2026-04-04_21-52-22` (896 iter) showed lin_vel and yaw_vel tracking plateaued with
+pure quadratic rewards. lin_vel error ~0.1 m/s/axis vs command ~0.08 (125% error ratio),
+yaw error ~0.22 rad/s. Compared to 16:06 run at same iter: lin_vel 64% worse, yaw 7% worse.
+Pure quadratic gradient weakens as error shrinks (grad ∝ 2*err), providing insufficient
+pressure for convergence to target. Also att_rp sigma=0.4 gave exp=0.977 at 5 deg target
+(zero gradient).
+
+Design: sigma set at target error for max gradient at the convergence point.
+
+| Term | Old | New | sigma | target err |
+|------|-----|-----|-------|------------|
+| lin_vel | -4.0 * err^2 | 4.0 * (exp - 1.0*err^2) | 0.15 m/s | 0.05 m/s/axis |
+| yaw_vel | -2.0 * err^2 | 2.0 * (exp - 1.0*err^2) | 0.20 rad/s | 0.1 rad/s |
+| att_rp | sigma 0.4 | sigma **0.15** | 0.15 rad | 5 deg |
+
+- `mdp/rewards.py`: `lin_vel_tracking` and `yaw_vel_tracking` changed from pure quadratic
+  to exp + quadratic (matching att_rp structure). Added config fields: `lin_vel_sigma=0.15`,
+  `lin_vel_quad_ratio=1.0`, `yaw_vel_sigma=0.20`, `yaw_vel_quad_ratio=1.0`. Sign of k_lin
+  and k_yaw flipped to positive (exp kernel returns positive reward)
+- `mdp/rewards.py`: `att_rp_sigma` 0.4 -> 0.15 (gradient at 5 deg target: 40x stronger)
+- `config.py`: `performance_lb` 100.0 -> 120.0 (reward shift from exp kernels)
+
 ---
 
 ## [2026-04-04] Constraint Redesign: thruster_util -> Probabilistic, Remove body_lin_vel (session 5)
