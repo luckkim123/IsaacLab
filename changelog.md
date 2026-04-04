@@ -15,6 +15,55 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-04] DORAEMON Optimizer Fix: SLSQP + Log-Space Parameterization (session 6)
+
+### Context
+DORAEMON optimizer had been completely non-functional for 700+ training iterations.
+scipy `trust-constr` with `keep_feasible=True` on the KL constraint was stuck because
+KL divergence has exactly zero gradient at the starting point (KL(p||p)=0 implies
+nabla_KL=0). The solver's trust radius collapsed from 1.0 to 0.1 on the first iteration
+and never recovered, making zero progress across 200 iterations.
+
+Additionally, the optimizer used raw alpha/beta space with `Bounds(1, 500)`, adding 72
+box constraints to the 36D problem. Reference implementation (Tiboni et al.) uses
+sigmoid-inverse (unconstrained) space with no bounds.
+
+Third issue: IS log-weight clamp at exp(20)~5e8 was too generous for ring buffer data,
+allowing IS weight explosion when the optimizer moved distribution parameters.
+
+Verified with controlled experiments:
+- trust-constr + keep_feasible=True in log-space: stuck (no movement in 200 iterations)
+- trust-constr + keep_feasible=False: violates constraints (KL goes to 14x budget)
+- SLSQP + log-space + IS clamp(5): converges in 217 iterations, sr=0.15->0.95, KL=1.0
+
+### Changed
+- `doraemon.py`: Replaced `trust-constr` solver with `SLSQP` in both `_optimize_entropy()`
+  and `_find_feasible_start()`. SLSQP handles zero-gradient constraints via SQP linearization
+  where trust-constr's barrier method fails
+- `doraemon.py`: Log-space parameterization for both optimizers. Variables are `log(alpha)`,
+  `log(beta)` instead of raw alpha/beta. `exp()` naturally keeps values positive, eliminating
+  the need for `Bounds(1, 500)` (72 fewer constraints in 36D space)
+- `doraemon.py`: IS log-weight clamp tightened from 20.0 to 5.0 (`_IS_LOG_CLAMP` constant).
+  exp(5)~148 is sufficient for in-distribution ring buffer data; exp(20)~5e8 caused
+  weight explosion with stale data
+- `doraemon.py`: `_find_feasible_start()` now accepts non-converged results if objective
+  improved and KL constraint satisfied (matching reference behavior for graceful degradation)
+
+### Removed
+- `doraemon.py`: Removed `Bounds` and `NonlinearConstraint` imports (no longer used)
+
+### Notes
+- Root cause verified: `nabla KL(Beta(a,b) || Beta(a0,b0))|_{a=a0,b=b0} = 0` identically.
+  This is a property of KL divergence, not a code bug. trust-constr with keep_feasible=True
+  requires nonzero constraint gradient to compute feasible directions
+- SLSQP constraint format uses dict `{'type': 'ineq', 'fun': ...}` (g(x)>=0 convention)
+  instead of `NonlinearConstraint(fun, lb, ub)`
+- IS clamp 5.0 validated: with data sampled from the current Beta distribution (as in real
+  training), IS weights are near 1.0 and clamp rarely activates. Previous value 20.0 was
+  needed only for out-of-distribution data (which shouldn't occur with proper ring buffer)
+
+---
+
 ## [2026-04-04] Constraint Redesign: thruster_util -> Probabilistic, Remove body_lin_vel (session 5)
 
 ### Context
