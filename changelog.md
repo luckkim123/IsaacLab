@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## [2026-04-06] Training Analysis + SS Error Tuning + eval_dr_fulldof Overhaul
+## [2026-04-06] Training Analysis + SS Error Tuning + eval_dr_fulldof Overhaul + DORAEMON kl_ub Fix
 
 ### Context
 Analyzed 20k-iter run (`2026-04-05_01-55-41`). noise_std exploded 0.7->13.95 due to
@@ -25,6 +25,15 @@ SS error analysis revealed reward gradient equilibrium across all 3 channels at
 similar magnitudes (~0.15-0.27 per step), preventing further improvement. Roll
 SS error 2x worse than pitch (5.4° vs 0.8° at roll+15 target) due to TAM roll
 actuation weakness (0.007m arm vs pitch 0.145m).
+
+New run (`2026-04-06_03-20-52`, 2700+ iters) with max_std=2.0: noise_std stable at
+0.47 (fix confirmed). However DORAEMON success_rate dropped to 0.31 and stuck --
+DR expanded too aggressively (entropy -34->-19 in 1000 iters, 4 updates). Root cause:
+kl_ub=1.5 (3x reference default=0.5). Our implementation updates every 250 RL iters
+(~16k env steps) vs reference which trains to convergence (~100k steps) between
+DORAEMON updates, making same kl_ub effectively much more aggressive. Mode=1
+(inverted+optimize) contracts DR then immediately re-expands within same kl budget,
+producing near-zero net contraction.
 
 ### Added
 - `constraint_trpo.py`: `max_std=2.0` parameter -- upper clamp on log_std, serving
@@ -41,11 +50,17 @@ actuation weakness (0.007m arm vs pitch 0.145m).
 - `rewards.py`: att_roll_weight=1.5 in err_sq (roll gets 1.5x gradient, compensating
   weak TAM actuation)
 - `rsl_rl_ppo_cfg.py`: entropy_coef 0.003->0.005, kl_ub 2.0->1.5
+- `config.py`: DORAEMON kl_ub 1.5->0.3 (reference-equivalent given our step_interval=250,
+  ~16k env steps between updates vs reference ~100k; prevents DR outpacing policy)
 
 ### Notes
 - Eval DR results (DORAEMON DR, none/hard): att SS 2.4/2.7 deg, lin_vel 0.164/0.163,
   yaw 0.058/0.059, rise_time 0.39/0.43s, 100% survival all levels
 - noise_std history: 0.005(explosion) -> 0.003(collapse) -> 0.005+max_std=2.0(current)
+- kl_ub history: 0.5->1.0->1.5(too fast)->0.3(current, reference-equivalent)
+- DORAEMON mode=1 structural note: inverted problem finds feasible point then main
+  optimization re-expands, matching reference behavior -- not a bug, but requires
+  appropriately sized kl_ub to allow net DR contraction when needed
 
 ---
 
