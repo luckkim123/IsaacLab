@@ -15,6 +15,52 @@ For the encoder ablation study (Steps 0-19), see
 
 ---
 
+## [2026-04-06] Training Analysis (20k iter) + max_std Cap + eval_dr Full-DOF Support
+
+### Context
+Analyzed training run `full_dof_trpo/2026-04-05_01-55-41` (20000 iterations) with
+kl_ub=1.5, entropy_coef=0.005. Key finding: **noise_std exploded from 0.7 to 13.95**
+due to a structural flaw in the decoupled sigma optimizer -- the entropy bonus
+(`-entropy_coef * log_std.sum()`) applies constant upward pressure on log_std with no
+upper bound. With entropy_coef=0.003 noise collapsed to 0.15; with 0.005 it exploded.
+The equilibrium between entropy gradient and advantage gradient is unstable because
+advantage weakens when reward plateaus, creating a positive feedback loop.
+
+Despite noise explosion, eval_dr showed the policy mean learned well: SS error 3.4-5.6 deg,
+100% survival across all DORAEMON-learned DR levels. Encoder z sweep confirmed 8/9 latent
+dimensions are active with strong DR parameter sensitivity.
+
+DORAEMON success_rate declined from 0.98 (step 1000) to 0.13 (step 20000) because
+noise-inflated actions reduced episode returns below performance_lb=200 threshold.
+ESS ratio degraded to 3%, indicating poor IS estimation quality.
+
+### Added
+- `constraint_trpo.py`: `max_std` parameter (default 2.0) with upper clamp on log_std.
+  This is an architectural fix for the decoupled sigma optimizer's unbounded entropy
+  gradient, not a band-aid. It serves as a trust region for sigma (analogous to TRPO's
+  KL trust region for the mean), preventing the entropy bonus from pushing noise beyond
+  physically meaningful levels (std=2.0 means 95% of actions span [-4, 4], effectively random).
+- `rsl_rl_ppo_cfg.py`: `max_std: float = 2.0` in algorithm config
+- `eval_dr.py`: Full-DOF task support (`Isaac-FullDOF-TRPO-v0`) with imports, class
+  registration, and attribute compatibility (`_ang_cmd` vs `_target_euler`, `_att_rp_err`
+  vs `_attitude_error`)
+- `eval_dr.py`: `--doraemon-run` CLI argument to use DORAEMON-learned DR distribution
+  (mean +/- 2*std from TB logs) as the "hard" DR reference instead of static config defaults
+
+### Changed
+- `eval_dr.py`: `build_dr_config()` and `_make_nominal_dr()` now use task-aware DR config
+  class resolution and skip fields not present in the target DR config (e.g., full_dof DR
+  has no `position_x_range` or `roll_range`)
+
+### Notes
+- Eval DR results (DORAEMON-learned DR as hard): none=3.4 deg, soft=3.7, medium=4.3, hard=5.6 deg SS error, 100% survival at all levels
+- entropy_coef=0.005 kept for next run (max_std cap should prevent explosion)
+- performance_lb=200 kept (noise control should restore natural DORAEMON dynamics)
+- Encoder z sweep: 8/9 dimensions active, z_1 dead (acceptable 1-dim loss)
+- Constraints stable: barrier_penalty=-0.105, thruster_util tightest (margin=1.27)
+
+---
+
 ## [2026-04-04] DORAEMON Optimizer Fix: SLSQP + Log-Space Parameterization (session 6)
 
 ### Context
