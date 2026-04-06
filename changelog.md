@@ -13,6 +13,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-06] DORAEMON performance_lb Reduction (200 -> 110)
+
+### Context
+Mid-training check on run `2026-04-06_13-43-49` (2142 iter) revealed DORAEMON
+stuck at `mode=-2` ("kept max-success dist") for last 6 updates. Success rate
+plateaued at 0.035 (vs alpha=0.5), reward plateau at 134.75 since ~45% of
+training. Root cause: without command curriculum (cmd_scale fixed at 1.0 since
+DORAEMON-managed scales were removed earlier today), task is too hard from
+iter 0 to reach `performance_lb=200`. Reward breakdown: att_rp 2.73/6.0 (45%),
+lin_vel 1.61/2.7 (60%), yaw_vel 0.93/3.5 (27% -- weakest). Tracking plateau at
+roll 11.5 / pitch 12.5 deg, coupled with `rp_vel_settling` constraint at 85%
+of budget (17.05/20.0).
+
+DORAEMON mode=-2 behavior: when inverted problem finds max-success direction
+but result is still below alpha, DORAEMON keeps that point and skips main
+entropy optimization. Physics DR mean contracted (inertia_scale 1.15->1.10,
+added_mass_std 0.072->0.054) but success never recovered because the
+bottleneck is command difficulty, not physics DR.
+
+Decision: lower `performance_lb` from 200 to 110 (current reward ~135, so lb
+below current means most episodes pass -> success_rate will jump to ~60-70%
+-> DORAEMON transitions to mode=0 normal -> physics DR re-expands). This
+restores DORAEMON functionality at the cost of accepting current tracking
+accuracy as the baseline. Tracking accuracy improvement is a separate problem
+not addressed here. Command range kept unchanged (att +-30 deg, full lin_vel,
+full yaw).
+
+### Changed
+- `config.py`: `doraemon.performance_lb` 200.0 -> 110.0 to unstick DORAEMON
+  from mode=-2 (max-success dist) fallback. Current reward plateau ~135, so
+  new lb brings success_rate from 0.035 to expected ~60-70%, enabling normal
+  entropy optimization and DR re-expansion.
+
+### Notes
+- Command range intentionally kept at current (att +-30 deg, full lin_vel,
+  full yaw) -- per user decision, tracking accuracy improvement is deferred
+- Expected new equilibrium: success_rate ~= alpha (0.5), reward 110-130,
+  physics DR wider than current (adversarial pressure restored)
+- Watch for: DORAEMON/mode transitioning -2 -> 0, entropy_after actually
+  moving (currently frozen at -34.55), std/* values growing back
+- performance_lb history: 80 -> 200 (2026-04-04) -> 110 (today)
+- If tracking accuracy improvement needed later, options: relax
+  rp_vel_settling budget, add command curriculum, or Gaussian two-stage
+  command sampling (discussed but deferred)
+
+---
+
 ## [2026-04-06] Training Analysis + SS Error Tuning + eval_dr_fulldof Overhaul + DORAEMON kl_ub Fix
 
 ### Context
