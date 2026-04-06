@@ -52,6 +52,15 @@ producing near-zero net contraction.
 - `rsl_rl_ppo_cfg.py`: entropy_coef 0.003->0.005, kl_ub 2.0->1.5
 - `config.py`: DORAEMON kl_ub 1.5->0.3 (reference-equivalent given our step_interval=250,
   ~16k env steps between updates vs reference ~100k; prevents DR outpacing policy)
+- `config.py`: att_cmd_rp_range pi/4->pi/6 (+-45 deg -> +-30 deg)
+
+### Removed
+- `doraemon.py`: Removed command scale parameters (cmd_att/lin/yaw_scale) from
+  DORAEMON optimization (18D->15D). DORAEMON preferentially shrank commands to boost
+  success_rate (cheapest path: less movement = less error = higher return), producing
+  degenerate solutions where robot barely moves. Commands are task difficulty knobs,
+  not physics parameters -- fixed at scale=1.0
+- `albc_env.py`: Removed per-env command scale application from DORAEMON sampling
 
 ### Notes
 - Eval DR results (DORAEMON DR, none/hard): att SS 2.4/2.7 deg, lin_vel 0.164/0.163,
@@ -61,6 +70,8 @@ producing near-zero net contraction.
 - DORAEMON mode=1 structural note: inverted problem finds feasible point then main
   optimization re-expands, matching reference behavior -- not a bug, but requires
   appropriately sized kl_ub to allow net DR contraction when needed
+- kl_ub=0.3 run (8k iters): eval_dr SS error 5.7-6.5 deg, 100% survival all DR levels,
+  but DORAEMON collapsed cmd_att_scale to 0.16 (mean), cmd_att_std to 0.05 before fix
 
 ---
 
