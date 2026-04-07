@@ -13,6 +13,89 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-08] Full-DOF Comparison Baselines (Phases 1-3)
+
+### Context
+Set up three ablation baselines for `Isaac-FullDOF-TRPO-v0` to isolate the
+contribution of each component (encoder, constraints, learning itself). All
+three reuse `ALBCEnv` so DR, reward, action space, command sampling, and
+DORAEMON match the production task exactly.
+
+| Phase | Task                      | What it removes                          |
+|-------|---------------------------|------------------------------------------|
+| 1     | `Isaac-FullDOF-NoEncoder-v0` | Encoder only (TRPO + IPO kept)        |
+| 2     | `Isaac-FullDOF-PPO-v0`       | Encoder + IPO constraint (plain PPO)  |
+| 3     | `Isaac-FullDOF-TDC-v0`       | All RL (classical TDC + 6-DOF PD)     |
+
+### Added
+- `constrained_full_albc/encoder/actor_critic_asym_constrained.py`: NoEncoder
+  policy class for Phase 1. Same asymmetric critic + cost critic as the
+  encoder variant, just without the privileged compression head.
+- `constrained_full_albc_tdc/`: new module for Phase 3 (sibling of
+  `constrained_full_albc/`). Subclasses `ALBCEnv` and overrides only
+  `_pre_physics_step` to inject classical controller output as an 8D
+  pseudo-action; the parent pipeline handles observation history, reward,
+  thruster lag, etc. unchanged.
+- `constrained_full_albc_tdc/controllers/thruster_pd.py`: stateless 6-DOF
+  thruster PD (`ThrusterPDController`). Drives Fx/Fy/Fz (lin vel),
+  **Tx/Ty (roll/pitch attitude PD)**, and Tz (yaw rate) so the baseline has
+  full thruster authority on all six wrench components, matching what the RL
+  policy has. Initial Tx=Ty=0 design was rejected mid-session as a baseline
+  weakening.
+- `constrained_full_albc_tdc/{tdc_env.py,config.py,__init__.py,...}`: TDC env
+  glue. Reuses `hero_agent.controllers.tdc.TDCController` and
+  `hero_agent.controllers.kinematics.ALBCKinematics` as-is. Overrides
+  `TDCControllerCfg` with `ik_num_iterations=1, ik_learning_rate=1.0`
+  (single-step DLS) -- the rate limiter only allows 0.05 rad/step which the
+  single-step solver tracks accurately, and the 100-iter accurate mode adds
+  ~30 ms/step of CUDA launch overhead on GPU.
+
+### Changed
+- `constrained_full_albc/__init__.py`: registers
+  `Isaac-FullDOF-NoEncoder-v0` and `Isaac-FullDOF-PPO-v0`. (Phase 3 task
+  is registered in its own module's `__init__.py`.)
+- `constrained_full_albc/agents/rsl_rl_ppo_cfg.py`: adds
+  `FullDOFNoEncoderRunnerCfg` (Phase 1) and `FullDOFPPORunnerCfg` (Phase 2).
+  PPO baseline uses asymmetric obs routing via `obs_groups` so the standard
+  rsl-rl `ActorCritic` can have a 81D actor and a 105D critic without a
+  custom policy class.
+- `constrained_full_albc/encoder/__init__.py`: exports the new
+  `ActorCriticAsymConstrained` class.
+- `constrained_full_albc/runners/constraint_encoder_runner.py`: encoder
+  logging is now optional so the runner works for the NoEncoder ablation
+  without spurious zeros in the encoder-specific metrics.
+
+### Phase 3 eval (`eval_dr_fulldof.py`, 64 envs, 4 DR levels)
+
+Stored at `logs/rsl_rl/tdc_pd_baseline/`. Survival 100% at every DR level
+(none/soft/medium/hard). Attitude SS error 2.8-7.1 deg (best at DR 100%
+because random damping increases happen to help). Linear velocity has the
+expected P-only steady-state floor: ~0.11 m/s on vx/vy and 0.25-0.40 m/s
+on vz (heave), which scales as `F_drag / kp_lin`. Yaw rate degrades from
+0.013 to 0.13 rad/s on hard DR as the P controller is overwhelmed by the
+widened yaw damping range.
+
+Post-eval gain bump committed but **not re-validated**: `kp_lin 30 -> 100`,
+`kp_yaw 8 -> 25`, `kp_att 8 -> 20`, `kd_att 2 -> 5`. Predicted ~3x SS error
+reduction; saturation budget is safe.
+
+### Notes
+- Eval artifacts (npz + 9 PNGs) are kept on disk, not committed.
+- Phase 1 and 2 task registrations and runner cfgs were created in earlier
+  sessions but never committed; they are bundled into this commit because
+  the changelog covers all three baselines together.
+- Reviewer-caught fixes applied to Phase 3 env: `_coerce_env_ids` instead
+  of an asymmetric assert in `_reset_idx`, `_tdc_dt = step_dt` (drop the
+  redundant `* control_decimation`), `no_grad` scope extended to cover the
+  parent `_pre_physics_step` call, and a no-op `ThrusterPDController.reset`
+  removed.
+- Wallclock optimization for `hero_agent`'s 100-iter IK loop is the obvious
+  follow-up: ~600 sequential GPU kernel launches per step add ~30 ms of
+  pure CUDA launch overhead. `torch.compile` fusion or an analytic 2-link
+  IK would remove it entirely.
+
+---
+
 ## [2026-04-07] Revert rp_vel_settling Budget (Constraint vs Reward Conflict)
 
 ### Context
