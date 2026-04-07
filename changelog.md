@@ -13,6 +13,80 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-07] Revert rp_vel_settling Budget (Constraint vs Reward Conflict)
+
+### Context
+Mid-training analysis of run `2026-04-07_22-24-20` at iter ~833 (post linear-penalty
+revert) showed att_rp Episode_Reward stuck near zero while lin_vel learned normally.
+Comparison against OLD baseline (`2026-04-06_21-24-43`) at the same iter:
+
+| Metric                       | OLD@800 | CURR@800 | Delta            |
+|------------------------------|---------|----------|------------------|
+| Train/mean_reward            |  +97.1  |  +11.7   | -85.4 (-88%)     |
+| Episode_Reward/att_rp        |  +1.602 |  -0.855  | **sign flipped** |
+| Episode_Reward/lin_vel       |  +1.482 |  +1.724  | +0.24 (better)   |
+| Episode_Reward/yaw_vel       |  +0.695 |  +0.233  | -0.46            |
+| Episode_Reward/smoothness    |  -0.327 |  -0.544  | -0.22 (66% worse)|
+| DORAEMON/success_rate        |   0.490 |   0.041  | -0.45 (mode -2)  |
+
+The selective regression (att_rp dead, lin_vel fine) ruled out "wider DR is harder
+for everything" -- only the channel that requires roll/pitch rotation suffered. Att_rp
+slope in the last 200 iter dropped to +0.025/100, essentially frozen. At this rate
+recovery to OLD's +1.60 would need ~9800 more iters (12x current), confirming the
+plateau is structural rather than transient.
+
+**Mechanism (code-level)**: `rp_vel_settling_cost` is `(|p|+|q|)/2` averaged over the
+episode (`mdp/constraints.py:236-250`). It is an Average-type IPO constraint, and at
+budget=0.12 the cost was 9.86/12 = 82% of budget -- in the active barrier-binding
+region. The IPO barrier (`barrier_t=100.0`) injects strong negative gradient on the
+actor whenever cost approaches budget, directly opposing the att_rp_tracking reward
+gradient (which requires p,q angular velocity to follow attitude commands).
+
+OLD ran with budget=0.20 and the same cost was 16.85/20 = 84% (similar binding
+ratio), but the absolute limit of 0.20 rad/s was sufficient for a 60-deg traverse
+in ~5.2s. With budget=0.12 a 60-deg traverse needs ~8.7s, deep into the IPO
+binding region for most of the trajectory. lin_vel does not interact with this
+constraint and learns normally; yaw_vel interacts only weakly (yaw_rate constraint
+threshold is 0.7 rad/s, well above the 0.5 cmd range). This is the diagnostic
+fingerprint: only the channel that fights `rp_vel_settling` is dead.
+
+The constraint's name implies a settling-phase-only behavior, but the implementation
+has no time/error gating -- it penalizes |p|+|q| at every timestep regardless of
+whether the policy is in a transition or a settling phase. A proper settling-aware
+redesign is deferred; the immediate fix is to restore the OLD budget so the next run
+isolates the linear-penalty revert as intended.
+
+**Decision**: Revert ONLY `rp_vel_settling.budget` 0.12 -> 0.20 (back to OLD value).
+Keep all other 04-07 changes (`performance_lb=80`, HardDR expansion, `yaw_rate=0.7`)
+since they did not show selective harm in the data. This is the minimum-change revert
+that targets the proximate cause; if att_rp recovers in the next run, the structural
+hypothesis is confirmed and the other 3 changes can be evaluated cleanly.
+
+### Changed
+- `config.py`: `rp_vel_settling.budget` 0.12 -> 0.20 (single line, matches OLD).
+  All other fields unchanged. The constraint definition itself
+  (`mdp/constraints.py:rp_vel_settling_cost`) is untouched.
+
+### Notes
+- HardDR expansion is NOT the proximate cause despite suspicions. lin_vel learning
+  faster than OLD under the wider DR rules out "DR is too hard". The wider DR may
+  be a contributing factor but is not load-bearing for the att_rp regression.
+- `performance_lb=80` reduction is also exonerated by this evidence. The reason
+  DORAEMON success is stuck at 0.04 is that mean_reward (11.7) is far below lb=80,
+  not that lb is wrong. Once att_rp recovers, mean_reward should rise into the
+  lb-feasible region naturally.
+- Smoothness regression (-0.327 -> -0.544) is also expected to recover after the
+  revert. It was caused by gradient conflict between IPO barrier and att_rp reward
+  pulling the policy in opposite directions every step.
+- Next training run: validate att_rp Episode_Reward returns to OLD trajectory
+  (+1.6 at iter 800). Watch DORAEMON/success_rate growth and total reward.
+- Open question for follow-up: redesign `rp_vel_settling_cost` to be settling-aware
+  (gate by command-stationarity AND |attitude_err| < threshold). This would let it
+  reduce SS oscillation without fighting the transition-phase reward gradient.
+  Deferred until baseline is recovered.
+
+---
+
 ## [2026-04-07] Revert Reward Linear Penalty (Dead Zone at Moderate Errors)
 
 ### Context
