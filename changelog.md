@@ -13,6 +13,113 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-07] DORAEMON Stuck Fix + HardDR Expansion + Reward Linear Penalty + Trajectory Update
+
+### Context
+Following the eval_dr_fulldof bug fixes (earlier today), analyzed `model_9999.pt`
+results in detail and identified several remaining issues that motivated targeted
+encoder-side improvements before proceeding to no-encoder/TDC baseline comparison:
+
+**Issue 1 (DORAEMON mode -2 stuck)**: Step-aligned trajectory analysis of run
+`2026-04-06_21-24-43` revealed phase 7 (iter 8000-9750) showed DORAEMON correctly
+shrinking entropy (-18.35 -> -19.69) -- it IS auto-retreating, but slower than the
+policy degradation rate. Root cause: `performance_lb=100` is too tight relative to
+actual training reward distribution; success_rate plateaus around 0.4 instead of
+the alpha=0.5 equilibrium target. Fix: lower lb to 80 so success_rate auto-rises
+to ~0.5 and DORAEMON exits mode -2 stuck.
+
+**Issue 2 (HardDR boundary push)**: The new dr_distributions.png plot showed
+several DORAEMON-managed parameters where the learned mean +/- 2*std error bars
+extended past the HardDR boundary (linear/quadratic damping, cob/cog offsets x).
+Fix: conservatively widen 5 fields where DORAEMON pushed against the prior
+boundary. Other fields (body_mass, volume, offsets, water_density) kept due to
+PhysX added-mass/inertia ratio and buoyancy stability constraints.
+
+**Issue 3 (SS error tolerance)**: User observation that the policy "tolerates" a
+certain level of steady-state error and stops trying to reduce it further. Root
+cause analysis: both exp kernel `exp(-e^2/2s^2)` and quadratic `q*e^2` have
+gradients that vanish as `err -> 0`. At err=0.005 the existing reward gradient is
+~0.5/rad while at err=0.05 it is ~4.5/rad -- the policy gets ~9x weaker signal at
+small errors and effectively gives up below ~5% of sigma. Fix: add a linear
+penalty term `-q_lin * |e|` whose gradient is constant at all error magnitudes.
+Verified analytically: linear penalty contributes 50% of the gradient at err=0.005
+and 33% at err=0.01, providing the missing constant SS-error pressure.
+
+**Issue 4 (overshoot patterns)**: User observed that overshoot is *lowest* at
+hard DR for all channels (att/lin_vel/yaw), and that yaw shows none-worst /
+hard-best for *all* metrics. Diagnosis: encoder algorithm is correctly adapting
+to DR distribution (positive sign that encoder z is functional), but policy
+becomes over-conservative on nominal physics (which is OOD relative to the
+DORAEMON-learned mean). Fixes: tighten `rp_vel_settling` budget (0.20 -> 0.12)
+to force faster settling, and lower `yaw_rate` soft_threshold (1.0 -> 0.7) so
+the policy is no longer free to swing yaw rate up to 1.0 rad/s when commands
+are bounded by 0.5 rad/s. `rp_rate` threshold kept at 1.0 (user request).
+
+**Issue 5 (eval trajectory)**: User wanted every block's first logged step to
+be at zero command (to clearly visualize the policy at rest before each step
+test) and the attitude block's final return to be doubled like lin_vel/yaw.
+Fix: insert one zero-command segment after each warmup (3 total) and add one
+more `att return (0, 0)` segment, bringing trajectory from 27 to 31 segments.
+
+**Considered but deferred**: An EMA-based SS bias reward term (`-k * |EMA(e)|`)
+to provide an explicit signal for "this error is a constant bias, not natural
+oscillation". User decided to first run training with the linear penalty alone
+and add the EMA term in a later iteration if SS bias persists.
+
+### Changed
+- `config.py`: `doraemon.performance_lb` 100.0 -> 80.0. Lower success threshold
+  unsticks DORAEMON from mode -2 by raising the IS-estimated success_rate from
+  ~0.37 to ~0.5 without changing the underlying physics distribution.
+- `config.py` (HardDomainRandomizationCfg): `added_mass_scale` (0.6, 1.4) -> (0.5, 1.5),
+  `linear_damping_scale` (0.5, 1.5) -> (0.4, 1.7), `quadratic_damping_scale`
+  (0.5, 1.5) -> (0.4, 1.7), `inertia_scale` (0.5, 1.8) -> (0.4, 2.0),
+  `payload_mass_range` (0.0, 2.0) -> (0.0, 3.0). All five fields had DORAEMON
+  pushing against the prior boundary; conservative expansion gives DORAEMON
+  more room without violating PhysX stability constraints.
+- `config.py` (constraints): `yaw_rate` soft_threshold 1.0 -> 0.7 (cmd range
+  is 0.5 rad/s, prior threshold of 1.0 left too much room for yaw overshoot);
+  `rp_vel_settling` budget 0.20 -> 0.12 (40% reduction forces faster settling).
+- `mdp/rewards.py`: Added `att_rp_lin_ratio=0.5`, `lin_vel_lin_ratio=0.8`,
+  `yaw_vel_lin_ratio=0.8` to `ALBCRewardCfg`. Each tracking reward now subtracts
+  `q_lin * |e|`: `att_rp_tracking` uses weighted L1 with `att_roll_weight`
+  (consistent with the existing weighted L2 quadratic), `lin_vel_tracking` uses
+  L2 norm of the 3D error, `yaw_vel_tracking` uses scalar abs.
+- `mdp/rewards.py`: Module docstring rewritten to document the new exp + quad
+  + linear formulation and explicitly state the SS-error-tolerance failure
+  mode that motivates the linear term.
+- `scripts/analysis/eval_dr_fulldof.py`: `build_step_trajectory` now inserts
+  three new zero-command segments (one after each of the three warmups) and
+  doubles the attitude block's final return. `TRAJECTORY_N_SEGMENTS` 27 -> 31.
+  All new segment names start with the matching block prefix (`att zero ...`,
+  `vxyz zero ...`, `yaw zero ...`) so `_classify_segment` automatically routes
+  them to the correct block. New episode_length_s = 31*5 + 10 = 165s. Per-block
+  logged time: attitude 60s (was 50s), lin_vel 55s (was 50s), yaw 25s (was 20s).
+
+### Notes
+- Reward gradient verification (analytic, q_lin=0.5 for att, 0.8 for lin/yaw):
+  at err=0.005 the linear term is 50% (att) / 61% (lin/yaw) of total gradient;
+  at err=0.05 it drops to 10% / 15%. Policy gets a constant ~0.5-0.8/rad signal
+  at small errors where exp+quad alone gave near-zero. Total gradient at small
+  errors is now 1.5-2.6x the prior value.
+- All 5 HardDR-expanded fields stay within physics-stable ranges. PhysX added-mass
+  ratio safety check (M_a/I < 1.0) and post-DR per-axis clamp (0.95*I) handle any
+  edge-case sample at the new boundary. body_mass/volume/offsets are NOT widened
+  because their ratio with each other (buoyancy balance) is more sensitive than
+  individual range size.
+- Next training run will accumulate 5 simultaneous changes (lb, HardDR, linear
+  penalty, yaw_rate threshold, rp_vel_settling, plus the eval-only trajectory
+  update). Ablation across these is not planned -- user prioritizes encoder
+  improvement over isolating individual contributions before baseline comparison.
+- The EMA bias reward term (`-k * |EMA(e)|`, alpha~0.02) is staged for the next
+  iteration if SS bias persists. Linear penalty alone is expected to be most of
+  the fix; EMA would add SS-phase-specific pressure that linear penalty cannot
+  distinguish from transient pressure.
+- Eval re-run not required: only training-side configs changed (lb, HardDR,
+  rewards, constraints) plus an eval-only trajectory tweak. The new trajectory
+  will be exercised at the next eval after the new training run completes.
+
+---
+
 ## [2026-04-07] eval_dr_fulldof Two-Bug Fix + DORAEMON DR Visualization
 
 ### Context
