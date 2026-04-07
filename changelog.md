@@ -13,6 +13,76 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-07] Revert Reward Linear Penalty (Dead Zone at Moderate Errors)
+
+### Context
+Analyzed the training run `2026-04-07_16-37-45` which was the first run after the
+linear penalty addition (previous entry below). Results at iter ~4700:
+
+- `mean_reward` 34 (OLD run `2026-04-06_21-24-43` at same iter: ~142)
+- `att_rp` Episode_Reward ~ 0 (OLD: +2.52)
+- roll/pitch err 10.6 deg (OLD: 6.55 deg)
+- DORAEMON success 0.17, mode=-2 stuck
+
+**Root cause**: The added `att_rp_lin_ratio=0.5` linear penalty interacts badly
+with the already-tightened `att_rp_sigma=0.10`. At err=10 deg (=0.175 rad) with
+roll-weighted err_sq_w=0.0762:
+- `exp_term = exp(-0.0762/0.02) = 0.022` (kernel effectively dead 2 sigma out)
+- `quad_pen = 0.833 * 0.0762 = 0.063`
+- `linear_pen = 0.5 * (1.5*0.175 + 0.175) = 0.219`
+- `raw = 0.022 - 0.063 - 0.219 = -0.260` (negative!)
+
+At err > sigma the exp kernel vanishes while the linear penalty grows, so the
+policy is *punished* for any error larger than ~5.7 deg. The optimal strategy
+becomes "don't try to track attitude" -- the policy converges with att_rp
+Episode_Reward at exactly 0 (confirmed in TB). lin_vel and yaw_vel still get
+positive contribution so the episode doesn't collapse, but attitude tracking
+is abandoned entirely.
+
+The linear penalty idea was sound in principle (constant gradient at small
+errors where exp+quad vanish) but the magnitude was miscalibrated for the
+tightened sigma -- it overwhelms the exp kernel in the moderate-error regime
+where most of early training happens. Once the policy settles into the
+no-attitude-tracking local optimum it cannot escape.
+
+**Decision**: Revert the linear penalty entirely. Keep all other changes from
+the prior entry (DORAEMON `performance_lb=80`, HardDR expansion,
+`rp_vel_settling` budget 0.12, `yaw_rate` threshold 0.7) so the next run
+isolates the linear-penalty effect from the other tunings. The EMA-based SS
+bias reward that was previously deferred will be redesigned later -- the user
+wants to first run a clean baseline matching the OLD reward shape, then plan
+a more optimized reward redesign separately.
+
+### Changed
+- `mdp/rewards.py`: Set `att_rp_lin_ratio`, `lin_vel_lin_ratio`, `yaw_vel_lin_ratio`
+  all to 0.0 (were 0.5, 0.8, 0.8). Reward formula now matches OLD run baseline:
+  `r = k * (exp(-e^2/2s^2) - q_quad*e^2)` with no linear term. Fields left in
+  `ALBCRewardCfg` (not deleted) so the linear path stays trivially re-enableable
+  for future experiments. Sigma (0.10) and k_lin (4.0) values unchanged --
+  they already matched the OLD run per commit 89314422.
+
+### Notes
+- Verified against saved `logs/.../2026-04-06_21-24-43/params/env.yaml`: all
+  reward fields now match OLD run exactly (k_att_rp=6.0, att_rp_sigma=0.10,
+  att_rp_quad_ratio=0.833, att_roll_weight=1.5, k_lin=4.0, lin_vel_sigma=0.10,
+  lin_vel_quad_ratio=1.0, k_yaw=3.5, yaw_vel_sigma=0.10, yaw_vel_quad_ratio=1.0).
+- config.py intentionally NOT reverted -- DORAEMON `performance_lb=80`, HardDR
+  expansion, `rp_vel_settling=0.12`, `yaw_rate=0.7` all retained. Next run
+  measures linear-penalty removal in isolation.
+- Analytical dead-zone verification (err=10 deg, sigma=0.10, lin_ratio=0.5):
+  raw reward = -0.260. At err=4.6 deg (sqrt(2)-scaled from OLD's err_rp_norm=6.5):
+  raw = 0.449 - 0.013 - 0.10 = +0.336 (still positive, so OLD's smaller errors
+  stayed in the reward-positive regime; NEW never got there because it started
+  with larger errors during the learning transient).
+- Next training: user will run ~2000 iter with the reverted reward config to
+  validate recovery of att_rp Episode_Reward and roll/pitch error tracking.
+- Plan: after validating the reward-only revert, redesign the SS-error pressure
+  term using an EMA bias signal instead of constant linear penalty (separates
+  persistent bias from transient tracking error, avoiding the dead-zone
+  pathology). Design session deferred until next conversation.
+
+---
+
 ## [2026-04-07] DORAEMON Stuck Fix + HardDR Expansion + Reward Linear Penalty + Trajectory Update
 
 ### Context
