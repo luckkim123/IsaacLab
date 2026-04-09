@@ -88,7 +88,10 @@ def _load_runner_and_policy(env, agent_cfg, resume_path):
         "BaseRunner": ("isaaclab_tasks.direct.hero_agent.runners", "BaseRunner"),
         "EncoderRunner": ("isaaclab_tasks.direct.hero_agent.runners", "EncoderRunner"),
         "AdaptRunner": ("isaaclab_tasks.direct.hero_agent.runners", "AdaptRunner"),
-        "ConstraintEncoderRunner": ("isaaclab_tasks.direct.hero_agent.runners", "ConstraintEncoderRunner"),
+        "FullDOFConstraintEncoderRunner": (
+            "isaaclab_tasks.direct.constrained_full_albc.runners",
+            "ConstraintEncoderRunner",
+        ),
         "SACMPCRunner": ("isaaclab_tasks.direct.hero_agent_mpc.runners", "SACMPCRunner"),
     }
 
@@ -166,6 +169,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.randomize_target_attitude = False
         env_cfg.target_attitude = (0.0, 0.0, 0.0)
 
+    # FullDOF-TRPO: enable play_mode (fixed zero commands for hovering eval)
+    if hasattr(env_cfg, "play_mode"):
+        env_cfg.play_mode = True
+
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
@@ -223,12 +230,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if hasattr(raw_env, "set_encoder_policy"):
             raw_env.set_encoder_policy(policy_nn)
 
-    # Hero Agent evaluation setup
+    # Evaluation setup (works for both Hero Agent and FullDOF-TRPO environments)
     raw_env = env.unwrapped
     has_eval = hasattr(raw_env, "get_eval_snapshot")
     eval_interval = 200  # Print eval every N steps
     eval_episode_count = 0
     eval_episode_errors: list[float] = []
+    # Detect attitude error attribute: hero_agent uses _attitude_error, ALBCEnv uses _att_rp_err
+    _att_err_attr = (
+        "_attitude_error" if hasattr(raw_env, "_attitude_error") else "_att_rp_err" if hasattr(raw_env, "_att_rp_err") else None
+    )
 
     # SAC-MPC: initialize prediction error buffer before first inference call
     if hasattr(policy_nn, "_ensure_pred_error_buf"):
@@ -261,12 +272,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 policy_nn.reset(dones)
         timestep += 1
 
-        # Hero Agent: collect episode-end errors and print periodic eval
+        # Collect episode-end errors and print periodic eval
         if has_eval:
-            if dones.any():
-                err_deg = torch.rad2deg(torch.linalg.norm(raw_env._attitude_error[dones.squeeze(-1), :2], dim=-1))
+            done_mask = dones.squeeze(-1).bool()
+            if done_mask.any() and _att_err_attr is not None:
+                att_err = getattr(raw_env, _att_err_attr)
+                err_deg = torch.rad2deg(torch.linalg.norm(att_err[done_mask, :2], dim=-1))
                 eval_episode_errors.extend(err_deg.tolist())
-                eval_episode_count += dones.sum().item()
+                eval_episode_count += done_mask.sum().item()
 
             if timestep % eval_interval == 0:
                 snap = raw_env.get_eval_snapshot()
@@ -279,16 +292,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         f"+/-{statistics.stdev(eval_episode_errors) if len(eval_episode_errors) > 1 else 0:.1f}deg"
                         f" ({eval_episode_count} eps)"
                     )
-                print(
-                    f"[Eval @{timestep:5d}] "
-                    f"err={snap['attitude_error_deg']:5.1f}deg "
-                    f"rate={snap['action_rate']:.4f} "
-                    f"angvel_rp={snap['angular_velocity_rp_rms']:.3f} "
-                    f"angvel_yaw={snap['angular_velocity_yaw_rms']:.3f} "
-                    f"jt_osc={snap['joint_oscillation_hf_rms']:.4f} "
-                    f"jt_pos={snap['joint_pos_mean_abs']:.2f}"
-                    f"{ep_info}"
-                )
+                # Build output from snapshot keys (adapts to any env)
+                parts = [f"[Eval @{timestep:5d}]"]
+                parts.append(f"err={snap['attitude_error_deg']:5.1f}deg")
+                if "lin_vel_error" in snap:
+                    parts.append(f"lin_err={snap['lin_vel_error']:.3f}")
+                parts.append(f"rate={snap['action_rate']:.4f}")
+                parts.append(f"angvel_rp={snap['angular_velocity_rp_rms']:.3f}")
+                parts.append(f"angvel_yaw={snap['angular_velocity_yaw_rms']:.3f}")
+                if "joint_oscillation_hf_rms" in snap:
+                    parts.append(f"jt_osc={snap['joint_oscillation_hf_rms']:.4f}")
+                if "thruster_utilization" in snap:
+                    parts.append(f"thr={snap['thruster_utilization']:.3f}")
+                parts.append(f"jt_pos={snap['joint_pos_mean_abs']:.2f}")
+                print(" ".join(parts) + ep_info)
 
         if args_cli.video:
             # Exit the play loop after recording one video
@@ -300,7 +317,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
 
-    # Hero Agent: print final evaluation summary
+    # Print final evaluation summary
     if has_eval and eval_episode_errors:
         import statistics
 
@@ -317,7 +334,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"  Action rate:    {snap['action_rate']:.5f}")
         print(f"  Ang vel RP:     {snap['angular_velocity_rp_rms']:.4f}")
         print(f"  Ang vel Yaw:    {snap['angular_velocity_yaw_rms']:.4f}")
-        print(f"  Joint osc HF:   {snap['joint_oscillation_hf_rms']:.5f}")
+        if "lin_vel_error" in snap:
+            print(f"  Lin vel err:    {snap['lin_vel_error']:.4f}")
+        if "joint_oscillation_hf_rms" in snap:
+            print(f"  Joint osc HF:   {snap['joint_oscillation_hf_rms']:.5f}")
+        if "thruster_utilization" in snap:
+            print(f"  Thruster util:  {snap['thruster_utilization']:.4f}")
         print(f"  Joint pos abs:  {snap['joint_pos_mean_abs']:.3f}")
         print("=" * 60)
 

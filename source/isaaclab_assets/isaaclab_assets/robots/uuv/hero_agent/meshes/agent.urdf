@@ -84,14 +84,14 @@
   <!-- ========== ALBC (Active Linear Buoyancy Controller) ========== -->
   <!-- 2-DOF revolute arm with buoy for attitude control -->
 
-  <!-- Joint1: Base to Link1 (Z-axis rotation) -->
-  <joint name="joint1" type="revolute">
+  <!-- Joint1: Base to Link1 (Z-axis rotation, continuous for cable-aware constraint) -->
+  <joint name="joint1" type="continuous">
     <parent link="base"/>
     <child link="link1"/>
     <origin xyz="0 0 0.1625" rpy="0 0 0"/>
     <axis xyz="0 0 1"/>
     <dynamics damping="0.7" friction="1"/>
-    <limit effort="200" velocity="30" lower="-6.2831853" upper="6.2831853"/>
+    <limit effort="200" velocity="30"/>
   </joint>
 
   <!-- Link1: First arm segment -->
@@ -116,14 +116,14 @@
     </inertial>
   </link>
 
-  <!-- Joint2: Link1 to Link2 (Z-axis rotation) -->
-  <joint name="joint2" type="revolute">
+  <!-- Joint2: Link1 to Link2 (Z-axis rotation, continuous rotation motor) -->
+  <joint name="joint2" type="continuous">
     <parent link="link1"/>
     <child link="link2"/>
     <origin xyz="0.233 0 0.01" rpy="0 0 0"/>
     <axis xyz="0 0 1"/>
     <dynamics damping="0.7" friction="1"/>
-    <limit effort="200" velocity="30" lower="-6.2831853" upper="6.2831853"/>
+    <limit effort="200" velocity="30"/>
   </joint>
 
   <!-- Link2: Second arm segment -->

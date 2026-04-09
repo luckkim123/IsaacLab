@@ -206,6 +206,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "ConstraintEncoderRunner",
         ),
         "SACMPCRunner": ("isaaclab_tasks.direct.hero_agent_mpc.runners", "SACMPCRunner"),
+        "FullDOFConstraintEncoderRunner": (
+            "isaaclab_tasks.direct.constrained_full_albc.runners",
+            "ConstraintEncoderRunner",
+        ),
     }
 
     if agent_cfg.class_name in _RUNNER_MAP:
