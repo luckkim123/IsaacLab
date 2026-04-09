@@ -13,6 +13,88 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-09] SS Error + Settling Tuning (att_rp weight, settling-aware constraint, DORAEMON speed)
+
+### Context
+Deep analysis of run `2026-04-07_23-21-27` (10k iter, lb=80, HardDR expanded, yaw_rate=0.7)
+revealed three structural issues despite DORAEMON operating correctly (mode=0 for 30
+consecutive updates, success_rate converging to ~0.45 near alpha=0.5):
+
+**Issue 1 (att SS error +0.5 deg at nominal physics):** Cross-eval experiment --
+OLD model evaluated on NEW's wider DORAEMON DR -- proved that 70% of hard-DR att SS
+degradation (OLD 2.9 deg vs NEW 4.5 deg on same DR) is due to NEW policy itself, not
+DR difficulty increase. Even at none-DR (nominal physics), NEW shows 2.4 deg vs OLD
+1.9 deg. Root cause: reward gradient equilibrium -- at 2.4 deg error the att_rp
+gradient (-3.5/step) is balanced by smoothness, thruster energy, and rp_vel_settling
+penalties. Raising k_att_rp from 6.0 to 9.0 shifts this equilibrium toward attitude.
+
+**Issue 2 (settling time 4.6x worse at hard DR):** NEW settling 1.74s vs OLD 0.39s,
+but cross-eval showed OLD model achieves 0.39s even on NEW's wider DR -- proving the
+issue is NEW policy's conservatism, not DR difficulty. `rp_vel_settling_cost` penalizes
+`(|p|+|q|)/2` at every step regardless of phase. During transit (target far away),
+angular velocity is NEEDED to reach the target, but the constraint opposes it. Policy
+learns to minimize angular velocity globally ("slow but safe"), trading settling speed
+for constraint compliance. Fix: gate constraint by attitude error proximity --
+active only when `|att_err| <= 5 deg` (settling phase), zero during transit.
+
+**Issue 3 (DORAEMON expands too fast):** Both OLD and NEW runs show `kl_step=0.15`
+(hitting the `kl_ub=0.15` ceiling) during all expansion updates. DORAEMON uses 100%
+of KL budget every time, meaning entropy maximization always wants to expand further
+and KL trust region is the only brake. With `kl_ub=0.15`, DR entropy expanded from
+-32 to -17 in just 15 updates (3750 iter) -- faster than policy can learn precision.
+Reducing `kl_ub` to 0.08 cuts per-update expansion by ~47%. Combined with raising
+`performance_lb` from 80 to 90, DORAEMON will expand more slowly and only when the
+policy demonstrates sufficient tracking performance.
+
+Cross-eval results (same eval script, 31-segment trajectory):
+| Config            | None AttSS | Hard AttSS | Hard Settling | Yaw SS (none) |
+|-------------------|-----------|-----------|---------------|---------------|
+| OLD model+OLD DR  | 1.9 deg   | 2.2 deg   | 0.38s         | 0.081 rad/s   |
+| OLD model+NEW DR  | 1.9 deg   | 2.9 deg   | 0.39s         | 0.081 rad/s   |
+| NEW model+NEW DR  | 2.4 deg   | 4.5 deg   | 1.74s         | 0.010 rad/s   |
+
+Encoder z_sweep comparison (model_9999.pt): both encoders healthy (7-8/9 dims active).
+NEW encoder shows stronger joint stiffness/damping sensitivity (dim_16: 1.10 vs 0.22,
+dim_17: 0.98 vs 0.48) but different dim utilization pattern (NEW: z_1-z_6 distributed,
+OLD: z_0/z_5/z_7/z_8 concentrated).
+
+### Changed
+- `mdp/rewards.py`: `k_att_rp` 6.0 -> 9.0. Shifts SS error equilibrium toward
+  attitude tracking. At 2.4 deg error the per-step gradient increases from -21.2
+  (6*-3.54) to -31.8 (9*-3.54), overcoming competing smoothness/energy penalties.
+- `mdp/constraints.py`: `rp_vel_settling_cost` redesigned to settling-aware gating.
+  New: `rp_vel * (|att_err| <= settling_threshold).float()`. Cost is zero during
+  transit (|att_err| > 5 deg) and active during settling (|att_err| <= 5 deg).
+  Allows policy to use angular velocity freely when far from target.
+  `settling_threshold` parameter added (default 0.087 rad = 5.0 deg).
+- `config.py`: `rp_vel_settling` constraint term now passes
+  `settling_threshold=0.087` via params dict.
+- `config.py`: DORAEMON `kl_ub` 0.15 -> 0.08. Reduces per-update DR expansion
+  by ~47%. Previous kl_step data showed ceiling-hitting (0.15/0.15) at every
+  expansion update, so this change has immediate effect.
+- `config.py`: DORAEMON `performance_lb` 80.0 -> 90.0. Raises success threshold
+  so DORAEMON expands only when policy achieves higher tracking performance.
+  At lb=80, success_rate stayed 0.85-0.90 for ~20 updates, allowing aggressive
+  expansion. At lb=90, success drops faster toward alpha(0.5), triggering earlier
+  automatic braking.
+
+### Notes
+- Cross-eval methodology: created temp directory with OLD model_9999.pt + NEW TB
+  events (DORAEMON state), allowing eval_dr_fulldof.py to evaluate OLD policy under
+  NEW's learned DR distribution. This cleanly separates "DR difficulty increase"
+  from "policy quality change".
+- Settling threshold 5 deg chosen as midpoint between typical SS error (~2-3 deg)
+  and typical command step amplitude (~15-30 deg). Below 5 deg, the policy should
+  be settling; above 5 deg, it's likely in transit.
+- The 4 changes are not independently ablated. If results are mixed, next session
+  should isolate: (a) k_att_rp alone, (b) settling-aware alone, (c) DORAEMON
+  speed alone. Priority order for revert: DORAEMON speed first (most conservative),
+  then settling-aware, then k_att_rp (least likely to cause regression).
+- yaw_rate threshold (0.7) retained from previous run -- yaw SS improved 8x
+  (0.081 -> 0.010) which is a clear success.
+
+---
+
 ## [2026-04-08] Full-DOF Comparison Baselines (Phases 1-3)
 
 ### Context
