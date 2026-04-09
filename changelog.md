@@ -13,6 +13,79 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-10] Adaptive Entropy + DORAEMON Tuning + Eval Metric Fixes
+
+### Context
+Run `2026-04-09_16-41-45` completed 10k iterations. Analysis revealed two critical issues:
+
+**Issue 1 (entropy-advantage imbalance):** Fixed entropy_coef=0.003 in the decoupled
+sigma optimizer creates a vicious cycle at reward plateau. When advantage signal weakens,
+entropy bonus dominates -> noise_std rises (0.363 -> 0.553) -> reward drops (227 -> 92)
+-> advantage weakens further. Confirmed by: (a) changepoint at iter 7300 (reward DOWN +
+entropy UP coincident), (b) OLD baseline stabilized noise_std at 0.26 with the same
+entropy_coef -- the difference is k_att_rp=9.0 inflating reward scale, causing faster
+advantage saturation. Best checkpoint was model_2000, not model_9999.
+
+**Issue 2 (DORAEMON saturation):** All 15 DR parameters reached Beta(1,1)=UNIFORM.
+DORAEMON cannot expand further. performance_lb=90 was too low relative to episode
+returns (220 at peak), allowing aggressive expansion. HardDR bounds also need widening.
+
+**Eval metric bugs:** Settling time used first crossing (optimistic), yaw error used
+|rate| instead of |rate - target|, no jitter or zero-crossing metrics.
+
+Literature review: SAC-style dual descent on alpha (Haarnoja et al., 2019) is the
+most principled approach for adaptive entropy. Target entropy = 1.5 (between peak
+performance entropy 3.12 and optimal-noise entropy 1.08).
+
+DR config reviewed for physical stability: volume_scale lower bound restored to 0.70
+(sinking risk at 0.65 + max payload), cob/cog_z offsets kept at +-0.04 (passive
+instability at +-0.06), joint_damping lower bound restored to 0.5 (underdamped at 0.2).
+
+### Added
+- `constraint_trpo.py`: SAC-style adaptive entropy coefficient. Learnable `log_alpha`
+  with dual gradient descent: `alpha_loss = alpha * (H(pi) - H_target)`. When entropy
+  exceeds target, alpha decreases (less exploration push), preventing noise divergence.
+  Config: `entropy_adaptive=True`, `entropy_target=1.5`, `entropy_alpha_lr=3e-4`.
+- `constraint_encoder_runner.py`: Save/load `entropy_alpha_state.pt` alongside
+  checkpoints for `--resume` support.
+- `constraint_encoder_runner.py`: `Policy/entropy_alpha` TensorBoard logging.
+- `eval_dr_fulldof.py`: SS jitter metric (std of per-step error in SS period) for
+  attitude, lin_vel (per-axis), and yaw channels.
+- `eval_dr_fulldof.py`: Zero crossing count (sign changes after 20% of segment)
+  for all three channels -- detects oscillatory behavior.
+- `eval_dr_fulldof.py`: Summary plots expanded from 2x2 to 3x2 grids (jitter +
+  zero-crossing panels) for all three channels.
+
+### Changed
+- `config.py`: DORAEMON `performance_lb` 90.0 -> 130.0. At lb=90, episodes passed
+  threshold until iter 8000 (episode return ~92). At lb=130, borderline at iter 6000
+  (return ~132), providing earlier DORAEMON braking.
+- `config.py`: HardDR bounds expanded ~30-50% for DORAEMON headroom: added_mass
+  (0.3-1.8), damping (0.2-2.0), inertia (0.3-2.5), payload (0-4kg), joint stiffness
+  (20-180), thrust_coeff (0.6-1.4). Physics-reviewed: volume_scale lower kept at 0.70
+  (not 0.65), cob/cog_z at +-0.04, joint_damping lower at 0.5.
+- `rsl_rl_ppo_cfg.py`: Added `entropy_adaptive=True`, `entropy_target=1.5`,
+  `entropy_alpha_lr=3e-4` to algorithm config.
+
+### Fixed
+- `eval_dr_fulldof.py`: Settling time now uses correct control-theory definition
+  (time after which error permanently stays within band), was using first crossing
+  (overly optimistic).
+- `eval_dr_fulldof.py`: Yaw total error now computes `|rate - target|` (tracking
+  error), was computing `|rate|` (absolute value, ignoring command).
+
+### Notes
+- Reward gradient analysis: at current SS errors, gradient is proportional to e
+  (vanishes at e=0). Linear penalty (q_lin) was disabled because it caused dead zone.
+  Sigma reduction (0.10 -> 0.05) would strengthen gradient 3-4x at SS errors but
+  changes reward landscape -- deferred to separate experiment.
+- Yaw overshoot 38-55% and zero-crossings 30+ at hard DR indicate damping issues.
+  Needs separate investigation (yaw_damping_scale DR range or reward structure).
+- Encoder z_sweep comparison (iter 4000 vs 9999): sensitivity patterns preserved,
+  z_1 remains dead. Encoder is not the issue in this run.
+
+---
+
 ## [2026-04-09] SS Error + Settling Tuning (att_rp weight, settling-aware constraint, DORAEMON speed)
 
 ### Context
