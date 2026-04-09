@@ -84,6 +84,49 @@ instability at +-0.06), joint_damping lower bound restored to 0.5 (underdamped a
 - Encoder z_sweep comparison (iter 4000 vs 9999): sensitivity patterns preserved,
   z_1 remains dead. Encoder is not the issue in this run.
 
+### [Session 2] Entropy Target + Alpha LR Correction + Eval Sample Trajectory
+
+### Context
+Analysis of run `2026-04-10_03-17-41` (adaptive entropy, HardDR expanded) revealed:
+
+**Entropy undershoot:** entropy_target=1.5 caused entropy to drop well below target
+(0.74 at iter 2408) with alpha unable to recover (0.002033 -> 0.002062 over 300 iters).
+The alpha_loss gradient is proportional to alpha itself, so small alpha produces tiny
+gradients. While alpha DID reverse direction at iter 2200, the response is far too slow.
+
+**Incorrect target selection:** target=1.5 was based on flawed reasoning -- OLD run
+iter 4000 (entropy=1.08) was labeled "optimal noise" but was actually pre-collapse.
+Correct reference: OLD best performance window (iter 1500-2500) had entropy 2.3-4.2,
+median ~3.0.
+
+**Reward scale drop explained:** NEW reward (149 at iter 1500) vs OLD (220) is due to
+HardDR bounds expansion. Physical DR spread is ~36% wider at same DORAEMON concentration.
+Exp-kernel reward nonlinearity amplifies small tracking accuracy decreases. Not a bug.
+
+**Per-component analysis:** att_rp declining (-0.000196/iter), lin_vel declining
+(-0.000186/iter), yaw_vel improving (+0.000261/iter). Total appears flat because
+yaw improvement + penalty reductions offset tracking declines. Root cause: DORAEMON
+expanding DR while entropy too low for policy to adapt.
+
+**Encoder z_sweep (model_2000):** 6/9 z dims active. z_2 specializes in actuators
+(joint_stiffness 1.24, joint_damping 1.15). z_1/z_8 encode buoyancy/mass. Weak:
+roll damping (dim 8/9), time_constant (dim 19).
+
+### Changed
+- `rsl_rl_ppo_cfg.py`: `entropy_target` 1.5 -> 3.0. Based on OLD best performance
+  window entropy (2.3-4.2, median 3.0). Corresponds to noise_std ~0.35 vs 0.29 at
+  target=1.5.
+- `rsl_rl_ppo_cfg.py`: `entropy_alpha_lr` 3e-4 -> 1e-3. Alpha response was too slow
+  (0.002 -> 0.003 recovery estimated at ~1400 iters at old lr). 3x increase reduces
+  recovery time to ~470 iters.
+
+### Added
+- `eval_dr_fulldof.py`: `_pick_sample_env()` function -- selects median-error env
+  for representative individual trajectory overlay.
+- `eval_dr_fulldof.py`: Sample env trajectory (dotted line) overlaid on attitude,
+  lin_vel, and yaw_rate tracking plots. Automatically skipped when num_envs=1.
+  Shows individual env behavior alongside mean+std band.
+
 ---
 
 ## [2026-04-09] SS Error + Settling Tuning (att_rp weight, settling-aware constraint, DORAEMON speed)
