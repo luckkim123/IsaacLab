@@ -373,9 +373,9 @@ Buoy added mass surge (1D)
 
 ## Related Documents
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md): 환경 구조 및 시뮬레이션 설정
-- [SIM_TO_REAL.md](./SIM_TO_REAL.md): Sim-to-real gap 분석 및 배포
-- [TRAINING_PIPELINE.md](./TRAINING_PIPELINE.md): HORA encoder의 privileged obs 사용
+- [ARCHITECTURE.md](../architecture/system_overview.md): 환경 구조 및 시뮬레이션 설정
+- [SIM_TO_REAL.md](./sim_to_real.md): Sim-to-real gap 분석 및 배포
+- [TRAINING_PIPELINE.md](../architecture/training_pipeline.md): HORA encoder의 privileged obs 사용
 
 ---
 

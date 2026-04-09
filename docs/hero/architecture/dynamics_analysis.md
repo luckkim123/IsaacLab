@@ -402,8 +402,8 @@ Proprioception History --> Adaptation Module --> z_hat_t --> M_bar(z_hat_t) --> 
 - Domain randomization으로 sim-real gap 최소화
 - Latent vector $z_t$와 실제 물리량 사이 correspondence 분석 가능 (해석 가능성)
 
-TDC 제어 법칙의 구체적인 수식 유도는 [TDC_CONTROL_LAW.md](./TDC_CONTROL_LAW.md)를 참조.
-학습 파이프라인(Phase 1/2 구현, DR 설정, 네트워크 구조)은 [TRAINING_PIPELINE.md](./TRAINING_PIPELINE.md)를 참조.
+TDC 제어 법칙의 구체적인 수식 유도는 [TDC_CONTROL_LAW.md](./tdc_control_law.md)를 참조.
+학습 파이프라인(Phase 1/2 구현, DR 설정, 네트워크 구조)은 [TRAINING_PIPELINE.md](./training_pipeline.md)를 참조.
 
 ---
 

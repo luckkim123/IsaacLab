@@ -427,9 +427,9 @@ Hero Agent의 pos:neg 비율(~2.3:1)이 다른 환경 대비 낮지만, 이는 �
 
 ## Related Notes
 
-- [TDC_CONTROL_LAW.md](./TDC_CONTROL_LAW.md): TDC 제어기 구조 및 제어 법칙 유도 (보상과 독립)
-- [TRAINING_PIPELINE.md](./TRAINING_PIPELINE.md): 학습 파이프라인 상세
-- [DOMAIN_RANDOMIZATION.md](./DOMAIN_RANDOMIZATION.md): Domain Randomization 설정 (보상 robustness에 영향)
+- [TDC_CONTROL_LAW.md](./tdc_control_law.md): TDC 제어기 구조 및 제어 법칙 유도 (보상과 독립)
+- [TRAINING_PIPELINE.md](./training_pipeline.md): 학습 파이프라인 상세
+- [DOMAIN_RANDOMIZATION.md](../environment/domain_randomization.md): Domain Randomization 설정 (보상 robustness에 영향)
 
 ---
 **Created**: 2026-02-11

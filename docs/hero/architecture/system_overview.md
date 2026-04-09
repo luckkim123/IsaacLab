@@ -352,7 +352,7 @@ Critical ordering:
 
 **File**: `mdp/events.py`
 
-10개 카테고리, 30+ 파라미터. 상세 내용은 [DOMAIN_RANDOMIZATION.md](./DOMAIN_RANDOMIZATION.md) 참조.
+10개 카테고리, 30+ 파라미터. 상세 내용은 [DOMAIN_RANDOMIZATION.md](../environment/domain_randomization.md) 참조.
 
 | Category | Key Parameters |
 |:---|:---|
@@ -391,14 +391,14 @@ Critical ordering:
 
 ## Related Documents
 
-- [DOMAIN_RANDOMIZATION.md](./DOMAIN_RANDOMIZATION.md): DR 상세
-- [TDC_CONTROL_LAW.md](./TDC_CONTROL_LAW.md): TDC 제어 법칙
-- [TRAINING_PIPELINE.md](./TRAINING_PIPELINE.md): 학습 파이프라인
-- [REWARD_FUNCTIONS.md](./REWARD_FUNCTIONS.md): 보상함수 분석
-- [SIM_TO_REAL.md](./SIM_TO_REAL.md): Sim-to-real gap
-- [DYNAMICS_ANALYSIS.md](./DYNAMICS_ANALYSIS.md): 동역학 분석
-- [TDC_LITERATURE_SURVEY.md](./TDC_LITERATURE_SURVEY.md): TDC 이론
-- [tdc-tuning-history.md](./tdc-tuning-history.md): TDC 디버깅 기록
+- [DOMAIN_RANDOMIZATION.md](../environment/domain_randomization.md): DR 상세
+- [TDC_CONTROL_LAW.md](./tdc_control_law.md): TDC 제어 법칙
+- [TRAINING_PIPELINE.md](./training_pipeline.md): 학습 파이프라인
+- [REWARD_FUNCTIONS.md](./reward_functions.md): 보상함수 분석
+- [SIM_TO_REAL.md](../environment/sim_to_real.md): Sim-to-real gap
+- [DYNAMICS_ANALYSIS.md](./dynamics_analysis.md): 동역학 분석
+- [TDC_LITERATURE_SURVEY.md](./tdc_literature_survey.md): TDC 이론
+- [tdc-tuning-history.md](../history/tdc_tuning_history.md): TDC 디버깅 기록
 
 ---
 

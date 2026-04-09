@@ -309,11 +309,11 @@ context 정보로서 포함. Reward에서는 yaw error를 제외.
 
 ## Related Documents
 
-- [TDC_CONTROL_LAW.md](./TDC_CONTROL_LAW.md): TDC 제어기 수식 유도
-- [DOMAIN_RANDOMIZATION.md](./DOMAIN_RANDOMIZATION.md): DR 설정 및 privileged obs 상세
-- [REWARD_FUNCTIONS.md](./REWARD_FUNCTIONS.md): 보상함수 분석 (Gaussian + curriculum)
-- [DYNAMICS_ANALYSIS.md](./DYNAMICS_ANALYSIS.md): 적응적 M_hat 필요성의 이론적 근거
-- [SAC_MPC_MONITORING.md](./SAC_MPC_MONITORING.md): SAC-MPC 학습 모니터링 가이드 (WandB 대시보드)
+- [TDC_CONTROL_LAW.md](./tdc_control_law.md): TDC 제어기 수식 유도
+- [DOMAIN_RANDOMIZATION.md](../environment/domain_randomization.md): DR 설정 및 privileged obs 상세
+- [REWARD_FUNCTIONS.md](./reward_functions.md): 보상함수 분석 (Gaussian + curriculum)
+- [DYNAMICS_ANALYSIS.md](./dynamics_analysis.md): 적응적 M_hat 필요성의 이론적 근거
+- [SAC_MPC_MONITORING.md](../archive/sac_mpc_monitoring.md): SAC-MPC 학습 모니터링 가이드 (WandB 대시보드)
 
 ---
 

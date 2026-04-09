@@ -314,7 +314,7 @@ encoder M_hat에 대한 **실시간 보정값**을 RL이 추가로 학습하는 
 - Added mass (수력학적 효과) -- `HydrodynamicsModel`이 외력으로 별도 적용
 - 부력제의 added mass m_A ~ 1.83 kg이 M_bb 변화의 **지배적 요인**
 
-**M_bb(gamma) 계산식** (Parallel axis theorem, [DYNAMICS_ANALYSIS.md](./DYNAMICS_ANALYSIS.md) Section 3.7):
+**M_bb(gamma) 계산식** (Parallel axis theorem, [DYNAMICS_ANALYSIS.md](../architecture/dynamics_analysis.md) Section 3.7):
 
 $$M_{bb}(\Gamma) = M_{ROV} + m_A \cdot H_{bu}^T \cdot H_{bu}$$
 
@@ -510,8 +510,8 @@ HORA reconstruction loss와 보완적으로 작동할 수 있다.
   and Its Application to Robot Manipulators." American Control Conference (ACC).
 - Kumar et al. (2021). "RMA: Rapid Motor Adaptation for Legged Robots." (HORA basis)
 - Qi et al. (2023). "HORA: Hand-Object Interaction with Online Robust Adaptation."
-- See also: [TDC_CONTROL_LAW.md](./TDC_CONTROL_LAW.md), [TRAINING_PIPELINE.md](./TRAINING_PIPELINE.md),
-  [TDC_LITERATURE_SURVEY.md](./TDC_LITERATURE_SURVEY.md), [DYNAMICS_ANALYSIS.md](./DYNAMICS_ANALYSIS.md)
+- See also: [TDC_CONTROL_LAW.md](../architecture/tdc_control_law.md), [TRAINING_PIPELINE.md](../architecture/training_pipeline.md),
+  [TDC_LITERATURE_SURVEY.md](../architecture/tdc_literature_survey.md), [DYNAMICS_ANALYSIS.md](../architecture/dynamics_analysis.md)
 
 ---
 

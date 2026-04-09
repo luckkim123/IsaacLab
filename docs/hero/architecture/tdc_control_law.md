@@ -3,7 +3,7 @@
 > **Status**: 2026-02-11 | **Source**: `controllers/tdc.py`, `controllers/kinematics.py`
 >
 > ALBC Roll/Pitch TDC (Time Delay Control) 제어 법칙의 수학적 유도와 구현 확장 사항.
-> 이론적 배경은 [TDC_LITERATURE_SURVEY.md](./TDC_LITERATURE_SURVEY.md) 참조.
+> 이론적 배경은 [TDC_LITERATURE_SURVEY.md](./tdc_literature_survey.md) 참조.
 
 ---
 
@@ -23,7 +23,7 @@ $$M_{bb}(\Gamma)\dot{\nu} + M_{bm}(\Gamma)\ddot{\Gamma} + C_b(\nu, \Gamma, \dot{
 | $\tau_{th}$ | $6 \times 1$ | 추력기 입력 |
 | $b(\Gamma)$ | $6 \times 1$ | 부력 모멘트 |
 
-동역학 유도 상세는 [DYNAMICS_ANALYSIS.md](./DYNAMICS_ANALYSIS.md) 참조.
+동역학 유도 상세는 [DYNAMICS_ANALYSIS.md](./dynamics_analysis.md) 참조.
 
 ---
 
@@ -228,7 +228,7 @@ $$\dot{\nu}^{filt}_t = \alpha \cdot \dot{\nu}^{raw}_t + (1 - \alpha) \cdot \dot{
 
 C++ 참조 구현과 일치. DLS Lambda_inv + DLS IK가 singularity를 자연 감쇠로 처리하므로, 별도의 TDE magnitude clamping이 불필요.
 
-튜닝 과정에서의 saturation 관련 시행착오는 [tdc-tuning-history.md](./tdc-tuning-history.md) 참조.
+튜닝 과정에서의 saturation 관련 시행착오는 [tdc-tuning-history.md](../history/tdc_tuning_history.md) 참조.
 
 ---
 

@@ -272,10 +272,10 @@ real에서는 Dynamixel이 내부적으로 trajectory를 생성하므로 positio
 
 ## Related Documents
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md): 시뮬레이션 설정 상세
-- [DOMAIN_RANDOMIZATION.md](./DOMAIN_RANDOMIZATION.md): DR 범위 및 센서 노이즈
-- [TDC_CONTROL_LAW.md](./TDC_CONTROL_LAW.md): TDC 제어기 수식
-- [TRAINING_PIPELINE.md](./TRAINING_PIPELINE.md): RL 학습 파이프라인
+- [ARCHITECTURE.md](../architecture/system_overview.md): 시뮬레이션 설정 상세
+- [DOMAIN_RANDOMIZATION.md](./domain_randomization.md): DR 범위 및 센서 노이즈
+- [TDC_CONTROL_LAW.md](../architecture/tdc_control_law.md): TDC 제어기 수식
+- [TRAINING_PIPELINE.md](../architecture/training_pipeline.md): RL 학습 파이프라인
 
 ---
 

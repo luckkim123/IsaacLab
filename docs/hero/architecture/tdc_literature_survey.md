@@ -2,7 +2,7 @@
 
 > **Status**: 2026-02-11 | Standalone theory document
 >
-> TDC 이론 및 문헌 조사. 이 시스템에 대한 구체적인 구현은 [TDC_CONTROL_LAW.md](./TDC_CONTROL_LAW.md)를, 튜닝 과정은 [tdc-tuning-history.md](./tdc-tuning-history.md)를 참조.
+> TDC 이론 및 문헌 조사. 이 시스템에 대한 구체적인 구현은 [TDC_CONTROL_LAW.md](./tdc_control_law.md)를, 튜닝 과정은 [tdc-tuning-history.md](../history/tdc_tuning_history.md)를 참조.
 
 ---
 
@@ -220,7 +220,7 @@ Hero Agent의 ALBC (Arm-Linked Buoyancy Control) arm은 이 문서의 이론을 
 - TDE가 hydrodynamic coupling, payload 변동, buoyancy 불확실성을 보상
 - RL encoder가 $\bar{M}$을 온라인으로 추정하여 Section 5.4의 Adaptive TDC를 실현
 
-구현 상세는 [TDC_CONTROL_LAW.md](./TDC_CONTROL_LAW.md), 튜닝 과정은 [tdc-tuning-history.md](./tdc-tuning-history.md) 참조.
+구현 상세는 [TDC_CONTROL_LAW.md](./tdc_control_law.md), 튜닝 과정은 [tdc-tuning-history.md](../history/tdc_tuning_history.md) 참조.
 
 ### Relevant Work
 
@@ -297,6 +297,6 @@ tau[k] = M_bar * q_ddot_ref + N_hat                 # TDC control law
 
 ## Related Documents
 
-- [TDC_CONTROL_LAW.md](./TDC_CONTROL_LAW.md): Hero Agent ALBC의 TDC 제어 법칙 유도 및 구현
-- [tdc-tuning-history.md](./tdc-tuning-history.md): TDC 튜닝 과정 전체 기록
-- [DYNAMICS_ANALYSIS.md](./DYNAMICS_ANALYSIS.md): ALBC 동역학 분석 및 added mass coupling
+- [TDC_CONTROL_LAW.md](./tdc_control_law.md): Hero Agent ALBC의 TDC 제어 법칙 유도 및 구현
+- [tdc-tuning-history.md](../history/tdc_tuning_history.md): TDC 튜닝 과정 전체 기록
+- [DYNAMICS_ANALYSIS.md](./dynamics_analysis.md): ALBC 동역학 분석 및 added mass coupling
