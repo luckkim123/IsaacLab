@@ -51,10 +51,12 @@ def _patched_ppo_init(self, policy, **kwargs):
     if encoder_params:
         self._has_encoder_params = True
         self.encoder_lr = 3e-3
-        self.optimizer = optim.Adam([
-            {"params": other_params, "weight_decay": 0.0, "lr": self.learning_rate},
-            {"params": encoder_params, "weight_decay": 1e-5, "lr": self.encoder_lr},
-        ])
+        self.optimizer = optim.Adam(
+            [
+                {"params": other_params, "weight_decay": 0.0, "lr": self.learning_rate},
+                {"params": encoder_params, "weight_decay": 1e-5, "lr": self.encoder_lr},
+            ]
+        )
     else:
         self._has_encoder_params = False
 
@@ -101,7 +103,9 @@ def _patched_ppo_update(self):
         if self.symmetry and self.symmetry["use_data_augmentation"]:
             data_augmentation_func = self.symmetry["data_augmentation_func"]
             obs_batch, actions_batch = data_augmentation_func(
-                obs=obs_batch, actions=actions_batch, env=self.symmetry["_env"],
+                obs=obs_batch,
+                actions=actions_batch,
+                env=self.symmetry["_env"],
             )
             num_aug = int(obs_batch.batch_size[0] / original_batch_size)
             old_actions_log_prob_batch = old_actions_log_prob_batch.repeat(num_aug, 1)
