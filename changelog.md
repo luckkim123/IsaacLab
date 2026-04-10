@@ -15,6 +15,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [2026-04-10] Revert Adaptive Entropy + HardDR, Slow DORAEMON Expansion
 
+### [Session 4] kl_ub=0.04 Mid-Training Analysis (run 2026-04-10_09-18-36, 4436 iter)
+
+### Context
+Compared NEW run (kl_ub=0.04) against OLD_09 (kl_ub=0.08) at same iterations to
+evaluate whether halving DORAEMON expansion rate prevents the reward decline observed
+in OLD_09. No code changes -- analysis only.
+
+**Config verification:** Confirmed via env.yaml diff that kl_ub (0.04 vs 0.08) is the
+ONLY difference between NEW and OLD_09. All other parameters identical.
+
+**DORAEMON DR expansion:** Successfully slowed. DR entropy at iter 4000: NEW -21.10 vs
+OLD -18.05 (3.05 nats less expanded). kl_step=0.04 consumed in full every update
+(ceiling-hitting unchanged). success_rate consistently higher: NEW 0.93 vs OLD 0.87
+at iter 4400.
+
+**Reward trajectory:** Both runs peaked near iter 2000 (~7.33) then declined. At iter
+4000: NEW 6.10 vs OLD 5.80 (+0.31). Decline rate slightly slower but decline pattern
+NOT prevented. NEW lost 1.23 from peak vs OLD lost 1.53 -- marginal improvement only.
+
+**Entropy:** NEW entropy (0.77 at iter 4400) is LOWER than OLD (1.00 at same iter).
+Unexpected -- slower DR should preserve more exploration capacity, but the opposite
+occurred. noise_std similar (NEW 0.35 vs OLD 0.37).
+
+**Attitude error:** Both runs stuck at 12-14 deg roll/pitch throughout. No improvement
+from kl_ub change.
+
+### Notes
+- kl_ub=0.04 delays saturation but does not prevent the fundamental reward decline
+  pattern. The same failure trajectory plays out on a slightly stretched timescale.
+- Ceiling-hitting (kl_step == kl_ub every update) persists, meaning success_rate >> alpha.
+  DORAEMON is still expanding as fast as the budget allows.
+- The entropy being lower than OLD_09 at same iter is unexplained and warrants investigation.
+- Next steps require user decision: kl_ub alone is insufficient. Structural changes to
+  DORAEMON gating (e.g., success_rate threshold, performance_lb increase) or reward/constraint
+  rebalancing may be needed.
+
+---
+
 ### [Session 3] Revert Failed Experiments + DORAEMON kl_ub Reduction
 
 ### Context
