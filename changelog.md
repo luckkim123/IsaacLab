@@ -15,6 +15,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [2026-04-10] Revert Adaptive Entropy + HardDR, Slow DORAEMON Expansion
 
+### [Session 5] Reintegrate log_std into TRPO Natural Gradient
+
+### Context
+Deep analysis of the reward decline pattern (peak at iter ~2000, then monotonic decline)
+revealed entropy collapse (8.5 -> 0.7 in 4500 iters) as the primary structural cause.
+Code + literature investigation showed our implementation deviates from standard TRPO:
+log_std was updated via a separate Adam optimizer instead of being included in the TRPO
+natural gradient step. Every reference TRPO implementation (Spinning Up, ikostrikov,
+SB2/SB3, SafePO, rllab) includes log_std in the natural gradient. When log_std is outside
+the trust region, the KL constraint cannot protect against variance collapse.
+
+**Root cause chain:** entropy_coef=0.003 was only in the sigma update (not TRPO surrogate,
+matching NORBC standard). But with log_std in a separate Adam, the advantage signal dominates
+(~1.0 scale) over entropy bonus (~0.024 for 8D actions). The trust region provides zero
+protection against entropy collapse because it doesn't constrain log_std changes.
+
+**Literature verification:** NORBC paper (Kim et al., T-RO 2024) uses standard TRPO.
+No reference implementation decouples log_std from the natural gradient. The original
+comment "In 2D action space, sigma consumes ~33% of KL budget" was from an earlier design;
+current 8D action space has log_std as 8/113K params (0.007%).
+
+### Changed
+- `algorithms/constraint_trpo.py`: Included log_std in `_policy_params` (TRPO natural gradient).
+  Removed separate `std_optimizer` (Adam) and entire sigma update block (lines 471-505).
+  Removed adaptive entropy machinery (SAC-style alpha, `_log_alpha`, `_alpha_optimizer`).
+  Added sigma gradient decomposition tracking (`_sigma_param_offset/count`).
+  Extended gradient decomposition from 2-way (encoder/actor) to 3-way (sigma/encoder/actor).
+  Safety clamp (`min_std`/`max_std`) retained, applied after TRPO step.
+- `agents/rsl_rl_ppo_cfg.py`: Removed `std_lr`, `entropy_coef`, `entropy_adaptive`,
+  `entropy_target`, `entropy_alpha_lr` from `RslRlConstraintTRPOAlgorithmCfg`.
+  Updated docstring: "Three optimizer groups" -> "Two optimizer groups".
+- `runners/constraint_encoder_runner.py`: Replaced `Policy/entropy_alpha` metric with
+  `GradDecomp/sigma_{vanilla,natgrad,step}_norm`. Removed adaptive entropy save/load code.
+- `encoder/actor_critic_asym_constrained.py`: Updated docstring for log_std routing.
+
+### Removed
+- Separate sigma (log_std) Adam optimizer and score-function gradient update
+- Adaptive entropy (SAC-style dual descent): `entropy_coef`, `entropy_adaptive`,
+  `entropy_target`, `entropy_alpha_lr`, `_log_alpha`, `_alpha_optimizer`
+- `Policy/entropy_alpha` TensorBoard metric
+- Adaptive entropy checkpoint save/load (`entropy_alpha_state.pt`)
+
+### Notes
+- `max_kl=0.005` unchanged. log_std is 8 params / 113K total; FIM auto-allocates KL budget.
+- `cg_iters=10` unchanged. 8 additional params negligible for CG convergence.
+- Checkpoint backward compatible: log_std is same nn.Parameter, removed config fields
+  handled by `**_kwargs` in constructor.
+- Monitor after training: `GradDecomp/sigma_step_norm > 0` (log_std updating),
+  `Policy/entropy` decline rate (should be slower), `Policy/line_search_success > 0.8`.
+
 ### [Session 4] kl_ub=0.04 Mid-Training Analysis (run 2026-04-10_09-18-36, 4436 iter)
 
 ### Context
