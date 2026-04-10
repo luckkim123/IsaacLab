@@ -15,6 +15,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [2026-04-10] Revert Adaptive Entropy + HardDR, Slow DORAEMON Expansion
 
+### [Session 6] Sigma Gradient Sign Logging for Noise Collapse Diagnosis
+
+### Context
+Investigation into why noise_std monotonically decreases: is it the reward structure,
+TRPO dynamics, or something else? Previous analysis claimed "reward structure always
+favors noise reduction" but this was unverified speculation. The surrogate gradient for
+log_std is `E[A * ((a-mu)^2/sigma^2 - 1)]`, whose sign depends on whether exploratory
+actions (far from mu) or exploitative actions (close to mu) have higher advantage.
+This is an empirical question, not derivable from reward function form alone.
+
+Added signed gradient logging so the next training run can answer: does the gradient
+ever point toward increasing noise (positive sigma_step_mean), or is it always negative?
+Per-dimension logging (dim_0-7) reveals whether arm (dim 0-1) vs thruster (dim 2-7)
+actions have different noise dynamics.
+
+**Run analysis (2026-04-10_14-35-00, iter 1974):**
+- Reward peaked at iter ~1200 (243.62), now 229.22 (-5.9%). Same decline pattern as OLD.
+- noise_std=0.199, entropy=-2.75 (collapsed). sigma_step_norm=0.001 (nearly zero).
+- DORAEMON success=0.999, DR expanding steadily.
+- eval_dr (model_950): 100% survival all DR levels, SS attitude error 1.0-1.2 deg.
+- Encoder z_sweep: broader coverage than OLD (20/24 params with 6+/9 active dims vs 16/24).
+- Reward decline concentrated in att_rp component (-13.1% from peak).
+- Constraint costs NOT increasing, ruling out IPO barrier as cause.
+
+### Changed
+- `algorithms/constraint_trpo.py`: Added `_last_sigma_step_mean` (signed mean of log_std
+  step direction: positive = noise increase, negative = noise decrease) and
+  `_last_sigma_step_per_dim` (per-action-dimension signed step, 8D list).
+- `runners/constraint_encoder_runner.py`: Log `GradDecomp/sigma_step_mean` and
+  `SigmaStep/dim_0` through `SigmaStep/dim_7` to TensorBoard.
+
+### Notes
+- sigma_step_mean > 0 at any point would indicate the gradient naturally wants to
+  increase noise (e.g., during command transitions or after DR expansion).
+- If sigma_step_mean is always negative, the hypothesis that reward structure suppresses
+  noise is supported and an entropy maintenance mechanism is justified.
+- Literature found: EnTRPO (2021), ERC-TRPO (2024) address TRPO exploration suppression.
+  CSAC-LB (2024) shows log-barrier + entropy maximization are complementary.
+  No paper analyzes TRPO + IPO + DR curriculum combination specifically.
+
 ### [Session 5] Reintegrate log_std into TRPO Natural Gradient
 
 ### Context
