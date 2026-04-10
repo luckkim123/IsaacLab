@@ -15,6 +15,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [2026-04-10] Revert Adaptive Entropy + HardDR, Slow DORAEMON Expansion
 
+### [Session 7] Per-Dimension Noise Std Logging + Sigma Gradient Analysis Results
+
+### Context
+Analyzed sigma gradient sign data from run 2026-04-10_17-04-09 (70 iters with new
+logging). Key finding: `sigma_step_mean` is negative in 70/70 iterations -- the TRPO
+natural gradient ALWAYS pushes noise down. Per-dimension breakdown reveals arm joints
+(dim 0-1) drive the collapse: 0-1% positive steps, magnitude 4-5x larger than thruster
+dims. Thruster dims (2-7) genuinely oscillate (17-36% positive steps) but are dominated
+by arm's strong negative signal in the aggregate mean.
+
+This confirms the gradient structurally reduces noise, but does NOT yet establish whether
+noise collapse causes reward decline. To answer that, need per-dimension noise_std logged
+alongside per-component reward breakdown (already logged as Episode_Reward/*).
+Added `NoiseStd/dim_*` logging to correlate arm dim noise floor with att_rp decline.
+
+Code analysis of reward functions:
+- `action_smoothness` (k=-0.1): applies equally to all 8 dims (mean of da^2)
+- `thruster_energy` (k=-0.35): dims 2-7 only (thruster action magnitude)
+- `att_rp` (k=9.0, highest weight): depends on arm joint positions
+- Smoothness alone cannot explain arm-thruster asymmetry in gradient direction
+
+### Added
+- `runners/constraint_encoder_runner.py`: Log `NoiseStd/dim_0` through `NoiseStd/dim_7`
+  (per-dimension exp(log_std)) to track individual action dim noise over training.
+
+### Notes
+- Resuming from model_2450.pt (run 2026-04-10_14-35-00) to collect long-run data
+- Watch for: arm dims hitting min_std (0.05) floor timing vs att_rp reward decline timing
+- If arm noise floors while att_rp keeps declining -> noise collapse is not the sole cause
+- If att_rp decline starts exactly when arm noise floors -> strong causal evidence
+
 ### [Session 6] Sigma Gradient Sign Logging for Noise Collapse Diagnosis
 
 ### Context
