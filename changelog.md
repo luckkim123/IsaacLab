@@ -13,6 +13,68 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-10] Revert Adaptive Entropy + HardDR, Slow DORAEMON Expansion
+
+### [Session 3] Revert Failed Experiments + DORAEMON kl_ub Reduction
+
+### Context
+Analysis of run `2026-04-10_06-02-55` (adaptive entropy + expanded HardDR, 1500 iter)
+confirmed both Session 1-2 changes degraded training vs OLD baseline
+(`2026-04-09_16-41-45`):
+
+**Adaptive entropy failure:** SAC-style alpha decayed from 0.003 to 0.0014 during the
+first 1300 iter where entropy was naturally above target (8.5 -> 3.0). By the time
+entropy dropped below target=3.0, alpha was too small to push back. At iter 1500,
+adaptive alpha (0.0014) provided LESS exploration pressure than OLD's fixed
+entropy_coef (0.003). Structural issue: SAC assumes entropy starts low and needs
+maintaining; our case has high initial entropy that naturally declines, reversing
+the dynamics.
+
+**HardDR expansion failure:** Tracking errors at iter 1500 were genuinely worse, not
+just reward-scale effects: roll 4.59 vs 2.80 deg (1.64x), lin_vel 0.237 vs 0.127 m/s
+(1.87x). Eval at model_1500 showed att SS 4.8 deg at hard DR (vs OLD's 2.3 deg at
+model_9999 hard DR). Settling time 1.61s vs OLD's 0.41s.
+
+**Revert produced identical run:** After reverting both changes + performance_lb to
+OLD_09 values, new run `2026-04-10_07-49-00` produced values identical to OLD_09 at
+every iter (same seed=30, same config). The k_att_rp=9.0 and settling-aware
+rp_vel_settling changes were already present in OLD_09, so the revert left zero
+differences.
+
+**OLD_09 root cause analysis (10k trajectory):** Peak at iter 2000 (reward 228,
+rp_err 3.9 deg), then monotonic decline to reward 85 at iter 8000. DORAEMON
+success_rate was >= 0.97 from iter 500 (performance_lb=90 vs reward 140+), consuming
+full kl_ub=0.08 budget every update. All 15 DR params reached Beta(1,1)=uniform by
+iter 5000. Entropy collapsed 7.6 -> 1.08 (iter 4000), then rebounded via fixed
+entropy_coef, but noise_std increase during rebound further degraded reward. Best
+checkpoint was model_2000, not model_9999.
+
+### Changed
+- `rsl_rl_ppo_cfg.py`: `entropy_adaptive` True -> False. Fixed entropy_coef=0.003
+  retained (was more stable than adaptive alpha which decayed below it).
+- `config.py`: HardDR bounds restored to pre-expansion values matching OLD_09
+  (20 fields reverted: added_mass (0.5,1.5), damping (0.4,1.7), inertia (0.4,2.0),
+  payload (0,3.0), body_mass (0.75,1.25), volume (0.75,1.25), cob/cog offsets +-0.02,
+  joint stiffness (30,150), joint damping (0.3,7.0), thrust_coeff (0.7,1.3), etc).
+- `config.py`: DORAEMON `performance_lb` 130.0 -> 90.0 (back to OLD_09 value).
+- `config.py`: DORAEMON `kl_ub` 0.08 -> 0.04. OLD_09 consumed full 0.08 budget
+  every update (success_rate ~1.0 >> alpha=0.5), reaching DR saturation by iter 5000.
+  Halving to 0.04 doubles time-to-saturation. performance_lb increase was rejected
+  due to prior mode=-2 stall at lb=200 (2026-04-06).
+
+### Notes
+- Eval of model_1500 (run 2026-04-10_06-02-55): none-DR att SS 1.5 deg (better than
+  OLD_09's 1.9), confirming k_att_rp=9.0 + settling-aware help at nominal physics.
+  But hard-DR att SS 4.8 deg + settling 1.61s showed the expanded HardDR was too wide
+  for the policy to handle at 1500 iters.
+- The adaptive entropy code (constraint_trpo.py) is retained but disabled. The
+  entropy_alpha logging and checkpoint save/load remain functional for future use.
+- Next run uses OLD_09 config + kl_ub=0.04 as the single change. Expected: similar
+  trajectory to OLD_09 in first 2000 iters, but slower DR expansion beyond that point,
+  delaying or preventing the saturation that caused OLD_09's decline.
+
+---
+
 ## [2026-04-10] Adaptive Entropy + DORAEMON Tuning + Eval Metric Fixes
 
 ### Context
