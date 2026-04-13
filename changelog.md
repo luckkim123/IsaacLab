@@ -77,6 +77,57 @@ but degraded vs OLD baseline (1.9-2.3 deg) due to entropy collapse.
   formulation (reward and entropy components would receive different trust-region
   scaling, violating the constraint geometry).
 
+### [Session 2] Fix ERC-TRPO: H-H_ref Entropy Normalization
+
+### Context
+Analyzed run `2026-04-13_13-53-43` (ERC-TRPO with entropy_beta=0.01, 1853 iters).
+Found that noise_std exploded from 0.7 to 1.55 (all 6 thruster dims hit max_std=2.0
+cap by iter 200, arm dims decreased to 0.17-0.25). Root cause: the absolute entropy
+H in `effective_kl = KL - beta * H` created a massive constant bonus. For 8D action,
+`H = 0.5*D*(1+log(2pi)) + sum(log(sigma))` has a dimension-dependent constant of
+~11.35. With beta=0.01, this gave beta*H = 0.12 = 24x delta, making the trust region
+essentially unconstrained from iter 0. The line search accepted every step at full
+size (ls_success=1.00, effective_kl=-0.12 throughout). Positive feedback loop:
+sigma up -> H up -> bigger bonus -> bigger steps -> sigma up faster -> max_std cap.
+
+Despite noise explosion, reward=201 (vs baseline 119) and roll/pitch error were
+marginally better (12.5/12.4 vs 13.1/13.8), suggesting entropy prevention helps but
+sigma=2.0 is far above optimal.
+
+Fix: normalize entropy bonus by initial policy entropy H_ref. The constraint becomes
+`KL - beta * (H - H_ref) <= delta`. This eliminates the dimension-dependent constant
+(it cancels), starts with zero bonus (H=H_ref -> bonus=0), and creates symmetric
+behavior (entropy increase = wider TR, decrease = tighter TR). The gradient
+combination `g + beta * h` is unchanged (grad of constant H_ref = 0).
+
+Numerical verification: at init, max acceptable KL goes from 18x delta (before) to
+1.5x delta (after, identical to standard TRPO). With H increasing by 3.5 nats,
+bonus = 0.035 = 7x delta -- significant but bounded.
+
+### Fixed
+- `constraint_trpo.py`: `_line_search` now uses `KL - beta * (H - H_ref)` instead
+  of `KL - beta * H`. Removes dimension-dependent constant from entropy bonus.
+  Includes None guard for `_entropy_ref` with safe fallback (entropy_delta=0).
+
+### Added
+- `constraint_trpo.py`: `_entropy_ref` field (set once on first `update()` call).
+  Captures initial policy entropy as normalization reference. On resume from
+  checkpoint, resets to current state (no stale reference from different policy).
+- `constraint_trpo.py`: H_ref initialization in `update()` with logging.
+
+### Changed
+- `constraint_trpo.py`: Module docstring and parameter comments updated from
+  `D_KL - beta * H` to `D_KL - beta * (H - H_ref)`.
+- `rsl_rl_ppo_cfg.py`: `entropy_beta` comment updated to reflect H-H_ref formulation.
+
+### Notes
+- `entropy_beta=0.01` kept unchanged -- with H-H_ref normalization, beta=0.01 means
+  "1 nat of entropy change adjusts trust region by 0.01", which is 2x delta. Reasonable.
+- Key monitoring: `Policy/effective_kl` should now start near 0 (not -0.12) and
+  track entropy changes. `NoiseStd/dim_*` should not all rush to max_std=2.0.
+- Previous ERC-TRPO run data (run 2026-04-13_13-53-43) serves as "broken baseline"
+  for comparison -- thruster dims at 2.0, arm dims at 0.17-0.25.
+
 ---
 
 ## [2026-04-10] Revert Adaptive Entropy + HardDR, Slow DORAEMON Expansion
