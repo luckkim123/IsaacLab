@@ -62,12 +62,61 @@ TRPO gradient still pushes arm noise down at floor (76% negative steps at min_st
 ### Notes
 - Entropy collapse experiment history: adaptive entropy (failed), log_std TRPO
   reintegration (failed), ERC-TRPO absolute H (failed), ERC-TRPO H-H_ref (failed),
-  per-dim min_std (pending).
+  per-dim min_std (pending), entropy_coef restoration (pending).
 - Per-dim min_std arm=0.10 is 1.7x the noise at peak performance (0.058). Chosen as
   moderate value between floor (0.05) and excessive (0.15).
-- The question "does entropy collapse cause reward decline?" remains open. DORAEMON
-  difficulty increase is the proximate cause, but whether noise floor limits DR adaptability
-  requires experimental verification.
+
+## [2026-04-13] Entropy_coef Root Cause Analysis + Restoration
+
+### Context
+Continued analysis of per-dim min_std run (2026-04-13_16-34-46) raised critical question:
+mean noise_std at iter 227 was nearly identical between new and baseline runs. Investigation
+of why TRPO "always reduces noise" led to discovery of run 2026-04-09_16-41-45 where noise
+clearly recovered (0.36->0.55 after iter 3758). This contradicted the claim.
+
+### Experiments
+- **Per-dim min_std run** (2026-04-13_16-34-46, 645 iter): arm_0 hit 0.10 floor by iter 250,
+  arm_1 by iter 550. All thruster dims still DECREASING (slope -0.0002/iter). No dim showed
+  increase. Per-dim min_std prevents floor crash but provides no upward pressure.
+- **04-09 run** (2026-04-09_16-41-45, 10k iter): noise recovered 0.36->0.55 after iter 3758.
+  Entropy recovered 1.08->3.21. Config: `std_lr=0.001, entropy_coef=0.003`.
+- **04-10 run** (2026-04-10_17-20-03, 10k iter): noise collapsed to 0.12, entropy to -6.28.
+  Config: no std_lr, no entropy_coef. Two changes at once (confounded).
+- **sigma_step_mean** over full 04-10 run: 85.6% negative, 14.4% positive (not 100% negative
+  as previously claimed from 70-iter subsample). TRPO CAN increase noise, but net direction
+  is negative without entropy bonus.
+
+### Decisions
+- **Restored entropy_coef=0.003 to TRPO surrogate.** Evidence: 04-09 (with coef) recovered
+  noise, 04-10 (without coef) collapsed. The entropy bonus adds +coef gradient to log_std,
+  counteracting TRPO's natural noise reduction. This is the only mechanism that pushes noise UP.
+- **Kept per-dim min_std alongside entropy_coef.** Roles are complementary: entropy_coef
+  provides upward pressure, per-dim min_std provides asymmetric floor (arm sensitivity > thruster).
+- **Kept log_std in TRPO natural gradient.** All standard implementations (SpinUp, SB3, rllab)
+  do this. No literature supports separating. Commit c0461d8c was right to reintegrate but
+  wrong to remove entropy_coef simultaneously.
+- **Corrected commit c0461d8c's attribution.** That commit blamed "separate Adam" for entropy
+  collapse, but the real cause was entropy_coef removal. Two variables changed simultaneously;
+  the wrong one was blamed.
+
+### Literature Findings
+- **Per-dim min_std**: No academic precedent. Engineering solution specific to this project.
+- **entropy_coef in TRPO**: Non-standard but backed by EnTRPO (Xu et al., 2021) and
+  ERC-TRPO (Guo et al., 2024). Standard in PPO but not in TRPO.
+- **Constrained TRPO + entropy**: Completely uncharted. NORBC, CPO, IPO, FOCOPS all ignore
+  entropy management. This project's low-dim mixed action space (8D arm+thruster) may
+  uniquely trigger entropy collapse that higher-dim locomotion tasks avoid.
+- **TRPO Fisher(log_sigma) = 2I** (constant). Natural gradient = vanilla gradient / 2.
+  No structural protection or attack on entropy. KL limits per-step change (~2.5%/step
+  at delta=0.01) but not cumulative decline.
+
+### Open Questions
+- Will entropy_coef=0.003 + per-dim min_std + TRPO-integrated sigma reproduce the 04-09
+  noise recovery? Next run will test this combination.
+- Is per-dim min_std still needed if entropy_coef restores noise recovery? May be redundant
+  or may serve as useful safety net for arm dims.
+- Optimal entropy_coef value: 0.003 worked in 04-09 but that had separate Adam for sigma.
+  Interaction with TRPO-integrated sigma is untested.
 
 ---
 
