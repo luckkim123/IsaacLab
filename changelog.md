@@ -13,6 +13,72 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-13] ERC-TRPO: Entropy-Regularized Trust Region Constraint
+
+### Context
+Analysis of run `2026-04-10_17-20-03` (10k iter, log_std integrated into TRPO natural
+gradient) confirmed that entropy collapse was NOT prevented -- entropy reached -6.28,
+arm dims (0,1) hit min_std=0.05 floor by iter 2000, reward declined from 234 to 119
+(-49%). The TRPO natural gradient structurally reduces noise (sigma_step_mean < 0 in
+70/70 iters from prior analysis), and the trust region (max_kl=0.005) allocates
+negligible budget to log_std (8/113K params = 0.007%).
+
+Literature review identified ERC-TRPO (Neurocomputing 2024) as the most relevant
+solution: it reformulates the KL constraint as `D_KL - beta * H(pi) <= delta`,
+giving high-entropy policies a wider effective trust region and braking entropy
+collapse. Key advantage over prior attempts (adaptive entropy, separate sigma
+optimizer): the entropy preservation is embedded in the trust region geometry
+itself, not as an auxiliary objective that competes with the reward signal.
+
+Implementation approach: combine reward gradient `g` with entropy gradient `h`
+as `g_combined = g + beta * h` before CG solve (single CG, no wall-clock overhead).
+Line search acceptance uses relaxed condition `(KL - beta*H) <= delta`. When
+`entropy_beta=0`, all new code is inactive (exact fallback to standard TRPO).
+
+Eval of model_9999 (run 2026-04-10_17-20-03): att SS 2.5-3.0 deg (none-hard),
+100% survival all DR levels, encoder 9/9 dims active. Performance is functional
+but degraded vs OLD baseline (1.9-2.3 deg) due to entropy collapse.
+
+### Added
+- `constraint_trpo.py`: ERC-TRPO entropy regularization in `_trpo_step`. Computes
+  entropy gradient `h = grad(-H)` (only non-zero for log_std params, uses
+  `allow_unused=True`), combines with reward gradient as `g + beta * h`, then
+  runs standard CG on the combined gradient. Single CG solve -- no additional
+  computational overhead vs standard TRPO.
+- `constraint_trpo.py`: `_flat_grad` now accepts `allow_unused=True` for computing
+  gradients of losses that don't depend on all policy params (entropy depends only
+  on log_std, not actor/encoder weights).
+- `constraint_trpo.py`: `_last_entropy_hTv` and `_last_effective_kl` monitoring
+  variables for ERC-TRPO diagnostics.
+- `rsl_rl_ppo_cfg.py`: `entropy_beta=0.01` in `RslRlConstraintTRPOAlgorithmCfg`.
+  Default value chosen so `beta * delta_H ≈ 0.01 * 0.5 = 0.005` matches
+  max_kl order of magnitude.
+- `constraint_encoder_runner.py`: `Policy/effective_kl` and `Policy/entropy_hTv`
+  TensorBoard metrics.
+
+### Changed
+- `constraint_trpo.py`: `_line_search` acceptance condition changed from
+  `kl <= kl_limit` to `(kl - entropy_beta * entropy) <= kl_limit`. High-entropy
+  candidates are accepted more easily; low-entropy candidates face a stricter bar.
+- `constraint_trpo.py`: Module docstring updated to reflect ERC-TRPO formulation
+  and reference.
+
+### Notes
+- Checkpoint backward compatible: `entropy_beta` handled by `**_kwargs` in
+  `__init__`. Existing checkpoints load without issues.
+- `entropy_beta=0` disables all ERC-TRPO code paths (exact standard TRPO).
+- Key metrics to watch: `Policy/entropy` (decline rate should slow),
+  `GradDecomp/sigma_step_mean` (expect more positive values),
+  `Policy/effective_kl` (should be less than raw KL).
+- Literature: ERC-TRPO (Neurocomputing 2024), CSAC-LB (arXiv 2403.14508)
+  confirms log-barrier + entropy maximization are complementary.
+- The combined gradient approach (g + beta*h before CG) was chosen over separate
+  CG solves after code review identified scaling inconsistency in the dual-CG
+  formulation (reward and entropy components would receive different trust-region
+  scaling, violating the constraint geometry).
+
+---
+
 ## [2026-04-10] Revert Adaptive Entropy + HardDR, Slow DORAEMON Expansion
 
 ### [Session 7] Per-Dimension Noise Std Logging + Sigma Gradient Analysis Results
