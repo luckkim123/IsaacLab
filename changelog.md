@@ -13,1155 +13,336 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## [2026-04-13] ERC-TRPO: Entropy-Regularized Trust Region Constraint
+## [2026-04-13] ERC-TRPO Tested & Reverted + Per-Dim Min_Std
 
 ### Context
-Analysis of run `2026-04-10_17-20-03` (10k iter, log_std integrated into TRPO natural
-gradient) confirmed that entropy collapse was NOT prevented -- entropy reached -6.28,
-arm dims (0,1) hit min_std=0.05 floor by iter 2000, reward declined from 234 to 119
-(-49%). The TRPO natural gradient structurally reduces noise (sigma_step_mean < 0 in
-70/70 iters from prior analysis), and the trust region (max_kl=0.005) allocates
-negligible budget to log_std (8/113K params = 0.007%).
+Entropy collapse investigation continued. ERC-TRPO (Neurocomputing 2024) was implemented,
+tested in 3 runs, and reverted due to a fundamental incompatibility with this task.
 
-Literature review identified ERC-TRPO (Neurocomputing 2024) as the most relevant
-solution: it reformulates the KL constraint as `D_KL - beta * H(pi) <= delta`,
-giving high-entropy policies a wider effective trust region and braking entropy
-collapse. Key advantage over prior attempts (adaptive entropy, separate sigma
-optimizer): the entropy preservation is embedded in the trust region geometry
-itself, not as an auxiliary objective that competes with the reward signal.
+**ERC-TRPO attempt (3 runs, all failed):**
+1. Run `2026-04-13_13-53-43` (absolute H): `KL - beta*H <= delta`. Noise exploded to
+   max_std=2.0 because 8D Gaussian has dimension constant ~11.35, giving 24x delta bonus.
+2. Run `2026-04-13_15-57-26` (H-H_ref): `KL - beta*(H-H_ref) <= delta`. Fixed explosion
+   but created hard entropy floor at `H_ref - kl_limit/beta = 8.498 - 0.75 = 7.748`.
+   Line search success dropped to 0% at iter 53 and never recovered. Policy frozen.
+   Root cause: effective_kl = KL + beta*(H_ref-H). When entropy drops 0.75 nats, penalty
+   alone equals kl_limit (0.0075), leaving zero room for any policy step.
+3. Fundamental issue: this task requires entropy drop 8.5 -> 3.1 for precise control.
+   ERC-TRPO prevents entropy from dropping more than 0.75 nats. Incompatible by design.
 
-Implementation approach: combine reward gradient `g` with entropy gradient `h`
-as `g_combined = g + beta * h` before CG solve (single CG, no wall-clock overhead).
-Line search acceptance uses relaxed condition `(KL - beta*H) <= delta`. When
-`entropy_beta=0`, all new code is inactive (exact fallback to standard TRPO).
+**Baseline reward decline analysis:** Deep investigation of run `2026-04-10_17-20-03`
+revealed that reward decline (234 -> 119) tracks DORAEMON DR difficulty increase
+(success 0.998 -> 0.589), not arm noise floor. During high DORAEMON success (iter 532-2913),
+reward slope was flat even as arm dim0 hit floor at iter 1404. First-differenced correlation
+between noise change and reward change was non-significant (r=-0.018, p=0.07).
 
-Eval of model_9999 (run 2026-04-10_17-20-03): att SS 2.5-3.0 deg (none-hard),
-100% survival all DR levels, encoder 9/9 dims active. Performance is functional
-but degraded vs OLD baseline (1.9-2.3 deg) due to entropy collapse.
+**Per-dim min_std experiment:** Despite inconclusive correlation, arm noise floor
+could affect long-term DR adaptability (not detectable by iteration-level correlation).
+Implemented per-dim min_std as experiment: arm(0,1)=0.10, thruster(2-7)=0.05.
+TRPO gradient still pushes arm noise down at floor (76% negative steps at min_std=0.05).
 
 ### Added
-- `constraint_trpo.py`: ERC-TRPO entropy regularization in `_trpo_step`. Computes
-  entropy gradient `h = grad(-H)` (only non-zero for log_std params, uses
-  `allow_unused=True`), combines with reward gradient as `g + beta * h`, then
-  runs standard CG on the combined gradient. Single CG solve -- no additional
-  computational overhead vs standard TRPO.
-- `constraint_trpo.py`: `_flat_grad` now accepts `allow_unused=True` for computing
-  gradients of losses that don't depend on all policy params (entropy depends only
-  on log_std, not actor/encoder weights).
-- `constraint_trpo.py`: `_last_entropy_hTv` and `_last_effective_kl` monitoring
-  variables for ERC-TRPO diagnostics.
-- `rsl_rl_ppo_cfg.py`: `entropy_beta=0.01` in `RslRlConstraintTRPOAlgorithmCfg`.
-  Default value chosen so `beta * delta_H ≈ 0.01 * 0.5 = 0.005` matches
-  max_kl order of magnitude.
-- `constraint_encoder_runner.py`: `Policy/effective_kl` and `Policy/entropy_hTv`
-  TensorBoard metrics.
-
-### Changed
-- `constraint_trpo.py`: `_line_search` acceptance condition changed from
-  `kl <= kl_limit` to `(kl - entropy_beta * entropy) <= kl_limit`. High-entropy
-  candidates are accepted more easily; low-entropy candidates face a stricter bar.
-- `constraint_trpo.py`: Module docstring updated to reflect ERC-TRPO formulation
-  and reference.
-
-### Notes
-- Checkpoint backward compatible: `entropy_beta` handled by `**_kwargs` in
-  `__init__`. Existing checkpoints load without issues.
-- `entropy_beta=0` disables all ERC-TRPO code paths (exact standard TRPO).
-- Key metrics to watch: `Policy/entropy` (decline rate should slow),
-  `GradDecomp/sigma_step_mean` (expect more positive values),
-  `Policy/effective_kl` (should be less than raw KL).
-- Literature: ERC-TRPO (Neurocomputing 2024), CSAC-LB (arXiv 2403.14508)
-  confirms log-barrier + entropy maximization are complementary.
-- The combined gradient approach (g + beta*h before CG) was chosen over separate
-  CG solves after code review identified scaling inconsistency in the dual-CG
-  formulation (reward and entropy components would receive different trust-region
-  scaling, violating the constraint geometry).
-
-### [Session 2] Fix ERC-TRPO: H-H_ref Entropy Normalization
-
-### Context
-Analyzed run `2026-04-13_13-53-43` (ERC-TRPO with entropy_beta=0.01, 1853 iters).
-Found that noise_std exploded from 0.7 to 1.55 (all 6 thruster dims hit max_std=2.0
-cap by iter 200, arm dims decreased to 0.17-0.25). Root cause: the absolute entropy
-H in `effective_kl = KL - beta * H` created a massive constant bonus. For 8D action,
-`H = 0.5*D*(1+log(2pi)) + sum(log(sigma))` has a dimension-dependent constant of
-~11.35. With beta=0.01, this gave beta*H = 0.12 = 24x delta, making the trust region
-essentially unconstrained from iter 0. The line search accepted every step at full
-size (ls_success=1.00, effective_kl=-0.12 throughout). Positive feedback loop:
-sigma up -> H up -> bigger bonus -> bigger steps -> sigma up faster -> max_std cap.
-
-Despite noise explosion, reward=201 (vs baseline 119) and roll/pitch error were
-marginally better (12.5/12.4 vs 13.1/13.8), suggesting entropy prevention helps but
-sigma=2.0 is far above optimal.
-
-Fix: normalize entropy bonus by initial policy entropy H_ref. The constraint becomes
-`KL - beta * (H - H_ref) <= delta`. This eliminates the dimension-dependent constant
-(it cancels), starts with zero bonus (H=H_ref -> bonus=0), and creates symmetric
-behavior (entropy increase = wider TR, decrease = tighter TR). The gradient
-combination `g + beta * h` is unchanged (grad of constant H_ref = 0).
-
-Numerical verification: at init, max acceptable KL goes from 18x delta (before) to
-1.5x delta (after, identical to standard TRPO). With H increasing by 3.5 nats,
-bonus = 0.035 = 7x delta -- significant but bounded.
-
-### Fixed
-- `constraint_trpo.py`: `_line_search` now uses `KL - beta * (H - H_ref)` instead
-  of `KL - beta * H`. Removes dimension-dependent constant from entropy bonus.
-  Includes None guard for `_entropy_ref` with safe fallback (entropy_delta=0).
-
-### Added
-- `constraint_trpo.py`: `_entropy_ref` field (set once on first `update()` call).
-  Captures initial policy entropy as normalization reference. On resume from
-  checkpoint, resets to current state (no stale reference from different policy).
-- `constraint_trpo.py`: H_ref initialization in `update()` with logging.
-
-### Changed
-- `constraint_trpo.py`: Module docstring and parameter comments updated from
-  `D_KL - beta * H` to `D_KL - beta * (H - H_ref)`.
-- `rsl_rl_ppo_cfg.py`: `entropy_beta` comment updated to reflect H-H_ref formulation.
-
-### Notes
-- `entropy_beta=0.01` kept unchanged -- with H-H_ref normalization, beta=0.01 means
-  "1 nat of entropy change adjusts trust region by 0.01", which is 2x delta. Reasonable.
-- Key monitoring: `Policy/effective_kl` should now start near 0 (not -0.12) and
-  track entropy changes. `NoiseStd/dim_*` should not all rush to max_std=2.0.
-- Previous ERC-TRPO run data (run 2026-04-13_13-53-43) serves as "broken baseline"
-  for comparison -- thruster dims at 2.0, arm dims at 0.17-0.25.
-
----
-
-## [2026-04-10] Revert Adaptive Entropy + HardDR, Slow DORAEMON Expansion
-
-### [Session 7] Per-Dimension Noise Std Logging + Sigma Gradient Analysis Results
-
-### Context
-Analyzed sigma gradient sign data from run 2026-04-10_17-04-09 (70 iters with new
-logging). Key finding: `sigma_step_mean` is negative in 70/70 iterations -- the TRPO
-natural gradient ALWAYS pushes noise down. Per-dimension breakdown reveals arm joints
-(dim 0-1) drive the collapse: 0-1% positive steps, magnitude 4-5x larger than thruster
-dims. Thruster dims (2-7) genuinely oscillate (17-36% positive steps) but are dominated
-by arm's strong negative signal in the aggregate mean.
-
-This confirms the gradient structurally reduces noise, but does NOT yet establish whether
-noise collapse causes reward decline. To answer that, need per-dimension noise_std logged
-alongside per-component reward breakdown (already logged as Episode_Reward/*).
-Added `NoiseStd/dim_*` logging to correlate arm dim noise floor with att_rp decline.
-
-Code analysis of reward functions:
-- `action_smoothness` (k=-0.1): applies equally to all 8 dims (mean of da^2)
-- `thruster_energy` (k=-0.35): dims 2-7 only (thruster action magnitude)
-- `att_rp` (k=9.0, highest weight): depends on arm joint positions
-- Smoothness alone cannot explain arm-thruster asymmetry in gradient direction
-
-### Added
-- `runners/constraint_encoder_runner.py`: Log `NoiseStd/dim_0` through `NoiseStd/dim_7`
-  (per-dimension exp(log_std)) to track individual action dim noise over training.
-
-### Notes
-- Resuming from model_2450.pt (run 2026-04-10_14-35-00) to collect long-run data
-- Watch for: arm dims hitting min_std (0.05) floor timing vs att_rp reward decline timing
-- If arm noise floors while att_rp keeps declining -> noise collapse is not the sole cause
-- If att_rp decline starts exactly when arm noise floors -> strong causal evidence
-
-### [Session 6] Sigma Gradient Sign Logging for Noise Collapse Diagnosis
-
-### Context
-Investigation into why noise_std monotonically decreases: is it the reward structure,
-TRPO dynamics, or something else? Previous analysis claimed "reward structure always
-favors noise reduction" but this was unverified speculation. The surrogate gradient for
-log_std is `E[A * ((a-mu)^2/sigma^2 - 1)]`, whose sign depends on whether exploratory
-actions (far from mu) or exploitative actions (close to mu) have higher advantage.
-This is an empirical question, not derivable from reward function form alone.
-
-Added signed gradient logging so the next training run can answer: does the gradient
-ever point toward increasing noise (positive sigma_step_mean), or is it always negative?
-Per-dimension logging (dim_0-7) reveals whether arm (dim 0-1) vs thruster (dim 2-7)
-actions have different noise dynamics.
-
-**Run analysis (2026-04-10_14-35-00, iter 1974):**
-- Reward peaked at iter ~1200 (243.62), now 229.22 (-5.9%). Same decline pattern as OLD.
-- noise_std=0.199, entropy=-2.75 (collapsed). sigma_step_norm=0.001 (nearly zero).
-- DORAEMON success=0.999, DR expanding steadily.
-- eval_dr (model_950): 100% survival all DR levels, SS attitude error 1.0-1.2 deg.
-- Encoder z_sweep: broader coverage than OLD (20/24 params with 6+/9 active dims vs 16/24).
-- Reward decline concentrated in att_rp component (-13.1% from peak).
-- Constraint costs NOT increasing, ruling out IPO barrier as cause.
-
-### Changed
-- `algorithms/constraint_trpo.py`: Added `_last_sigma_step_mean` (signed mean of log_std
-  step direction: positive = noise increase, negative = noise decrease) and
-  `_last_sigma_step_per_dim` (per-action-dimension signed step, 8D list).
-- `runners/constraint_encoder_runner.py`: Log `GradDecomp/sigma_step_mean` and
-  `SigmaStep/dim_0` through `SigmaStep/dim_7` to TensorBoard.
-
-### Notes
-- sigma_step_mean > 0 at any point would indicate the gradient naturally wants to
-  increase noise (e.g., during command transitions or after DR expansion).
-- If sigma_step_mean is always negative, the hypothesis that reward structure suppresses
-  noise is supported and an entropy maintenance mechanism is justified.
-- Literature found: EnTRPO (2021), ERC-TRPO (2024) address TRPO exploration suppression.
-  CSAC-LB (2024) shows log-barrier + entropy maximization are complementary.
-  No paper analyzes TRPO + IPO + DR curriculum combination specifically.
-
-### [Session 5] Reintegrate log_std into TRPO Natural Gradient
-
-### Context
-Deep analysis of the reward decline pattern (peak at iter ~2000, then monotonic decline)
-revealed entropy collapse (8.5 -> 0.7 in 4500 iters) as the primary structural cause.
-Code + literature investigation showed our implementation deviates from standard TRPO:
-log_std was updated via a separate Adam optimizer instead of being included in the TRPO
-natural gradient step. Every reference TRPO implementation (Spinning Up, ikostrikov,
-SB2/SB3, SafePO, rllab) includes log_std in the natural gradient. When log_std is outside
-the trust region, the KL constraint cannot protect against variance collapse.
-
-**Root cause chain:** entropy_coef=0.003 was only in the sigma update (not TRPO surrogate,
-matching NORBC standard). But with log_std in a separate Adam, the advantage signal dominates
-(~1.0 scale) over entropy bonus (~0.024 for 8D actions). The trust region provides zero
-protection against entropy collapse because it doesn't constrain log_std changes.
-
-**Literature verification:** NORBC paper (Kim et al., T-RO 2024) uses standard TRPO.
-No reference implementation decouples log_std from the natural gradient. The original
-comment "In 2D action space, sigma consumes ~33% of KL budget" was from an earlier design;
-current 8D action space has log_std as 8/113K params (0.007%).
-
-### Changed
-- `algorithms/constraint_trpo.py`: Included log_std in `_policy_params` (TRPO natural gradient).
-  Removed separate `std_optimizer` (Adam) and entire sigma update block (lines 471-505).
-  Removed adaptive entropy machinery (SAC-style alpha, `_log_alpha`, `_alpha_optimizer`).
-  Added sigma gradient decomposition tracking (`_sigma_param_offset/count`).
-  Extended gradient decomposition from 2-way (encoder/actor) to 3-way (sigma/encoder/actor).
-  Safety clamp (`min_std`/`max_std`) retained, applied after TRPO step.
-- `agents/rsl_rl_ppo_cfg.py`: Removed `std_lr`, `entropy_coef`, `entropy_adaptive`,
-  `entropy_target`, `entropy_alpha_lr` from `RslRlConstraintTRPOAlgorithmCfg`.
-  Updated docstring: "Three optimizer groups" -> "Two optimizer groups".
-- `runners/constraint_encoder_runner.py`: Replaced `Policy/entropy_alpha` metric with
-  `GradDecomp/sigma_{vanilla,natgrad,step}_norm`. Removed adaptive entropy save/load code.
-- `encoder/actor_critic_asym_constrained.py`: Updated docstring for log_std routing.
+- `constraint_trpo.py`: `min_std_per_dim` parameter (tuple). When provided, per-dim
+  log tensor used for clamp instead of scalar. Empty tuple falls back to scalar `min_std`.
+- `rsl_rl_ppo_cfg.py`: `min_std_per_dim=(0.10, 0.10, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05)`.
 
 ### Removed
-- Separate sigma (log_std) Adam optimizer and score-function gradient update
-- Adaptive entropy (SAC-style dual descent): `entropy_coef`, `entropy_adaptive`,
-  `entropy_target`, `entropy_alpha_lr`, `_log_alpha`, `_alpha_optimizer`
-- `Policy/entropy_alpha` TensorBoard metric
-- Adaptive entropy checkpoint save/load (`entropy_alpha_state.pt`)
+- `constraint_trpo.py`: All ERC-TRPO code removed -- `entropy_beta` parameter (absorbed
+  by `**_kwargs` for backward compat), `_entropy_ref`, `_entropy_beta`, combined entropy
+  gradient (`g + beta*h`), modified line search acceptance (`KL - beta*(H-H_ref)`).
+- `rsl_rl_ppo_cfg.py`: `entropy_beta` config field removed.
+
+### Tested and Reverted
+- **ERC-TRPO (absolute H, beta=0.01):** Noise explosion, unconstrained trust region.
+- **ERC-TRPO (H-H_ref, beta=0.01):** Hard entropy floor at H=7.748, policy frozen after
+  iter 53. Mathematically: any beta > 0 creates floor at `H_ref - max_kl*kl_margin/beta`.
+  For precise control tasks requiring large entropy reduction, ERC-TRPO is structurally
+  incompatible regardless of beta value (smaller beta just lowers the floor).
 
 ### Notes
-- `max_kl=0.005` unchanged. log_std is 8 params / 113K total; FIM auto-allocates KL budget.
-- `cg_iters=10` unchanged. 8 additional params negligible for CG convergence.
-- Checkpoint backward compatible: log_std is same nn.Parameter, removed config fields
-  handled by `**_kwargs` in constructor.
-- Monitor after training: `GradDecomp/sigma_step_norm > 0` (log_std updating),
-  `Policy/entropy` decline rate (should be slower), `Policy/line_search_success > 0.8`.
-
-### [Session 4] kl_ub=0.04 Mid-Training Analysis (run 2026-04-10_09-18-36, 4436 iter)
-
-### Context
-Compared NEW run (kl_ub=0.04) against OLD_09 (kl_ub=0.08) at same iterations to
-evaluate whether halving DORAEMON expansion rate prevents the reward decline observed
-in OLD_09. No code changes -- analysis only.
-
-**Config verification:** Confirmed via env.yaml diff that kl_ub (0.04 vs 0.08) is the
-ONLY difference between NEW and OLD_09. All other parameters identical.
-
-**DORAEMON DR expansion:** Successfully slowed. DR entropy at iter 4000: NEW -21.10 vs
-OLD -18.05 (3.05 nats less expanded). kl_step=0.04 consumed in full every update
-(ceiling-hitting unchanged). success_rate consistently higher: NEW 0.93 vs OLD 0.87
-at iter 4400.
-
-**Reward trajectory:** Both runs peaked near iter 2000 (~7.33) then declined. At iter
-4000: NEW 6.10 vs OLD 5.80 (+0.31). Decline rate slightly slower but decline pattern
-NOT prevented. NEW lost 1.23 from peak vs OLD lost 1.53 -- marginal improvement only.
-
-**Entropy:** NEW entropy (0.77 at iter 4400) is LOWER than OLD (1.00 at same iter).
-Unexpected -- slower DR should preserve more exploration capacity, but the opposite
-occurred. noise_std similar (NEW 0.35 vs OLD 0.37).
-
-**Attitude error:** Both runs stuck at 12-14 deg roll/pitch throughout. No improvement
-from kl_ub change.
-
-### Notes
-- kl_ub=0.04 delays saturation but does not prevent the fundamental reward decline
-  pattern. The same failure trajectory plays out on a slightly stretched timescale.
-- Ceiling-hitting (kl_step == kl_ub every update) persists, meaning success_rate >> alpha.
-  DORAEMON is still expanding as fast as the budget allows.
-- The entropy being lower than OLD_09 at same iter is unexplained and warrants investigation.
-- Next steps require user decision: kl_ub alone is insufficient. Structural changes to
-  DORAEMON gating (e.g., success_rate threshold, performance_lb increase) or reward/constraint
-  rebalancing may be needed.
+- Entropy collapse experiment history: adaptive entropy (failed), log_std TRPO
+  reintegration (failed), ERC-TRPO absolute H (failed), ERC-TRPO H-H_ref (failed),
+  per-dim min_std (pending).
+- Per-dim min_std arm=0.10 is 1.7x the noise at peak performance (0.058). Chosen as
+  moderate value between floor (0.05) and excessive (0.15).
+- The question "does entropy collapse cause reward decline?" remains open. DORAEMON
+  difficulty increase is the proximate cause, but whether noise floor limits DR adaptability
+  requires experimental verification.
 
 ---
 
-### [Session 3] Revert Failed Experiments + DORAEMON kl_ub Reduction
+## [2026-04-10] Log_std TRPO Reintegration + Entropy Collapse Investigation
 
 ### Context
-Analysis of run `2026-04-10_06-02-55` (adaptive entropy + expanded HardDR, 1500 iter)
-confirmed both Session 1-2 changes degraded training vs OLD baseline
-(`2026-04-09_16-41-45`):
+Seven sessions investigating and addressing entropy collapse. Key progression:
 
-**Adaptive entropy failure:** SAC-style alpha decayed from 0.003 to 0.0014 during the
-first 1300 iter where entropy was naturally above target (8.5 -> 3.0). By the time
-entropy dropped below target=3.0, alpha was too small to push back. At iter 1500,
-adaptive alpha (0.0014) provided LESS exploration pressure than OLD's fixed
-entropy_coef (0.003). Structural issue: SAC assumes entropy starts low and needs
-maintaining; our case has high initial entropy that naturally declines, reversing
-the dynamics.
+1. **Adaptive entropy tested and failed:** SAC-style alpha decayed from 0.003 to 0.0014
+   during early training (entropy above target). By the time entropy dropped below
+   target, alpha was too small to push back. Structural issue: SAC assumes entropy starts
+   low; our case has high initial entropy that naturally declines.
 
-**HardDR expansion failure:** Tracking errors at iter 1500 were genuinely worse, not
-just reward-scale effects: roll 4.59 vs 2.80 deg (1.64x), lin_vel 0.237 vs 0.127 m/s
-(1.87x). Eval at model_1500 showed att SS 4.8 deg at hard DR (vs OLD's 2.3 deg at
-model_9999 hard DR). Settling time 1.61s vs OLD's 0.41s.
+2. **HardDR expansion tested and reverted:** Wider bounds degraded tracking (roll 4.59 vs
+   2.80 deg at 1500 iter) without compensating benefits.
 
-**Revert produced identical run:** After reverting both changes + performance_lb to
-OLD_09 values, new run `2026-04-10_07-49-00` produced values identical to OLD_09 at
-every iter (same seed=30, same config). The k_att_rp=9.0 and settling-aware
-rp_vel_settling changes were already present in OLD_09, so the revert left zero
-differences.
+3. **Log_std TRPO reintegration (key fix):** Our implementation had log_std in a separate
+   Adam optimizer instead of the TRPO natural gradient. Every reference TRPO (Spinning Up,
+   ikostrikov, SB2/SB3, SafePO, rllab) includes log_std in the natural gradient. With
+   log_std outside trust region, KL constraint cannot protect against variance collapse.
 
-**OLD_09 root cause analysis (10k trajectory):** Peak at iter 2000 (reward 228,
-rp_err 3.9 deg), then monotonic decline to reward 85 at iter 8000. DORAEMON
-success_rate was >= 0.97 from iter 500 (performance_lb=90 vs reward 140+), consuming
-full kl_ub=0.08 budget every update. All 15 DR params reached Beta(1,1)=uniform by
-iter 5000. Entropy collapsed 7.6 -> 1.08 (iter 4000), then rebounded via fixed
-entropy_coef, but noise_std increase during rebound further degraded reward. Best
-checkpoint was model_2000, not model_9999.
+4. **Sigma gradient analysis:** Confirmed sigma_step_mean negative in 70/70 iters. Arm
+   dims (0-1) drive collapse: 0-1% positive steps, 4-5x larger magnitude than thruster.
+   Thruster dims (2-7) oscillate (17-36% positive) but arm dominates aggregate.
 
-### Changed
-- `rsl_rl_ppo_cfg.py`: `entropy_adaptive` True -> False. Fixed entropy_coef=0.003
-  retained (was more stable than adaptive alpha which decayed below it).
-- `config.py`: HardDR bounds restored to pre-expansion values matching OLD_09
-  (20 fields reverted: added_mass (0.5,1.5), damping (0.4,1.7), inertia (0.4,2.0),
-  payload (0,3.0), body_mass (0.75,1.25), volume (0.75,1.25), cob/cog offsets +-0.02,
-  joint stiffness (30,150), joint damping (0.3,7.0), thrust_coeff (0.7,1.3), etc).
-- `config.py`: DORAEMON `performance_lb` 130.0 -> 90.0 (back to OLD_09 value).
-- `config.py`: DORAEMON `kl_ub` 0.08 -> 0.04. OLD_09 consumed full 0.08 budget
-  every update (success_rate ~1.0 >> alpha=0.5), reaching DR saturation by iter 5000.
-  Halving to 0.04 doubles time-to-saturation. performance_lb increase was rejected
-  due to prior mode=-2 stall at lb=200 (2026-04-06).
+5. **kl_ub=0.04 analysis:** Halving DORAEMON expansion rate delayed saturation but did
+   NOT prevent the fundamental reward decline pattern (-1.23 from peak vs -1.53).
 
-### Notes
-- Eval of model_1500 (run 2026-04-10_06-02-55): none-DR att SS 1.5 deg (better than
-  OLD_09's 1.9), confirming k_att_rp=9.0 + settling-aware help at nominal physics.
-  But hard-DR att SS 4.8 deg + settling 1.61s showed the expanded HardDR was too wide
-  for the policy to handle at 1500 iters.
-- The adaptive entropy code (constraint_trpo.py) is retained but disabled. The
-  entropy_alpha logging and checkpoint save/load remain functional for future use.
-- Next run uses OLD_09 config + kl_ub=0.04 as the single change. Expected: similar
-  trajectory to OLD_09 in first 2000 iters, but slower DR expansion beyond that point,
-  delaying or preventing the saturation that caused OLD_09's decline.
+Run `2026-04-10_17-20-03` (10k iter with log_std in TRPO): entropy still collapsed
+(-6.28), arm hit min_std by iter 2000, reward 234->119. Log_std reintegration alone
+insufficient -- motivated ERC-TRPO (see 2026-04-13).
 
----
+Eval of model_9999: att SS 2.5-3.0 deg (none-hard), 100% survival, encoder 9/9 dims active.
 
-## [2026-04-10] Adaptive Entropy + DORAEMON Tuning + Eval Metric Fixes
-
-### Context
-Run `2026-04-09_16-41-45` completed 10k iterations. Analysis revealed two critical issues:
-
-**Issue 1 (entropy-advantage imbalance):** Fixed entropy_coef=0.003 in the decoupled
-sigma optimizer creates a vicious cycle at reward plateau. When advantage signal weakens,
-entropy bonus dominates -> noise_std rises (0.363 -> 0.553) -> reward drops (227 -> 92)
--> advantage weakens further. Confirmed by: (a) changepoint at iter 7300 (reward DOWN +
-entropy UP coincident), (b) OLD baseline stabilized noise_std at 0.26 with the same
-entropy_coef -- the difference is k_att_rp=9.0 inflating reward scale, causing faster
-advantage saturation. Best checkpoint was model_2000, not model_9999.
-
-**Issue 2 (DORAEMON saturation):** All 15 DR parameters reached Beta(1,1)=UNIFORM.
-DORAEMON cannot expand further. performance_lb=90 was too low relative to episode
-returns (220 at peak), allowing aggressive expansion. HardDR bounds also need widening.
-
-**Eval metric bugs:** Settling time used first crossing (optimistic), yaw error used
-|rate| instead of |rate - target|, no jitter or zero-crossing metrics.
-
-Literature review: SAC-style dual descent on alpha (Haarnoja et al., 2019) is the
-most principled approach for adaptive entropy. Target entropy = 1.5 (between peak
-performance entropy 3.12 and optimal-noise entropy 1.08).
-
-DR config reviewed for physical stability: volume_scale lower bound restored to 0.70
-(sinking risk at 0.65 + max payload), cob/cog_z offsets kept at +-0.04 (passive
-instability at +-0.06), joint_damping lower bound restored to 0.5 (underdamped at 0.2).
+### Changed (net, surviving changes only)
+- `constraint_trpo.py`: Log_std included in `_policy_params` (TRPO natural gradient).
+  Removed separate `std_optimizer` (Adam), sigma update block, and adaptive entropy
+  machinery. Extended gradient decomposition to 3-way (sigma/encoder/actor).
+- `agents/rsl_rl_ppo_cfg.py`: Removed `std_lr`, `entropy_coef`, `entropy_adaptive`,
+  `entropy_target`, `entropy_alpha_lr`. "Three groups" -> "Two groups".
+  DORAEMON `kl_ub` 0.08 -> 0.04.
+- `config.py`: HardDR bounds restored to OLD values (20 fields reverted).
+  DORAEMON `performance_lb` 130.0 -> 90.0 (back to OLD).
+- `runners/constraint_encoder_runner.py`: Replaced `Policy/entropy_alpha` with
+  `GradDecomp/sigma_{vanilla,natgrad,step}_norm`. Removed adaptive entropy save/load.
+  Added `NoiseStd/dim_0` through `dim_7`, `GradDecomp/sigma_step_mean`,
+  `SigmaStep/dim_0` through `dim_7`.
 
 ### Added
-- `constraint_trpo.py`: SAC-style adaptive entropy coefficient. Learnable `log_alpha`
-  with dual gradient descent: `alpha_loss = alpha * (H(pi) - H_target)`. When entropy
-  exceeds target, alpha decreases (less exploration push), preventing noise divergence.
-  Config: `entropy_adaptive=True`, `entropy_target=1.5`, `entropy_alpha_lr=3e-4`.
-- `constraint_encoder_runner.py`: Save/load `entropy_alpha_state.pt` alongside
-  checkpoints for `--resume` support.
-- `constraint_encoder_runner.py`: `Policy/entropy_alpha` TensorBoard logging.
-- `eval_dr_fulldof.py`: SS jitter metric (std of per-step error in SS period) for
-  attitude, lin_vel (per-axis), and yaw channels.
-- `eval_dr_fulldof.py`: Zero crossing count (sign changes after 20% of segment)
-  for all three channels -- detects oscillatory behavior.
-- `eval_dr_fulldof.py`: Summary plots expanded from 2x2 to 3x2 grids (jitter +
-  zero-crossing panels) for all three channels.
-
-### Changed
-- `config.py`: DORAEMON `performance_lb` 90.0 -> 130.0. At lb=90, episodes passed
-  threshold until iter 8000 (episode return ~92). At lb=130, borderline at iter 6000
-  (return ~132), providing earlier DORAEMON braking.
-- `config.py`: HardDR bounds expanded ~30-50% for DORAEMON headroom: added_mass
-  (0.3-1.8), damping (0.2-2.0), inertia (0.3-2.5), payload (0-4kg), joint stiffness
-  (20-180), thrust_coeff (0.6-1.4). Physics-reviewed: volume_scale lower kept at 0.70
-  (not 0.65), cob/cog_z at +-0.04, joint_damping lower at 0.5.
-- `rsl_rl_ppo_cfg.py`: Added `entropy_adaptive=True`, `entropy_target=1.5`,
-  `entropy_alpha_lr=3e-4` to algorithm config.
+- `eval_dr_fulldof.py`: SS jitter metric, zero-crossing count, sample trajectory overlay,
+  summary plots expanded to 3x2 grids.
 
 ### Fixed
-- `eval_dr_fulldof.py`: Settling time now uses correct control-theory definition
-  (time after which error permanently stays within band), was using first crossing
-  (overly optimistic).
-- `eval_dr_fulldof.py`: Yaw total error now computes `|rate - target|` (tracking
-  error), was computing `|rate|` (absolute value, ignoring command).
+- `eval_dr_fulldof.py`: Settling time uses correct control-theory definition (permanent
+  band crossing, was first crossing). Yaw error uses `|rate-target|` (was `|rate|`).
+
+### Removed
+- Separate sigma Adam optimizer and score-function gradient update
+- Adaptive entropy (SAC-style): `_log_alpha`, `_alpha_optimizer`, checkpoint save/load
+- `Policy/entropy_alpha` metric
+
+### Tested and Reverted
+- **Adaptive entropy (SAC-style):** Alpha decayed below fixed entropy_coef (0.0014 < 0.003)
+  because entropy started above target. Structural mismatch with declining-entropy regime.
+- **HardDR expansion (+30-50%):** Tracking errors genuinely worse (roll 4.59 vs 2.80 deg).
+  Wider bounds require longer training, not just more DR.
+- **kl_ub=0.04 alone:** Delayed saturation timeline but same decline trajectory. The
+  fundamental problem is entropy collapse, not DORAEMON expansion speed.
 
 ### Notes
-- Reward gradient analysis: at current SS errors, gradient is proportional to e
-  (vanishes at e=0). Linear penalty (q_lin) was disabled because it caused dead zone.
-  Sigma reduction (0.10 -> 0.05) would strengthen gradient 3-4x at SS errors but
-  changes reward landscape -- deferred to separate experiment.
-- Yaw overshoot 38-55% and zero-crossings 30+ at hard DR indicate damping issues.
-  Needs separate investigation (yaw_damping_scale DR range or reward structure).
-- Encoder z_sweep comparison (iter 4000 vs 9999): sensitivity patterns preserved,
-  z_1 remains dead. Encoder is not the issue in this run.
-
-### [Session 2] Entropy Target + Alpha LR Correction + Eval Sample Trajectory
-
-### Context
-Analysis of run `2026-04-10_03-17-41` (adaptive entropy, HardDR expanded) revealed:
-
-**Entropy undershoot:** entropy_target=1.5 caused entropy to drop well below target
-(0.74 at iter 2408) with alpha unable to recover (0.002033 -> 0.002062 over 300 iters).
-The alpha_loss gradient is proportional to alpha itself, so small alpha produces tiny
-gradients. While alpha DID reverse direction at iter 2200, the response is far too slow.
-
-**Incorrect target selection:** target=1.5 was based on flawed reasoning -- OLD run
-iter 4000 (entropy=1.08) was labeled "optimal noise" but was actually pre-collapse.
-Correct reference: OLD best performance window (iter 1500-2500) had entropy 2.3-4.2,
-median ~3.0.
-
-**Reward scale drop explained:** NEW reward (149 at iter 1500) vs OLD (220) is due to
-HardDR bounds expansion. Physical DR spread is ~36% wider at same DORAEMON concentration.
-Exp-kernel reward nonlinearity amplifies small tracking accuracy decreases. Not a bug.
-
-**Per-component analysis:** att_rp declining (-0.000196/iter), lin_vel declining
-(-0.000186/iter), yaw_vel improving (+0.000261/iter). Total appears flat because
-yaw improvement + penalty reductions offset tracking declines. Root cause: DORAEMON
-expanding DR while entropy too low for policy to adapt.
-
-**Encoder z_sweep (model_2000):** 6/9 z dims active. z_2 specializes in actuators
-(joint_stiffness 1.24, joint_damping 1.15). z_1/z_8 encode buoyancy/mass. Weak:
-roll damping (dim 8/9), time_constant (dim 19).
-
-### Changed
-- `rsl_rl_ppo_cfg.py`: `entropy_target` 1.5 -> 3.0. Based on OLD best performance
-  window entropy (2.3-4.2, median 3.0). Corresponds to noise_std ~0.35 vs 0.29 at
-  target=1.5.
-- `rsl_rl_ppo_cfg.py`: `entropy_alpha_lr` 3e-4 -> 1e-3. Alpha response was too slow
-  (0.002 -> 0.003 recovery estimated at ~1400 iters at old lr). 3x increase reduces
-  recovery time to ~470 iters.
-
-### Added
-- `eval_dr_fulldof.py`: `_pick_sample_env()` function -- selects median-error env
-  for representative individual trajectory overlay.
-- `eval_dr_fulldof.py`: Sample env trajectory (dotted line) overlaid on attitude,
-  lin_vel, and yaw_rate tracking plots. Automatically skipped when num_envs=1.
-  Shows individual env behavior alongside mean+std band.
+- Entropy literature found: EnTRPO (2021), ERC-TRPO (2024), CSAC-LB (2024).
+- sigma_step_mean is always negative: TRPO natural gradient structurally reduces noise.
+  Arm dims are primary driver (reward structure couples attitude to arm noise).
 
 ---
 
-## [2026-04-09] SS Error + Settling Tuning (att_rp weight, settling-aware constraint, DORAEMON speed)
+## [2026-04-09] SS Error + Settling Tuning
 
 ### Context
-Deep analysis of run `2026-04-07_23-21-27` (10k iter, lb=80, HardDR expanded, yaw_rate=0.7)
-revealed three structural issues despite DORAEMON operating correctly (mode=0 for 30
-consecutive updates, success_rate converging to ~0.45 near alpha=0.5):
+Deep analysis of run `2026-04-07_23-21-27` (10k iter). Cross-eval experiment (OLD model
+on NEW DR) proved 70% of hard-DR attitude degradation is policy quality, not DR difficulty.
+Even at none-DR: NEW 2.4 deg vs OLD 1.9 deg.
 
-**Issue 1 (att SS error +0.5 deg at nominal physics):** Cross-eval experiment --
-OLD model evaluated on NEW's wider DORAEMON DR -- proved that 70% of hard-DR att SS
-degradation (OLD 2.9 deg vs NEW 4.5 deg on same DR) is due to NEW policy itself, not
-DR difficulty increase. Even at none-DR (nominal physics), NEW shows 2.4 deg vs OLD
-1.9 deg. Root cause: reward gradient equilibrium -- at 2.4 deg error the att_rp
-gradient (-3.5/step) is balanced by smoothness, thruster energy, and rp_vel_settling
-penalties. Raising k_att_rp from 6.0 to 9.0 shifts this equilibrium toward attitude.
+Three fixes based on code-level root cause analysis:
+1. `k_att_rp` 6.0->9.0: shifts reward gradient equilibrium toward attitude
+2. `rp_vel_settling_cost` redesigned: gated by `|att_err| <= 5 deg` (settling phase only).
+   Old: penalized `|p|+|q|` every step (opposed attitude commands during transit).
+3. DORAEMON `kl_ub` 0.15->0.08, `performance_lb` 80->90: slows DR expansion.
 
-**Issue 2 (settling time 4.6x worse at hard DR):** NEW settling 1.74s vs OLD 0.39s,
-but cross-eval showed OLD model achieves 0.39s even on NEW's wider DR -- proving the
-issue is NEW policy's conservatism, not DR difficulty. `rp_vel_settling_cost` penalizes
-`(|p|+|q|)/2` at every step regardless of phase. During transit (target far away),
-angular velocity is NEEDED to reach the target, but the constraint opposes it. Policy
-learns to minimize angular velocity globally ("slow but safe"), trading settling speed
-for constraint compliance. Fix: gate constraint by attitude error proximity --
-active only when `|att_err| <= 5 deg` (settling phase), zero during transit.
-
-**Issue 3 (DORAEMON expands too fast):** Both OLD and NEW runs show `kl_step=0.15`
-(hitting the `kl_ub=0.15` ceiling) during all expansion updates. DORAEMON uses 100%
-of KL budget every time, meaning entropy maximization always wants to expand further
-and KL trust region is the only brake. With `kl_ub=0.15`, DR entropy expanded from
--32 to -17 in just 15 updates (3750 iter) -- faster than policy can learn precision.
-Reducing `kl_ub` to 0.08 cuts per-update expansion by ~47%. Combined with raising
-`performance_lb` from 80 to 90, DORAEMON will expand more slowly and only when the
-policy demonstrates sufficient tracking performance.
-
-Cross-eval results (same eval script, 31-segment trajectory):
-| Config            | None AttSS | Hard AttSS | Hard Settling | Yaw SS (none) |
-|-------------------|-----------|-----------|---------------|---------------|
-| OLD model+OLD DR  | 1.9 deg   | 2.2 deg   | 0.38s         | 0.081 rad/s   |
-| OLD model+NEW DR  | 1.9 deg   | 2.9 deg   | 0.39s         | 0.081 rad/s   |
-| NEW model+NEW DR  | 2.4 deg   | 4.5 deg   | 1.74s         | 0.010 rad/s   |
-
-Encoder z_sweep comparison (model_9999.pt): both encoders healthy (7-8/9 dims active).
-NEW encoder shows stronger joint stiffness/damping sensitivity (dim_16: 1.10 vs 0.22,
-dim_17: 0.98 vs 0.48) but different dim utilization pattern (NEW: z_1-z_6 distributed,
-OLD: z_0/z_5/z_7/z_8 concentrated).
+Cross-eval results:
+| Config            | None AttSS | Hard AttSS | Hard Settling | Yaw SS  |
+|-------------------|-----------|-----------|---------------|---------|
+| OLD model+OLD DR  | 1.9 deg   | 2.2 deg   | 0.38s         | 0.081   |
+| OLD model+NEW DR  | 1.9 deg   | 2.9 deg   | 0.39s         | 0.081   |
+| NEW model+NEW DR  | 2.4 deg   | 4.5 deg   | 1.74s         | 0.010   |
 
 ### Changed
-- `mdp/rewards.py`: `k_att_rp` 6.0 -> 9.0. Shifts SS error equilibrium toward
-  attitude tracking. At 2.4 deg error the per-step gradient increases from -21.2
-  (6*-3.54) to -31.8 (9*-3.54), overcoming competing smoothness/energy penalties.
-- `mdp/constraints.py`: `rp_vel_settling_cost` redesigned to settling-aware gating.
-  New: `rp_vel * (|att_err| <= settling_threshold).float()`. Cost is zero during
-  transit (|att_err| > 5 deg) and active during settling (|att_err| <= 5 deg).
-  Allows policy to use angular velocity freely when far from target.
-  `settling_threshold` parameter added (default 0.087 rad = 5.0 deg).
-- `config.py`: `rp_vel_settling` constraint term now passes
-  `settling_threshold=0.087` via params dict.
-- `config.py`: DORAEMON `kl_ub` 0.15 -> 0.08. Reduces per-update DR expansion
-  by ~47%. Previous kl_step data showed ceiling-hitting (0.15/0.15) at every
-  expansion update, so this change has immediate effect.
-- `config.py`: DORAEMON `performance_lb` 80.0 -> 90.0. Raises success threshold
-  so DORAEMON expands only when policy achieves higher tracking performance.
-  At lb=80, success_rate stayed 0.85-0.90 for ~20 updates, allowing aggressive
-  expansion. At lb=90, success drops faster toward alpha(0.5), triggering earlier
-  automatic braking.
+- `mdp/rewards.py`: `k_att_rp` 6.0 -> 9.0
+- `mdp/constraints.py`: `rp_vel_settling_cost` gated by `|att_err| <= settling_threshold`.
+  Zero during transit, active during settling. `settling_threshold=0.087 rad` (5 deg).
+- `config.py`: DORAEMON `kl_ub` 0.15 -> 0.08, `performance_lb` 80.0 -> 90.0
 
 ### Notes
-- Cross-eval methodology: created temp directory with OLD model_9999.pt + NEW TB
-  events (DORAEMON state), allowing eval_dr_fulldof.py to evaluate OLD policy under
-  NEW's learned DR distribution. This cleanly separates "DR difficulty increase"
-  from "policy quality change".
-- Settling threshold 5 deg chosen as midpoint between typical SS error (~2-3 deg)
-  and typical command step amplitude (~15-30 deg). Below 5 deg, the policy should
-  be settling; above 5 deg, it's likely in transit.
-- The 4 changes are not independently ablated. If results are mixed, next session
-  should isolate: (a) k_att_rp alone, (b) settling-aware alone, (c) DORAEMON
-  speed alone. Priority order for revert: DORAEMON speed first (most conservative),
-  then settling-aware, then k_att_rp (least likely to cause regression).
-- yaw_rate threshold (0.7) retained from previous run -- yaw SS improved 8x
-  (0.081 -> 0.010) which is a clear success.
+- 4 changes not independently ablated. Priority revert order: DORAEMON speed first,
+  settling-aware second, k_att_rp last.
+- yaw_rate threshold (0.7) retained from previous run (8x improvement confirmed).
 
 ---
 
 ## [2026-04-08] Full-DOF Comparison Baselines (Phases 1-3)
 
 ### Context
-Set up three ablation baselines for `Isaac-FullDOF-TRPO-v0` to isolate the
-contribution of each component (encoder, constraints, learning itself). All
-three reuse `ALBCEnv` so DR, reward, action space, command sampling, and
-DORAEMON match the production task exactly.
+Three ablation baselines for component contribution analysis. All reuse `ALBCEnv`
+(DR, reward, action space, DORAEMON identical to production task).
 
-| Phase | Task                      | What it removes                          |
-|-------|---------------------------|------------------------------------------|
-| 1     | `Isaac-FullDOF-NoEncoder-v0` | Encoder only (TRPO + IPO kept)        |
-| 2     | `Isaac-FullDOF-PPO-v0`       | Encoder + IPO constraint (plain PPO)  |
-| 3     | `Isaac-FullDOF-TDC-v0`       | All RL (classical TDC + 6-DOF PD)     |
+| Phase | Task                        | Removes                            |
+|-------|-----------------------------|------------------------------------|
+| 1     | `Isaac-FullDOF-NoEncoder-v0`| Encoder only (TRPO+IPO kept)       |
+| 2     | `Isaac-FullDOF-PPO-v0`      | Encoder + IPO (plain PPO)          |
+| 3     | `Isaac-FullDOF-TDC-v0`      | All RL (classical TDC + 6-DOF PD)  |
 
-### Added
-- `constrained_full_albc/encoder/actor_critic_asym_constrained.py`: NoEncoder
-  policy class for Phase 1. Same asymmetric critic + cost critic as the
-  encoder variant, just without the privileged compression head.
-- `constrained_full_albc_tdc/`: new module for Phase 3 (sibling of
-  `constrained_full_albc/`). Subclasses `ALBCEnv` and overrides only
-  `_pre_physics_step` to inject classical controller output as an 8D
-  pseudo-action; the parent pipeline handles observation history, reward,
-  thruster lag, etc. unchanged.
-- `constrained_full_albc_tdc/controllers/thruster_pd.py`: stateless 6-DOF
-  thruster PD (`ThrusterPDController`). Drives Fx/Fy/Fz (lin vel),
-  **Tx/Ty (roll/pitch attitude PD)**, and Tz (yaw rate) so the baseline has
-  full thruster authority on all six wrench components, matching what the RL
-  policy has. Initial Tx=Ty=0 design was rejected mid-session as a baseline
-  weakening.
-- `constrained_full_albc_tdc/{tdc_env.py,config.py,__init__.py,...}`: TDC env
-  glue. Reuses `hero_agent.controllers.tdc.TDCController` and
-  `hero_agent.controllers.kinematics.ALBCKinematics` as-is. Overrides
-  `TDCControllerCfg` with `ik_num_iterations=1, ik_learning_rate=1.0`
-  (single-step DLS) -- the rate limiter only allows 0.05 rad/step which the
-  single-step solver tracks accurately, and the 100-iter accurate mode adds
-  ~30 ms/step of CUDA launch overhead on GPU.
-
-### Changed
-- `constrained_full_albc/__init__.py`: registers
-  `Isaac-FullDOF-NoEncoder-v0` and `Isaac-FullDOF-PPO-v0`. (Phase 3 task
-  is registered in its own module's `__init__.py`.)
-- `constrained_full_albc/agents/rsl_rl_ppo_cfg.py`: adds
-  `FullDOFNoEncoderRunnerCfg` (Phase 1) and `FullDOFPPORunnerCfg` (Phase 2).
-  PPO baseline uses asymmetric obs routing via `obs_groups` so the standard
-  rsl-rl `ActorCritic` can have a 81D actor and a 105D critic without a
-  custom policy class.
-- `constrained_full_albc/encoder/__init__.py`: exports the new
-  `ActorCriticAsymConstrained` class.
-- `constrained_full_albc/runners/constraint_encoder_runner.py`: encoder
-  logging is now optional so the runner works for the NoEncoder ablation
-  without spurious zeros in the encoder-specific metrics.
-
-### Phase 3 eval (`eval_dr_fulldof.py`, 64 envs, 4 DR levels)
-
-Stored at `logs/rsl_rl/tdc_pd_baseline/`. Survival 100% at every DR level
-(none/soft/medium/hard). Attitude SS error 2.8-7.1 deg (best at DR 100%
-because random damping increases happen to help). Linear velocity has the
-expected P-only steady-state floor: ~0.11 m/s on vx/vy and 0.25-0.40 m/s
-on vz (heave), which scales as `F_drag / kp_lin`. Yaw rate degrades from
-0.013 to 0.13 rad/s on hard DR as the P controller is overwhelmed by the
-widened yaw damping range.
-
-Post-eval gain bump committed but **not re-validated**: `kp_lin 30 -> 100`,
-`kp_yaw 8 -> 25`, `kp_att 8 -> 20`, `kd_att 2 -> 5`. Predicted ~3x SS error
-reduction; saturation budget is safe.
-
-### Notes
-- Eval artifacts (npz + 9 PNGs) are kept on disk, not committed.
-- Phase 1 and 2 task registrations and runner cfgs were created in earlier
-  sessions but never committed; they are bundled into this commit because
-  the changelog covers all three baselines together.
-- Reviewer-caught fixes applied to Phase 3 env: `_coerce_env_ids` instead
-  of an asymmetric assert in `_reset_idx`, `_tdc_dt = step_dt` (drop the
-  redundant `* control_decimation`), `no_grad` scope extended to cover the
-  parent `_pre_physics_step` call, and a no-op `ThrusterPDController.reset`
-  removed.
-- Wallclock optimization for `hero_agent`'s 100-iter IK loop is the obvious
-  follow-up: ~600 sequential GPU kernel launches per step add ~30 ms of
-  pure CUDA launch overhead. `torch.compile` fusion or an analytic 2-link
-  IK would remove it entirely.
-
----
-
-## [2026-04-07] Revert rp_vel_settling Budget (Constraint vs Reward Conflict)
-
-### Context
-Mid-training analysis of run `2026-04-07_22-24-20` at iter ~833 (post linear-penalty
-revert) showed att_rp Episode_Reward stuck near zero while lin_vel learned normally.
-Comparison against OLD baseline (`2026-04-06_21-24-43`) at the same iter:
-
-| Metric                       | OLD@800 | CURR@800 | Delta            |
-|------------------------------|---------|----------|------------------|
-| Train/mean_reward            |  +97.1  |  +11.7   | -85.4 (-88%)     |
-| Episode_Reward/att_rp        |  +1.602 |  -0.855  | **sign flipped** |
-| Episode_Reward/lin_vel       |  +1.482 |  +1.724  | +0.24 (better)   |
-| Episode_Reward/yaw_vel       |  +0.695 |  +0.233  | -0.46            |
-| Episode_Reward/smoothness    |  -0.327 |  -0.544  | -0.22 (66% worse)|
-| DORAEMON/success_rate        |   0.490 |   0.041  | -0.45 (mode -2)  |
-
-The selective regression (att_rp dead, lin_vel fine) ruled out "wider DR is harder
-for everything" -- only the channel that requires roll/pitch rotation suffered. Att_rp
-slope in the last 200 iter dropped to +0.025/100, essentially frozen. At this rate
-recovery to OLD's +1.60 would need ~9800 more iters (12x current), confirming the
-plateau is structural rather than transient.
-
-**Mechanism (code-level)**: `rp_vel_settling_cost` is `(|p|+|q|)/2` averaged over the
-episode (`mdp/constraints.py:236-250`). It is an Average-type IPO constraint, and at
-budget=0.12 the cost was 9.86/12 = 82% of budget -- in the active barrier-binding
-region. The IPO barrier (`barrier_t=100.0`) injects strong negative gradient on the
-actor whenever cost approaches budget, directly opposing the att_rp_tracking reward
-gradient (which requires p,q angular velocity to follow attitude commands).
-
-OLD ran with budget=0.20 and the same cost was 16.85/20 = 84% (similar binding
-ratio), but the absolute limit of 0.20 rad/s was sufficient for a 60-deg traverse
-in ~5.2s. With budget=0.12 a 60-deg traverse needs ~8.7s, deep into the IPO
-binding region for most of the trajectory. lin_vel does not interact with this
-constraint and learns normally; yaw_vel interacts only weakly (yaw_rate constraint
-threshold is 0.7 rad/s, well above the 0.5 cmd range). This is the diagnostic
-fingerprint: only the channel that fights `rp_vel_settling` is dead.
-
-The constraint's name implies a settling-phase-only behavior, but the implementation
-has no time/error gating -- it penalizes |p|+|q| at every timestep regardless of
-whether the policy is in a transition or a settling phase. A proper settling-aware
-redesign is deferred; the immediate fix is to restore the OLD budget so the next run
-isolates the linear-penalty revert as intended.
-
-**Decision**: Revert ONLY `rp_vel_settling.budget` 0.12 -> 0.20 (back to OLD value).
-Keep all other 04-07 changes (`performance_lb=80`, HardDR expansion, `yaw_rate=0.7`)
-since they did not show selective harm in the data. This is the minimum-change revert
-that targets the proximate cause; if att_rp recovers in the next run, the structural
-hypothesis is confirmed and the other 3 changes can be evaluated cleanly.
-
-### Changed
-- `config.py`: `rp_vel_settling.budget` 0.12 -> 0.20 (single line, matches OLD).
-  All other fields unchanged. The constraint definition itself
-  (`mdp/constraints.py:rp_vel_settling_cost`) is untouched.
-
-### Notes
-- HardDR expansion is NOT the proximate cause despite suspicions. lin_vel learning
-  faster than OLD under the wider DR rules out "DR is too hard". The wider DR may
-  be a contributing factor but is not load-bearing for the att_rp regression.
-- `performance_lb=80` reduction is also exonerated by this evidence. The reason
-  DORAEMON success is stuck at 0.04 is that mean_reward (11.7) is far below lb=80,
-  not that lb is wrong. Once att_rp recovers, mean_reward should rise into the
-  lb-feasible region naturally.
-- Smoothness regression (-0.327 -> -0.544) is also expected to recover after the
-  revert. It was caused by gradient conflict between IPO barrier and att_rp reward
-  pulling the policy in opposite directions every step.
-- Next training run: validate att_rp Episode_Reward returns to OLD trajectory
-  (+1.6 at iter 800). Watch DORAEMON/success_rate growth and total reward.
-- Open question for follow-up: redesign `rp_vel_settling_cost` to be settling-aware
-  (gate by command-stationarity AND |attitude_err| < threshold). This would let it
-  reduce SS oscillation without fighting the transition-phase reward gradient.
-  Deferred until baseline is recovered.
-
----
-
-## [2026-04-07] Revert Reward Linear Penalty (Dead Zone at Moderate Errors)
-
-### Context
-Analyzed the training run `2026-04-07_16-37-45` which was the first run after the
-linear penalty addition (previous entry below). Results at iter ~4700:
-
-- `mean_reward` 34 (OLD run `2026-04-06_21-24-43` at same iter: ~142)
-- `att_rp` Episode_Reward ~ 0 (OLD: +2.52)
-- roll/pitch err 10.6 deg (OLD: 6.55 deg)
-- DORAEMON success 0.17, mode=-2 stuck
-
-**Root cause**: The added `att_rp_lin_ratio=0.5` linear penalty interacts badly
-with the already-tightened `att_rp_sigma=0.10`. At err=10 deg (=0.175 rad) with
-roll-weighted err_sq_w=0.0762:
-- `exp_term = exp(-0.0762/0.02) = 0.022` (kernel effectively dead 2 sigma out)
-- `quad_pen = 0.833 * 0.0762 = 0.063`
-- `linear_pen = 0.5 * (1.5*0.175 + 0.175) = 0.219`
-- `raw = 0.022 - 0.063 - 0.219 = -0.260` (negative!)
-
-At err > sigma the exp kernel vanishes while the linear penalty grows, so the
-policy is *punished* for any error larger than ~5.7 deg. The optimal strategy
-becomes "don't try to track attitude" -- the policy converges with att_rp
-Episode_Reward at exactly 0 (confirmed in TB). lin_vel and yaw_vel still get
-positive contribution so the episode doesn't collapse, but attitude tracking
-is abandoned entirely.
-
-The linear penalty idea was sound in principle (constant gradient at small
-errors where exp+quad vanish) but the magnitude was miscalibrated for the
-tightened sigma -- it overwhelms the exp kernel in the moderate-error regime
-where most of early training happens. Once the policy settles into the
-no-attitude-tracking local optimum it cannot escape.
-
-**Decision**: Revert the linear penalty entirely. Keep all other changes from
-the prior entry (DORAEMON `performance_lb=80`, HardDR expansion,
-`rp_vel_settling` budget 0.12, `yaw_rate` threshold 0.7) so the next run
-isolates the linear-penalty effect from the other tunings. The EMA-based SS
-bias reward that was previously deferred will be redesigned later -- the user
-wants to first run a clean baseline matching the OLD reward shape, then plan
-a more optimized reward redesign separately.
-
-### Changed
-- `mdp/rewards.py`: Set `att_rp_lin_ratio`, `lin_vel_lin_ratio`, `yaw_vel_lin_ratio`
-  all to 0.0 (were 0.5, 0.8, 0.8). Reward formula now matches OLD run baseline:
-  `r = k * (exp(-e^2/2s^2) - q_quad*e^2)` with no linear term. Fields left in
-  `ALBCRewardCfg` (not deleted) so the linear path stays trivially re-enableable
-  for future experiments. Sigma (0.10) and k_lin (4.0) values unchanged --
-  they already matched the OLD run per commit 89314422.
-
-### Notes
-- Verified against saved `logs/.../2026-04-06_21-24-43/params/env.yaml`: all
-  reward fields now match OLD run exactly (k_att_rp=6.0, att_rp_sigma=0.10,
-  att_rp_quad_ratio=0.833, att_roll_weight=1.5, k_lin=4.0, lin_vel_sigma=0.10,
-  lin_vel_quad_ratio=1.0, k_yaw=3.5, yaw_vel_sigma=0.10, yaw_vel_quad_ratio=1.0).
-- config.py intentionally NOT reverted -- DORAEMON `performance_lb=80`, HardDR
-  expansion, `rp_vel_settling=0.12`, `yaw_rate=0.7` all retained. Next run
-  measures linear-penalty removal in isolation.
-- Analytical dead-zone verification (err=10 deg, sigma=0.10, lin_ratio=0.5):
-  raw reward = -0.260. At err=4.6 deg (sqrt(2)-scaled from OLD's err_rp_norm=6.5):
-  raw = 0.449 - 0.013 - 0.10 = +0.336 (still positive, so OLD's smaller errors
-  stayed in the reward-positive regime; NEW never got there because it started
-  with larger errors during the learning transient).
-- Next training: user will run ~2000 iter with the reverted reward config to
-  validate recovery of att_rp Episode_Reward and roll/pitch error tracking.
-- Plan: after validating the reward-only revert, redesign the SS-error pressure
-  term using an EMA bias signal instead of constant linear penalty (separates
-  persistent bias from transient tracking error, avoiding the dead-zone
-  pathology). Design session deferred until next conversation.
-
----
-
-## [2026-04-07] DORAEMON Stuck Fix + HardDR Expansion + Reward Linear Penalty + Trajectory Update
-
-### Context
-Following the eval_dr_fulldof bug fixes (earlier today), analyzed `model_9999.pt`
-results in detail and identified several remaining issues that motivated targeted
-encoder-side improvements before proceeding to no-encoder/TDC baseline comparison:
-
-**Issue 1 (DORAEMON mode -2 stuck)**: Step-aligned trajectory analysis of run
-`2026-04-06_21-24-43` revealed phase 7 (iter 8000-9750) showed DORAEMON correctly
-shrinking entropy (-18.35 -> -19.69) -- it IS auto-retreating, but slower than the
-policy degradation rate. Root cause: `performance_lb=100` is too tight relative to
-actual training reward distribution; success_rate plateaus around 0.4 instead of
-the alpha=0.5 equilibrium target. Fix: lower lb to 80 so success_rate auto-rises
-to ~0.5 and DORAEMON exits mode -2 stuck.
-
-**Issue 2 (HardDR boundary push)**: The new dr_distributions.png plot showed
-several DORAEMON-managed parameters where the learned mean +/- 2*std error bars
-extended past the HardDR boundary (linear/quadratic damping, cob/cog offsets x).
-Fix: conservatively widen 5 fields where DORAEMON pushed against the prior
-boundary. Other fields (body_mass, volume, offsets, water_density) kept due to
-PhysX added-mass/inertia ratio and buoyancy stability constraints.
-
-**Issue 3 (SS error tolerance)**: User observation that the policy "tolerates" a
-certain level of steady-state error and stops trying to reduce it further. Root
-cause analysis: both exp kernel `exp(-e^2/2s^2)` and quadratic `q*e^2` have
-gradients that vanish as `err -> 0`. At err=0.005 the existing reward gradient is
-~0.5/rad while at err=0.05 it is ~4.5/rad -- the policy gets ~9x weaker signal at
-small errors and effectively gives up below ~5% of sigma. Fix: add a linear
-penalty term `-q_lin * |e|` whose gradient is constant at all error magnitudes.
-Verified analytically: linear penalty contributes 50% of the gradient at err=0.005
-and 33% at err=0.01, providing the missing constant SS-error pressure.
-
-**Issue 4 (overshoot patterns)**: User observed that overshoot is *lowest* at
-hard DR for all channels (att/lin_vel/yaw), and that yaw shows none-worst /
-hard-best for *all* metrics. Diagnosis: encoder algorithm is correctly adapting
-to DR distribution (positive sign that encoder z is functional), but policy
-becomes over-conservative on nominal physics (which is OOD relative to the
-DORAEMON-learned mean). Fixes: tighten `rp_vel_settling` budget (0.20 -> 0.12)
-to force faster settling, and lower `yaw_rate` soft_threshold (1.0 -> 0.7) so
-the policy is no longer free to swing yaw rate up to 1.0 rad/s when commands
-are bounded by 0.5 rad/s. `rp_rate` threshold kept at 1.0 (user request).
-
-**Issue 5 (eval trajectory)**: User wanted every block's first logged step to
-be at zero command (to clearly visualize the policy at rest before each step
-test) and the attitude block's final return to be doubled like lin_vel/yaw.
-Fix: insert one zero-command segment after each warmup (3 total) and add one
-more `att return (0, 0)` segment, bringing trajectory from 27 to 31 segments.
-
-**Considered but deferred**: An EMA-based SS bias reward term (`-k * |EMA(e)|`)
-to provide an explicit signal for "this error is a constant bias, not natural
-oscillation". User decided to first run training with the linear penalty alone
-and add the EMA term in a later iteration if SS bias persists.
-
-### Changed
-- `config.py`: `doraemon.performance_lb` 100.0 -> 80.0. Lower success threshold
-  unsticks DORAEMON from mode -2 by raising the IS-estimated success_rate from
-  ~0.37 to ~0.5 without changing the underlying physics distribution.
-- `config.py` (HardDomainRandomizationCfg): `added_mass_scale` (0.6, 1.4) -> (0.5, 1.5),
-  `linear_damping_scale` (0.5, 1.5) -> (0.4, 1.7), `quadratic_damping_scale`
-  (0.5, 1.5) -> (0.4, 1.7), `inertia_scale` (0.5, 1.8) -> (0.4, 2.0),
-  `payload_mass_range` (0.0, 2.0) -> (0.0, 3.0). All five fields had DORAEMON
-  pushing against the prior boundary; conservative expansion gives DORAEMON
-  more room without violating PhysX stability constraints.
-- `config.py` (constraints): `yaw_rate` soft_threshold 1.0 -> 0.7 (cmd range
-  is 0.5 rad/s, prior threshold of 1.0 left too much room for yaw overshoot);
-  `rp_vel_settling` budget 0.20 -> 0.12 (40% reduction forces faster settling).
-- `mdp/rewards.py`: Added `att_rp_lin_ratio=0.5`, `lin_vel_lin_ratio=0.8`,
-  `yaw_vel_lin_ratio=0.8` to `ALBCRewardCfg`. Each tracking reward now subtracts
-  `q_lin * |e|`: `att_rp_tracking` uses weighted L1 with `att_roll_weight`
-  (consistent with the existing weighted L2 quadratic), `lin_vel_tracking` uses
-  L2 norm of the 3D error, `yaw_vel_tracking` uses scalar abs.
-- `mdp/rewards.py`: Module docstring rewritten to document the new exp + quad
-  + linear formulation and explicitly state the SS-error-tolerance failure
-  mode that motivates the linear term.
-- `scripts/analysis/eval_dr_fulldof.py`: `build_step_trajectory` now inserts
-  three new zero-command segments (one after each of the three warmups) and
-  doubles the attitude block's final return. `TRAJECTORY_N_SEGMENTS` 27 -> 31.
-  All new segment names start with the matching block prefix (`att zero ...`,
-  `vxyz zero ...`, `yaw zero ...`) so `_classify_segment` automatically routes
-  them to the correct block. New episode_length_s = 31*5 + 10 = 165s. Per-block
-  logged time: attitude 60s (was 50s), lin_vel 55s (was 50s), yaw 25s (was 20s).
-
-### Notes
-- Reward gradient verification (analytic, q_lin=0.5 for att, 0.8 for lin/yaw):
-  at err=0.005 the linear term is 50% (att) / 61% (lin/yaw) of total gradient;
-  at err=0.05 it drops to 10% / 15%. Policy gets a constant ~0.5-0.8/rad signal
-  at small errors where exp+quad alone gave near-zero. Total gradient at small
-  errors is now 1.5-2.6x the prior value.
-- All 5 HardDR-expanded fields stay within physics-stable ranges. PhysX added-mass
-  ratio safety check (M_a/I < 1.0) and post-DR per-axis clamp (0.95*I) handle any
-  edge-case sample at the new boundary. body_mass/volume/offsets are NOT widened
-  because their ratio with each other (buoyancy balance) is more sensitive than
-  individual range size.
-- Next training run will accumulate 5 simultaneous changes (lb, HardDR, linear
-  penalty, yaw_rate threshold, rp_vel_settling, plus the eval-only trajectory
-  update). Ablation across these is not planned -- user prioritizes encoder
-  improvement over isolating individual contributions before baseline comparison.
-- The EMA bias reward term (`-k * |EMA(e)|`, alpha~0.02) is staged for the next
-  iteration if SS bias persists. Linear penalty alone is expected to be most of
-  the fix; EMA would add SS-phase-specific pressure that linear penalty cannot
-  distinguish from transient pressure.
-- Eval re-run not required: only training-side configs changed (lb, HardDR,
-  rewards, constraints) plus an eval-only trajectory tweak. The new trajectory
-  will be exercised at the next eval after the new training run completes.
-
----
-
-## [2026-04-07] eval_dr_fulldof Two-Bug Fix + DORAEMON DR Visualization
-
-### Context
-Re-evaluation of `model_9999.pt` from run `2026-04-06_21-24-43` (the DORAEMON
-mode=-2 stuck run) showed all 4 DR levels (none/soft/medium/hard) producing
-near-identical results: att SS error 1.8-2.1 deg, lin_vel SS 0.04-0.05 m/s,
-100% survival across all levels. Initial interpretation was that the policy
-was extremely robust, but deeper inspection of `eval_dr_fulldof.py`
-revealed two compounding bugs that made all 4 levels evaluate near-nominal
-physics regardless of the requested DR scale.
-
-**Bug 1 (`build_dr_config` fallback)**: The `full` anchor for the 100%-DR
-level was `DomainRandomizationCfg()` (the narrow base class), but the actual
-training environment uses `HardDomainRandomizationCfg`, which has ranges
-1.5-2.67x wider on most fields. The "hard" eval level therefore reached only
-~40% of the actual training-time DR width.
-
-**Bug 2 (`load_doraemon_dr` PARAM_SPECS clamp)**: When `--doraemon-dr` was
-active, `load_doraemon_dr` clamped the DORAEMON-learned `mean +/- 2*std` into
-the bounds of the imported `PARAM_SPECS` constant. But that constant uses
-hardcoded base-DR bounds, while the runtime DORAEMON scheduler builds its
-specs from `HardDomainRandomizationCfg` via `build_param_specs(dr_cfg)`. So
-DORAEMON-learned ranges were being truncated into the narrow base bounds:
-e.g. `added_mass_scale` learned (0.544, 1.456) was clamped to (0.85, 1.15),
-losing 80% of the learned distribution. After the fix the hard-DR widths
-expanded 1.94-3.13x: `payload_mass_range` 0.47 -> 1.47 (3.13x),
-`added_mass_scale` 0.30 -> 0.80 (2.67x), `inertia_scale` 0.55 -> 1.06,
-`body_mass_scale` 0.20 -> 0.39.
-
-A new `dr_distributions.png` plot visualizes the 4 DR levels per parameter
-(normalized to HardDR range), with DORAEMON-learned mean +/- 2*std overlaid
-as black star + error bars. This plot makes the relationship between
-DORAEMON's learned distribution and the actually-applied hard DR explicit
-(any clamp mismatch becomes visually obvious).
-
-### DORAEMON Trajectory Reanalysis (run 2026-04-06_21-24-43)
-Step-aligned `mode/success/kl/entropy` trajectory across 40 DORAEMON updates
-revealed 7 distinct phases (not the "stuck" interpretation from earlier):
-
-1. iter 0-250: mode -3 (SLSQP failed, gradient=0 at identity)
-2. iter 500-750: mode -2 (find feasible, success 0.04 -> 0.38)
-3. iter 1000-2500: mode 0 (DR too easy, entropy -34 -> -25, success ~0.97)
-4. iter 3000-4750: mode 0 (DR catching up, success 0.93 -> 0.71)
-5. iter 5000-6500: mode 0 (entropy frozen at -18.18, KL_step=0, optimizer
-   reports zero-step -- success constraint binding)
-6. iter 6750-7750: mode +1 (inverted+optimize, success 0.49 -> 0.46)
-7. iter 8000-9750: mode -2 (entropy actively shrinking -18.35 -> -19.69,
-   policy decay outpacing DORAEMON retreat speed)
-
-Phase 7 entropy *decrease* of 1.34 unit shows DORAEMON IS auto-retreating
-when policy can't keep up; the issue is retreat speed (~0.2 entropy units
-per 250 iter) vs policy degradation speed (faster). Not a stuck bug.
-
-### Re-evaluation Results (after both bug fixes)
-| Level   | DR%  | AttSS | Settling | LinVel | YawSS  | Surv |
-|---------|------|-------|----------|--------|--------|------|
-| none    |   0% | 1.9d  | 0.30s    | 0.336  | 0.0746 | 100% |
-| soft    |  30% | 1.8d  | 0.30s    | 0.335  | 0.0405 | 100% |
-| medium  |  60% | 2.2d  | 0.38s    | 0.334  | 0.0384 | 100% |
-| hard    | 100% | 2.3d  | 0.41s    | 0.336  | 0.0354 | 100% |
-
-Even with the corrected (much wider) hard-DR anchor that now matches the
-true DORAEMON-learned distribution, the policy survives 100% with att SS
-error rising only 1.9 -> 2.3 deg and settling time 0.30 -> 0.41s. Yaw SS is
-actually *lower* at hard (noise robustness benefit). This is strong evidence
-that `model_9999.pt` is genuinely robust across the full HardDR-equivalent
-physics range that DORAEMON learned.
+Phase 3 eval: 100% survival all DR levels, att SS 2.8-7.1 deg, lin_vel ~0.11-0.40 m/s
+(P-only floor), yaw degrades 0.013->0.13 at hard DR.
 
 ### Added
-- `eval_dr_fulldof.py`: `_TRUE_NOMINAL_PHYSICS` constant -- explicit physics-true
-  nominal for the scale=0 anchor (mass/damping/volume scales = 1.0,
-  offsets = 0.0, water_density = 1000.0, payload = 0.0).
-- `eval_dr_fulldof.py`: `_DORAEMON_RAW` module-level dict -- stores per-field
-  DORAEMON learned (mean, std) for the new visualization.
-- `eval_dr_fulldof.py`: `_plot_dr_distributions()` -- horizontal bar plot,
-  4 DR levels per parameter normalized to HardDR range, DORAEMON mean +/- 2*std
-  overlaid as black star with error bars. Output: `dr_distributions.png`.
+- `encoder/actor_critic_asym_constrained.py`: NoEncoder policy (Phase 1)
+- `constrained_full_albc_tdc/`: Phase 3 module (TDC env, thruster PD controller,
+  single-step DLS IK)
+- `constrained_full_albc/__init__.py`: Phase 1+2 task registration
+- `agents/rsl_rl_ppo_cfg.py`: `FullDOFNoEncoderRunnerCfg`, `FullDOFPPORunnerCfg`
 
-### Changed
-- `eval_dr_fulldof.py`: `--doraemon-dr` flag now uses
-  `argparse.BooleanOptionalAction` with `default=True`, so DORAEMON state is
-  auto-loaded from the run dir on every eval. Use `--no-doraemon-dr` to fall
-  back to `HardDomainRandomizationCfg` (the static training-time anchor).
-- `eval_dr_fulldof.py`: `_make_nominal_dr()` rewritten to use
-  `_TRUE_NOMINAL_PHYSICS`. Asset-specific fields (joint_stiffness/damping,
-  buoy_moment_arm) still fall back to base-cfg midpoint since they have no
-  obvious physics-true value.
-- `eval_dr_fulldof.py`: `build_dr_config()` rewritten -- the `full` anchor is
-  now `_DORAEMON_FULL_DR or HardDomainRandomizationCfg()` (was base
-  `DomainRandomizationCfg()`).
-- `eval_dr_fulldof.py`: `load_doraemon_dr()` returns `(cfg, raw)` tuple,
-  starts from `HardDomainRandomizationCfg` so non-DORAEMON fields (joint,
-  thruster) match training, uses `build_param_specs(HardDR)` to build the
-  clamp bounds (was hardcoded `PARAM_SPECS`), and gracefully returns
-  `(None, {})` if no DORAEMON tags found in the TB log.
+### Notes
+- TDC IK: single-step DLS (ik_num_iterations=1) -- rate limiter caps at 0.05 rad/step,
+  100-iter mode adds ~30ms CUDA overhead for negligible accuracy gain.
+- Post-eval gain bump committed unvalidated: kp_lin 30->100, kp_yaw 8->25,
+  kp_att 8->20, kd_att 2->5.
+
+---
+
+## [2026-04-07] eval_dr_fulldof Bug Fixes + Reward/Constraint Tuning Cycle
+
+### Context
+Four iterations in one day driven by two critical eval bugs and reward tuning experiments.
+
+**eval_dr_fulldof bugs (fixed first):**
+1. `build_dr_config` used base `DomainRandomizationCfg` as 100%-DR anchor instead of
+   `HardDomainRandomizationCfg` -- all 4 DR levels evaluated near-nominal (~40% of true width).
+2. `load_doraemon_dr` clamped DORAEMON-learned distributions to hardcoded base-DR bounds,
+   truncating 60-80% of learned range.
+
+After fix: hard-DR widths expanded 1.94-3.13x. Re-eval of `model_9999.pt` (run
+`2026-04-06_21-24-43`): att SS 1.9-2.3 deg, 100% survival all DR levels. Policy is
+genuinely robust across full HardDR-equivalent range.
+
+**DORAEMON trajectory reanalysis** (7 phases): mode -3 -> -2 -> 0 (expansion) -> 0
+(catching up) -> 0 (frozen, success binding) -> +1 (inverted) -> -2 (retreating).
+Phase 7 entropy DECREASE (-18.35 -> -19.69) proves DORAEMON IS auto-retreating when
+policy degrades; issue is retreat speed vs degradation speed.
+
+**Reward tuning cycle (linear penalty):** Added `-q_lin * |e|` to provide constant
+gradient at small SS errors. Run `2026-04-07_16-37-45` showed dead zone: at err > 5.7 deg
+the linear penalty overwhelms the exp kernel (reward goes negative), and the policy
+abandons attitude tracking (att_rp Episode_Reward = 0). Reverted same day.
+
+**rp_vel_settling budget cycle:** Tightened 0.20->0.12 to force faster settling. Run
+`2026-04-07_22-24-20` showed att_rp sign-flipped to negative (reward -0.855 vs OLD +1.602).
+At budget=0.12, a 60-deg traverse needs ~8.7s deep in IPO binding region. Reverted to 0.20.
+
+### Net Changes (surviving after all reverts)
+- `eval_dr_fulldof.py`: Two-bug fix (DR anchor + DORAEMON clamp bounds). New
+  `dr_distributions.png` visualization. `--doraemon-dr` default=True.
+  `_TRUE_NOMINAL_PHYSICS` constant. `_DORAEMON_RAW` for visualization. Trajectory
+  updated: 27->31 segments (zero-command segments + doubled att return).
+- `config.py`: `performance_lb` 100.0 -> 80.0 (DORAEMON unstick).
+  HardDR expanded: added_mass (0.6,1.4)->(0.5,1.5), linear_damping (0.5,1.5)->(0.4,1.7),
+  quadratic_damping (0.5,1.5)->(0.4,1.7), inertia (0.5,1.8)->(0.4,2.0),
+  payload_mass (0,2.0)->(0,3.0). yaw_rate threshold 1.0->0.7.
+- `mdp/rewards.py`: `att_rp_lin_ratio`, `lin_vel_lin_ratio`, `yaw_vel_lin_ratio` fields
+  added (set to 0.0 -- linear path retained for future experiments).
 
 ### Fixed
-- `eval_dr_fulldof.py`: **Bug 1** -- `build_dr_config` was using base
-  `DomainRandomizationCfg` as the 100%-DR anchor instead of
-  `HardDomainRandomizationCfg`, causing all 4 DR levels to evaluate near
-  nominal (40% of true training DR width).
-- `eval_dr_fulldof.py`: **Bug 2** -- `load_doraemon_dr` was clamping
-  DORAEMON-learned `mean +/- 2*std` to the imported `PARAM_SPECS` constant
-  (which has hardcoded base-DR bounds), truncating DORAEMON's learned
-  distribution into the much narrower base DR range. Fix uses
-  `build_param_specs(HardDomainRandomizationCfg())` so the clamp matches the
-  bounds DORAEMON actually learned over.
+- `eval_dr_fulldof.py`: DR anchor bug (base -> HardDR) -- was evaluating at ~40% of
+  true training DR width.
+- `eval_dr_fulldof.py`: DORAEMON clamp bug -- was truncating learned distribution into
+  narrow base-DR bounds.
+
+### Tested and Reverted
+- **Linear penalty (`lin_ratio=0.5`):** Dead zone at moderate errors. With sigma=0.10,
+  at err=10 deg: exp=0.022, quad=-0.063, linear=-0.219, total=-0.260 (negative reward).
+  Policy converges to "don't track attitude" local optimum.
+- **rp_vel_settling budget 0.12:** Too tight for transit phase. 60-deg traverse requires
+  ~8.7s in IPO binding region. Only the att_rp channel was affected (lin_vel fine),
+  confirming the selective constraint-reward conflict.
 
 ### Notes
-- The DR distribution plot visually validates the fix: black star error bars
-  (unclamped DORAEMON `mean +/- 2*std`) and red hard bars (applied cfg)
-  now overlap correctly. Some fields (`linear_damping_scale`,
-  `cob/cog_offset_x`, `quadratic_damping_scale`) have stars whose error bars
-  extend slightly past [0, 1], indicating DORAEMON tried to push past
-  HardDR boundary but was clamped -- evidence that HardDR width is the
-  current bottleneck for DORAEMON learning, not the algorithm itself.
-- `model_9999.pt` (run 2026-04-06_21-24-43) reaches 100% survival on the
-  HardDR-equivalent eval. For the planned encoder vs no-encoder vs TDC
-  comparison this is the encoder baseline; the next step is to train and
-  evaluate the no-encoder/TDC baselines on the same eval to establish the
-  performance gap.
-- Open question for next session: should `performance_lb` be lowered (100
-  -> 80) to unstick DORAEMON's mode-2 retreat in future runs, and/or should
-  HardDR ranges be expanded for fields where DORAEMON pushed against the
-  boundary? Decisions deferred until baseline comparison is complete.
+- Re-eval results after bug fix: att SS 1.9-2.3 deg, 100% survival (confirms genuine
+  robustness). This is the encoder baseline for Phase 1-3 comparison.
+- rp_vel_settling needs settling-aware redesign (gate by att_err proximity, not global).
+  Implemented later (2026-04-09).
 
 ---
 
-## [2026-04-06] DORAEMON performance_lb Reduction (200 -> 110)
+## [2026-04-06] DORAEMON performance_lb + SS Error Tuning + eval_dr_fulldof Overhaul
 
 ### Context
-Mid-training check on run `2026-04-06_13-43-49` (2142 iter) revealed DORAEMON
-stuck at `mode=-2` ("kept max-success dist") for last 6 updates. Success rate
-plateaued at 0.035 (vs alpha=0.5), reward plateau at 134.75 since ~45% of
-training. Root cause: without command curriculum (cmd_scale fixed at 1.0 since
-DORAEMON-managed scales were removed earlier today), task is too hard from
-iter 0 to reach `performance_lb=200`. Reward breakdown: att_rp 2.73/6.0 (45%),
-lin_vel 1.61/2.7 (60%), yaw_vel 0.93/3.5 (27% -- weakest). Tracking plateau at
-roll 11.5 / pitch 12.5 deg, coupled with `rp_vel_settling` constraint at 85%
-of budget (17.05/20.0).
+Two sessions. Run `2026-04-05_01-55-41` (20k iter): noise_std exploded 0.7->13.95 due to
+unbounded entropy in decoupled sigma optimizer. Despite noise, eval showed SS error
+2.4-5.6 deg, 100% survival, encoder 8/9 dims active. SS error analysis: reward gradient
+equilibrium at ~0.15-0.27/step across all channels. Roll 2x worse than pitch (5.4 vs
+0.8 deg) due to TAM roll actuation weakness (0.007m arm vs pitch 0.145m).
 
-DORAEMON mode=-2 behavior: when inverted problem finds max-success direction
-but result is still below alpha, DORAEMON keeps that point and skips main
-entropy optimization. Physics DR mean contracted (inertia_scale 1.15->1.10,
-added_mass_std 0.072->0.054) but success never recovered because the
-bottleneck is command difficulty, not physics DR.
+New run `2026-04-06_03-20-52` with max_std=2.0: noise stable at 0.47. But DORAEMON
+success dropped to 0.31 -- kl_ub=1.5 was 3x reference default. Our step_interval=250
+(~16k env steps) vs reference ~100k between updates, making same kl_ub 6x more aggressive.
 
-Decision: lower `performance_lb` from 200 to 110 (current reward ~135, so lb
-below current means most episodes pass -> success_rate will jump to ~60-70%
--> DORAEMON transitions to mode=0 normal -> physics DR re-expands). This
-restores DORAEMON functionality at the cost of accepting current tracking
-accuracy as the baseline. Tracking accuracy improvement is a separate problem
-not addressed here. Command range kept unchanged (att +-30 deg, full lin_vel,
-full yaw).
+Mid-training check (`2026-04-06_13-43-49`, 2142 iter): DORAEMON stuck at mode=-2,
+success=0.035, reward plateau at 134.75. Without command curriculum, task too hard
+from iter 0 to reach performance_lb=200. Lowered to 110.
 
 ### Changed
-- `config.py`: `doraemon.performance_lb` 200.0 -> 110.0 to unstick DORAEMON
-  from mode=-2 (max-success dist) fallback. Current reward plateau ~135, so
-  new lb brings success_rate from 0.035 to expected ~60-70%, enabling normal
-  entropy optimization and DR re-expansion.
-
-### Notes
-- Command range intentionally kept at current (att +-30 deg, full lin_vel,
-  full yaw) -- per user decision, tracking accuracy improvement is deferred
-- Expected new equilibrium: success_rate ~= alpha (0.5), reward 110-130,
-  physics DR wider than current (adversarial pressure restored)
-- Watch for: DORAEMON/mode transitioning -2 -> 0, entropy_after actually
-  moving (currently frozen at -34.55), std/* values growing back
-- performance_lb history: 80 -> 200 (2026-04-04) -> 110 (today)
-- If tracking accuracy improvement needed later, options: relax
-  rp_vel_settling budget, add command curriculum, or Gaussian two-stage
-  command sampling (discussed but deferred)
-
----
-
-## [2026-04-06] Training Analysis + SS Error Tuning + eval_dr_fulldof Overhaul + DORAEMON kl_ub Fix
-
-### Context
-Analyzed 20k-iter run (`2026-04-05_01-55-41`). noise_std exploded 0.7->13.95 due to
-unbounded entropy gradient in decoupled sigma optimizer. Despite noise, policy mean
-was healthy: eval_dr showed SS error 2.4-5.6 deg, 100% survival. Encoder z sweep
-confirmed 8/9 latent dimensions active.
-
-SS error analysis revealed reward gradient equilibrium across all 3 channels at
-similar magnitudes (~0.15-0.27 per step), preventing further improvement. Roll
-SS error 2x worse than pitch (5.4° vs 0.8° at roll+15 target) due to TAM roll
-actuation weakness (0.007m arm vs pitch 0.145m).
-
-New run (`2026-04-06_03-20-52`, 2700+ iters) with max_std=2.0: noise_std stable at
-0.47 (fix confirmed). However DORAEMON success_rate dropped to 0.31 and stuck --
-DR expanded too aggressively (entropy -34->-19 in 1000 iters, 4 updates). Root cause:
-kl_ub=1.5 (3x reference default=0.5). Our implementation updates every 250 RL iters
-(~16k env steps) vs reference which trains to convergence (~100k steps) between
-DORAEMON updates, making same kl_ub effectively much more aggressive. Mode=1
-(inverted+optimize) contracts DR then immediately re-expands within same kl budget,
-producing near-zero net contraction.
+- `constraint_trpo.py`: Added `max_std=2.0` upper clamp on log_std
+- `rewards.py`: Tightened sigmas: att_rp 0.15->0.10, lin_vel 0.15->0.10, yaw 0.17->0.10.
+  k_lin 2.7->4.0. att_roll_weight=1.5 in err_sq (roll gets 1.5x gradient).
+- `rsl_rl_ppo_cfg.py`: entropy_coef 0.003->0.005
+- `config.py`: DORAEMON kl_ub 1.5->0.3. performance_lb 200->110. att_cmd_rp_range
+  pi/4->pi/6 (+-45->+-30 deg).
 
 ### Added
-- `constraint_trpo.py`: `max_std=2.0` parameter -- upper clamp on log_std, serving
-  as trust region for sigma (prevents entropy-driven noise explosion)
-- `eval_dr.py`: Full-DOF task support + `--doraemon-run` CLI for DORAEMON-learned DR
-- `eval_dr_fulldof.py`: Warmup segment exclusion, block-aware trajectory cropping,
-  DR-separated row layout for lin_vel/yaw, `error.png`, per-channel summary plots
-  (summary_att/lin_vel/yaw), per-axis lin_vel and yaw step-response metrics
-
-### Changed
-- `rewards.py`: Tightened sigmas for SS error pressure:
-  att_rp_sigma 0.15->0.10, lin_vel_sigma 0.15->0.10, yaw_vel_sigma 0.17->0.10
-- `rewards.py`: k_lin 2.7->4.0 (lin_vel gradient was weakest, error gap was largest)
-- `rewards.py`: att_roll_weight=1.5 in err_sq (roll gets 1.5x gradient, compensating
-  weak TAM actuation)
-- `rsl_rl_ppo_cfg.py`: entropy_coef 0.003->0.005, kl_ub 2.0->1.5
-- `config.py`: DORAEMON kl_ub 1.5->0.3 (reference-equivalent given our step_interval=250,
-  ~16k env steps between updates vs reference ~100k; prevents DR outpacing policy)
-- `config.py`: att_cmd_rp_range pi/4->pi/6 (+-45 deg -> +-30 deg)
+- `eval_dr_fulldof.py`: Full-DOF eval overhaul -- warmup exclusion, block-aware
+  trajectory cropping, DR-separated layout, error.png, per-channel summary plots,
+  per-axis lin_vel and yaw step-response metrics, `--doraemon-run` CLI.
 
 ### Removed
-- `doraemon.py`: Removed command scale parameters (cmd_att/lin/yaw_scale) from
-  DORAEMON optimization (18D->15D). DORAEMON preferentially shrank commands to boost
-  success_rate (cheapest path: less movement = less error = higher return), producing
-  degenerate solutions where robot barely moves. Commands are task difficulty knobs,
-  not physics parameters -- fixed at scale=1.0
-- `albc_env.py`: Removed per-env command scale application from DORAEMON sampling
+- `doraemon.py`: Command scale parameters removed from DORAEMON optimization (18D->15D).
+  DORAEMON shrank commands to boost success (degenerate solution). Commands fixed at
+  scale=1.0.
+- `albc_env.py`: Per-env command scale application from DORAEMON sampling.
 
 ### Notes
-- Eval DR results (DORAEMON DR, none/hard): att SS 2.4/2.7 deg, lin_vel 0.164/0.163,
-  yaw 0.058/0.059, rise_time 0.39/0.43s, 100% survival all levels
-- noise_std history: 0.005(explosion) -> 0.003(collapse) -> 0.005+max_std=2.0(current)
-- kl_ub history: 0.5->1.0->1.5(too fast)->0.3(current, reference-equivalent)
-- DORAEMON mode=1 structural note: inverted problem finds feasible point then main
-  optimization re-expands, matching reference behavior -- not a bug, but requires
-  appropriately sized kl_ub to allow net DR contraction when needed
-- kl_ub=0.3 run (8k iters): eval_dr SS error 5.7-6.5 deg, 100% survival all DR levels,
-  but DORAEMON collapsed cmd_att_scale to 0.16 (mean), cmd_att_std to 0.05 before fix
+- noise_std history: explosion(0.005) -> collapse(0.003) -> max_std=2.0 cap(current)
+- kl_ub history: 0.5 -> 1.0 -> 1.5(too fast) -> 0.3(reference-equivalent)
+- performance_lb history: 80 -> 200 -> 110
+- DORAEMON mode=1: inverted problem finds feasible then re-expands within same kl budget.
+  Not a bug, but needs appropriately sized kl_ub for net contraction.
 
 ---
 
-## [2026-04-04] DORAEMON SLSQP Fix + Constraint/Reward Iterations (sessions 4-6)
+## [2026-04-04] DORAEMON Fixes + Constraint/Reward Finalization
 
 ### Context
-DORAEMON optimizer was completely non-functional. scipy trust-constr stuck because
-KL divergence has zero gradient at identity (KL(p||p)=0 -> grad=0). SLSQP handles
-this via SQP linearization. Also: log-space parameterization eliminates 72 box
-constraints; IS clamp tightened from exp(20) to exp(5).
+Two sessions. DORAEMON optimizer was non-functional: scipy trust-constr stuck because
+KL has zero gradient at identity. SLSQP handles this via SQP linearization. Log-space
+parameterization eliminates 72 box constraints. First successful run: 9/9 updates
+succeeded, entropy -45.66 -> -27.33.
 
-Multiple constraint/reward iterations in same day:
-- thruster_rate constraint added then removed (structurally incompatible with entropy)
-- thruster_sat reverted to thruster_util (Average, budget=0.40)
-- All tracking rewards unified to exp+quadratic kernels
-- Reward weights tuned from run data (k_lin 4.0->2.7, k_yaw 2.0->3.5)
+Issues found: noise_std collapsed (0.70->0.15, entropy_coef=0.001 too conservative),
+DORAEMON used full kl_ub every step. PARAM_SPEC bounds were hardcoded copies of
+DomainRandomizationCfg -- DORAEMON couldn't expand beyond default DR.
 
-### Changed
-- `doraemon.py`: trust-constr -> SLSQP, log-space parameterization, IS clamp 20->5
-- `doraemon.py`: ESS min_ess_ratio 0.05->0.01 (prevents excessive reverts)
-- `rewards.py`: All 3 tracking terms use exp+quadratic: `k*(exp(-e²/2σ²) - q*e²)`
-  att_rp(k=6.0, σ=0.15, q=0.833), lin_vel(k=2.7, σ=0.15, q=1.0), yaw(k=3.5, σ=0.17, q=1.0)
-- `config.py`: performance_lb 80->200, constraint list finalized at 10 terms (5 prob + 5 avg)
-
-### Removed
-- `thruster_rate_cost`: noise-induced da > threshold every step, barrier suppressed all output
-- `body_linear_velocity_cost`: always inactive (cr=0.00)
-
----
-
-## [2026-04-04] DORAEMON Tuning + PARAM_SPEC Auto-sync (sessions 1-3)
-
-### Context
-First successful DORAEMON run after bug fixes. 9/9 scheduled updates succeeded,
-entropy -45.66 -> -27.33 (near uniform). Two issues: noise_std collapsed (0.70->0.15,
-entropy_coef=0.001 too conservative), DORAEMON used full kl_ub every step (bottleneck).
-
-PARAM_SPEC bounds were hardcoded copies of DomainRandomizationCfg -- DORAEMON couldn't
-expand beyond default DR. Fixed with auto-sync from DR config at init time.
-
-eval_dr_fulldof.py created for 6-DOF evaluation (14 segments: att + lin_vel + yaw).
+Multiple constraint/reward iterations: thruster_rate added then removed (incompatible
+with entropy), thruster_sat reverted to thruster_util (Average, budget=0.40), all
+tracking rewards unified to exp+quadratic.
 
 ### Changed
+- `doraemon.py`: trust-constr -> SLSQP, log-space parameterization, IS clamp 20->5,
+  ESS min_ess_ratio 0.05->0.01. `build_param_specs(dr_cfg)` for auto-deriving bounds.
+- `rewards.py`: All 3 tracking terms use exp+quadratic: `k*(exp(-e^2/2s^2) - q*e^2)`.
+  att_rp(k=6.0, s=0.15, q=0.833), lin_vel(k=2.7, s=0.15, q=1.0), yaw(k=3.5, s=0.17, q=1.0)
 - `rsl_rl_ppo_cfg.py`: entropy_coef 0.001->0.003, kl_ub 0.5->1.0
-- `doraemon.py`: `build_param_specs(dr_cfg)` for auto-deriving bounds from DR config
+- `config.py`: performance_lb 80->200. Constraint list finalized: 10 terms (5 prob + 5 avg).
 
 ### Added
-- `eval_dr_fulldof.py`: 6-DOF step trajectory, `--doraemon-dr` flag, per-channel plots
+- `eval_dr_fulldof.py`: 6-DOF step trajectory (14 segments), `--doraemon-dr` flag,
+  per-channel plots.
+
+### Removed
+- `thruster_rate_cost`: noise-induced da > threshold every step, barrier suppressed output.
+- `body_linear_velocity_cost`: always inactive (cr=0.00).
