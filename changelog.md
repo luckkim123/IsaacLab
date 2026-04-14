@@ -13,6 +13,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-14] Per-Dim Noise Analysis + Comparison Experiment Design
+
+### Context
+Deep analysis of per-dim noise dynamics in run `2026-04-13_17-15-54` (10k iters).
+Arm dims collapse to floor within 285 iters while thr6/7 diverge to 1.22/1.60.
+Uniform entropy_coef=0.003 is the root cause: too weak for arm (net gradient -0.004)
+but too strong for thrusters (net gradient +0.003 with no natural resistance).
+
+### Experiments
+- **Run `2026-04-13_17-15-54` per-dim noise extraction**: arm0 hits floor(0.10)
+  at iter 285 (from 0.625). SigmaStep 89% negative in first 300 iters,
+  cumulative=-1.95. arm1 near-floor at iter 500.
+- **thr6/7 noise divergence**: thr6=1.22, thr7=1.60 at iter 10k. entropy_coef
+  +0.003 gradient accumulates unopposed (natural gradient ~0 for these dims).
+- **Aggregate entropy masks collapse**: entropy 3.26->5.08 appears healthy,
+  but excluding thr6/7 the mean noise is 0.395 (lower than OLD09's 0.553).
+- **Eval DR results**: AttSS=3.3deg, LinVel=0.337m/s, Survival=100% at hard DR.
+  Performance acceptable but DORAEMON success drops 0.999->0.507 by iter 9750.
+
+### Decisions
+- **Rejected Exp-A (min_std 0.10->0.25 clamp raise)** because clamp is applied
+  post-TRPO step with no FIM feedback. TRPO wastes KL budget trying to reduce
+  arm noise, gets clamped back every iter. Confound: cannot distinguish "forced
+  noise hurt precision" from "exploration helped."
+- **Rejected accelerated DORAEMON (step_interval=50)** for comparison experiments.
+  It creates a fundamentally different training regime (30 DR updates in 1500 iters
+  vs 6), not just time-compression. Two variables changing simultaneously.
+- **Adopted per-dim entropy_coef** as the primary experiment. arm=0.01 (3.3x
+  baseline) reverses arm net gradient to +0.003; thr=0.001 (1/3 baseline) slows
+  thr divergence. Works inside the surrogate loss, so FIM sees it and natural
+  gradient finds a self-consistent equilibrium. Code: ~15 lines in constraint_trpo.py.
+- **max_std=1.0 as secondary experiment** (config-only change, orthogonal to
+  per-dim coef). Caps thr6/7 divergence.
+- **3-run comparison plan**: Baseline + Exp1(per-dim coef) + Exp2(max_std=1.0),
+  all at num_envs=1024, 5000 iters. Baseline+Exp1 parallel on GPU0+GPU1,
+  then Exp2 sequential. Total ~4h.
+
+### Open Questions
+- Does arm noise collapse actually limit performance under hard DR? Per-dim
+  entropy_coef experiment will answer this by iter 3000-5000.
+- Is thr6/7 noise explosion harmful or beneficial exploration? max_std=1.0
+  experiment will test this.
+- If per-dim coef shows improvement, optimal values (0.01 may be too
+  conservative) need further tuning.
+
 ## [2026-04-13] ERC-TRPO Tested & Reverted + Per-Dim Min_Std
 
 ### Context
