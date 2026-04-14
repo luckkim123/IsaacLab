@@ -50,13 +50,46 @@ but too strong for thrusters (net gradient +0.003 with no natural resistance).
   all at num_envs=1024, 5000 iters. Baseline+Exp1 parallel on GPU0+GPU1,
   then Exp2 sequential. Total ~4h.
 
+### 3-Run Comparison Results (2500 iters, num_envs=1024)
+
+Baseline (`2026-04-14_15-23-49_baseline`), PerDimEnt (`2026-04-14_15-22-17_perdiment`),
+MaxStd1 (`2026-04-14_15-22-40_maxstd1`).
+
+- **PerDimEnt is best at 2500 iters**: reward 204.7 vs 193.8 vs 187.4.
+  Best att_rp (5.03), smoothness (-0.11 vs -0.24), thruster (-0.09 vs -0.17).
+- **Arm noise equilibrium confirmed**: PerDimEnt arm0=0.144 (not floor), arm1=0.225.
+  Slight recovery after iter 750 (0.142->0.147). Baseline/MaxStd1 both hit floor.
+- **Thruster noise dropped aggressively in PerDimEnt**: all thr dims 0.25-0.37
+  (vs baseline 0.54-0.82). Entropy=0.51 (very low). Primary cause: thr entropy_coef=0.001.
+- **PerDimEnt weaknesses**: lin_vel worst (1.11 vs 1.30 vs 1.40). roll_deg=12.76
+  (baseline=10.53). Very low entropy may limit DR adaptation.
+- **MaxStd1 showed no major benefit**: dim7 still diverged to 0.856 (cap not reached).
+  Reward middle of the pack.
+- **DORAEMON success stayed >95% in all runs**: kl_ub=0.04 insufficient for DR stress
+  in 2500 iters. Reference success drop (0.507) happened after iter 5000.
+- **Smoothness reward trajectory** is the clearest differentiator: PerDimEnt improved
+  continuously (-0.25->-0.11), baseline flat (-0.25->-0.24), MaxStd1 flat (-0.25->-0.23).
+
+### Round 2 Experiment Design
+
+- **Key question**: Is thr entropy_coef=0.001 too low? Does PerDimEnt survive harder DR?
+- **DORAEMON kl_ub raised 0.04->0.06** for both runs. Projected DR entropy at 5000 iters:
+  -15.5 (equivalent to reference iter 7250, success ~0.62). kl_ub=0.08 rejected as
+  too aggressive (DR entropy -10.1, uncharted territory, collapse risk).
+- **Run A** (PerDimEnt: arm=0.01, thr=0.001): current best config + harder DR.
+- **Run B** (ArmOnly: arm=0.01, thr=0.003): arm boost only, thr = baseline uniform.
+  Tests whether thr noise reduction helps or hurts under harder DR.
+- Both num_envs=2048, 5000 iters, kl_ub=0.06. Single variable: thr entropy_coef.
+- If A>B: thr=0.001 is optimal. If B>A: thr=0.001 too low, need more exploration.
+
 ### Open Questions
-- Does arm noise collapse actually limit performance under hard DR? Per-dim
-  entropy_coef experiment will answer this by iter 3000-5000.
-- Is thr6/7 noise explosion harmful or beneficial exploration? max_std=1.0
-  experiment will test this.
-- If per-dim coef shows improvement, optimal values (0.01 may be too
-  conservative) need further tuning.
+- Does PerDimEnt's low entropy (0.51) become a liability under harder DR (kl_ub=0.06)?
+  Round 2 will answer.
+- Is arm entropy_coef=0.01 sufficient, or would 0.02-0.03 give better equilibrium?
+  arm0=0.144 is above floor but still declining.
+- Optimal thr entropy_coef: 0.001 (current) vs 0.003 (baseline). Round 2 A vs B comparison.
+- For future short-run experiments (<=2500 iter), DORAEMON kl_ub or performance_lb
+  must be adjusted to create sufficient DR pressure.
 
 ## [2026-04-13] ERC-TRPO Tested & Reverted + Per-Dim Min_Std
 
