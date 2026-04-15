@@ -13,6 +13,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-15] Round 2 Results: Thruster Entropy Reduction is Critical
+
+### Context
+Round 2 experiments (PerDimEnt, ArmOnly, Baseline) completed overnight with kl_ub=0.06
+and num_envs=2048 at 5000 iters. Goal: isolate whether PerDimEnt's advantage comes from
+arm entropy boost (arm=0.01) or thruster entropy reduction (thr=0.001).
+
+### Experiments
+- **PerDimEnt** (`2026-04-14_18-55-20_perdiment_kl06`): arm=0.01, thr=0.001.
+  Reward 151.3@5000. Arm noise stable (dim0=0.157, dim1=0.244, both above floor).
+  All thr dims declining (dim7=0.332). Entropy collapsed to -0.26.
+  DORAEMON success 0.990->0.811 (best of 3). Smoothness -0.090, thruster -0.074.
+- **ArmOnly** (`2026-04-14_18-55-29_armonly_kl06`): arm=0.01, thr=0.003.
+  Reward 130.6@5000 (WORST). Arm noise stable (dim0=0.158, dim1=0.255).
+  Thr dims DIVERGED: dim7=1.360, dim6=0.959, dim3=0.909. Entropy grew to 7.63.
+  DORAEMON success 0.787. Smoothness -0.326, thruster -0.222 (both worst).
+- **Baseline** (`2026-04-14_22-33-43_baseline_kl06`): uniform entropy=0.003.
+  Auto-launched by monitor script after PerDimEnt finished (GPU0).
+  Reward 137.9@5000. Arm dims at floor (dim0=0.100, dim1=0.114).
+  Thr dim7=0.893 (diverging, less than ArmOnly). DORAEMON success 0.775.
+  Best roll_deg (10.9) but otherwise middle-of-pack.
+- **eval_dr_fulldof** (PerDimEnt vs ArmOnly, Baseline pending):
+  Yaw SS error: PerDimEnt 0.019 vs ArmOnly 0.070 rad/s at hard DR (3.7x worse).
+  ArmOnly zero-crossings 4.8 at medium DR (yaw oscillation from thr noise divergence).
+  Attitude SS: similar (~1.5° none, ~2.4° hard). Lin_vel: similar. Survival: 100% both.
+
+### Decisions
+- **ArmOnly (arm boost without thr reduction) is counterproductive.** ArmOnly
+  underperformed even Baseline: reward 130.6 vs 138.0, thruster noise diverged 2.19x
+  (dim7: 0.621->1.360 vs Baseline 0.606->0.893). Arm entropy boost amplifies thruster
+  divergence when thr entropy_coef is at baseline level (0.003). Mechanism: arm exploration
+  pressure propagates to thruster dims through shared TRPO update.
+- **PerDimEnt's entropy collapse (-0.26) is NOT a liability under DR.** Despite near-zero
+  entropy, PerDimEnt maintained highest DORAEMON success (0.811 vs 0.787/0.775) and
+  highest reward (151.3 vs 130.6/138.0). Low entropy = precise policy = robust to DR.
+- **Preliminary decision: adopt PerDimEnt as default** (arm=0.01, thr=0.001).
+  Pending Baseline eval_dr confirmation. Changes needed: add entropy_coef_per_dim to
+  FullDOFTRPORunnerCfg, revert kl_ub 0.06->0.04.
+- **Monitor script validated.** `monitor_and_launch_baseline.sh` (nohup + pgrep polling)
+  successfully detected PerDimEnt completion at 22:33 and auto-launched Baseline on GPU0.
+
+### Open Questions
+- Baseline eval_dr results still pending (running). Will complete the 3-way comparison.
+- PerDimEnt's roll_deg (14.6°) worse than Baseline (10.9°) in training metrics, but
+  eval_dr attitude SS was similar (1.5° vs TBD). Needs eval_dr confirmation.
+- Optimal thr entropy_coef: 0.001 confirmed better than 0.003. Is there a sweet spot
+  at 0.002? Lower priority -- 0.001 works well.
+- kl_ub=0.06 should revert to 0.04 after experiments. Need to confirm before any
+  production runs.
+
+---
+
 ## [2026-04-14] Per-Dim Noise Analysis + Comparison Experiment Design
 
 ### Context
