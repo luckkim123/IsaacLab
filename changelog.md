@@ -50,6 +50,63 @@ Round 3 launched (both at 2026-04-16):
 - Control: Round 2 PerDimEnt `2026-04-14_18-55-20_perdiment_kl06`. Both new runs
   keep kl_ub=0.06 and num_envs=2048 to enable direct single-variable comparison.
 
+Round 3 completed; eval_dr_fulldof 3-way comparison (64 envs × 4 DR levels):
+- **Exp-L1 results**: Mechanism confirmed but tradeoff adverse. Late-training SS
+  error reduced on most axes (vxSS -15 to -21%, vySS -18 to -24%, yawSS -10 to
+  -21%). But OVERSHOOT WORSE on all tracked axes: attOS +25-60%, vxOS +49-86%,
+  vyOS +51-70%, yawOS +16-35%. Rise time 20-38% FASTER. Classic L1 pattern:
+  constant far-field gradient makes controller aggressive. Training stable
+  (reward 154 vs Control 148, DORAEMON success 0.845 vs 0.811).
+- **Exp-Settling results**: Catastrophic yaw failure. yawSS 0.012-0.019 (Control)
+  → 0.272-0.337 rad/s (**20x worse**). Yaw rise time = 0s (policy abandoned
+  tracking; trajectory plot shows actual yaw_rate = -0.2 rad/s when target =
+  +0.3 rad/s). Reward -31% (103 vs Control 148). Entropy collapsed 10x deeper
+  (-3.08 vs Control -0.30). Apparent vy overshoot reduction (14.8→10.7%) is NOT
+  a real improvement: Jitter 4x higher (0.004 vs 0.000), rise time 8-13% slower,
+  ZX count increases at low DR. Pattern is "low-amplitude jittery settling" from
+  reduced policy aggressiveness, not cleaner control. TAM-sharing (yaw+sway use
+  same 4 horizontal thrusters) explains indirect vy effect; vz (independent
+  vertical thrusters) unaffected by yaw dynamics but SS +80% worse from policy
+  narrowing.
+- **Settling root cause (3-fold structural failure)**:
+  (1) `yaw_settling` cost exceeded budget from iter 50 (cost=1.077 vs d_k=0.5),
+  barrier gradient activated before policy could learn.
+  (2) threshold=0.04 rad/s too tight vs typical yaw_rate_err range 0.1-0.3 →
+  near_target gate rarely 1 during normal tracking, but when it flips the
+  binary discontinuity creates abrupt penalty.
+  (3) Perverse incentive: Policy found local optimum at yaw_rate_err ≈ 0.32
+  rad/s where exp kernel reward ~0.006 (abandoned) but yaw_settling gate = 0
+  (no constraint cost). Avoiding target became easier than achieving it.
+- **lin_vel_settling never bound**: cost=0.010 vs budget=0.50 (2% utilization
+  throughout training) — threshold=0.04 m/s too tight for agent to reach. No
+  information content from this constraint.
+
+Round 4 launched (both at 2026-04-16, based on Round 3 diagnosis + literature):
+- **Exp-Tanh** (`Isaac-FullDOF-Exp-Tanh-v0`, GPU 0): `ρ(e) = coef·eps·tanh(|e|/eps)`
+  with coef=1.0, eps=σ=0.10 on lin_vel and yaw. Run: `exp_tanh_ss`. ETA ~3.3h.
+- **Exp-Arctan** (`Isaac-FullDOF-Exp-Arctan-v0`, GPU 1):
+  `ρ(e) = coef·eps·(2/π)·arctan(|e|/eps)` with same coef=1.0, eps=0.10.
+  Safer variant (heavier tail, weaker at e=0). Run: `exp_arctan_ss`. ETA ~4.4h.
+- Both num_envs=2048, max_iterations=5000, seed=30, kl_ub=0.06 (Control match).
+
+Literature and gradient analysis supporting Round 4:
+- Classical control (Slotine & Li 1991, "Applied Nonlinear Control"): tanh/arctan
+  are standard SMC chatter-reducing substitutes for sign(). Finite gradient at
+  e=0 with saturation for |e|≫ε.
+- Hwangbo et al. 2019 (Science Robotics, ANYmal): logistic kernel with
+  near-linear behavior near zero and saturation — only empirically validated
+  saturating tracking kernel in RL locomotion.
+- Hwangbo 2017 (quadrotor, RA-L): integral-error in observation eliminates SS
+  offset without reward shape changes. Alternative approach, deferred.
+- CAPS (Mysore et al. 2021, ICRA): derivative/action-rate penalties are the
+  standard anti-overshoot tool in RL locomotion — NOT error-shape manipulation.
+- Numerical gradient comparison (σ=0.10, exp peak = 6.065 at e=σ):
+  At e=0: L1 0.150, Tanh 1.000 (with coef=1.0), Arctan 0.637.
+  At e=5σ: L1 persists at 0.150 (causes cruise-phase overshoot), Tanh 0.018,
+  Arctan 0.024 (both vanish correctly).
+- Predicted Round 4 outcome: Tanh delivers ~50% SS reduction relative to Exp-L1
+  while keeping overshoot near Control baseline (far-field force ~1% of L1's).
+
 ### Decisions
 - **Adopted PerDimEnt as default** (entropy_coef_per_dim = arm=0.01, thr=0.001
   now in `RslRlConstraintTRPOAlgorithmCfg`). Round 2 evidence: reward 151.3 vs
@@ -74,17 +131,59 @@ Round 3 launched (both at 2026-04-16):
 - **Kept kl_ub=0.06 for Round 3** instead of reverting to 0.04. Reason: direct
   comparison with Round 2 PerDimEnt control requires kl_ub match. kl_ub effect
   study is deferred; tracking precision is the current priority.
+- **Deprecated Settling-constraint approach entirely**. Three compounding
+  failures (barrier trigger at iter 50, threshold mismatch, perverse incentive
+  local optimum) are not fixable with hyperparameter tuning alone. The
+  `rp_vel_settling_cost` (attitude) works because the attitude exp kernel is
+  strong enough to dominate; the same construction fails for yaw because the
+  policy can "escape" constraint activation by staying far from target. Future
+  anti-overshoot attempts should use smooth reward penalty (not binary-gated
+  hard constraint) or operate via action-rate penalty (CAPS-style).
+- **Corrected prior misdiagnosis of Exp-Settling "vy success"**. Initial
+  3-way table showed vy overshoot 14.8→10.7% at no-DR as a positive. Deeper
+  inspection (Jitter 0.000→0.004, ZX 0.5→2.1, Rise +9.8%) reveals this is
+  jittery low-amplitude settling — peaks are smaller but tracking is less
+  precise overall. The "improvement" reflects a narrower action distribution
+  (symptom of policy abandoning yaw tracking) not an intended settling
+  mechanism. Settling approach fails on every axis.
+- **Reaffirmed: entropy collapse is symptom, not cause**. The 2026-04-10
+  analysis (run `2026-04-10_17-20-03`, r=-0.018 first-differenced correlation
+  between entropy and reward) already established this. When recording
+  Exp-Settling results, initial note attributed vy effect to entropy collapse;
+  corrected to "policy narrowing → TAM-shared thrusters → indirect vy damping"
+  with entropy being the narrowing's measurable symptom.
+- **Chose saturating penalty (Tanh/Arctan) over 6 alternatives** from gradient
+  analysis. Rejected: pseudo-Huber (grad=0 at zero), log-cosh (grad=0 at zero),
+  focal |e|^α (grad→∞ at zero; TRPO instability per Engstrom et al. 2020),
+  bounded-L1 min(|e|,δ) (discontinuity at e=δ=σ coincides with exp peak),
+  Soft-L0 1-exp(-e²/ε²) (huge spike in stopping zone → guaranteed overshoot),
+  low-L1 ratio=0.05 (1/3 effect of ratio=0.15, still has far-field force).
+  Tanh+Arctan are the only candidates with BOTH (a) non-zero gradient at e=0
+  and (b) decay to 0 at far-field — required by gradient-shape analysis.
+- **Parameter choice coef=1.0, eps=0.10** for saturating penalties.
+  Rationale: at e=0, Tanh gives 16% of exp-kernel peak gradient; this is the
+  "enough to kill dead zone but not dominate reward shape" sweet spot derived
+  from the gradient table. eps=σ=0.10 aligns saturation scale with where exp
+  kernel is strongest — penalty becomes negligible exactly where exp takes over.
+- **Launched Tanh AND Arctan together (not Tanh alone)**. Rationale: Arctan
+  provides a safety-margin variant with 10.5% peak-at-zero (vs Tanh 16%). If
+  Tanh creates any training instability at coef=1.0, Arctan is the fallback
+  without re-launching. Time cost: zero (parallel GPUs available).
 
 ### Open Questions
-- Does L1 with ratio=0.15 actually avoid the "moderate error dead zone" that
-  caused the original disable? Check SS error + training stability at iter 500-2000.
-- Is budget=0.005 tight enough for settling constraints to enforce <10% overshoot?
-  If settling cost stays at budget 100% of episode, tighter budget (0.002) needed.
-  If rarely active, loosen to 0.01.
-- Do L1 and settling address orthogonal problems? If Round 3 confirms both work,
-  next step is combined config (both L1 and settling). If only one works, that
-  defines the default going forward.
-- kl_ub=0.04 vs 0.06 for PerDimEnt still untested. Deferred to Round 4.
+- Does saturating penalty (Tanh coef=1.0, eps=0.10) achieve the gradient-analysis
+  prediction of ~50% SS reduction relative to Exp-L1 while keeping overshoot
+  near Control baseline? Check at iter 5000 via eval_dr_fulldof.
+- Does Arctan's weaker peak-at-zero (0.637 vs Tanh 1.000) translate to less SS
+  improvement but better overshoot preservation, or does the heavier 1/(1+x²)
+  tail cause unexpected interference near cruise? Direct comparison in Round 4.
+- If Tanh succeeds, does increasing coef from 1.0 to 2.0 continue improving SS
+  linearly, or is there a transition to L1-like overshoot pattern? Deferred to
+  Round 5 if Round 4 validates principle.
+- Is integral-error-in-observation (Hwangbo 2017 quadrotor precedent) a viable
+  complementary approach? Would require encoder input reshape and is higher
+  risk than Round 4; deferred pending Round 4 results.
+- kl_ub=0.04 vs 0.06 for PerDimEnt still untested. Deferred beyond Round 4.
 
 ---
 
