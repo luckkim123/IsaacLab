@@ -13,6 +13,81 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-16] Round 3: Structural Fixes for SS Error and Overshoot
+
+### Context
+After Round 2 confirmed PerDimEnt as the best entropy config, evaluation revealed
+two remaining problems shared across all Round 2 runs: (1) lin_vel SS error and
+overshoot even at no-DR, and (2) yaw overshoot. User questioned whether simple
+reward weight tuning would suffice or if reward/constraint structure itself
+needed redesign.
+
+### Experiments
+Deep analysis of reward/constraint mechanics before launching Round 3:
+
+- **Reward gradient dead zone (mathematical proof)**: For `r(e) = exp(-e²/2σ²) - q·e²`,
+  `dr/de = -e × (1/σ² × exp(-e²/2σ²) + 2q)`. At e=0 the gradient is exactly 0
+  regardless of weights. At e=0.01 the gradient is 16% of peak (at e=σ=0.10).
+  Weight tuning (k_lin 4→7) multiplies ALL gradients by 1.75x but preserves the
+  zero-at-zero shape. Conclusion: weight tuning cannot fix SS error; structural
+  change (L1 term or sigma reduction) required.
+- **Constraint asymmetry discovered**: `rp_vel_settling_cost` (constraints.py:236)
+  penalizes |ω_rp| when |att_err| < 5° — an explicit anti-overshoot mechanism for
+  attitude. No equivalent exists for lin_vel or yaw. This directly explains why
+  attitude tracking is satisfactory while lin/yaw show overshoot.
+- **Smoothness penalty is structurally weak**: Round 2 data showed smoothness
+  contribution = -0.090 per episode with k_s=-0.1 vs mean_reward=151.3 (0.06%).
+  10x increase would still only reach 0.6%. The `da.pow(2).mean()` formula over
+  normalized 8D actions produces intrinsically small values. Not a viable
+  primary lever for overshoot.
+
+Round 3 launched (both at 2026-04-16):
+- **Exp-L1** (`Isaac-FullDOF-Exp-L1-v0`, GPU 0): Enable lin_vel_lin_ratio=0.15 and
+  yaw_vel_lin_ratio=0.15. Run: `exp_l1_ss`. ETA 3.5h.
+- **Exp-Settling** (`Isaac-FullDOF-Exp-Settling-v0`, GPU 1): Add `lin_vel_settling_cost`
+  and `yaw_settling_cost` constraints (budget=0.005, settling_threshold=0.04).
+  Run: `exp_settling_overshoot`. ETA 4.5h.
+- Control: Round 2 PerDimEnt `2026-04-14_18-55-20_perdiment_kl06`. Both new runs
+  keep kl_ub=0.06 and num_envs=2048 to enable direct single-variable comparison.
+
+### Decisions
+- **Adopted PerDimEnt as default** (entropy_coef_per_dim = arm=0.01, thr=0.001
+  now in `RslRlConstraintTRPOAlgorithmCfg`). Round 2 evidence: reward 151.3 vs
+  137.9 baseline, DORAEMON success 0.811 vs 0.775, better noise stability.
+- **Rejected simple weight tuning (k_lin↑, k_yaw↑, k_s↑) alone**. Reason:
+  mathematically, any smooth symmetric f(|e|) has f'(0)=0. Scaling weights does
+  not create gradient at e=0 where SS error lives. The policy has nothing
+  pulling it from e=0.01 to e=0. Weight tuning only matters if combined with
+  structural change.
+- **Chose L1 penalty (ratio=0.15) over sigma reduction for SS error**. L1 gives
+  constant gradient at all error magnitudes, directly attacking the dead zone.
+  Sigma reduction (σ=0.10→0.05) narrows the reward "valley", risks harder initial
+  learning because transit phase gets less signal. L1 is surgical: dominates near
+  zero (at e=0.01: L1 gradient 0.15 > exp gradient 1.0×k_lin) but negligible at
+  moderate errors where exp+quad dominate. The 0.15 value is low enough to avoid
+  the "moderate error dead zone" that caused L1 to be disabled originally.
+- **Chose settling-cost constraints over error-derivative reward for overshoot**.
+  The settling-cost pattern is already validated by `rp_vel_settling_cost` for
+  attitude. Adding the same mechanism for lin_vel and yaw is a proven
+  architectural parallel, not a novel invention. Budget=0.005 is tighter than
+  att's 0.20, reflecting the smaller scale of velocity changes (m/s vs rad/s).
+- **Kept kl_ub=0.06 for Round 3** instead of reverting to 0.04. Reason: direct
+  comparison with Round 2 PerDimEnt control requires kl_ub match. kl_ub effect
+  study is deferred; tracking precision is the current priority.
+
+### Open Questions
+- Does L1 with ratio=0.15 actually avoid the "moderate error dead zone" that
+  caused the original disable? Check SS error + training stability at iter 500-2000.
+- Is budget=0.005 tight enough for settling constraints to enforce <10% overshoot?
+  If settling cost stays at budget 100% of episode, tighter budget (0.002) needed.
+  If rarely active, loosen to 0.01.
+- Do L1 and settling address orthogonal problems? If Round 3 confirms both work,
+  next step is combined config (both L1 and settling). If only one works, that
+  defines the default going forward.
+- kl_ub=0.04 vs 0.06 for PerDimEnt still untested. Deferred to Round 4.
+
+---
+
 ## [2026-04-15] Round 2 Results: Thruster Entropy Reduction is Critical
 
 ### Context
