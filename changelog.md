@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## [2026-04-17] Round 5 Launched: Constraint-Only SS Error Reduction
+## [2026-04-17] Round 5 Evaluated + Round 6 Launched: Shape Calibration
 
 ### Context
 Round 4 concluded that reward-shape tuning (Tanh/Arctan) cannot solve SS error
@@ -21,7 +21,9 @@ on TAM-coupled axes. User constrained Round 5 to: (a) no new reward terms (keep
 6 items), (b) two parallel experiments with single-variable control, (c) must
 analyze constraints in addition to rewards, (d) 4-hour budget on GPU0+GPU1.
 Targets: hard DR roll/pitch SS < 1.25, lin_vel SS < 0.04 (0.03 for none), yaw
-SS < 0.02.
+SS < 0.02. Both R5 runs completed in this session; both failed on primary
+hypothesis but revealed axis-specific opportunities that Round 6 pursues via
+calibrated saturating penalties.
 
 ### Experiments
 - **Constraint activity audit of Round 4 runs** (`Constraint/cost_return_*` vs
@@ -80,17 +82,137 @@ SS < 0.02.
   disabled due to "structurally incompatible with entropy_coef>0, noise alone
   violates 5x"; user deferred this path).
 
-### Open Questions
-- If GPU1 shows rp_vel_settling at 80%+ utilization but attitude SS doesn't
-  improve, it means rp_vel_settling mechanism itself is insufficient (not
-  budget issue) — would need to redesign the constraint function or add
-  integral error in observation.
-- If GPU2's lin_vel_settling activates during transit (not just SS) due to
-  threshold=0.10 being too wide, policy may slow convergence. Verify by
-  checking rise_time vs Control post-training.
-- Yaw OS ~33% across all Round 4 runs (including Control) remains unaddressed.
-  Round 5 yaw_settling may help but primarily targets yaw SS, not OS.
-  Whether DORAEMON yaw +-0.25 step is overly aggressive is unanswered.
+### R5 Results (both failed primary, revealed mechanisms)
+
+- **R5 GPU1 (`r5_rpvel_b008`, iter 5000)**: rp_vel_settling utilization moved
+  30.8% -> 63.3% (cost_return 6.16 -> 5.07 vs d_k 20.0 -> 8.0). Mechanism bound
+  as designed. But eval_dr hard DR showed roll SS 1.68 -> **1.90 (+13%)**,
+  pitch 1.38 -> 1.47 (+7%), roll rise_time +29%. Training reward actually
+  **improved +3.7%** (150.5 vs 145.1), with `Episode_Reward/lin_vel +27%`.
+  Root cause: rp_vel_settling mechanism = "suppress |p|+|q| when near target"
+  -> **over-damped control**. Policy reaches ~5 deg then stops, blocking the
+  last residual correction. This is a structural mismatch with SS reduction
+  (confirmed by rise_time +29% and roll σ ratio 0.94 showing mean shift not
+  distribution widening).
+  Unexpected win: **vy SS 0.059 -> 0.044 (-24%, σ-ratio 0.70)** — real robust
+  improvement. Mechanism: angular stabilization frees horizontal thrust to
+  allocate more precisely to linear motion (TAM indirect effect).
+
+- **R5 GPU2 (`r5_velsettling_th010`, iter 5000)**: **Catastrophic failure**.
+  Eval yaw SS 0.025 -> **0.308 rad/s (+1117%)**, identical pattern to Round 3
+  Settling (0.272-0.337). `Episode_Reward/yaw_vel = -0.002` (policy abandoned
+  yaw tracking). yaw US_env_mean = 40% at all DR levels (other 5 runs all 0%).
+  yaw σ-ratio 5.78x (env spread massive). Round 3 perverse incentive exactly
+  reproduced despite threshold 0.04 -> 0.10 (2.5x) and budget 0.005 -> 0.015
+  (3x) relaxation. Policy reward calculus: reward at yaw_err=0.3 is ~0.01
+  (exp-tail), yaw_settling cost is 0 when err > threshold (gate=0). Abandoning
+  target gives 0 cost vs tracking gives reward ~+1 minus significant cost ->
+  policy chooses abandon. **Threshold/budget relaxation does not fix the binary
+  gate perverse incentive.** lin_vel_settling utilization stayed at 5.5%
+  (binding failed) so vy still improved -17% via the same TAM indirect path
+  as GPU1.
+
+- **5-way hard-DR SS comparison (Control/L1/Tanh/Arctan/R5-GPU1/R5-GPU2 six
+  runs)**:
+  | axis | Control | L1 | Tanh | Arctan | R5-GPU1 | R5-GPU2 |
+  |------|---------|------|------|--------|---------|---------|
+  | roll | 1.68 | 1.91 | 1.53 | **1.42** | 1.90 | 2.00 |
+  | vy   | 0.059 | **0.044** | 0.045 | 0.051 | 0.044 | 0.049 |
+  | yaw  | 0.025 | **0.019** | **0.021** | 0.028 | 0.036 | **0.308** |
+  | pitch| 1.38 | 1.47 | 1.46 | 1.44 | 1.47 | 1.57 |
+  Pattern: Arctan wins roll SS (only winner), L1/Tanh win vy/yaw SS, pitch
+  +5-14% across all six (structural limit at pitch SS ~= 0.24 sigma). No
+  single intervention wins all axes.
+
+- **Observation structure audit** (`mdp/observations.py:40`): `compute_policy_obs`
+  returns only command (6D) + body state (9D) + arm (5D) + thruster (6D) = 26D
+  proprioception. **No error, no integral error, no accumulated bias**. Policy
+  cannot observe SS bias directly; must infer from command and state. Hwangbo
+  2017 (quadrotor) precedent: adding integral error to obs eliminates SS
+  offset. Currently unimplemented — deferred as Round 7+ candidate.
+
+- **Reward dead-zone calibration analysis**: `r(e) = exp(-e^2/2σ^2) - q*e^2`,
+  `dr/de = -e/σ^2 * exp(-e^2/2σ^2) - 2q*e`, both zero at e=0 (att_rp_lin_ratio
+  currently 0). Hard-DR pitch SS 1.38° = 0.24σ; exp gradient there ~63% of
+  peak. Pitch cannot be reduced via shape alone; sigma reduction or integral
+  error required. Roll is similar but Arctan's smooth gradient (e=0 grad =
+  2*coef/pi = 0.19 at coef=0.3) proved sufficient in Round 4 data.
+
+### R5 Decisions
+- **Settling-constraint approach declared a structural dead end**. Round 3 +
+  R5 GPU1 + R5 GPU2 = three attempts, all failed. rp_vel_settling over-damps;
+  lin/yaw_settling trigger perverse incentives. Binary gate `(err < thr)*|dv|`
+  is not fixable via parameter tuning. Future work must abandon the settling-
+  cost pattern, not iterate on it.
+- **Per-env std added to `enhanced_summary.json`** (session code change):
+  `os_env_std`, `us_env_std`, `rise_time_std`, `ss_error_std`, `ss_jitter_std`,
+  and mirrored fields on `att_norm`. Aggregation = std-across-envs per segment,
+  averaged across segments (parallel to existing mean). Backward-compatible
+  (mean fields unchanged). Reading σ-ratio clarifies judgments: R5-GPU1 vy
+  σ-ratio 0.70 confirms robust improvement; R5-GPU2 yaw σ-ratio 5.78 confirms
+  catastrophic regression has concentrated worst-case behavior.
+- **Kept rp_vel_settling in Round 6** (user decision). Its over-damping
+  contribution suspected (Control's 33% utilization is non-trivial) but
+  keeping it preserves single-variable control vs Control baseline. Future
+  Round 7 candidate: remove rp_vel_settling once Round 6 shape is validated.
+
+### Round 6 Launched: Axis-Specific Shape Calibration
+- **Design rationale**: Round 4 Tanh/Arctan used coef=1.0, giving e=0 gradient
+  1.0/0.637 — **6.7x / 4.2x stronger than L1's 0.15**, causing vy reward -40%
+  and OS +40%. Round 6 recalibrates to coef=0.3 (Arctan e=0 grad=0.191, Tanh
+  0.3), near L1 region. Based on Round 4 5-way evidence, applied axis-
+  specifically: Arctan on attitude (because Arctan was the only roll SS
+  winner) and Tanh on velocity (because Tanh/L1 were vy/yaw SS winners).
+- **GPU0 (`Isaac-FullDOF-R6-AttArctan-v0`, run `r6_attarctan_c03`, wandb
+  xtjmnwbk)**: `att_rp_arctan_coef=0.3`, eps=0.10 (=att_rp_sigma). New fields
+  `att_rp_arctan_coef/eps` and `att_rp_tanh_coef/eps` added to `ALBCRewardCfg`
+  (user-approved: saturating shape is a parameter of the existing att_rp
+  penalty, not a new reward term). `att_rp_tracking` function updated to apply
+  them (mirrors existing lin_vel_tracking/yaw_vel_tracking structure).
+  Target: roll SS < 1.40, pitch SS < 1.30, vy/yaw SS ±5% of Control.
+- **GPU1 (`Isaac-FullDOF-R6-VelTanh-v0`, run `r6_veltanh_c03`, wandb
+  txroyh8u)**: `lin_vel_tanh_coef=0.3`, `yaw_vel_tanh_coef=0.3`, eps=0.10.
+  Uses existing fields only. Target: vy SS < 0.045, yaw SS < 0.022, OS within
+  +15-20% (vs Round 4 Tanh coef=1.0's +40%). Attitude untouched.
+- **Both runs**: 10 constraints identical to Control (rp_vel_settling retained
+  per user decision), per-dim entropy (arm=0.01, thr=0.001), kl_ub=0.06,
+  num_envs=2048, max_iter=5000, seed=30. Clean single-variable diff each.
+
+### Round 6 Decisions
+- **Recalibrated coef=0.3 instead of re-running Round 4 coefs**. Round 4
+  coef=1.0 failure was magnitude, not shape. L1's grad=0.15 worked without
+  reward destruction; coef=0.3 (arctan grad 0.19, tanh grad 0.3) sits in that
+  region. Rejected coef=0.2 (more conservative, too small gap from L1 to be
+  informative) and coef=0.5 (closer to Round 4's failure mode).
+- **Axis-specific shape (Arctan att, Tanh vel), not uniform**. Round 4 applied
+  single shape to lin+yaw and skipped attitude entirely. 5-way data shows each
+  axis has its own winning shape — pitch in particular has never been
+  attacked via shape. Applying the 5-way-discovered optimal shape per axis
+  is the natural next step.
+- **Rejected alternatives**: (a) integral error in obs (Hwangbo 2017 pattern)
+  — would change obs dim 26D->32D, full retrain required, 4h budget
+  insufficient to characterize; deferred to Round 7 if Round 6 attitude shape
+  fails to resolve pitch SS. (b) sigma reduction (0.10->0.05) — narrows reward
+  valley, risks slower transit learning; also deferred. (c) CAPS action-rate
+  penalty — addresses overshoot not SS, not the priority metric.
+
+### Open Questions (updated after R5, pre-R6 results)
+- Does calibrated coef=0.3 shape on attitude actually reduce roll/pitch SS,
+  or does the pitch structural ceiling (pitch SS ~0.24 sigma = 63% of exp
+  gradient peak) persist regardless of shape? Round 6 GPU0 result will
+  answer.
+- Does Tanh at coef=0.3 preserve Round 4's vy SS -22% win while avoiding the
+  OS +40% penalty? Round 6 GPU1 will answer. The 1/3-magnitude hypothesis is
+  testable directly against Round 4 Tanh-coef-1.0 baseline.
+- rp_vel_settling's over-damping contribution remains uncharacterized. If
+  Round 6 succeeds, Round 7 candidate: rp_vel_settling removed (budget 0.20
+  -> null) to measure its standalone impact on SS vs OS.
+- Integral error in observation: unimplemented, deferred, remains the highest-
+  leverage untested intervention for pitch ceiling.
+- Yaw OS ~33% in Control and most runs (R5-GPU2 is 16% only because policy
+  abandons yaw entirely) remains unaddressed. Root cause is aggressive yaw
+  command ±0.25 rad/s from DORAEMON; whether to tame at the DR level is still
+  open.
 
 ---
 
