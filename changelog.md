@@ -13,6 +13,186 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-17] Round 5 Launched: Constraint-Only SS Error Reduction
+
+### Context
+Round 4 concluded that reward-shape tuning (Tanh/Arctan) cannot solve SS error
+on TAM-coupled axes. User constrained Round 5 to: (a) no new reward terms (keep
+6 items), (b) two parallel experiments with single-variable control, (c) must
+analyze constraints in addition to rewards, (d) 4-hour budget on GPU0+GPU1.
+Targets: hard DR roll/pitch SS < 1.25, lin_vel SS < 0.04 (0.03 for none), yaw
+SS < 0.02.
+
+### Experiments
+- **Constraint activity audit of Round 4 runs** (`Constraint/cost_return_*` vs
+  `Constraint/d_k_*` TB tags): rp_vel_settling cost_return 6.0-6.6 vs budget
+  episode-sum 20.0 = **33% utilization** on all 4 runs. Budget is slack, not
+  binding. lin_vel_settling and yaw_settling coded in `constraints.py` but NOT
+  registered in `_FULL_DOF_CONSTRAINT_TERMS` (default), so Round 4 ran with
+  only 10 constraints. `thruster_util` is the only constraint near saturation
+  (94% of budget).
+- **TAM coupling quantified via Round 4 4-way comparison** (hard DR):
+  L1 (far-field yaw penalty grad 0.15): yaw SS 0.019 BEST, roll SS 1.91 WORST.
+  Arctan (far-field yaw penalty grad -> 0): yaw SS 0.028 WORST, roll SS 1.42
+  BEST. Physical mechanism: horizontal thrusters share yaw moment and lateral
+  force; strong yaw penalty -> aggressive differential horizontal thrust ->
+  thrust-vector offset from CoM -> roll/pitch disturbance via TAM Mx row
+  (0.007, 0.007, -0.007, -0.007, 0, 0). Data supports the coupling.
+- **Tanh/Arctan coef mismatch documented**: tanh_coef=1.0 gives gradient 1.0 at
+  e=0 (vs L1's 0.15) = 6.7x stronger small-error pressure. Arctan_coef=1.0
+  gives 0.637 = 4.2x. Round 4 was NOT a controlled shape comparison; it mixed
+  shape effect with magnitude effect. Any future tanh/arctan re-run requires
+  coef calibration (~0.2) to L1's gradient at 0.
+- **L1 baseline rejected for Round 5**: L1 hard DR SS is roll 1.91/pitch 1.47
+  = WORST attitude SS across 4 runs (vs Control 1.68/1.38). L1's velocity SS
+  wins (vy 0.043, yaw 0.019) but attitude target gap would be 35% from L1 vs
+  26% from Control. Switched to Control baseline for cleaner experiment.
+
+### Decisions
+- **Chose Control as Round 5 baseline, not L1.** Rationale: (1) smaller gap to
+  attitude target (Control roll 1.68 vs L1 1.91), (2) pure exp+quad reward =
+  no reward engineering in baseline = constraint effect can be isolated, (3)
+  consistent baseline for both GPU1 and GPU2 enables direct cross-comparison.
+- **Two orthogonal constraint interventions, Control reward unchanged on both:**
+  - GPU1 (`Isaac-FullDOF-R5-RpVel-v0`, run `r5_rpvel_b008`): tighten
+    `rp_vel_settling.budget` 0.20 -> 0.08 to move from 33% to ~80% utilization.
+    Targets attitude SS.
+  - GPU2 (`Isaac-FullDOF-R5-VelSettling-v0`, run `r5_velsettling_th010`):
+    activate `lin_vel_settling` + `yaw_settling` constraints (12 total).
+    Targets velocity SS.
+  Both use per-dim entropy (arm=0.01, thr=0.001) matching Control run
+  `2026-04-14_18-55-20_perdiment_kl06`.
+- **Chose settling_threshold = reward_sigma = 0.10 (not 0.04 original)** for
+  lin_vel/yaw settling. Rationale: original 0.04 m/s is below Control's hard
+  DR SS (0.06-0.07), creating chicken-egg problem (constraint can't activate
+  until policy already meets target, but constraint is what drives policy to
+  target). Matching threshold to reward sigma follows rp_vel_settling's existing
+  design pattern (threshold 0.087 ~= att_sigma 0.1 rad). User initially
+  challenged a different threshold rationale (I had circularly used policy's
+  current SS state as basis). Corrected to principled sigma-match basis.
+- **Budget 0.015 (3x original 0.005) for lin/yaw settling.** Active region is
+  2.5x larger with threshold 0.10, so loosen budget proportionally. Can
+  tighten in Round 6 if too slack.
+- **Rejected: (a)** adding EMA bias / integral error reward (user: no new
+  reward terms); **(b)** re-running Tanh/Arctan with calibrated coefs
+  (diminishing returns given TAM coupling limit demonstrated in Round 4);
+  **(c)** CAPS action-rate penalty (thruster_rate constraint exists but was
+  disabled due to "structurally incompatible with entropy_coef>0, noise alone
+  violates 5x"; user deferred this path).
+
+### Open Questions
+- If GPU1 shows rp_vel_settling at 80%+ utilization but attitude SS doesn't
+  improve, it means rp_vel_settling mechanism itself is insufficient (not
+  budget issue) — would need to redesign the constraint function or add
+  integral error in observation.
+- If GPU2's lin_vel_settling activates during transit (not just SS) due to
+  threshold=0.10 being too wide, policy may slow convergence. Verify by
+  checking rise_time vs Control post-training.
+- Yaw OS ~33% across all Round 4 runs (including Control) remains unaddressed.
+  Round 5 yaw_settling may help but primarily targets yaw SS, not OS.
+  Whether DORAEMON yaw +-0.25 step is overly aggressive is unanswered.
+
+---
+
+## [2026-04-16] Round 4 Completed + Enhanced Per-Env OS Metric
+
+### Context
+Round 4 (Tanh/Arctan saturating penalties) completed after overnight training.
+Deep analysis of eval_dr_fulldof results revealed that the stock `OS %` metric
+is computed on the ensemble-averaged trajectory peak, which under-reports real
+policy behavior when 64 envs' peak timings differ (envelope smoothing) and
+silently drops undershoot (target-miss) cases. Recomputed per-env OS
+distribution from existing NPZs reverses several prior conclusions.
+
+### Experiments
+- **Round 4 completed**: Tanh (`2026-04-16_16-32-12_exp_tanh_ss`) and Arctan
+  (`2026-04-16_16-32-44_exp_arctan_ss`) both trained to iter 5000 with kl_ub=0.06,
+  num_envs=2048, seed=30 (matching Round 2 PerDimEnt control). Both completed
+  cleanly; training reward Tanh=134, Arctan=145 vs Control=151.
+- **Deep analysis A (trajectory overlay, 4-way)**: Tanh vy +0.25 step shows
+  persistent SS drift (median 0.280 vs target 0.250, +12% above target during
+  SS). Tanh vy reversal (-0.25 target) undershoots (peak -0.218 vs target
+  -0.250, -12.9% miss). Arctan vy trajectory matches Control.
+- **Deep analysis C (reward breakdown, TB Episode_Reward/*)**: Tanh total reward
+  4.256 (Control 4.854 = 88%), decomposed as lin_vel -41%, yaw_vel -27%,
+  att_rp neutral. Arctan total 4.690 (97%) with only lin_vel -40% hit.
+  Saturating penalty erodes exp-kernel reward magnitude without improving SS.
+- **Deep analysis D (per-env distribution, hard DR vy+0.25)**: Tanh 29/64 envs
+  (45%) above +20% OS vs Control 16/64 (25%). Tanh's overshoot is
+  distribution-wide, not outlier-driven.
+- **Deep analysis E (thruster usage, TB Action/*)**: Tanh thruster_norm 1.113
+  (+2.7% vs Control), thruster_rate 1.287 (+4.0%). Arctan 1.017 (-6.2%) and
+  1.146 (-7.4%) with util_margin +31% vs Control. Quantitative confirmation
+  that Tanh learns an aggressive controller and Arctan learns a smooth one.
+- **Deep analysis F (DORAEMON state)**: All 4 runs converged to
+  DORAEMON/entropy_after = -17.808 with identical step trajectory. Tanh's low
+  reward is NOT due to harder DR curriculum — DR learning is identical
+  across runs, difference is entirely from penalty shape.
+
+- **Methodology audit of eval_dr_fulldof stock metric**: Stock `OS %` uses
+  `mean(actual, axis=envs)` then takes peak. Overshoot clamped to >=0, so
+  undershoot (reversal lag) silently recorded as 0%. Discrepancy example:
+  Tanh vy OS_hard stock=20.6% vs per-env mean=22.7% vs per-env median=22.9%.
+  Per-env metric also exposes undershoot via `-(peak - target)/step_mag` when
+  negative.
+- **Recomputed per-env OS (hard DR) on all 4 runs** from existing NPZ files:
+
+  | Axis  | Control | Exp-L1 | Tanh   | Arctan |
+  |-------|---------|--------|--------|--------|
+  | roll  | 13.7    | 13.9   | 13.6   | 17.1   |
+  | pitch | 9.7     | 12.8   | 9.9    | 9.3    |
+  | vx    | 20.0    | 22.5   | 19.3   | 19.9   |
+  | vy    | 16.2    | 22.8   | 22.7   | 16.7   |
+  | vz    | 20.0    | 18.6   | 16.6   | 17.3   |
+  | yaw   | 33.4    | 41.5   | 37.8   | 42.0   |
+
+### Decisions
+- **Added `scripts/analysis/recompute_eval_summary.py`**. Reads eval_*.npz,
+  produces `enhanced_summary.json` with per-axis stats: OS_env_mean, _median,
+  _q90, US_env_mean (target-miss magnitude), n_gt20, n_gt40, n_us_lt_minus20.
+  No changes to `eval_dr_fulldof.py` itself (backward compat preserved). Future
+  eval runs can call this script as a post-processing step.
+- **Retracted "Tanh failed / Arctan succeeded" framing from earlier in this
+  session.** Enhanced metric shows neither reached Primary Success:
+  - Tanh: vy OS +40% vs Control (real degradation) but vx/vz neutral-or-better,
+    yaw neutral. Net: "vy-specific degradation", NOT across-the-board failure.
+  - Arctan: roll OS 17.1% (+25% vs Control 13.7%, the worst across runs on
+    roll) and yaw OS +26% vs Control. vy/vx match Control, vz better. Net:
+    "roll-and-yaw degradation with vy/vz benefit". NOT "smooth winner" as
+    stock `AttSS` summary suggested.
+  - Exp-L1: across-the-board degradation (vy +41%, yaw +24%, pitch +32%)
+    confirmed, consistent with earlier conclusion.
+- **Retracted "Arctan thruster-smoother = better controller"**: thruster_norm
+  -6.2% is real but does not translate to lower OS on all axes (roll 17.1% is
+  the largest across runs). "Smooth" is axis-specific.
+- **Confirmed: saturating penalty erodes lin_vel reward without SS benefit**.
+  Tanh/Arctan both lose ~40% lin_vel episode reward (penalty cuts into exp
+  kernel) yet SS error is unchanged (Tanh vy_SS=0.043 vs Control 0.055;
+  within measurement noise).
+- **Confirmed: TAM coupling dominates penalty shape**. vz (independent
+  vertical thruster) improves on both Tanh and Arctan (-17% and -13% OS vs
+  Control). vx/vy/yaw (shared horizontal thrusters) show mixed or degraded
+  results. Conclusion: reward-penalty tuning is ineffective for TAM-coupled
+  axes; next Round must target action-rate (CAPS) or integral-error
+  observation (Hwangbo 2017) instead.
+
+### Open Questions
+- Does eval_dr_fulldof.py `compute_metrics` need to be patched in-place to
+  emit enhanced metrics directly? (Current: separate script only; future
+  runs require manual post-processing call.) Deferred pending decision on
+  whether to also move away from mean-trajectory convention entirely or
+  keep both.
+- Round 5 design: Arctan coef sweep (0.3/0.5) vs CAPS action-rate penalty
+  vs integral-error-in-obs. Trajectory overlay + per-env evidence suggests
+  **CAPS is highest-leverage** because vy reversal lag (Tanh -12.9%) is an
+  action-dynamics issue (thruster commands ramp too slowly vs target sign
+  flip), not a reward-shape issue. Deferred to next session.
+- Whether to treat "yaw overshoot ~40% across all runs" as a DORAEMON
+  scenario artifact (yaw ±0.25 step is aggressive) or a real problem
+  needing intervention. Baseline Control is 33% — not small either.
+
+---
+
 ## [2026-04-16] Round 3: Structural Fixes for SS Error and Overshoot
 
 ### Context
