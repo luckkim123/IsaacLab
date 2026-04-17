@@ -13,6 +13,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-18] R7 Evaluated + R8 Designed: Integral Observation Validated, Overshoot Next
+
+### Context
+R7 experiments completed overnight (EpsSmooth on GPU0, Integral on GPU1). Both
+aimed to improve SS error from R6-VelTanh baseline. This session analyzed both
+R7 runs with eval_dr, performed deep overshoot analysis on R7-Integral, and
+designed/launched Round 8 experiments targeting overshoot reduction.
+
+### Experiments
+- **R7-EpsSmooth** (run `2026-04-17_22-37-26_r7_epssmooth`, model_4999.pt):
+  **FAILED.** Wider eps=0.20 improved roll SS (0.87 vs 1.05 deg, -17%) and roll OS
+  (9.7% vs 15.8%) but degraded pitch SS (+90% at hard DR), yaw SS (3x worse:
+  0.031 vs 0.011 rad/s), and vx OS (+34%). Root cause: wider eps weakens ALL
+  velocity gradient indiscriminately, not just the coupled component. Entropy
+  collapsed further (-1.66 vs -0.50). Reward 137 vs R6's 147.
+
+- **R7-Integral** (run `2026-04-17_22-41-51_r7_integral`, model_4999.pt):
+  **SUCCESS for SS error.** All integral-covered channels showed 50-67% SS
+  reduction (Cohen's d = -0.84 to -1.70, all large effect size):
+  - att_norm SS: none=0.49 vs 1.37 deg (-64%), hard=0.98 vs 2.40 deg (-59%)
+  - vy SS: 0.016 vs 0.037 m/s (-56%)
+  - yaw SS worsened (+94%) because integral was not applied to yaw channel
+  - Reward 227 vs R6's 147 (+54%), DORAEMON success 98.6%, smoothness -0.073
+  
+  **Overshoot increased** as predicted by PI control theory:
+  - Roll OS: 22.2% vs 15.8% (+41%), Pitch OS: 19.7% vs 11.0% (+80%)
+  - Yaw OS: 32.5% vs 46.9% (-31%, improved indirectly)
+
+- **Overshoot root cause analysis** (per-segment trajectory + integral windup):
+  Integral windup is NOT the primary cause (WINDUP vs BRAKE cases show identical
+  OS: 18.9% vs 19.5%, |I|↔OS correlation r=-0.37). True cause: policy learned a
+  "slow start + integral-driven push" pattern -- initial response 0.82x slower than
+  R6 but peak 0.3s later. OS is DR-invariant (18.8-21.6% across all DR levels),
+  confirming it's learned behavior, not DR sensitivity.
+
+### Decisions
+- **R7-EpsSmooth approach abandoned.** Wider eps is a blunt instrument that
+  degrades channels indiscriminately. Structural approaches (integral obs) are
+  strictly superior for SS error reduction.
+
+- **R7-Integral validated as new baseline.** 50-67% SS reduction with large
+  effect sizes across all DR levels. Remaining issue (overshoot) is a known,
+  addressable PI control trade-off.
+
+- **R8 baseline = 6D integral** (roll, pitch, vx, vy, vz, yaw_rate). Extended
+  from R7's 3D to cover all tracking channels. Yaw SS worsened in R7 precisely
+  because it lacked integral; 6D should fix this.
+
+- **R8 overshoot experiments**: Two orthogonal approaches:
+  1. Error-gated conditional integration (only accumulate when |err| < reward sigma).
+     Simulation shows ~9x reduction in integral at target crossing.
+  2. Faster leak rate (0.95 vs 0.99, tau 2.0s→0.39s). Simpler change, trades
+     some SS improvement for reduced windup.
+
+- **No additional findings from prior experiments worth adding.** Reviewed all
+  rounds: tanh velocity penalty and PerDimEnt already in R7-Integral; att_rp
+  experiments (Arctan, L1, Settling) all superseded by integral's 60%+ SS reduction.
+
+### Open Questions
+- Will 6D integral fix yaw SS (currently +94% worse without integral)?
+- Error-gated vs fast-leak: which gives better OS/SS trade-off?
+- If both R8 experiments reduce OS but increase SS, what's the optimal leak/gate?
+- Integral windup was ruled out as primary OS cause; can overshoot be further
+  reduced via reward structure (smoothness penalty was ineffective in R7-EpsSmooth)?
+
+---
+
 ## [2026-04-17] Round 5 Evaluated + Round 6 Launched: Shape Calibration
 
 ### Context
