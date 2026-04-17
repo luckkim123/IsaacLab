@@ -196,23 +196,77 @@ calibrated saturating penalties.
   valley, risks slower transit learning; also deferred. (c) CAPS action-rate
   penalty — addresses overshoot not SS, not the priority metric.
 
-### Open Questions (updated after R5, pre-R6 results)
-- Does calibrated coef=0.3 shape on attitude actually reduce roll/pitch SS,
-  or does the pitch structural ceiling (pitch SS ~0.24 sigma = 63% of exp
-  gradient peak) persist regardless of shape? Round 6 GPU0 result will
-  answer.
-- Does Tanh at coef=0.3 preserve Round 4's vy SS -22% win while avoiding the
-  OS +40% penalty? Round 6 GPU1 will answer. The 1/3-magnitude hypothesis is
-  testable directly against Round 4 Tanh-coef-1.0 baseline.
-- rp_vel_settling's over-damping contribution remains uncharacterized. If
-  Round 6 succeeds, Round 7 candidate: rp_vel_settling removed (budget 0.20
-  -> null) to measure its standalone impact on SS vs OS.
-- Integral error in observation: unimplemented, deferred, remains the highest-
-  leverage untested intervention for pitch ceiling.
-- Yaw OS ~33% in Control and most runs (R5-GPU2 is 16% only because policy
-  abandons yaw entirely) remains unaddressed. Root cause is aggressive yaw
-  command ±0.25 rad/s from DORAEMON; whether to tame at the DR level is still
-  open.
+### R6 Results: VelTanh Achieves 4/4 Targets at none-DR
+
+- **R6-AttArctan (GPU0, `r6_attarctan_c03`)**: Pitch SS catastrophically worsened
+  (1.33 vs Control 0.82, **+62%**, Cohen's d=+1.05 large effect). Pitch OS doubled
+  (18.82 vs 9.37 deg, systematic: std=4.67 low variance). Velocity unexpectedly
+  improved (vy -31%, yaw -36%). Attitude penalty on attitude **backfired** via
+  overcorrection -> velocity oscillation -> pitch settling degradation.
+
+- **R6-VelTanh (GPU1, `r6_veltanh_c03`)**: **First run to pass all 4 SS targets
+  at none-DR** (roll 1.05, pitch 0.69, vy 0.037, yaw 0.011). L1 is the only other
+  4/4 run. Cohen's d analysis: yaw improvement is large (d=-0.98), others are
+  small effects (d~0.3). Roll is marginal (1.05 vs target 1.25, fails at medium DR
+  1.29). Cross-axis coupling beneficial: velocity penalty helped pitch SS (-16%).
+
+- **Noise collapse hypothesis tested and rejected.** Extracted per-dim NoiseStd at
+  milestones for all 6 completed runs. Control (PerDimEnt) maintained arm noise
+  at 0.179-0.191 (well above 0.10 floor) for full 4000+ iterations, yet roll still
+  worsened (10.42->14.12 deg) and reward declined (201->165). All L1/Tanh/Arctan
+  runs had similar noise profiles. Noise preservation is necessary but NOT sufficient
+  for SS reduction; reward shape and observation structure are the binding constraints.
+
+- **Per-segment trajectory analysis of VelTanh** revealed critical pattern: roll SS
+  is **better at target=0** (dSS -0.20 to -0.61) but **worse at target=+-15 deg**
+  (dSS +0.09 to +0.71). Physical mechanism: at off-equilibrium attitude, buoyancy
+  torque creates velocity coupling; tanh velocity penalty suppresses the coupled
+  velocity response, making policy hesitant to hold non-zero roll. Pitch is immune
+  because pitch actuation is 20x stronger (TAM: 0.145m vs 0.007m).
+
+### R7 Launched: Two Refinements of VelTanh Baseline
+
+- **GPU0 (`Isaac-FullDOF-R7-EpsSmooth-v0`, run `r7_epssmooth`)**: Config-only change.
+  `tanh_eps` 0.10->0.20 (wider saturation = weaker penalty at moderate errors in
+  off-equilibrium zone) + `k_s` -0.1->-0.2 (doubled smoothness penalty for OS
+  reduction). Target: roll medium DR 1.29 -> <1.25, attitude OS ~16 -> ~12 deg.
+
+- **GPU1 (`Isaac-FullDOF-R7-Integral-v0`, run `r7_integral`)**: Integral error obs
+  (Hwangbo 2017). Added 3D leaky integrator (leak=0.99, clamp=+-2.0) for
+  [roll_err, pitch_err, vy_err] to policy observation (81D -> 84D). Provides PI-like
+  cumulative error signal that distinguishes "just arrived" from "stuck at 1 deg
+  offset for 100 steps". Reward = R6-VelTanh (tanh c=0.3). Fresh training (new
+  obs dim = no checkpoint compatibility). Two launch failures fixed: (1) 84D noise
+  model vs 81D vectors (extended with zeros for integral dims), (2) `_R7IntegralPolicyCfg`
+  inherited from `_EncoderPolicyCfg` (missing `class_name`), fixed to inherit from
+  `_FullDOFPolicyCfg`.
+
+### R7 Decisions
+- **VelTanh chosen as R7 baseline, not AttArctan.** VelTanh achieved 4/4 none-DR
+  targets; AttArctan's pitch degradation (d=+1.05) is disqualifying. L1 also passed
+  4/4 but with weaker yaw improvement (d=-0.04 vs VelTanh's d=-0.98).
+- **Two orthogonal R7 experiments: parameter tuning vs observation structure.**
+  GPU0 (eps+smooth) tests whether VelTanh's roll weakness at medium DR is fixable
+  via parameter calibration alone. GPU1 (integral) tests the Hwangbo 2017 structural
+  hypothesis — if integral obs drives SS to zero, it supersedes all shape tuning.
+- **Rejected: (a)** attitude-dependent velocity penalty gating (complex, gradient
+  discontinuity risk); **(b)** angular rate constraint tightening (rp_rate budget
+  10.0->3.0, would hurt rise time at hard DR); **(c)** reference trajectory shaping
+  (step->sigmoid, too large a paradigm change for one round).
+
+### Open Questions (updated after R6, pre-R7 results)
+- Does wider tanh_eps (0.20) fix the off-equilibrium roll penalty by pushing
+  moderate velocity errors into the saturation regime? Per-segment analysis shows
+  errors of 0.1-0.2 m/s at target=+-15 deg; eps=0.20 means tanh(e/eps) saturates
+  at e~0.3 m/s instead of e~0.15 m/s.
+- Does integral error obs provide enough signal for the policy to eliminate SS
+  without explicit reward-shape tuning? If R7-Integral succeeds, all prior
+  L1/Tanh/Arctan shape work may be unnecessary.
+- Overshoot (roll ~16 deg, yaw ~47 deg at none-DR) remains unaddressed except
+  via k_s increase in R7-GPU0. If k_s=-0.2 is insufficient, more aggressive
+  approaches (CAPS, action-rate constraint) may be needed.
+- At medium+ DR, roll SS exceeds target (1.29 at medium). Is this a policy
+  capacity limit, or can observation/reward changes overcome it?
 
 ---
 
