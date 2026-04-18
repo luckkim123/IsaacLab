@@ -11,8 +11,40 @@ Active changelog: [/workspace/isaaclab/changelog.md](/workspace/isaaclab/changel
 
 | File | Period | Description |
 |------|--------|-------------|
+| [changelog_full_albc_early.md](changelog_full_albc_early.md) | 2026-03-31 ~ 2026-04-02 | Full ALBC initial development (DORAEMON, wrench-space, logging) |
 | [changelog_constrained_albc.md](changelog_constrained_albc.md) | 2026-03-27 ~ 2026-03-31 | Constrained ALBC redesign Steps 1-8 |
 | [changelog_legacy.md](changelog_legacy.md) | 2026-03-05 ~ 2026-03-26 | Initial development Phase 1-8 (85+ commits) |
+
+---
+
+## experiments/
+
+Experiment records, ablation studies, root cause analyses.
+
+### Full ALBC Experiment Rounds (2026-04-04 ~ 2026-04-18)
+
+8 rounds of systematic experiments, from entropy management to error-gated integration.
+각 문서는 hypothesis, setup, results, analysis, conclusions 구조로 정리.
+
+| File | Period | Summary |
+|------|--------|---------|
+| [pre_round_infrastructure.md](experiments/pre_round_infrastructure.md) | 04-04 ~ 04-13 | DORAEMON 안정화, eval 도구, entropy 조사, ablation baseline, reward/constraint 확정 |
+| [round1_noise_comparison.md](experiments/round1_noise_comparison.md) | 04-14 | Per-dim noise 3-run 비교. PerDimEnt (arm=0.01, thr=0.001) 최초 검증 |
+| [round2_perdiment_validation.md](experiments/round2_perdiment_validation.md) | 04-14 ~ 04-15 | PerDimEnt harder DR 검증. Thr entropy reduction이 핵심 확인 |
+| [round3_ss_structural.md](experiments/round3_ss_structural.md) | 04-16 | L1 + Settling. L1 SS/OS tradeoff, Settling catastrophic failure |
+| [round4_saturating_penalty.md](experiments/round4_saturating_penalty.md) | 04-16 | Tanh/Arctan. Per-env OS metric 도입, TAM coupling 한계 확인 |
+| [round5_constraint_tuning.md](experiments/round5_constraint_tuning.md) | 04-17 | Constraint budget + settling. Settling dead end 최종 선언 |
+| [round6_axis_calibration.md](experiments/round6_axis_calibration.md) | 04-17 | Axis-specific shape. VelTanh c=0.3이 4/4 none-DR target 달성 |
+| [round7_integral_obs.md](experiments/round7_integral_obs.md) | 04-17 ~ 04-18 | Integral obs (Hwangbo 2017). 50-67% SS 감소, reward shape 초월 |
+| [round8_gated_integral.md](experiments/round8_gated_integral.md) | 04-18 | **Error-gated integration. SS+OS 동시 개선. BEST POLICY** |
+
+### Other Experiments
+
+| File | Description |
+|------|-------------|
+| [encoder_ablation.md](experiments/encoder_ablation.md) | Encoder integration ablation study (Steps 0-19, 20+ experiments) |
+| [arm_freeze_analysis.md](experiments/arm_freeze_analysis.md) | Arm freeze root cause analysis (tanh saturation, H1-H6 hypotheses) |
+| [dr_training_survey.md](experiments/dr_training_survey.md) | DR training strategies 문헌 조사 (ADR, curriculum, contrastive) |
 
 ---
 
@@ -41,18 +73,6 @@ Simulation environment, physics, domain randomization 문서.
 | [physics_environment.md](environment/physics_environment.md) | PhysX 안정성 (effort_limit, max_velocity, damping, added mass) |
 | [domain_randomization.md](environment/domain_randomization.md) | DR 구현 (12 categories, 35+ parameters, curriculum) |
 | [sim_to_real.md](environment/sim_to_real.md) | Sim-to-real gap 분석 (actuator, sensor, hydrodynamics) |
-
----
-
-## experiments/
-
-Ablation study, root cause analysis, experiment survey 문서.
-
-| File | Description |
-|------|-------------|
-| [encoder_ablation.md](experiments/encoder_ablation.md) | Encoder integration ablation study (Steps 0-19, 20+ experiments) |
-| [arm_freeze_analysis.md](experiments/arm_freeze_analysis.md) | Arm freeze root cause analysis (tanh saturation, H1-H6 hypotheses) |
-| [dr_training_survey.md](experiments/dr_training_survey.md) | DR training strategies 문헌 조사 (ADR, curriculum, contrastive) |
 
 ---
 
