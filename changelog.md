@@ -22,6 +22,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-19] R9 Partial Results + R10 Queued
+
+### Context
+
+First two R9 runs finished (baseline, symatt). Evaluated both with `eval_dr_fulldof.py`, migrated logs/wandb to `/workspace/isaaclab/logs/rsl_rl/fulldof_albc/`, and designed two R10 experiments that auto-chain after r9_tightrates (GPU0) and r9_normval (GPU1) complete. r9_tightrates and r9_normval still running.
+
+### Experiments
+
+**r9_baseline** (`2026-04-18_21-27-44_r9_baseline`, iter 5000) — control, same config as R8-Gated:
+- hard DR: roll SS=1.090 (+28% vs r8_gated 0.855), pitch SS=0.320 (=), vz SS=0.026 (-35%), vy SS=0.015, yaw SS=0.004 (+135%), OS 14.1% / 21.2%.
+- Survival 100% all DR levels. Reward decayed 267 (iter 1000 peak) -> 216 (iter 5000), -19%.
+- Seed variance bound: roll SS 0.855 -> 1.090 on identical config = ~30% run-to-run spread. Any R10 delta must beat ~30% to be real signal.
+
+**r9_symatt** (`2026-04-18_21-43-13_r9_symatt`, iter 5000) — att_roll_weight 1.5 -> 1.0:
+- vs r9_baseline: roll **jitter -33%**, roll SS -3%, roll OS -21%, vy SS +44% (roll-sway coupling regression), vz SS slightly worse but vz Jit -56%, yaw OS 21.2 -> 18.9%.
+- Barrier↔reward first-differenced correlation 0.72 (was 0.35 in baseline) — softer reward makes constraint the dominant gradient.
+- **Finding: reward weight controls oscillation amplitude (jitter), not SS floor.** Symmetric weighting eliminates the 1.5x competing signal without resolving the 20x TAM authority gap.
+
+**Evidence gathered for R10 design (from TB metrics + plots):**
+- `DORAEMON/success_rate` saturated at 0.98+ from iter 500 onward (`perf_lb=90` trivially met because mean return 200-280 >> 90). DR Beta advances at full speed throughout training. Late-training reward decline is DR difficulty outpacing policy adaptation.
+- `Constraint/margin/rp_rate=9.17`, `rp_vel_settling=11.58` — both far from budget, **constraints not binding at current oscillation levels**. Implication: r9_tightrates effect may be limited to transients, not SS.
+- Per-env CV(SS_error) at hard DR: roll 169%, pitch 196%, yaw 285% (vs 77-78% at no-DR). n>40% catastrophes appear **only** at hard DR (roll 2%, vy 2.8%). Points to DORAEMON-saturation driven tail under-coverage, not general brittleness.
+- Reward gradient analysis at err=1°: with σ=0.10 rad (5.73°), a 1° roll error costs only 1.54% reward loss. Small-error region is effectively flat — explains why symatt moved jitter but not SS.
+- Entropy collapsed to -0.87 by iter 5000, noise at min_std floor. Thruster min_std=0.05 = 2.5N per-thruster random thrust -> ~0.035 Nm RMS roll torque via 0.007m arm, non-trivial forcing for the weak roll axis.
+
+### Decisions
+
+- **r10_perflb_high** (`config.py:378`, `performance_lb 90 -> 180`) because DORAEMON success saturated at 0.98+ from iter 500 and late reward drops -19% -- current perf_lb gates nothing, policy pushed into hard DR before mid-DR mastery. Prediction: success falls to 0.6-0.8 mid-training, n>40% < 0.5%, reward plateau sustained.
+- **r10_thr_minstd** (`rsl_rl_ppo_cfg.py:213`, thruster floor 0.05 -> 0.03, arm 0.10 kept) because entropy has collapsed by iter 5000 so the thruster floor operates during all SS behavior, injecting ~0.035 Nm random roll torque forcing. 40% forcing RMS reduction predicted -> roll jitter -30%, SS -15%.
+- **Rejected Run B candidates**:
+  - `integral_leak 0.99 -> 0.995`: minor change, weak evidence (no observation that integral signal is the bottleneck).
+  - `obs noise halved`: user correctly flagged "trivially predictable" — lower noise obviously improves sim SS but would widen sim2real gap. Any diagnostic value is swamped by the obvious direction.
+  - `kl_ub 0.06 -> 0.04`: user intentionally set `kl_ub=0.06` to accelerate DORAEMON advancement during short (5000 iter) runs; long (~20000 iter) runs will use lower kl_ub. Preserving that design choice.
+
+### Open Questions
+
+- r9_tightrates (rp_rate 1.0->0.5, yaw_rate 0.7->0.55): given constraint margins 9-12 at current policy, is SS oscillation affected at all, or is the effect confined to transient overshoot? Results pending (~04:56 KST ETA).
+- r9_normval after the cost-GAE fix from 2026-04-18: does HORA-style value normalization stabilize critic targets with constraint/reward advantage mixing? Pending (~06:16 KST ETA).
+- r9_symatt's vy SS +44% regression is unexplained. Hypothesis: roll-sway coupling via body-frame rotations -- reduced roll weight frees roll motion that couples into Fy. If R10 confirms, may need per-axis lin_vel reward re-balance in R11.
+
+---
+
 ## [2026-04-18] Starting Point: Code Cleanup + Current Baseline
 
 Previous 8 rounds of experiments (R1-R8) completed. R8-Gated confirmed as best policy.
