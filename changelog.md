@@ -112,11 +112,31 @@ Answers to prior open questions:
   (undershoot=5.0%). The ungated integral on yaw provides damping that
   eliminates OS but impairs SS.
 
+### Variance Analysis (session 2, R8-Gated vs R7-Integral)
+
+Per-env std checked across all 48 comparisons (4 DR x 6 axis x {SS, OS}):
+- **36/48 (75%) statistically significant** (t>2.0, p<0.05) in favor of R8-Gated.
+- **1/48 significantly worse**: none/yaw/OS (R8G 34.4% vs R7I 32.5%, d=+0.62).
+- **11/48 not significant** (mostly roll SS, vy SS, and hard DR roll OS).
+
+Key caveats:
+- **Roll SS not significant at any DR level.** R8-Gated roll SS std=0.405 exceeds
+  mean=0.341 (CV=1.19). Some environments have very high roll SS while others near
+  zero. The high per-env variance may indicate integral destabilizes roll tracking
+  for certain DR parameter combinations.
+- **Hard DR roll OS not significant** (std=22.5%, t=1.22). Hard DR amplifies
+  per-env variance enough to mask the improvement signal.
+- **Strongly significant**: yaw SS (d=-11.75, t=66.5), pitch OS (d=-5.10, t=28.9),
+  vx OS (d=-1.65, t=9.3), vz SS none (d=-1.13, t=6.4).
+
 ### Open Questions
 - Yaw OS in R8-Gated (34.4%): can it be addressed by channel-specific gate
   configuration (e.g., ungated yaw integral, or wider gate threshold 2*sigma)?
 - All R8 runs show entropy collapse (Gated: 0.03, FastLeak: -0.98, Baseline:
   -0.32). Is this affecting performance ceiling? PerDimEnt may need tuning.
+- R8-Gated roll SS has high per-env variance (std > mean). Is this caused by
+  specific DR parameter combinations destabilizing roll integral? Requires
+  per-env DR parameter correlation analysis.
 - R8-Gated pitch OS=6.2% is excellent but roll OS=14.5% still above 10%
   target. Further roll OS reduction may need separate investigation.
 
