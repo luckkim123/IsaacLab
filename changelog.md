@@ -22,11 +22,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## [2026-04-19] R9 Partial Results + R10 Queued
+## [2026-04-19] R9 Partial Results + R10 Queued + R11 Designed
 
 ### Context
 
-First two R9 runs finished (baseline, symatt). Evaluated both with `eval_dr_fulldof.py`, migrated logs/wandb to `/workspace/isaaclab/logs/rsl_rl/fulldof_albc/`, and designed two R10 experiments that auto-chain after r9_tightrates (GPU0) and r9_normval (GPU1) complete. r9_tightrates and r9_normval still running.
+First two R9 runs finished (baseline, symatt). Evaluated both with `eval_dr_fulldof.py`, migrated logs/wandb to `/workspace/isaaclab/logs/rsl_rl/fulldof_albc/`, and designed two R10 experiments that auto-chain after r9_tightrates (GPU0) and r9_normval (GPU1) complete. Later in the session r9_tightrates finished, was analyzed, and four R11 experiments (r11_baseline + three feature ablations) were queued on top of a new accumulated-best baseline.
 
 ### Experiments
 
@@ -39,6 +39,20 @@ First two R9 runs finished (baseline, symatt). Evaluated both with `eval_dr_full
 - vs r9_baseline: roll **jitter -33%**, roll SS -3%, roll OS -21%, vy SS +44% (roll-sway coupling regression), vz SS slightly worse but vz Jit -56%, yaw OS 21.2 -> 18.9%.
 - Barrier↔reward first-differenced correlation 0.72 (was 0.35 in baseline) — softer reward makes constraint the dominant gradient.
 - **Finding: reward weight controls oscillation amplitude (jitter), not SS floor.** Symmetric weighting eliminates the 1.5x competing signal without resolving the 20x TAM authority gap.
+
+**r9_tightrates** (`2026-04-19_00-56-32_r9_tightrates`, iter 5000) — rp_rate 1.0->0.5, yaw_rate 0.7->0.55:
+- hard DR vs r9_baseline: **roll SS 1.090 -> 0.829 (-24%, beats r8_gated 0.855)**, roll Jit 0.264 -> 0.130 (-51%), pitch SS -12%, pitch Jit -35%, pitch OS -27%, **yaw OS 21.2 -> 15.3% (-28%)**, yaw n>20 halved (25.5 -> 15.0). Only regression: vx SS 0.021 -> 0.026 (+24%, still small absolute).
+- Open Question from morning entry resolved: constraint margins `rp_rate=9.17`, `yaw_rate=~10` at converged policy suggested tightening would only touch transients. In fact it also reduced the SS floor — the 30% seed-variance bound was exceeded. Constraint slack WAS permitting SS oscillation, not just overshoot.
+
+**Per-env outlier analysis of r9_tightrates hard DR (new this session):**
+- Per-env SS CV values: roll 2.18, pitch 1.47, vx 2.19, vy 1.92, vz 3.12, yaw 1.50. vz CV>3 means a low mean (0.026 m/s) hides a heavy tail of catastrophic envs.
+- Top-6-worst-env overlap matrix: **roll ∩ pitch = 0** (completely disjoint outliers). Hypothesis "extreme DR combo fails everywhere" falsified. Axis-specific DR combos drive distinct failure modes.
+- 8 envs fail in ≥2 axes: env 14 (roll +5° systematic + vz -0.5 m/s), env 23 (pitch +10° saturated), env 43 (vx +0.17 m/s x-offset), env 16 (yaw oscillatory). All show **systematic bias**, not oscillation. Per-step reward cannot see offsets smaller than its gradient scale (σ=0.10 rad / m/s).
+- Physical arithmetic: 3 kg payload × 0.15 m CoG-xy radius = 4.5 Nm gravity torque, exceeding roll TAM authority = 4 × 50 N × 0.007 m = 1.4 Nm. Some DR combos are physically uncontrollable for roll.
+
+**DORAEMON scope verification (this session):**
+- User asked whether ocean current is DORAEMON-managed. Checked `doraemon.py:69-85`: 15-param list covers payload_mass, added_mass, damping, water_density, COG/COB offsets, inertia, body_mass only. **Ocean current is NOT DORAEMON-managed**.
+- Also verified `eval_dr_fulldof.py:315-355` build_dr_config does not scale ocean_current across DR levels. All 4 levels share `max_velocity=(0.5, 0.5, 0.25)`. Hard DR initial spike (30° roll at t=0) is driven by physics DR extremes, not current.
 
 **Evidence gathered for R10 design (from TB metrics + plots):**
 - `DORAEMON/success_rate` saturated at 0.98+ from iter 500 onward (`perf_lb=90` trivially met because mean return 200-280 >> 90). DR Beta advances at full speed throughout training. Late-training reward decline is DR difficulty outpacing policy adaptation.
@@ -56,11 +70,31 @@ First two R9 runs finished (baseline, symatt). Evaluated both with `eval_dr_full
   - `obs noise halved`: user correctly flagged "trivially predictable" — lower noise obviously improves sim SS but would widen sim2real gap. Any diagnostic value is swamped by the obvious direction.
   - `kl_ub 0.06 -> 0.04`: user intentionally set `kl_ub=0.06` to accelerate DORAEMON advancement during short (5000 iter) runs; long (~20000 iter) runs will use lower kl_ub. Preserving that design choice.
 
+**R11 Experiments (queued after R10, on new accumulated-best baseline):**
+
+- **r11_baseline** (branch `r11_baseline`): fold in r9_tightrates thresholds (rp_rate 0.5, yaw_rate 0.55) AND shrink `HardDomainRandomizationCfg.payload_cog_offset_xy_radius` 0.15 -> 0.08. **P1 rationale**: outlier-env analysis showed the worst roll/vz/pitch envs have payload × CoG combinations exceeding roll TAM authority (1.4 Nm). 0.08 caps gravity torque at 2.4 Nm — still above the 1.4 Nm limit so roll must work for it, but eliminates the physically-impossible tail that dominates SS_std. From R11 onward this is the reference baseline; R11 features measure their effect against this, not against R9.
+- **r11_yawratedot** (branch `r11_yawratedot`): new `yaw_rate_dot_cost` average constraint, threshold 0.8 rad/s², budget 0.10. **P2 rationale**: magnitude-only `yaw_rate_cost` fires only after |ω_z| crosses 0.55, by which time overshoot has already happened. Derivative bound targets the aggressive torque swings (observed 1-2 rad/s² at step changes) that cause the overshoot, while leaving normal tracking (~0.2 rad/s²) unaffected. Uses existing `env._prev_root_ang_vel_z`.
+- **r11_encdim16** (branch `r11_encdim16`): encoder `latent_dim 9 -> 16`. **P3-a rationale**: 24D privileged info compressed into 9D latent. Multi-axis outlier envs show distinct failure patterns (not a single "extreme combo"), suggesting encoder needs to represent a richer DR-conditional behavior space. 16D roughly doubles capacity. If z_std on added dims stays near zero, we'll know capacity wasn't the bottleneck.
+- **r11_emabias** (branch `r11_emabias`): add EMA bias penalty reward, `k_bias=-2.0`, `alpha=0.99` (100-step / 2 s effective window), per-axis weights (roll 1.5, others 1.0). **P3-b rationale**: outlier envs show systematic per-env bias (env 14 roll +5°, env 23 pitch +10°, env 43 vx +0.17 m/s), not oscillation. Per-step tracking reward with σ=0.10 has gradient ~1.5% at 1° roll error — too flat to correct sustained offsets. EMA-squared penalty gradient grows with persistence, directly targeting this failure mode. Matches user's long-standing SS-error priority.
+- **Rejected R11 candidates**:
+  - `linear_damping / quadratic_damping` added to privileged obs per-axis: damping is a global scalar scale in `hydrodynamics.py:106`; knowing roll damping value + the known base ratio recovers all other axes. Adding them gives no new info.
+  - `roll reward σ 0.10 -> 0.17`: widens gradient for large errors but flattens it for small errors, which would hurt the SS regime where r9_tightrates is already doing well. EMA-bias is a cleaner alternative for the same motivation.
+  - Running R11 experiments without r11_baseline: would confound P1 (xy_radius) with each feature. r11_baseline added to the queue despite user only asking for 3 features — required for clean variable control, matches user-flagged principle.
+
+### Variable Control (R11 ablation structure)
+
+Each R11 experiment differs from r11_baseline by **exactly one variable** (see commits `417810ce`, `4cc2eede`, `402cb5c7`, `a69723f3`). The P1 contribution is measured via r11_baseline vs r9_tightrates; each feature via r11_X vs r11_baseline.
+
 ### Open Questions
 
-- r9_tightrates (rp_rate 1.0->0.5, yaw_rate 0.7->0.55): given constraint margins 9-12 at current policy, is SS oscillation affected at all, or is the effect confined to transient overshoot? Results pending (~04:56 KST ETA).
-- r9_normval after the cost-GAE fix from 2026-04-18: does HORA-style value normalization stabilize critic targets with constraint/reward advantage mixing? Pending (~06:16 KST ETA).
-- r9_symatt's vy SS +44% regression is unexplained. Hypothesis: roll-sway coupling via body-frame rotations -- reduced roll weight frees roll motion that couples into Fy. If R10 confirms, may need per-axis lin_vel reward re-balance in R11.
+- r9_tightrates SS-vs-transient question **resolved**: constraint tightening reduced SS floor, not just transients (roll SS -24%). Outcome of this resolves whether threshold slack allows oscillation at all; it does.
+- r9_normval after the cost-GAE fix from 2026-04-18: does HORA-style value normalization stabilize critic targets with constraint/reward advantage mixing? Still running on GPU1 at session end.
+- r9_symatt's vy SS +44% regression is still unexplained. Hypothesis: roll-sway coupling via body-frame rotations -- reduced roll weight frees roll motion that couples into Fy.
+- R11 predictions to validate:
+  - r11_baseline vs r9_tightrates: does the outlier tail (per-env SS_std for roll/vz) actually collapse when physically-impossible payload combos are removed, or was something else in the tail?
+  - r11_yawratedot: does yaw OS drop below 15.3% without damaging yaw rise time or tracking?
+  - r11_encdim16: does z_std increase across new dims (encoder using the extra capacity), and does any outlier SS metric improve — or do the extra dims collapse (unused)?
+  - r11_emabias: does EMA-bias penalty drop roll/vz SS in outlier envs specifically (per-env CV), without hurting per-step tracking?
 
 ---
 
