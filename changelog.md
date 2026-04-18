@@ -186,6 +186,20 @@ Lesson: checkpoint-reload eval passes do not validate init paths. Before trustin
 
 - vz structural undershoot (4.19% hard DR, highest of all axes): candidate fixes deferred to R10 (per-axis lin_vel sigma, vz-only undershoot penalty, or revisiting added-mass DR bounds for heave).
 - Rise time improvement: user marked low priority this round; may revisit after R9 results if rate-tightening regresses it.
-- `normalize_value` fix is on r9_normval branch only; main branch still has the latent AttributeError when the flag is True. Landing the fallback on feat/encoder-tdc-integration would unblock future opt-in without per-branch fixes.
+
+### Follow-up mid-session: normalize_value wrapper had a second, silent bug
+
+`r9_normval` appeared healthy at iter 200 (reward rising, ls_success=1.0) but `cost_val=2.4e-10` revealed the cost critic was producing essentially zero-magnitude outputs. User flagged: "constraints not changing at all".
+
+Root cause: the wrapper `_compute_returns_with_value_norm` replaces `ConstraintTRPO.compute_returns` wholesale. The original did TWO things (reward GAE + cost GAE for K constraints); the wrapper only did reward GAE, silently skipping cost GAE. Consequence: `storage.cost_returns=0`, `cost_advantages=0`, IPO barrier gradients=0 -> training degenerated into unconstrained PPO while still logging as ConstraintTRPO. Not a mathematical problem with normalize_value; purely a method-override scoping bug.
+
+Decision: killed r9_normval at iter ~230 rather than waste further compute. Added the missing `self.alg._compute_cost_returns(last_cost_values)` inside the wrapper. Cherry-picked the fix (plus the earlier `normalize_advantage_per_mini_batch` fallback) onto `feat/encoder-tdc-integration` so main is no longer carrying the latent bug set. Chained a waiter script so `r9_normval` auto-launches on GPU1 once `r9_symatt` completes (~02:05 KST), rather than restarting the full queue.
+
+Lesson: when overriding a method with multiple side effects, verify which effects the override preserves. `cost_val` near zero when constraints are configured is a clear "cost critic frozen" smell -- future runs should treat this as a hard pre-flight check.
+
+### Open Questions (continued)
+
+- R10 will need to decide whether vz gets a dedicated fix or whether tightrates + symatt results reshape the priorities.
+- When R9 runs complete, apply the `.claude/rules/02-operations.md` "Experiment Worktree Lifecycle" cleanup: migrate logs/checkpoints to `/workspace/isaaclab/logs/`, cherry-pick remaining useful worktree commits to main, then remove the four `isaaclab-r9*/` worktrees and temporary `run_gpu*.sh` scripts.
 
 ---
