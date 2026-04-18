@@ -13,7 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## [2026-04-18] R7 Evaluated + R8 Designed: Integral Observation Validated, Overshoot Next
+## [2026-04-18] R7→R8: Integral Validated, Error-Gated Integration Solves SS+OS Simultaneously
 
 ### Context
 R7 experiments completed overnight (EpsSmooth on GPU0, Integral on GPU1). Both
@@ -71,12 +71,54 @@ designed/launched Round 8 experiments targeting overshoot reduction.
   rounds: tanh velocity penalty and PerDimEnt already in R7-Integral; att_rp
   experiments (Arctan, L1, Settling) all superseded by integral's 60%+ SS reduction.
 
+### R8 Eval Results (session 2)
+
+Three R8 runs completed (5000 iters, 2048 envs each). All used 6D integral obs
+(87D), tanh velocity penalty, and PerDimEnt. Eval_dr_fulldof on model_4999.pt:
+
+- **R8-Gated** (run `2026-04-18_03-48-21_r8_gated`): **CLEAR WINNER.**
+  Error-gated integration solves SS and OS simultaneously:
+  - Aggregate: SS=0.131 (best), OS=13.1% (best), n>20%=16.0% (best), RT=0.318s
+  - Attitude: SS=0.370 (-15% vs R7I 0.433), OS=9.3% (-48% vs R7I 18.0%)
+  - Velocity: SS=0.014 (-53% vs R7I 0.030), OS=10.4% (-52% vs R7I 21.7%)
+  - Pitch OS=6.2% (none DR) — nearly eliminated
+  - Exception: yaw OS=34.4% (worst), but yaw SS=0.001 (best by 17x)
+
+- **R8-Baseline** (run `2026-04-18_08-17-35_r8_baseline`, 6D ungated):
+  Middling. SS=0.206, OS=16.2%. Notable: yaw OS=0.0% (overdamped by integral)
+  but yaw undershoot=5.0% and yaw SS=0.017. Thruster_util exceeded budget (40.06
+  vs 40.0).
+
+- **R8-FastLeak** (run `2026-04-18_03-48-21_r8_fastleak`, leak=0.95):
+  **WORST across all metrics.** SS=0.275, OS=26.0%, n>20%=37.7%. The faster
+  leak (tau=0.39s) destroys SS correction (integral decays before offsetting
+  error) while still accumulating during transients (no gating) → worst of both
+  worlds. Pitch SS=0.852 (5x worse than Gated's 0.167). Entropy collapsed to
+  -0.98.
+
+Answers to prior open questions:
+- 6D integral DID fix yaw SS: R8-Gated yaw SS=0.001 vs R7I's 0.021 (-95%).
+- Error-gated >> fast-leak: gated gives simultaneous SS+OS improvement; fast-leak
+  degrades both.
+- OS reduction without SS trade-off IS possible via error gating (PID anti-windup).
+
+### Decisions (session 2)
+- **R8-Gated confirmed as new best policy.** First run to achieve simultaneous
+  improvement in SS error AND overshoot across all channels except yaw OS.
+- **FastLeak approach abandoned.** Faster leak is strictly worse than gating.
+  It removes both the SS correction benefit and the transient damping benefit.
+- **Yaw OS is the sole remaining weakness.** R8-Gated yaw SS is near-zero
+  (0.001) but yaw OS=34.4%. R8-Baseline has yaw OS=0.0% but overdamped
+  (undershoot=5.0%). The ungated integral on yaw provides damping that
+  eliminates OS but impairs SS.
+
 ### Open Questions
-- Will 6D integral fix yaw SS (currently +94% worse without integral)?
-- Error-gated vs fast-leak: which gives better OS/SS trade-off?
-- If both R8 experiments reduce OS but increase SS, what's the optimal leak/gate?
-- Integral windup was ruled out as primary OS cause; can overshoot be further
-  reduced via reward structure (smoothness penalty was ineffective in R7-EpsSmooth)?
+- Yaw OS in R8-Gated (34.4%): can it be addressed by channel-specific gate
+  configuration (e.g., ungated yaw integral, or wider gate threshold 2*sigma)?
+- All R8 runs show entropy collapse (Gated: 0.03, FastLeak: -0.98, Baseline:
+  -0.32). Is this affecting performance ceiling? PerDimEnt may need tuning.
+- R8-Gated pitch OS=6.2% is excellent but roll OS=14.5% still above 10%
+  target. Further roll OS reduction may need separate investigation.
 
 ---
 
