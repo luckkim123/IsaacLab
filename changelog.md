@@ -145,3 +145,47 @@ Integral error (6D): leaky integrator (leak=0.99, clamp=+-2.0)
 - Entropy collapse in all R8 runs (Gated: 0.03): PerDimEnt tuning needed?
 
 ---
+
+## [2026-04-18] R9 Plan: Roll Oscillation / Yaw Overshoot + Refactor Bug Discovery
+
+### Context
+
+R8-Gated eval_dr_fulldof revealed three residual problems that block a production-ready policy: roll oscillation (high SS jitter), vz undershoot, and isolated yaw overshoot. Needed to launch new experiments addressing these while also retraining baseline (R8-Gated checkpoint lost) and exercising the disabled `normalize_value` feature for the first time.
+
+### Experiments
+
+Hard-DR evidence from R8-Gated archive (enhanced_summary.json):
+- roll SS=0.855 / jitter=0.275 / OS=14.6% vs pitch SS=0.320 / jitter=0.082 / OS=5.6% -> roll is ~3x worse across every metric despite same reward structure.
+- vz SS=0.040 (std=0.099) / undershoot=4.19% / OS=14.1% -> vz is the worst lin_vel axis by 2-3x on every metric, consistent with buoyancy-F_bu 26.24 N + heave-added-mass being 10x smaller than surge/sway.
+- yaw SS=0.0017 rad/s and rise=0.014 s (essentially perfect) but OS=23.8% with n_gt20=33% -> control authority is not the issue; yaw_rate constraint threshold of 0.7 rad/s authorizes the overshoot given cmd range +-0.5 rad/s.
+
+R9 queue launched on GPU0/1 (2048 envs, 5000 iter, WandB project `fulldof_albc`):
+- **r9_baseline** (GPU0 first): control, zero code change on top of r8_gated config.
+- **r9_normval** (GPU1 first): `normalize_value=True` (HORA-style running mean/std for critic targets, previously-disabled path).
+- **r9_tightrates** (GPU0 second): rp_rate soft_threshold 1.0 -> 0.5, yaw_rate 0.7 -> 0.55. Hypothesis: both rate constraints had 3x / 1.4x margin over command, leaving rate damping inactive.
+- **r9_symatt** (GPU1 second): `att_roll_weight` 1.5 -> 1.0. Hypothesis: the 1.5x multiplier is in a middle zone where it neither compensates the 20x TAM moment-arm gap (0.007 m vs 0.145 m) nor avoids being a competing sharp signal.
+
+### Decisions
+
+- **Minimum-change per run, orthogonal hypotheses** over a single "combined fix" run. Separate isolation lets the decision tree for R10 read off cleanly (e.g., if tightrates helps roll/yaw but symatt does not, rate threshold was the bottleneck, not reward asymmetry).
+- **Root-cause fix for refactor bugs** chosen over a lazy null-check guard, on user pushback. The proper contract is "after `_reset_idx`, env is in a valid observation state", restored by populating `_euler_cache` at reset-time just like `_get_dones` does per step. An `if is None` check would have masked the ordering violation.
+- **Git worktree + PYTHONPATH prepend** over argparse CLI overrides for run isolation. Argparse route would have required modifying config parse logic, violating minimum-change. PYTHONPATH takes precedence over pip editable-install .pth entries, so each worktree's source is found first without touching the main install.
+- **Sequential queue over 4 concurrent**. RTX 4060 (8GB) cannot host two runs simultaneously at ~6-7 GB each. Halving num_envs to fit 2-concurrent would double iterations to reach equivalent samples, yielding zero net wall-time gain.
+
+### Latent bugs surfaced by first fresh training since refactor eafca264
+
+The -2071 / +565 line refactor removed lazy-init guards that previously hid three bugs. R8-Gated only evaluated an archived checkpoint, so none of these had been exercised until this session's fresh train:
+
+1. **`_euler_cache` uninitialized at first `_get_observations`**. Root: init=None in `__init__`, population only in `_get_dones` which does not run during `env.reset()`. Symptom: `TypeError: cannot unpack non-iterable NoneType`. Fix: populate at tail of `_reset_idx` so post-reset observation contract holds.
+2. **Encoder static-min-max constants were plain Python attributes**. `_enc_obs_range` and `_enc_obs_midpoint` were assigned with `self.x = ...`, not `register_buffer`, so `module.to(cuda)` left them on CPU while inputs were on cuda. Symptom: `RuntimeError: tensors on different devices`. Fix: wrap both in `register_buffer`.
+3. **`normalize_value` pipeline referenced a PPO-only attribute**. `self.alg.normalize_advantage_per_mini_batch` does not exist on `ConstraintTRPO`. Symptom: `AttributeError`. Only triggered when the flag was flipped on for the first time in r9_normval. Fix: `getattr(..., False)` fallback in `_compute_returns_with_value_norm`.
+
+Lesson: checkpoint-reload eval passes do not validate init paths. Before trusting a refactor, run fresh training at least once with each toggleable feature enabled.
+
+### Open Questions
+
+- vz structural undershoot (4.19% hard DR, highest of all axes): candidate fixes deferred to R10 (per-axis lin_vel sigma, vz-only undershoot penalty, or revisiting added-mass DR bounds for heave).
+- Rise time improvement: user marked low priority this round; may revisit after R9 results if rate-tightening regresses it.
+- `normalize_value` fix is on r9_normval branch only; main branch still has the latent AttributeError when the flag is True. Landing the fallback on feat/encoder-tdc-integration would unblock future opt-in without per-branch fixes.
+
+---
