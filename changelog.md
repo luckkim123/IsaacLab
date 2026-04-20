@@ -119,14 +119,49 @@ Within-env `ss_jitter` at hard DR - per-axis extremes:
 - **vz regression from encdim16 is unsolved**. Hard DR vz SS 0.030 -> 0.056 (+87%)
   in r11_encdim16, and env-std flipped (baseline 0.077 is now the MIN, encdim16
   0.133 is the MAX - only such reversal across all axes). Hypothesis: encoder
-  capacity shifts to attitude at heave's expense. Candidate R13 experiments: probe
-  encoder latent_dim=12 midpoint, or add vz-specific auxiliary signal in observations.
+  capacity shifts to attitude at heave's expense. Partially addressed in afternoon
+  by launching r12_latent12 (see below).
 - R12 prediction (to validate when training completes): roll ~0.48 (encdim16),
   pitch ~0.33-0.35 (partial regression recovered), vz ~0.05 (encdim16 cost persists),
   yaw ~0.003 (half of r11_emabias win), vx net small improvement.
 - Run `2026-04-20_13-07-07_r12_baseline` was launched with k_bias=-2.0 then killed
   at ~22 min after variance analysis identified the risk. Relaunched as
   `2026-04-20_13-24-19_r12_baseline` with k_bias=-1.0.
+
+### Afternoon addendum: r8_gated comparison and r12_latent12 launch
+
+**r8_gated (archived best pre-R9) vs r9~r11 hard DR:** Per-axis winners
+- roll: r11_encdim16 **0.48** (r8_gated 0.86, -44%) -- real improvement beyond seed variance
+- pitch: r9_tightrates 0.28 (r8_gated 0.32, -12%)
+- vx: r11_emabias 0.010 (r8_gated 0.018, -42%)
+- vy: r9_tightrates 0.012 (r8_gated 0.013, tied)
+- vz: r9_tightrates/baseline 0.026 (r8_gated 0.040, -35%); r11_encdim16 0.056 REGRESSES
+- yaw: **r8_gated 0.0017 still best**; r11_emabias 0.0022 closest challenger
+- r9_baseline (same config as r8_gated) gave roll 1.09 vs r8_gated 0.86 = **+27% seed variance**,
+  setting ~20% floor on what counts as a real improvement
+- No single run dominates r8_gated on all six axes -> trade-off structure is fundamental
+
+**r12_latent12 launched on idle GPU1** (branch `r12_latent12` commit `176e2d3f`).
+Single variable change: `encoder_latent_dim 9 -> 12` (midpoint between r11_baseline=9
+and r11_encdim16=16). No emabias -- isolates pure encoder capacity effect.
+Completes 3-point sweep to identify whether vz regression is monotonic in
+latent_dim or has a sweet spot at 12.
+
+Decision tree after both R12 runs finish:
+- latent=12 roll ~0.6 + vz ~0.045: midpoint compromise; combine with emabias for R13
+- latent=12 roll ~0.48 + vz ~0.040: 12 is sweet spot; switch base to 12
+- latent=12 roll ~0.85 (no improvement): capacity effect non-linear; R13 must use
+  vz-specific intervention (not latent tuning)
+
+Rejected alternatives for parallel GPU1 experiment:
+- r12_bias2 (k_bias=-2.0 full emabias + encdim16): tests bias intensity but leaves
+  vz regression unexplored -- less information gain
+- r12_seed2 (R12 replicate): controls seed variance but generates no mechanism info
+- r12_encdim_only: duplicate of r11_encdim16, zero information gain
+
+Infrastructure note: fresh worktrees need `_isaac_sim` symlink to `/isaac-sim` AND
+the `meshes/` directory symlinked to main repo (Agent.usd + configuration/*.usd
+are gitignored). Took three relaunches to diagnose.
 
 ---
 
