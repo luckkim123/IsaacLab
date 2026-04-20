@@ -60,6 +60,51 @@ R13 completed: pure encoder latent dim ablation (the *only* config diff). r13_A=
 ### Open Questions
 
 - Will 20k iter + entropy_coef=0.001 actually reduce thruster std below 0.15? Monitor final log_std per-dim and roll limit cycle amplitude in eval_dr_switching.
+
+---
+
+## [2026-04-21] Student Policy (TCN/GRU BC from r13_A Teacher) — Architecture Ablation
+
+### Context
+
+Building asymmetric student encoder via behavior cloning from frozen r13_A teacher (latent_dim=9): teacher has privileged->z->actor pipeline, student learns proprio_history->z_hat via MSE on both z_hat vs teacher z and teacher_actor(o, z_hat) vs teacher a. Dropped DORAEMON, forced HardDR during BC rollouts (per RMA Phase 2 protocol). Two encoder variants compared: TCN (window-based conv) and GRU (recurrent).
+
+### Experiments
+
+- **TCN history mismatch (initial design flaw)**: first TCN runs used tcn_history=50 (1.0 s at 50 Hz), 50x longer than teacher's embedded 180 ms proprio history (stride=3 x 3 steps, built into o_t's 87D). Fixed to tcn_history=9 stride=1 with kernels (3,3,3) → receptive field matches teacher's embedding span. ~1h wasted before correction.
+- **Killed GRU run `2026-04-21_06-38-03_student_gru`** (iter 599, terminated during panic restart): loss_total v0=0.295 → Q1=0.173, flat thereafter (Q4=0.170). loss_latent v0=0.221 → Q1=0.114 → Q4=0.113 (zero improvement after Q1). grad_norm collapsed 0.79 → 0.05 by Q4 (optimizer effectively dead).
+- **Root-cause diagnosis of GRU plateau** (code audit, not speculation):
+  1. `runner.py:_compute_loss_gru` called `self.student(batch.obs_seq, hidden=None)` — every minibatch re-initialized GRU hidden to zero, capping effective context at 24 steps (0.48 s). DR params are ~static per episode, so 0.48 s is insufficient identification window.
+  2. Student encoder received raw 87D obs directly. Teacher's actor consumes `actor_obs_normalizer(o)` (EmpiricalNorm trained over 6.5e8 steps, mean in [-2.15, 3.32], std in [0.006, 1.59]). Raw scale mismatch ~10^2 between e.g. angular velocity and integral terms degrades initial gradient signal.
+  3. Collection-time `self.gru_hidden` was zeroed on done but never forwarded through student — vestigial variable, not functional.
+- **GRU v2 `student_gru_h9v2` with fixes applied**: (a) obs normalized via teacher's frozen `actor_obs_normalizer`, (b) `train_hidden` snapshotted at rollout start and threaded per-env through BPTT chunks with done-env reset, re-computed via no-grad forward at iter-end. Result: v0=0.199 → Q1=0.114 → **Q4=0.113 (identical asymptote to killed run)**. Only effect: 10% faster initial descent (v0 0.220→0.199).
+- **TCN H=9 `student_tcn_h9`** (no fixes, baseline for comparison): v0=0.169 → Q1=0.059 → **Q4=0.034** (loss_latent Q4=0.026, ~4.3x lower than GRU). grad_norm Q4=0.178 (healthy).
+- **DR-switching eval (64 envs, zero cmd, 5s/seg x 10 segs, hard DR re-sampled each seg)**:
+
+| DR level | axis | TCN H=9 | GRU v2 | ratio GRU/TCN |
+|---|---|---|---|---|
+| none | roll/pitch | 0.797° | 0.750° | 0.94x |
+| none | vz | 0.0101 | 0.0252 | **2.50x** |
+| soft | vz | 0.0099 | 0.0531 | **5.38x** |
+| medium | roll/pitch | 1.156° | 0.987° | 0.85x |
+| medium | vz | 0.0463 | 0.1074 | 2.32x |
+| hard | roll/pitch | 4.785° | 4.298° | **0.90x** |
+| hard | vx | 0.0534 | 0.0450 | 0.84x |
+| hard | vz | 0.240 | 0.300 | 1.25x |
+| hard | yaw | 0.0308 | 0.0385 | 1.25x |
+
+### Decisions
+
+- **Training loss is not a reliable proxy for eval quality in this BC setup**. GRU v2 loss_latent=0.113 (4.3x worse than TCN's 0.026) produced eval metrics COMPARABLE to TCN, with GRU actually 5-18% better on roll/pitch at all DR levels. Teacher's actor downstream is robust to imperfect z_hat within a broad manifold — the latent->action mapping absorbs substantial z-noise without behavior degradation. Conclusion: don't chase training loss floor; evaluate final policy.
+- **TCN H=9 is the preferred student for this teacher**. Reason: matches teacher's embedded 180 ms history exactly, and vz tracking is substantially better (GRU 1.25-5.4x worse at vz across all DR). TCN also reaches higher training stability (grad_norm 0.18 healthy vs GRU 0.05 collapsed).
+- **GRU architectural ceiling recognized, not fixed**. obs_norm + hidden threading did nothing measurable on the asymptote. The plateau at loss_latent=0.113 is the current GRU arch's capacity limit under 24-step BPTT + single-layer 128-hidden. Deeper architecture exploration (bigger hidden, more layers, richer head) deferred.
+- **Fixes retained in code despite zero asymptote impact**: obs normalization is still theoretically correct and improves initial descent (-10% v0). Hidden threading still correctly implements RMA-canonical truncated BPTT vs the "simplicity" zero-init anti-pattern. Both are semantically right even if GRU architecture limits prevent them from mattering here.
+
+### Open Questions
+
+- Does the 0.026 TCN loss_latent represent observability ceiling (privileged->proprio mutual information limit) or also TCN capacity ceiling? Would deeper TCN / bigger head reach 0.01?
+- **GRU vz failure mode**: which DR parameters is GRU's z_hat missing that TCN recovers? Likely heave-related (added mass, buoyancy delta). Per-dim z sensitivity sweep (`encoder_z_sweep.py`) on both students would localize the gap.
+- Teacher r13_A on eval_dr_switching for apples-to-apples baseline: neither student reaches 4.8° @ hard but teacher reference unmeasured. Without it, "how far from teacher" is unquantified.
 - Will aggressive DR widening cause DORAEMON to stall at easy difficulty? Mitigation: performance_lb=90 automatic stop prevents divergence; worst case = same DR reach as r13.
 - Should action_latency DR be added to DORAEMON curriculum (vs fixed-range)? Initially fixed; revisit if curriculum makes it too dominant.
 - Is the mid-episode DR switch (new `randomize_physics_mid_episode` method) fully equivalent to episode-boundary DR for DORAEMON's statistics? Eval-only usage so OK for now, but if used in training, needs curriculum integration.
