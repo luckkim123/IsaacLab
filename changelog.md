@@ -22,7 +22,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## [2026-04-20] R11 Synthesis + R12 Design Refinement + Variance Analysis Methodology
+## [2026-04-21] R13 A/B Deep Analysis + DR-Switching Eval Mode + R14 Final Design
+
+### Context
+
+R13 completed: pure encoder latent dim ablation (the *only* config diff). r13_A=latent 9, r13_B=latent 16. Both trained from r12_baseline equivalent + added HardDR `ocean_current_strength_range=(0,1)`. Goal: decide r14 baseline, diagnose remaining residual issues (roll oscillation, yaw overshoot).
+
+### Experiments
+
+- **Added eval_dr_switching.py**: new eval mode. Fixed zero command (xyz=0, rpy=0) with cascade PID outer loop, DR switches per 5s segment (10 segs total). Tests disturbance-rejection robustness under identical DR sequence seed. Extends env randomization mid-episode via `randomize_physics_mid_episode()` (new method in albc_env.py). Also added analyze_dr_switching.py for cross-run comparison.
+- **Cascade PID ported to play.py**: outer loop position/yaw error → vel_cmd/yaw_rate_cmd, inner loop policy tracks. Kp_pos/kp_yaw tunable CLI args.
+- **Kp_pos/kp_yaw doubled from 0.5→1.0**: Y-bias r13_A improved 2.3→2.3 mm (unchanged, already tiny), r13_B 6-11mm (still worst — inherent payload asymmetry on gripper side).
+- **r13_A vs r13_B comparison** (both eval_dr and eval_dr_switching):
+  - r13_A wins: pitch SS ~2x better, yaw SS ~2x better, Y-bias 2-5mm vs 6-11mm
+  - r13_B wins: roll SS edge, roll heavy-tail %>10° 28%→19% at hard, yaw peak 1.61°→0.83°, pos p99 0.57→0.42m
+  - Env-level agreement (hard): spearman ρ=+0.79, same worst env (env 56) — DR seed reproducible
+- **Per-dim log_std measurement** (r13_A final ckpt): arm 0.15/0.22, thrusters 0.22-0.31. All **4-6x above min_std floor (0.05)**. Policy voluntarily maintains high noise — min_std is NOT binding.
+- **Roll oscillation frequency** (FFT on eval_dr_switching DR=none): r13_A 0.68 Hz @ 5.4 magnitude, r13_B 0.87 Hz @ 112 magnitude. Same TAM-driven limit cycle mechanism but latent=16 has 20x stronger amplitude (wider noise channel).
+- **Yaw overshoot history scan across 14 runs**:
+  - r11_emabias (latent=9, NO ocean HardDR, EMA bias k=-2): yaw_os **11.1%** — best
+  - r11_encdim16 (latent=16, NO ocean HardDR): 11.4%
+  - r13_B (latent=16, +ocean HardDR): 12.5%
+  - r13_A (latent=9, +ocean HardDR): **17.6%** — worst latent=9 with EMA bias
+  - r12_latent12 (latent=12, NO EMA bias, NO ocean): 20.2% — **latent=12 is NOT a middle ground**, worse than latent=9
+
+### Decisions
+
+- **r14 = r13_B baseline (latent=16)**. Reason: production-readiness prioritizes controlled peaks/heavy-tail over last-mm SS. Latent=16 consistently absorbs transient disturbances better; r13_A's SS/Y-bias advantages are smaller gains than r13_B's peak/tail advantages. User-approved "Option B".
+- **entropy_coef 0.003 → 0.001**. Reason: final thruster std 0.22-0.34 (4-6x above floor) drives roll limit cycle. min_std floor is NOT constraining. Lower entropy coefficient allows actor to shrink toward 0.10-0.15 std. 20k iteration horizon absorbs aggressive coef without exploration collapse.
+- **DORAEMON step_interval 250 → 500**. Reason: 4x longer training means 80 DR updates at current cadence — too frequent. 500 gives 40 updates, stable curriculum progression.
+- **HardDR aggressive widening (17 params, 1.5-3x wider)**. Reason: r13_B achieves survival 100% + clean SS on all DR levels — under-utilizing policy capacity. User: "DR 범위에서도 너무 잘되잖아, 최대한 많은 환경을 보여주는거지". Eval filters extreme tail (use none/soft/medium or rescale `DR_SCALE` to `{0, 0.2, 0.5, 0.8}`).
+- **Non-DORAEMON DR expanded**: observation `noise_scale` widened across all channels incl. angular velocity; OU current `delta_scale` 0.1→0.2.
+- **Action latency DR ported from hero_agent**. Range (0, 6) physics steps = 0-30ms delay. Rationale: real-hardware communication lag; directly attacks yaw overshoot (delayed feedback → policy must learn predictive control). Implementation: ~40 lines in albc_env.py via `_action_history` buffer per hero_agent pattern.
+- **payload_cog_offset_xy_radius 0.08 retained** (user choice). Y-bias fix deferred to r15 if needed.
+- **Compute scale: num_envs 2048→4096, max_iterations 5000→20000, save_interval 50→100**. Single run, ~8x sample budget, ~30-40h wall clock.
+
+### Open Questions
+
+- Will 20k iter + entropy_coef=0.001 actually reduce thruster std below 0.15? Monitor final log_std per-dim and roll limit cycle amplitude in eval_dr_switching.
+- Will aggressive DR widening cause DORAEMON to stall at easy difficulty? Mitigation: performance_lb=90 automatic stop prevents divergence; worst case = same DR reach as r13.
+- Should action_latency DR be added to DORAEMON curriculum (vs fixed-range)? Initially fixed; revisit if curriculum makes it too dominant.
+- Is the mid-episode DR switch (new `randomize_physics_mid_episode` method) fully equivalent to episode-boundary DR for DORAEMON's statistics? Eval-only usage so OK for now, but if used in training, needs curriculum integration.
+
+### Root-Cause Summary (documented for future reference)
+
+- **Roll oscillation at DR=none**: NOT min_std floor. entropy_coef too high keeps thruster std at 0.25; via TAM roll arm (0.007m, 20x weaker than pitch) this noise manifests as 0.68-0.87 Hz limit cycle. Fix: lower entropy_coef.
+- **Yaw overshoot r13_A 17.6% (vs r11_emabias 11.1%)**: caused by cumulative addition of `ocean_current_strength_range=(0,1)` HardDR between r12 and r13. Latent=9 cannot absorb this transient as well as latent=16. Choosing latent=16 (r14 = r13_B) directly addresses this.
+- **latent=12 worse than latent=9 for yaw transient** (r12_latent12 data). Dimension effect is non-linear. Between latent=9 and 16 is NOT a safe interpolation for all axes.
+
+
 
 ### Context
 
