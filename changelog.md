@@ -22,6 +22,114 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-20] R11 Synthesis + R12 Design Refinement + Variance Analysis Methodology
+
+### Context
+
+All R11 experiments completed. Initial R12 design naively stacked "all R11 winners"
+(encdim16 + emabias) on r11_baseline. Session goal: validate whether this is truly
+optimal via deep variance + mechanism analysis of R9~R11, then revise R12 if needed.
+User also flagged confusion about `summary_*.png` plots: baseline runs show
+sample-env line overlapping the mean line, while other runs show large divergence
+in attitude (hard DR) and lin_vel (soft/medium DR).
+
+### Experiments
+
+**Variance ranking across r9~r11 (r11_yawratedot excluded as catastrophic):**
+
+Env-to-env `ss_error_std` at hard DR - per-axis extremes:
+- roll: min **r11_encdim16 (0.55)**, max r9_baseline (2.10), 3.8x ratio
+- pitch: min **r11_encdim16 (0.24)**, max r9_symatt (0.64), 2.6x
+- vx: min **r11_emabias (0.014)**, max r9_tightrates (0.057), 4.1x
+- vy: min **r11_emabias (0.018)**, max r9_normval (0.044), 2.4x
+- vz: min r9_baseline (0.077), max **r11_encdim16 (0.133)** - REVERSAL, 1.7x
+- yaw: min **r11_emabias (0.0015)**, max r10_perflb_high (0.025), **16.8x**
+
+Within-env `ss_jitter` at hard DR - per-axis extremes:
+- roll/pitch/vx/vy: r9_tightrates minimum (rate constraint suppresses oscillation)
+- vz: r9_normval max (value norm distorts critic targets for lin_vel)
+- pitch: **r11_emabias max (0.083)** - bias_weights roll emphasis destabilizes pitch trim
+- yaw: **r11_emabias min (0.0008)** - bias EMA directly dampens yaw oscillation
+
+**encdim16 mechanism (TB evidence from run `2026-04-19_11-26-59`):**
+- Policy/entropy: baseline 0.145 -> 0.282 (+94%). Larger latent preserves exploration.
+- Reward/lin_vel: baseline 1.79 -> 1.12 (-37%). Encoder capacity shifts to attitude at
+  lin_vel's expense. Directly explains vz SS +87% and vx SS +60% regressions.
+- Track/att/roll_err_deg (training): 2.79 -> 2.50 (-10%), Train/mean_reward: 231.6 -> 209.7.
+- Conclusion: encdim16 trades lin_vel tracking for attitude robustness. Real trade-off,
+  not training variance.
+
+**emabias mechanism (TB evidence from run `2026-04-19_15-55-14`):**
+- Track/att/pitch_err_deg (training): 1.65 -> 1.89 (+14%). Pitch regression visible
+  in training, not just eval.
+- Reward/att_rp: 5.13 -> 4.83 (-6%). Bias term settled at -0.10.
+- Root cause traced to `bias_weights=(1.5, 1, 1, 1, 1, 1)` with squared EMA: roll bias^2
+  weighted 1.5x dominates sum. Roll cannot structurally improve much (TAM arm 0.007m
+  vs pitch 0.145m, 20x authority gap), so policy optimizer finds indirect reduction
+  via thrust-trim shifts, which offset pitch. Classic "balloon squeeze": penalizing
+  a structurally-limited axis diverts optimization to collateral axes.
+
+**Sample env plot divergence mechanism (eval_dr_fulldof.py:570-582 `_pick_sample_env`):**
+- Sample env = median-attitude-error env per DR level per run. NOT fixed index 0,
+  NOT random. Same env reused for attitude / lin_vel / yaw plots.
+- Baseline runs: axes inter-correlated, so median-att env is typical in lin_vel/yaw.
+  Sample approx mean.
+- Intervention runs: policy develops axis-specific strengths. Median-att env can be
+  outlier in lin_vel (att good but lin_vel bad). Sample line diverges from mean in
+  lin_vel plot even though DR seed is identical.
+- This is a **diagnostic signal**, not a bug: policy axis-decorrelation reveals
+  itself as sample-vs-mean divergence. Quantifiable via per-axis CV comparison.
+
+### Decisions
+
+- **R12 adopts `k_bias=-1.0` (halved from r11_emabias -2.0)**, single-variable change
+  vs initial R12 plan. Rationale: encdim16 already solves roll structurally (roll
+  SS 0.900 -> 0.480 + std 1.74 -> 0.55), so heavy bias pressure on roll is redundant;
+  halving preserves yaw gain (expected ~-27% still better than baseline -54%) while
+  halving pitch regression (from +26% eval / +14% train toward ~+7%). Bias-term
+  reward contribution drops -0.10 -> -0.05, still larger than smoothness -0.11, so
+  emabias mechanism remains effective.
+- **Rejected `k_bias=-2.0` stacking (initial R12 plan)**: measured pitch regression
+  +124% std and +26% mean at hard DR on r11_emabias alone; combining with encdim16
+  risks compounding without mitigation.
+- **Rejected `bias_weights=(1.5, 1.5, 1, 1, 1, 1)`**: pitch squared-bias magnitude is
+  ~10x smaller than roll (0.005^2 vs 0.016^2), so 1.5x weight keeps pitch term ~13%
+  of roll contribution. Mechanism is gradient-dominance, not weight-lack.
+- **Rejected `encdim16 alone`**: equals `r11_encdim16`, already evaluated. No new
+  information gained.
+- **Methodology captured in rules/skill**: `/workspace/.claude/rules/03-analysis-quality.md`
+  added "Env-to-Env Variance Analysis" and "Sample Env Plot Divergence Explained"
+  sections. `/workspace/.claude/skills/train-analyze/SKILL.md` added "eval_dr Env
+  Variance Analysis" workflow. Future analyses MUST report `mean +/- std` across all
+  four DR levels and six axes, and interpret sample-vs-mean divergence as a
+  decorrelation diagnostic.
+
+### Cleanup
+
+- Removed 9 experiment worktrees (r9_baseline, r9_symatt, r9_tightrates, r10_perflb,
+  r10_minstd, r11_baseline, r11_encdim16, r11_yawratedot, r11_emabias) and their
+  branches, all clean (logs already migrated; cherry-picks captured in r12_baseline).
+- Removed 15 per-experiment run scripts from `/workspace/`. Kept only
+  `run_r12_baseline.sh` (active training).
+- Archived 32K stub log from r11_baseline worktree (aborted 14s after successful
+  r11_baseline run) to `logs/archive/rsl_rl/fulldof_albc/`.
+
+### Open Questions
+
+- **vz regression from encdim16 is unsolved**. Hard DR vz SS 0.030 -> 0.056 (+87%)
+  in r11_encdim16, and env-std flipped (baseline 0.077 is now the MIN, encdim16
+  0.133 is the MAX - only such reversal across all axes). Hypothesis: encoder
+  capacity shifts to attitude at heave's expense. Candidate R13 experiments: probe
+  encoder latent_dim=12 midpoint, or add vz-specific auxiliary signal in observations.
+- R12 prediction (to validate when training completes): roll ~0.48 (encdim16),
+  pitch ~0.33-0.35 (partial regression recovered), vz ~0.05 (encdim16 cost persists),
+  yaw ~0.003 (half of r11_emabias win), vx net small improvement.
+- Run `2026-04-20_13-07-07_r12_baseline` was launched with k_bias=-2.0 then killed
+  at ~22 min after variance analysis identified the risk. Relaunched as
+  `2026-04-20_13-24-19_r12_baseline` with k_bias=-1.0.
+
+---
+
 ## [2026-04-19] R9 Partial Results + R10 Queued + R11 Designed
 
 ### Context
