@@ -163,6 +163,111 @@ Infrastructure note: fresh worktrees need `_isaac_sim` symlink to `/isaac-sim` A
 the `meshes/` directory symlinked to main repo (Agent.usd + configuration/*.usd
 are gitignored). Took three relaunches to diagnose.
 
+### Evening addendum: R12 sweep completion + 24-run retrospective + R13 parallel launch
+
+**r12_latent12 completed** (run `2026-04-20_13-48-43_r12_latent12`, migrated to
+`logs/rsl_rl/fulldof_albc/`). Hard DR: roll SS 0.791, pitch 0.441, vz 0.040,
+yaw_ovr 20.2%. No heavy-tail (0% peak>20°). 3-point latent sweep (9/12/16)
+result: **inconclusive**. 12 wins vz at low DR (absolute magnitude at noise floor,
+<0.01 m/s) and soft/medium roll; 16 wins yaw overshoot consistently across DR
+(7-11% vs 20-29%, 2-3x margin) AND hard-DR attitude (roll 0.48 vs 0.79). latent=12
+is NOT a sweet spot. Also, r12_latent12 was built on r12_baseline base (confounded)
+so the single data point cannot be read as a clean latent_dim sweep.
+
+**Comprehensive 24-run retrospective** via composite rank (4 DR levels x 10
+metrics = 40 rankings averaged per run, lower = better):
+- rank 1: `r11_emabias` (5.90) -- latent=9 + k_bias=-2.0
+- rank 2: `r11_encdim16` (7.10) -- latent=16 + no emabias
+- rank 3: `r12_latent12` (7.42) -- latent=12 + weak emabias (confounded)
+- rank 4: `r9_tightrates` (7.55)
+- rank 5: `r10_thr_minstd` (7.92)
+- rank 6: `r11_baseline` (8.38)
+- **rank 7: `r12_baseline` (8.65)** -- latent=16 + k_bias=-1.0 (half strength) REGRESSED
+
+Hard DR same ranking order. **r11_emabias is the demonstrably best run across
+all 24 runs, not just R11.** Previously under-sold as "small DIV 4/24 -> 2/24
+improvement" -- actual wins span roll (all 4 DR levels, -11 to -31%), hard yaw
+(-55% ss_error, -88% std, -61% n_gt20), and n_gt20 across most axes.
+
+**"Intervention causes divergence" hypothesis REJECTED by data.** User observed
+large sample-vs-mean divergence in PNG plots for intervention runs but not
+baselines. Refined DIV rate (rank<5% or >95%, or gap > 2xnoise_floor AND
+|ratio-1|>0.3) per run:
+- BASELINE (r8_gated, r9_baseline, r11_baseline, r12_baseline): 19/96 cells = **19.8%**
+- INTERVENTION (8 runs): 43/192 = 22.4%
+- INTERVENTION excluding `r11_yawratedot` (training-failed, yaw 100% peak>th): 32/168 = **19.0%**
+
+One failed run (r11_yawratedot) was skewing the entire intervention group to look
+divergence-heavy. Without it, baseline and intervention are statistically
+indistinguishable. The "baseline looks clean" perception was driven by smaller
+absolute scale (baselines have lower means so the identical divergence rate is
+less visually striking).
+
+**Config lineage discovery -- critical for R13:** Direct params diff between
+r11_baseline, r11_encdim16, r11_emabias, r12_baseline revealed r12_baseline =
+r11_baseline + (latent=9->16) + (emabias k_bias=0 -> **-1.0**, half of r11_emabias
+-2.0). **This is the ONLY test of latent=16 + emabias combination to date**, and
+it REGRESSED (hard roll 1.26 vs r11_encdim16 0.48, rank #7 vs #2). Failure
+cause ambiguous: weakened k_bias vs. inherent latent=16 + emabias interaction.
+
+### Decisions (continued)
+
+- **R13_A launched on GPU0**: r11_emabias config (latent=9, k_bias=-2.0, full
+  strength) + ocean_current DR DORAEMON-managed (nominal=0, Beta skewed to zero
+  current, expands as curriculum advances). **Minimum change from rank-#1 run**:
+  only ocean DR added. Rationale: preserves proven best config; measures pure
+  ocean DR effect; low risk of regression.
+- **R13_B launched on GPU1**: latent=16 + k_bias=-2.0 (full strength) + ocean
+  DR. Clean ablation that r12_baseline didn't do (it used k_bias=-1.0). Decides
+  whether r12_baseline failure was due to weak bias (then B should succeed) or
+  inherent combination problem (then B replicates r12 regression). Either
+  outcome produces actionable information.
+- **Rejected R13 alternatives**:
+  - `r11_baseline + latent=16 + ocean DR` (no emabias): duplicates r11_encdim16
+    with only ocean DR added. Testable by applying r11_encdim16 to ocean scenario
+    post hoc rather than burning a full run.
+  - `r11_baseline + emabias + tightrates + latent=16 + ocean DR` (all-in):
+    5-variable change, violates minimum-change; r12_baseline already showed this
+    direction regresses.
+  - Adding ocean DR to existing config without DORAEMON management: ocean
+    current was already present at static [0, 0.5, 0.5, 0.25] m/s; unmanaged
+    range made it a fixed-perturbation, not a curriculum variable.
+
+### Open Questions (continued)
+
+- Does latent=16 fundamentally conflict with emabias, or was r12_baseline's
+  regression purely from k_bias=-1.0 halving? R13_B answers this directly.
+- Does ocean DR DORAEMON curriculum converge within 5000 iters, or does it stay
+  at nominal=0 end of Beta? Monitor `DORAEMON/ocean_current_strength_mean` in
+  TB; if stays <0.3 by iter 3000, policy cannot handle any current -- different
+  failure mode than sim only.
+- Does the sample-mean divergence pattern in PNG plots disappear with better
+  policies? Divergence rate 19% is axis-decorrelation artifact of
+  `_pick_sample_env` (median-att env). Unresolved whether rank-#1 training
+  actually reduces decorrelation.
+
+### Cleanup done this session
+
+- Migrated `r12_latent12` logs (713MB, 101 checkpoints) from
+  `/workspace/isaaclab-r12latent12/` to
+  `/workspace/isaaclab/logs/rsl_rl/fulldof_albc/2026-04-20_13-48-43_r12_latent12/`.
+- Created R13 worktrees `/workspace/isaaclab-r13_A` (branch `r13_A`) and
+  `/workspace/isaaclab-r13_B` (branch `r13_B`) off `r12_baseline` branch.
+- Cherry-picks from r12_baseline to main still pending (ocean DR integration,
+  r11/r12 code lineage) -- deferred until R13 results land, per
+  `rules/02-operations.md` "Experiment Worktree Lifecycle".
+
+### Methodology refinements
+
+- `scripts/analysis/analyze_eval_dr.py` (added prior session) exercised extensively
+  to compute heavy-tail (peak_max, %env peak>threshold) and sample-mean
+  divergence (sample_ss vs mean_ss, rank%). Refined DIV criterion combines
+  extreme rank with absolute gap > 2xnoise_floor to suppress false positives
+  from low-magnitude axes (yaw 0.003 rad/s mean_ss has spurious high ratios).
+- Composite 24-run ranking methodology: per-DR-level per-metric rank sum, then
+  average across 4 DR x 10 metrics. Resistant to single-axis optimization
+  bias. Use for future cross-run comparisons.
+
 ---
 
 ## [2026-04-19] R9 Partial Results + R10 Queued + R11 Designed
