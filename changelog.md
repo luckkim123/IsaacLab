@@ -22,6 +22,84 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-21] v6 Result Analysis + TCN Normfix + v6 Post-Eval Rerun Queue
+
+### Context
+v6 (GRU, r13_A DR matching) training completed — finished at loss_latent 0.0841
+(v5 r14-DR was 0.1132, 25% lower but still a plateau, not teacher-level convergence).
+Analyzed v6 eval_dr vs teacher r13_A, inspected TCN/GRU code paths for latent code
+defects, then re-ran v6 switching+diag after discovering they had crashed. User
+earlier rightly flagged that r14-era student runs (TCN h9, GRU v2/v5) are not valid
+comparisons for conclusions about architecture limits — only v6 onward uses the
+correct r13_A DR that the teacher was trained on.
+
+### Experiments
+- **v6 eval_dr (hard DR, per-axis |err| last 500 steps vs teacher r13_A)**:
+  roll 1.62° vs teacher 0.59° (2.7x gap) — big win over v5's 2.19°.
+  pitch 0.30° vs teacher 0.20° (1.5x gap) — **v5 was 2.04° (85% reduction)**.
+  vz 0.097 vs teacher 0.018 (5.4x) — v5 was 0.307 (68% reduction).
+  vy 0.005 vs teacher 0.005 (≈match) — v5 was 0.028.
+  Termination rate: 0% (v5 was 1.7%). Attitude norm: 1.71° vs v5's 3.48° (51%↓).
+  Teacher's structural roll≫pitch asymmetry (3:1) is recovered in v6 (5:1)
+  whereas v5 had lost it (roll≈pitch≈2° — policy not using privileged knowledge).
+- **v6 residual gap**: roll env-std 4.82° with mean 1.62° — one env exceeds 20°
+  (1/64). Heavy-tail persists on a minority of envs, even though the bulk-env
+  median is now close to teacher. BC loss floor 0.084 corresponds to ~85-90% of
+  teacher's latent variance recovered.
+- **TCN code audit** (`runner.py:_compute_loss_tcn`, `eval.py`): TCN path fed raw
+  obs_window (scales 10^-2 to 10^2) to student while GRU path runs obs through
+  teacher's actor_obs_normalizer. Eval path mirrored the same asymmetry. Comment
+  in runner.py explicitly documents that GRU was fixed for this reason; TCN was
+  never updated. TCN BC still converged to 0.026 under r14 but the asymmetry
+  remains a real defect and was fixed for future TCN runs.
+- **v6 post-eval crashes** — distinguished by failure mode:
+  - *switching* `AttributeError: 'ALBCEnv' object has no attribute
+    'randomize_physics_mid_episode'` — the method was added in r14 commit
+    1e2d5771 and removed by this session's earlier r13_A revert to `f05ca6f5`.
+    Eval-only tooling, orthogonal to training DR; re-added from r14 source.
+  - *diag* referenced `self._apply_obs_norm` which was removed in this session's
+    eval.py cleanup. Fixed the reference in `diagnose_student_latent.py`.
+- **TCN v1 r13_A + normfix** (run `2026-04-21_21-01-27_student_tcn_h9v1_r13aDR_normfix`):
+  launched on GPU 1 after v6 pipeline freed it; auto-chains eval_dr / switching /
+  diag. Will be first TCN run on matched DR — tests whether TCN with the
+  normalization fix beats v6's 0.084 BC plateau and closes the remaining 2-3x
+  gap on hard-DR roll/vz.
+
+### Decisions
+- **Keep v6 as a real improvement, not a fix.** r13_A DR matching is necessary
+  (v5→v6 improved att_norm 51%, pitch 85%, vz 68%, 0% termination) but not
+  sufficient (2-3x gap vs teacher on roll/vz). Do not drop v6 arch for a new
+  direction until TCN v1 result clarifies whether BC plateau is encoder-generic
+  or GRU-specific.
+- **Apply TCN obs normalization fix and remove `_apply_obs_norm` flag.**
+  Both encoders now unconditionally run obs through teacher's
+  actor_obs_normalizer at train and eval. Old TCN checkpoints (r14-era, raw
+  input) are accepted as incompatible — those runs are not valid baselines
+  anyway so no backward-compat shim added.
+- **Re-add `randomize_physics_mid_episode` rather than skip switching.** The
+  method is eval-only (resamples hydro/mass/payload/ocean/thruster mid-episode
+  without resetting motion state) and independent of training DR ranges. It was
+  an accidental casualty of the r13_A revert, not something r14 specifically
+  contributed. Re-included from r14 commit body without modification — no
+  evidence it needed r14's widened ranges to function.
+- **Queue v6 switching+diag rerun after TCN pipeline** rather than interrupt
+  TCN. Both GPUs occupied (GPU 0 r14, GPU 1 TCN); queuing behind TCN adds no
+  risk and defers by ~20-25 min vs killing TCN and re-starting. User asked only
+  for switching re-run so this ordering optimizes for TCN completion first.
+
+### Open Questions
+- Does TCN v1 with r13_A DR + normfix break through v6's 0.084 plateau, or does
+  TCN also plateau (suggesting the bottleneck is information-theoretic rather
+  than architecture-specific)?
+- Root cause of v6's roll env-heavy-tail (env-std 4.82°): are there DR corners
+  where teacher's privileged signal cannot be reconstructed from obs history at
+  all, or is the student BC underfit in those corners? Latent diagnostic rerun
+  will show per-env/per-dim MSE which can distinguish these.
+- Does the 2-3x teacher gap scale with DR difficulty (it does: medium 1.3x hard
+  3x), suggesting the residual is teacher-compensated disturbances that student
+  cannot infer? Or does it shrink with longer BPTT/deeper network (to be tested
+  if TCN v1 results are similar)?
+
 ## [2026-04-21] Ablation & Baseline Sweep — Spec, Plan, Baseline Selection, Challenger Launch
 
 ### Context
