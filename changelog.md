@@ -69,6 +69,18 @@ Result: both variants should train without crashes; smoke test deferred until GP
 
 **Challenger training launched (Phase 0.6 Task 0.6.3)**: `challenger_hist5_act3_enc16`, num_envs=2048, max_iterations=5000, GPU 0, seed=30. Background run; monitor set to fire on every 500-iter milestone + any crash signature. ETA ~5 hr.
 
+**Challenger env drift discovered and corrected (hotfix, aborted first launch at ~iter 4)**. User challenged "is it actually identical to hist5_act3 except encoder_latent_dim?" — answer was No. Initial `ALBCChallengerEnc16EnvCfg` inherited from current main, which has drifted post-hist5_act3 via r14 across 20+ fields:
+
+- `ou_enable` (False → True), `ou_sigma` (0.05 → 0.10) — r14 mid-episode OU drift doubled
+- 18 HardDR ranges widened 1.5-3x: `added_mass_scale` (0.5,1.5)→(0.3,1.8), `inertia_scale` (0.4,2.0)→(0.3,3.0), `payload_mass_range` (0,3)→(0,5), `thrust_coefficient_scale` (0.7,1.3)→(0.3,1.5), `time_constant_scale` (0.7,1.3)→(0.3,2.0), `ocean_current_strength_range` (0,1)→(0,2), `joint_stiffness_range` (30,150)→(20,200), etc.
+- `action_latency_range` added in r14 HardDR (0,6); field absent pre-r14 → effective (0,0)
+- `doraemon.step_interval` (250 → 500)
+- `save_interval` (50 → 100, runner-side)
+
+Root cause: hist5_act3 was trained in a worktree that was deleted per lifecycle policy; only `params/env.yaml` snapshot survived. Inheriting from current main picked up ALL post-hist5_act3 changes. Under this drift, Phase 0.7 would have compared challenger-with-r14 against r13_A-no-r14 — not a latent_dim test but a 20-variable confound.
+
+**Fix**: rewrote `config_challenger_enc16.py` to reconstruct hist5_act3's exact env — override `ou_enable/ou_sigma`, pair a new `ChallengerHardDomainRandomizationCfg` with all 18 r13-era HardDR ranges, override `doraemon.step_interval=250` and `save_interval=50`. Verified via yaml diff: smoke-run env.yaml has 0 behavioral diffs vs hist5_act3 (only action_latency_range field syntactic presence + CLI num_envs); agent.yaml diff = exactly `encoder_latent_dim: 9 → 16` (intended single variable) + CLI max_iterations. Relaunched.
+
 ### Decisions
 
 - **Baseline = r13_A (initial pick)** from 4-way analysis. Rationale: most balanced (pitch/vx/yaw/switching peak_roll 1st or tied-1st); hist variants only win narrow axes while regressing CV. Alternatives (hist10 vz breakthrough, hist5_act3 switching ss_roll) rejected because gains are axis-specific and aggregate score does not favor them.
@@ -84,6 +96,10 @@ Result: both variants should train without crashes; smoke test deferred until GP
 - **Reward kept constant across all variants** (no "replacement penalties" for no-constraint variants). Rationale: matches literature convention (CPO, IPO, SafeExploration benchmarks); adding penalties would conflate constraint effect with reward-shaping effect.
 
 - **Phase execution order: 0 → 0.6 → 0.7 → 0.5 → 1–4 → 5.** Rationale: Phase 0.5 sanity runs (500-iter pre-flight for variants #2 and #5) must use canonical env cfg locked at Phase 0.7 — otherwise they test the wrong thing.
+
+- **No new worktrees for experiments (policy going forward).** Rationale: worktree-based experiments (April 2026 hist/layernorm sweep) were deleted post-training per lifecycle policy, leaving only `params/env.yaml` snapshots. When later work attempted to "reproduce hist5_act3 + latent=16", main config had drifted via r14 and the subclass didn't override the drift — creating a 20-variable confound. Saved as `feedback_no_worktree_experiments` memory. Going forward: subclass-based env/runner cfg isolation in main repo only; subclass must override every field that differs from the intended reference run (verify via yaml diff before launch); worktree only acceptable for spec/plan writing, never for training.
+
+- **Subclass must full-diff against reference, not just override intended axis.** Rationale: the challenger drift bug happened because only 3 fields (hist_len, hist_action_len, observation_space) were overridden; the remaining main drift (OU, HardDR widening, latency, step_interval) leaked through silently. Going forward, for any "reproduce historical run X with one change" experiment: parse the reference `params/env.yaml`, run a programmatic full-field diff against the subclass's effective cfg, and assert diff count equals the intended variable count before launching.
 
 ### Open Questions
 
