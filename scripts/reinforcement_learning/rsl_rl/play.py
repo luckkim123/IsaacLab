@@ -115,6 +115,10 @@ def _load_runner_and_policy(env, agent_cfg, resume_path):
             "isaaclab_tasks.direct.constrained_full_albc.runners",
             "ConstraintEncoderRunner",
         ),
+        "OnPolicyDoraemonRunner": (
+            "isaaclab_tasks.direct.constrained_full_albc.runners",
+            "OnPolicyDoraemonRunner",
+        ),
     }
 
     if agent_cfg.class_name in _RUNNER_MAP:

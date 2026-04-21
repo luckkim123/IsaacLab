@@ -201,6 +201,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "isaaclab_tasks.direct.constrained_full_albc.runners",
             "ConstraintEncoderRunner",
         ),
+        "OnPolicyDoraemonRunner": (
+            "isaaclab_tasks.direct.constrained_full_albc.runners",
+            "OnPolicyDoraemonRunner",
+        ),
     }
 
     if agent_cfg.class_name in _RUNNER_MAP:
