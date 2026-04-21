@@ -22,37 +22,75 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## [2026-04-21] Ablation & Baseline Sweep — Spec + Plan + Baseline Initial Selection
+## [2026-04-21] Ablation & Baseline Sweep — Spec, Plan, Baseline Selection, Challenger Launch
 
-Design specs and implementation plan committed for the main-method ablation sweep (encoder/IPO/algorithm factors).
+### Context
 
-- Spec: `docs/superpowers/specs/2026-04-21-ablation-baseline-sweep-design.md`
-- Plan: `docs/superpowers/plans/2026-04-21-ablation-baseline-sweep.md`
-- Baseline record (artifact): `logs/rsl_rl/fulldof_albc/ablation_sweep/baseline_selection.md`
+Main method (`encoder + IPO + TRPO`) needs controlled comparisons to substantiate claims:
+- **Claim A (primary)**: encoder contributes to DR adaptation
+- **Claim B (secondary)**: IPO outperforms reward-only shaping
 
-### Variants to train (5)
+Five-variant matrix designed: `main(1) / noenc(2) / nocstr(3) / ppoenc(4) / pureppo(5)`. Reward / DR / DORAEMON held constant, single seed (`seed=30`), sequential on GPU 0. Student-policy training is live on GPU 1 throughout; any operation touching main repo must be safe against concurrent imports.
 
-| # | Run | Encoder | Constraint | Algorithm |
-|---|---|---|---|---|
-| 1 | main (baseline) | Yes | IPO | TRPO |
-| 2 | noenc | No | IPO | TRPO |
-| 3 | nocstr | Yes | no | TRPO |
-| 4 | ppoenc | Yes | no | PPO |
-| 5 | pureppo | No | no | PPO |
+### Experiments
 
-### Baseline initial pick: r13_A
+**4-way baseline candidate analysis (eval_dr + eval_dr_switching, hard-DR focus).** Candidates: r13_A, hist5, hist10, hist5_act3 (all `encoder_latent_dim=9`). layernorm excluded (reward -33%, pos_drift +3278%).
 
-From 4-way eval_dr + eval_dr_switching comparison (r13_A vs hist5 vs hist10 vs hist5_act3, all `latent=9`): r13_A most balanced (pitch/vx/yaw/switching peak_roll 1st or tied-1st). No hist variant decisively beats it under current `latent=9 + asymmetric critic` architecture. Hypothesized bottleneck.
+Per-axis ss_error at hard-DR:
 
-### Baseline challenger (Phase 0.6): hist5_act3 + `encoder_latent_dim=16`
+| Run | roll | pitch | vx | vy | vz | yaw | Heavy-tail (CV>=150%) |
+|---|---|---|---|---|---|---|---|
+| r13_A | 1.08° | **0.28°** | **0.004** | 0.006 | 0.018 | **0.002** | vz 231%, roll 184% |
+| hist5 | 1.25° | 0.31° | 0.008 | 0.008 | 0.015 | 0.003 | roll 220%, vx 241%, vz 230% |
+| hist10 | **1.04°** | 0.35° | 0.008 | 0.009 | **0.007** | 0.004 | vx 193% (vz 69%!) |
+| hist5_act3 | 1.09° | 0.38° | 0.007 | **0.006** | 0.015 | 0.003 | roll 244%, vx 292%, yaw 183% |
 
-One challenger run to falsify the bottleneck hypothesis. If challenger wins aggregate score vs r13_A, baseline + canonical env cfg switch to `hist_len=5, hist_action_len=3, obs_dim=121, latent=16`. Else revert to r13_A cfg.
+Switching seg1-9 peak_roll / ss_roll / pos_drift: r13_A wins peak (7.63°), hist5_act3 wins ss_roll (0.59°), hist10 wins pos_drift (0.070).
 
-### Execution constraints
+Finding: **no hist variant decisively beats r13_A**; hist10 only wins vz (Markovian-weakest axis), other axes tied or slightly worse.
 
-- GPU 0 only; GPU 1 reserved for user's parallel experiments.
-- No `./isaaclab.sh --install` swaps; all work from `/workspace/isaaclab` main repo.
-- Sequential single-seed (`seed=30`), 5000 iter per variant, reward/DR/DORAEMON held constant.
+**Three structural explanations considered for hist underperformance:**
+1. Encoder bottleneck: obs 87→178 squeezed through fixed z∈R^9 latent.
+2. Asymmetric critic leakage: critic reads privileged 23D directly, so hist's role (recovering hidden state) is marginal.
+3. Markovian dynamics: quat/omega/linvel already sufficient; hist marginal value saturates early.
+
+**Falsifiable predictions**: latent_dim=9→16 unmasks bottleneck → hist variants should win; no change → critic leakage / Markovian dominance.
+
+**Runtime risk check for Phase 2 / Phase 3 (code-level verification).** Before committing to PPO+Encoder and TRPO-NoIPO variants:
+- `ConstraintTRPO`: `num_constraints > 0` guards at lines 241, 262, 277, 593 — cleanly skips cost-critic paths when K=0.
+- `ActorCriticEncoder.__init__`: `num_constraints > 0` guard at line 191 creates no cost_critic; `load_state_dict` guarded at line 287.
+- `ConstraintEncoderRunner`: `getattr(self.alg, "num_constraints", 0) > 0` at line 121.
+- `PolicyBase` / `ActorCriticEncoder` implement all PPO-required methods: `act, evaluate, act_inference, get_actions_log_prob, update_normalization, action_mean, action_std, entropy, is_recurrent=False`. `**_kwargs` swallows PPO's extra `masks`/`hidden_state` args.
+- `OnPolicyRunner` uses `eval(class_name)` scope which finds `FullDOFActorCriticEncoder` via the module-level injection in `rsl_rl_ppo_cfg.py:22`.
+
+Result: both variants should train without crashes; smoke test deferred until GPU 0 frees.
+
+**Challenger smoke test (Phase 0.6 Task 0.6.2 Step 5)**: 5 iters with `Isaac-FullDOF-TRPO-ChallengerEnc16-v0` + num_envs=64 completed in 7.08s. Reward components, encoder metrics, obs shape=121 all correct.
+
+**Challenger training launched (Phase 0.6 Task 0.6.3)**: `challenger_hist5_act3_enc16`, num_envs=2048, max_iterations=5000, GPU 0, seed=30. Background run; monitor set to fire on every 500-iter milestone + any crash signature. ETA ~5 hr.
+
+### Decisions
+
+- **Baseline = r13_A (initial pick)** from 4-way analysis. Rationale: most balanced (pitch/vx/yaw/switching peak_roll 1st or tied-1st); hist variants only win narrow axes while regressing CV. Alternatives (hist10 vz breakthrough, hist5_act3 switching ss_roll) rejected because gains are axis-specific and aggregate score does not favor them.
+
+- **Add Phase 0.6 baseline challenger** before committing to variants. Challenger = `hist5_act3 + encoder_latent_dim=16`, doubling latent capacity (78% more). Rationale: the three competing explanations for hist underperformance are entangled; one challenger run falsifies the bottleneck hypothesis cheaply. If challenger wins aggregate score → baseline + canonical env cfg switch. Else r13_A stays.
+
+- **Subclass approach over main cfg editing for challenger** (Phase 0.6.2 re-plan). Rationale: student policy training is live on GPU 1 and reads `ALBCEnvCfg` at import; in-place edits to main `config.py` carry non-zero risk if reset/eval reconstructs env and reads new config. New isolated task `Isaac-FullDOF-TRPO-ChallengerEnc16-v0` with `ALBCChallengerEnc16EnvCfg` + `FullDOFTRPOChallengerEnc16RunnerCfg` keeps main untouched. Same pattern applied to variants #3/#4 via `ALBCNoConstraintEnvCfg`.
+
+- **No editable install swap during sweep** (carried forward from earlier session). Student-policy training must not be disrupted. All work from `/workspace/isaaclab` main repo only.
+
+- **Single seed (`seed=30`) not multi-seed.** Rationale: user prioritizes faster iteration over statistical rigor for this claim set; published work will acknowledge this limitation. Multi-seed defensible as future statistical-rigor pass.
+
+- **Reward kept constant across all variants** (no "replacement penalties" for no-constraint variants). Rationale: matches literature convention (CPO, IPO, SafeExploration benchmarks); adding penalties would conflate constraint effect with reward-shaping effect.
+
+- **Phase execution order: 0 → 0.6 → 0.7 → 0.5 → 1–4 → 5.** Rationale: Phase 0.5 sanity runs (500-iter pre-flight for variants #2 and #5) must use canonical env cfg locked at Phase 0.7 — otherwise they test the wrong thing.
+
+### Open Questions
+
+- Does challenger win Phase 0.7 head-to-head vs r13_A? Answer determines canonical env cfg and whether latent=9 vs 16 is the correct baseline for variants.
+- If challenger loses: does symmetric-critic follow-up ablation belong in this sweep or a later one? Per spec, deferred — but flag if Phase 0.7 result strongly implicates critic leakage.
+- PPO + ActorCriticEncoder runtime compatibility verified by code inspection only; actual train loop interaction may still surface issues (e.g., `hidden_state=None` handling inside PolicyBase). Phase 0.5 smoke will confirm.
+- Student-policy training ETA on GPU 1 is not tracked by Claude; if it finishes mid-sweep, later phases could parallelize on GPU 1 for throughput.
 
 ---
 

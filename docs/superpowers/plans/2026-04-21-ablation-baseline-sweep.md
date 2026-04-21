@@ -119,84 +119,130 @@ Three interpretations, each falsifiable:
 - Bottleneck exists but critic leakage dominates: challenger ties or loses marginally → keep r13_A but flag for future symmetric-critic ablation.
 - Markovian dominance: challenger loses clearly → keep r13_A; hist extensions don't help under this architecture.
 
-### Task 0.6.1: Pre-flight check — no other training active
+### Task 0.6.1: Decision — subclass approach (no main cfg edit)
 
-**Why**: Editing main's `ALBCEnvCfg` while another training constructs env instances can cause import inconsistencies.
+**Why subclass**: user's student-policy training (PID 2405335) is live on GPU1, reads `ALBCEnvCfg` at import time. Editing main `config.py` carries non-zero risk that a reset / eval-during-train event reconstructs env and reads the new config. Using a subclass + new task registration isolates the challenger cfg entirely from main, zero risk to student policy.
 
-- [ ] **Step 1: Check GPU activity**
-
-```bash
-nvidia-smi --query-compute-apps=pid,process_name,gpu_uuid,used_memory --format=csv
-ps aux | grep "train.py" | grep -v grep
-```
-
-- [ ] **Step 2: Ask user to confirm no active training on main repo**
-
-Ask: "hist5_act3+latent=16 challenger는 main config.py를 수정해야 합니다. 현재 student policy나 다른 main-repo 기반 훈련이 active 상태인지 확인해주세요."
-
-Wait for user confirmation. If active, defer Phase 0.6 until safe window.
-
-### Task 0.6.2: Edit main ALBCEnvCfg to hist5_act3 + latent=16
+### Task 0.6.2: Create `ALBCChallengerEnc16EnvCfg` + runner cfg + task registration
 
 **Files:**
-- Modify: `/workspace/isaaclab/source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/config.py`
-- Modify: `/workspace/isaaclab/source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/agents/rsl_rl_ppo_cfg.py`
+- Create: `/workspace/isaaclab/source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/config_challenger_enc16.py`
+- Create or modify: `/workspace/isaaclab/source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/agents/ablation_cfgs.py` (new file or appended)
+- Modify: `/workspace/isaaclab/source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/__init__.py`
+- Modify: `/workspace/isaaclab/source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/agents/__init__.py`
 
-- [ ] **Step 1: Read current values**
+- [ ] **Step 1: Write `config_challenger_enc16.py`**
 
-```bash
-grep -n "hist_len\|hist_action_len\|hist_stride\|observation_space\|policy_obs_dim\|encoder_latent_dim" \
-  /workspace/isaaclab/source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/config.py \
-  /workspace/isaaclab/source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/agents/rsl_rl_ppo_cfg.py \
-  | grep -v "^\s*#"
+```python
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+"""Env cfg for Phase 0.6 baseline challenger.
+
+Matches hist5_act3 config (hist_len=5, hist_action_len=3, observation_space=121)
+exactly. Paired with encoder_latent_dim=16 in the runner cfg to test the
+encoder-bottleneck hypothesis.
+"""
+
+from __future__ import annotations
+
+from isaaclab.utils import configclass
+
+from .config import ALBCEnvCfg
+
+
+@configclass
+class ALBCChallengerEnc16EnvCfg(ALBCEnvCfg):
+    """hist5_act3 obs config. Reward/DR/DORAEMON/noise unchanged."""
+
+    observation_space: int = 121
+    hist_len: int = 5
+    hist_action_len: int = 3
+    # hist_stride inherited = 3 from parent
 ```
 
-- [ ] **Step 2: Read hist5_act3 env.yaml for exact values**
+Verify the parent values first:
 
 ```bash
-grep -E "^(hist_len|hist_stride|hist_action_len|observation_space):" \
-  /workspace/isaaclab/logs/rsl_rl/fulldof_albc/2026-04-21_15-13-15_r13a_hist5_act3/params/env.yaml
+grep -nE "^\s+(observation_space|hist_len|hist_stride|hist_action_len):" \
+  /workspace/isaaclab/source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/config.py
 ```
 
-Expected values: `hist_len=5, hist_stride=3, hist_action_len=3, observation_space=121`.
+- [ ] **Step 2: Add challenger runner cfg to `ablation_cfgs.py`**
 
-- [ ] **Step 3: Edit config.py to hist5_act3 values**
+If file doesn't exist, create it with a minimal header + this content. If it exists (from Phase 2 prep), append at end.
 
-Use Edit tool to change in `config.py`:
-- `observation_space` → `121`
-- `hist_len` → `5`
-- `hist_action_len` → `3`
-- (hist_stride should already be 3; verify)
+```python
+# =============================================================================
+# Phase 0.6: Baseline challenger (hist5_act3 + encoder_latent_dim=16)
+# =============================================================================
 
-- [ ] **Step 4: Edit rsl_rl_ppo_cfg.py**
+from .rsl_rl_ppo_cfg import _FullDOFPolicyCfg, FullDOFTRPORunnerCfg
 
-Use Edit tool:
-- `_EncoderPolicyCfg.policy_obs_dim: int = 87` → `121`
-- `_EncoderPolicyCfg.encoder_latent_dim: int = 16` (confirm already 16; if not, change)
-- `_FullDOFNoEncoderPolicyCfg.policy_obs_dim: int = 87` → `121`
 
-- [ ] **Step 5: Do NOT run `./isaaclab.sh --install`**
+@configclass
+class _FullDOFChallengerEnc16PolicyCfg(_FullDOFPolicyCfg):
+    """Encoder policy for challenger: obs=121, latent=16."""
 
-The editable install maps `isaaclab_tasks` to main's source tree. In-place edits take effect on next Python import in new processes.
+    policy_obs_dim: int = 121
+    encoder_latent_dim: int = 16
 
-- [ ] **Step 6: Smoke-test 5-iter**
+
+@configclass
+class FullDOFTRPOChallengerEnc16RunnerCfg(FullDOFTRPORunnerCfg):
+    """Encoder + IPO + TRPO trained on hist5_act3 obs with doubled latent."""
+
+    policy = _FullDOFChallengerEnc16PolicyCfg()
+```
+
+Note: `FullDOFTRPORunnerCfg` already sets `class_name="FullDOFConstraintEncoderRunner"`, algorithm, obs_groups, seed, etc. The subclass only overrides the policy cfg.
+
+- [ ] **Step 3: Register the new task in `__init__.py`**
+
+Append to `/workspace/isaaclab/source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/__init__.py`:
+
+```python
+gym.register(
+    id="Isaac-FullDOF-TRPO-ChallengerEnc16-v0",
+    entry_point="isaaclab_tasks.direct.constrained_full_albc:ALBCEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.config_challenger_enc16:ALBCChallengerEnc16EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{__name__}.agents.ablation_cfgs:FullDOFTRPOChallengerEnc16RunnerCfg",
+    },
+)
+```
+
+- [ ] **Step 4: Export runner cfg from `agents/__init__.py`**
+
+Read current file; if needed, add:
+
+```python
+from .ablation_cfgs import FullDOFTRPOChallengerEnc16RunnerCfg
+```
+
+- [ ] **Step 5: Smoke-test new task (5 iter, GPU 0)**
 
 ```bash
 cd /workspace/isaaclab
 CUDA_VISIBLE_DEVICES=0 ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
-  --task Isaac-FullDOF-TRPO-v0 \
+  --task Isaac-FullDOF-TRPO-ChallengerEnc16-v0 \
   --num_envs 64 --max_iterations 5 --headless
 ```
 
-Expected: 5 iters pass without shape mismatch. If fail, inspect error and fix config values.
+Expected: 5 iters pass, obs shape=121, encoder latent_dim=16. If shape mismatch, verify `policy_obs_dim=121` + check `obs_noise_std_full.shape` includes the right dims.
 
-- [ ] **Step 7: Commit the challenger env config (do not push)**
+- [ ] **Step 6: Commit challenger cfg + task registration**
 
 ```bash
 cd /workspace/isaaclab
-git add source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/config.py \
-        source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/agents/rsl_rl_ppo_cfg.py
-git commit -m "ablation: reconfigure env to hist5_act3 + encoder_latent_dim=16 for Phase 0.6 challenger"
+git add source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/config_challenger_enc16.py \
+        source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/agents/ablation_cfgs.py \
+        source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/agents/__init__.py \
+        source/isaaclab_tasks/isaaclab_tasks/direct/constrained_full_albc/__init__.py
+git commit -m "ablation(Phase 0.6): challenger task with hist5_act3 obs + encoder_latent_dim=16"
 ```
 
 ### Task 0.6.3: Launch challenger training (5000 iter)
@@ -209,7 +255,7 @@ git commit -m "ablation: reconfigure env to hist5_act3 + encoder_latent_dim=16 f
 ```bash
 cd /workspace/isaaclab
 CUDA_VISIBLE_DEVICES=0 ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \
-  --task Isaac-FullDOF-TRPO-v0 \
+  --task Isaac-FullDOF-TRPO-ChallengerEnc16-v0 \
   --num_envs 2048 --max_iterations 5000 --headless \
   --logger wandb --log_project_name fulldof_albc --run_name challenger_hist5_act3_enc16 \
   2>&1 | tee /workspace/challenger_hist5_act3_enc16.log
@@ -237,7 +283,7 @@ cd /workspace/isaaclab
 LATEST=$(ls -td /workspace/isaaclab/logs/rsl_rl/fulldof_albc/*_challenger_hist5_act3_enc16 | head -1)
 CKPT="$LATEST/model_4999.pt"
 CUDA_VISIBLE_DEVICES=0 ./isaaclab.sh -p scripts/analysis/eval_dr_fulldof.py \
-  --task Isaac-FullDOF-TRPO-v0 --num_envs 64 --headless --checkpoint "$CKPT"
+  --task Isaac-FullDOF-TRPO-ChallengerEnc16-v0 --num_envs 64 --headless --checkpoint "$CKPT"
 ```
 
 Expected: `<run>/eval_dr/enhanced_summary.json` + 3 PNG plots + 4 npz files.
@@ -247,7 +293,7 @@ Expected: `<run>/eval_dr/enhanced_summary.json` + 3 PNG plots + 4 npz files.
 ```bash
 cd /workspace/isaaclab
 CUDA_VISIBLE_DEVICES=0 ./isaaclab.sh -p scripts/analysis/eval_dr_switching.py \
-  --task Isaac-FullDOF-TRPO-v0 --num_envs 64 --headless \
+  --task Isaac-FullDOF-TRPO-ChallengerEnc16-v0 --num_envs 64 --headless \
   --checkpoint "$CKPT" --seed 42 --segment_duration 5.0 --num_segments 10
 ```
 
