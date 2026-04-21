@@ -22,6 +22,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-21] Ablation & Baseline Sweep — Spec + Plan + Baseline Initial Selection
+
+Design specs and implementation plan committed for the main-method ablation sweep (encoder/IPO/algorithm factors).
+
+- Spec: `docs/superpowers/specs/2026-04-21-ablation-baseline-sweep-design.md`
+- Plan: `docs/superpowers/plans/2026-04-21-ablation-baseline-sweep.md`
+- Baseline record (artifact): `logs/rsl_rl/fulldof_albc/ablation_sweep/baseline_selection.md`
+
+### Variants to train (5)
+
+| # | Run | Encoder | Constraint | Algorithm |
+|---|---|---|---|---|
+| 1 | main (baseline) | Yes | IPO | TRPO |
+| 2 | noenc | No | IPO | TRPO |
+| 3 | nocstr | Yes | no | TRPO |
+| 4 | ppoenc | Yes | no | PPO |
+| 5 | pureppo | No | no | PPO |
+
+### Baseline initial pick: r13_A
+
+From 4-way eval_dr + eval_dr_switching comparison (r13_A vs hist5 vs hist10 vs hist5_act3, all `latent=9`): r13_A most balanced (pitch/vx/yaw/switching peak_roll 1st or tied-1st). No hist variant decisively beats it under current `latent=9 + asymmetric critic` architecture. Hypothesized bottleneck.
+
+### Baseline challenger (Phase 0.6): hist5_act3 + `encoder_latent_dim=16`
+
+One challenger run to falsify the bottleneck hypothesis. If challenger wins aggregate score vs r13_A, baseline + canonical env cfg switch to `hist_len=5, hist_action_len=3, obs_dim=121, latent=16`. Else revert to r13_A cfg.
+
+### Execution constraints
+
+- GPU 0 only; GPU 1 reserved for user's parallel experiments.
+- No `./isaaclab.sh --install` swaps; all work from `/workspace/isaaclab` main repo.
+- Sequential single-seed (`seed=30`), 5000 iter per variant, reward/DR/DORAEMON held constant.
+
+---
+
 ## [2026-04-21] r13_A Ablation Sweep — hist_len / hist_action_len / LayerNorm
 
 ### Context

@@ -102,13 +102,9 @@ A `hist5_act3 + encoder_latent_dim=16` run will test the bottleneck hypothesis.
 If challenger wins, baseline switches and canonical env cfg updates accordingly.
 ```
 
-- [ ] **Step 2: Commit baseline selection record**
+- [ ] **Step 2: Note — `baseline_selection.md` is an artifact, not committed**
 
-```bash
-cd /workspace/isaaclab
-git add logs/rsl_rl/fulldof_albc/ablation_sweep/baseline_selection.md
-git commit -m "ablation: record r13_A as initial baseline from 4-way analysis"
-```
+`logs/rsl_rl/` is gitignored. Do not attempt `git add` on it. Instead, append a line to `changelog.md` (which IS tracked) referencing the artifact path. The artifact itself persists alongside the run logs.
 
 ---
 
@@ -376,13 +372,9 @@ git commit -m "ablation: revert to r13_A env cfg after Phase 0.7 challenger comp
 
 ### Task 0.7.3: Commit the decision record
 
-- [ ] **Step 1: Commit baseline_selection.md**
+- [ ] **Step 1: Append decision to `baseline_selection.md` (artifact, not committed)**
 
-```bash
-cd /workspace/isaaclab
-git add logs/rsl_rl/fulldof_albc/ablation_sweep/baseline_selection.md
-git commit -m "ablation: record final baseline decision from Phase 0.7"
-```
+See note in Task 0.1 Step 2 — `logs/rsl_rl/` is gitignored. Persistence is via the artifact + changelog entry.
 
 - [ ] **Step 2: Update changelog**
 
