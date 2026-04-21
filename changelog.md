@@ -283,6 +283,30 @@ Follow-up on Decision #3 (GRU architectural ceiling deferred). Hypothesis tested
 - Why does TCN reach loss_latent=0.026 (4x below GRU floor) with same 87D obs? Differential architecture effect vs observability: TCN sees explicit 9-step window; GRU accumulates via hidden state. If hidden state initialization or regularization is destroying info, that's a separate fix path worth one experiment.
 - Can teacher action noise floor (loss_action=0.057 ≈ teacher σ²=0.0625) be driven lower by noise-aware BC loss (KL against stochastic teacher distribution instead of L2 to mean)?
 
+### Late-evening resolution: r14 DR mismatch was the root cause
+
+**v5 eval confirmed LN(9) removal inert.** eval_dr HARD ss_error v5/v2/TCN: roll 2.28°/2.12°/2.30°, vz 0.304/0.292/0.247. All three within 5% — LN hypothesis finally rejected. Heavy-tail (tail 30%, peak>20°/0.5) also indistinguishable between v5 and v2. Training grad_norm did sustain 4x higher in v5 (0.22 vs 0.05) — gradient flow was restored but produced no downstream quality change.
+
+**Root cause identified via pipeline audit.** Student training used `HardDomainRandomizationCfg` (imported in `student/runner.py`) that had been **widened 1.5–3x by commit `1e2d5771` (r14 prep)** on 2026-04-21 — after r13_A was trained (commit `f05ca6f5`, 2026-04-20). Teacher r13_A had never seen the expanded DR ranges: added_mass (0.5,1.5)→(0.3,1.8), inertia (0.4,2.0)→(0.3,3.0), payload (0.0,3.0)→(0.0,5.0), thrust_coef (0.7,1.3)→(0.3,1.5), plus new `action_latency_range`, `ou_enable=True`, `ou_sigma` doubled. **Every BC label from the teacher in those widened regions was OOD noise.** DORAEMON final Beta(1.93, 1.93) shows teacher was competent near the midpoint of its own training range — querying it in the r14 tails produced incoherent z_true and action targets, explaining the universal `loss_latent=0.11` plateau (≈ mean-predictor baseline).
+
+**r14 removed, r13_A state exactly restored.** Reverted `config.py`, `albc_env.py`, `agents/rsl_rl_ppo_cfg.py` to commit `f05ca6f5` (sha256 byte-identical, verified). Deleted `scripts/launch_r14.sh`, `docs/superpowers/{plans,specs}/2026-04-21-r14-final-*.md`. Comment in `student/runner.py:40` updated to reference r13_A-era HardDR rather than "r14 aggressive". No other r14 refs remain outside one unrelated ablation file (`config_challenger_enc16.py`, another session).
+
+**v6 `student_gru_h9v6_r13aDR_h256_bptt48` (launched 2026-04-21 20:28, GPU 1)**: same architecture as v5 (hidden 256, deep head 64, BPTT 48, no output LN), only variable changed is DR distribution (now exact r13_A HardDR). **Iter 15 loss_latent=0.0848 — already 25% below the 0.11 plateau floor that all of v2/v3/v4/v5 were stuck at for 1000 iters each.** Confirms DR mismatch was the dominant bottleneck, not architecture. Full training + eval pending.
+
+**Separate eval-time fix.** `student/eval.py` now auto-infers `gru_hidden` and `gru_head_hidden` from checkpoint tensor shapes so eval scripts no longer require explicit CLI args for non-default architectures. Prevents v4/v5 style checkpoint-mismatch crashes.
+
+### Decisions (late-evening)
+
+- **Match student DR distribution to teacher's training distribution.** RMA Phase-2 canonical protocol. Rollouts beyond teacher competence produce OOD labels that look like noise to the BC loss, collapsing it toward the mean-predictor baseline regardless of architecture. Alternatives rejected: keeping r14 DR with DAGGER (doesn't fix OOD teacher); keeping r14 DR and re-training teacher (out of scope; r14 teacher doesn't exist).
+- **Discontinue all architecture-only experiments for GRU.** v2–v5 swept head depth, hidden size (128→256), BPTT window (24→48), and output LN. None moved the asymptote by more than the noise floor. Demonstrated the plateau was an external (DR) constraint, not an internal (capacity) one. Future GRU changes only on top of DR-matched baseline.
+- **Reject "switching-first" framing.** User observation: switching-eval errors are largely PID-tunable at deployment while eval_dr steady-state errors are fundamental to policy competence. TCN's 33% vz-heavy-tail advantage at HARD (20% vs 30% envs peak>0.5 m/s) remains the cleanest eval_dr signal; switching differences get lower weight.
+
+### Open Questions (late-evening)
+
+- Does v6 reach loss_latent ≈ TCN's 0.026, or will GRU plateau at an intermediate floor even with matched DR? Answer defines whether GRU has a residual architectural disadvantage vs TCN beyond the DR issue.
+- eval_dr_fulldof.py defines "hard" via the system HardDomainRandomizationCfg at import time. Post-revert, "hard" now matches teacher's training range — so v6 "hard" eval is apples-to-apples with r13_A, but earlier v2/v5 "hard" eval used the wider r14 range. Retro-comparison tables across v2…v5 vs v6 hard metrics are not strictly apples-to-apples; need to note this when citing previous numbers.
+- Should DORAEMON eventually be re-enabled for student rollouts (curriculum from soft to r13_A-hard)? Currently disabled because the intended reason (match teacher's final operating point) is now satisfied by fixed r13_A-HardDR; DORAEMON adds non-stationarity with unclear benefit for pure BC.
+
 ### Context
 
 All R11 experiments completed. Initial R12 design naively stacked "all R11 winners"
