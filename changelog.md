@@ -22,6 +22,68 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-21] r13_A Ablation Sweep — hist_len / hist_action_len / LayerNorm
+
+### Context
+
+Four single-variable branches forked from `r13_A` baseline (commit `bafe23f4`) to probe whether adding proprioceptive history or swapping the actor obs normalizer improves command tracking and DR-switching robustness. Each branch modifies exactly one config axis; everything else (reward, constraints, encoder latent=9, DORAEMON, HardDR) held fixed. All four trained 5000 iter, num_envs=4096, seed=42, in isolated worktrees (`/workspace/isaaclab-r13a_*`).
+
+### Experiment-specific diffs vs `r13_A` baseline (documented before worktree removal)
+
+- **r13a_hist5** (commit `a557d4e1`): `hist_len: 3 → 5`. `policy_obs_dim: 87 → 113`. Updated `_OBS_NOISE_STD` and `_OBS_BIAS_MAG` tuples (joint hist 12→20, body hist 27→45). `hist_stride=3`, `hist_action_len=2` unchanged.
+- **r13a_hist10** (commit `5a26bf91`): `hist_len: 3 → 10`. `policy_obs_dim: 87 → 178`. Same obs-tuple expansion (joint hist 12→40, body hist 27→90).
+- **r13a_hist5_act3** (commit `4063466b`): `hist_len: 3 → 5` + `hist_action_len: 2 → 3`. `policy_obs_dim: 87 → 121`. Joint hist 20, body hist 45, action hist 24.
+- **r13a_layernorm** (commit `962cb9af`): in `encoder/actor_critic_encoder.py`, actor obs normalizer swapped `EmpiricalNormalization(num_actor_obs_norm) → nn.LayerNorm(num_actor_obs_norm)`. Also guarded `.update()` call with `hasattr` since LayerNorm has no `update`. `policy_obs_dim` unchanged at 87.
+
+### Experiments (5 runs analyzed: r13_A baseline + 4 ablations)
+
+eval_dr 4 DR levels (none/soft/medium/hard, num_envs=64, ckpt=model_4999) — per-axis `ss_error` at **hard DR**:
+
+| Run | roll° | pitch° | vx m/s | vy m/s | vz m/s | yaw rad/s | CV heavy-tail |
+|-----|-------|--------|--------|--------|--------|-----------|----------------|
+| r13_A | 1.08 | **0.28** | **0.004** | 0.006 | 0.018 | **0.002** | vz 231%, roll 184% |
+| hist5 | 1.25 | 0.31 | 0.008 | 0.008 | 0.015 | 0.003 | vx 241%, vz 230% |
+| hist10 | **1.04** | 0.35 | 0.008 | 0.009 | **0.007** | 0.004 | vz 69% (!), vx 193% |
+| layernorm | 1.53 | 1.04 | 0.040 | 0.035 | 0.060 | 0.037 | broad failure |
+| hist5_act3 | 1.09 | 0.38 | 0.007 | **0.006** | 0.015 | 0.003 | vx 292%, yaw 183% |
+
+- Survival=100% all runs / all DR — no run destabilizes.
+- **hist10 vz breakthrough**: ss_error 0.018 → 0.007, CV 231% → 69%. Only hist10 wins an axis clearly. Matches the hypothesis that vz is the least Markovian axis (buoyancy + added-mass dynamics are slow), so history extension helps.
+- **layernorm fails across the board**: pitch 4x worse (0.28 → 1.04), all linear velocities 5-10x worse, yaw 20x worse. Not marginal — structural.
+
+eval_dr_switching (zero cmd, 5s x 10 segs with DR re-sample @ seg 1-9, same seed):
+
+| Run | seg0 peak_roll (PID-neutral) | seg1-9 hard peak_roll | seg1-9 hard ss_roll | seg1-9 hard pos_drift |
+|-----|-----|-----|-----|-----|
+| r13_A | 14.8° | **7.63°** | 0.67° | 0.085 m |
+| hist5 | **13.3°** | 8.70° | 1.28° | 0.121 m |
+| hist10 | 15.4° | 8.60° | 0.68° | **0.070 m** |
+| layernorm | 20.4° (worst) | 8.75° | 1.07° | 0.287 m (worst) |
+| hist5_act3 | 14.8° | 7.72° | **0.59°** | 0.087 m |
+
+- seg0 is PID-gain-neutral (common upright init): layernorm alone stands out as worst → policy failure, not controller artifact.
+- seg1-9 hard vs none ratio varies 7-36x across runs; none-level values are too close to zero for ratios to be diagnostic.
+
+### Decisions
+
+- **r13_A remains the baseline**. None of the ablations unambiguously beats it. pitch/yaw/vx stay with r13_A; hist10 wins vz+pos_drift; hist5_act3 wins vy+settled roll. No single challenger dominates.
+- **Reject LayerNorm actor obs normalizer**. Failure is structural across all axes, seg0 included (so not a PID-gain artifact). EmpiricalNormalization's running mean/var is load-bearing for this policy — LayerNorm's per-sample normalization breaks the conditioning the encoder + actor rely on.
+- **Hist extension has marginal returns under the current architecture**. Explanation confirmed from config read + code audit:
+  1. `encoder_latent_dim=9` is a hard bottleneck. Extended history (87→178D) still squeezes through z of 9-dim. Additional input ends up as either noise or ignored.
+  2. Critic is **asymmetric** (receives privileged 23D directly), so actor does not have to reconstruct hidden state — history's DR-identification utility is already provided by privileged info at training time. This is the opposite of HORA's original setup (symmetric critic), which is why HORA-style history extension typically shows bigger gains in the literature.
+  3. IMU-dominant axes (roll/pitch) are near-Markovian; only vz (slow hydrodynamic axis) shows meaningful gain from history.
+- **Worktrees removed, branches kept**. Each ablation's single experiment commit is preserved on its branch (`r13a_hist5`, `r13a_hist10`, `r13a_hist5_act3`, `r13a_layernorm`) for future cherry-pick; only the filesystem worktrees under `/workspace/isaaclab-r13a_*` are deleted. Log directories already migrated into `/workspace/isaaclab/logs/rsl_rl/fulldof_albc/` (hist5_act3 moved in this session from `full_dof_trpo/` subproject; the rest were already there).
+- **Pip editable install restored to main** `/workspace/isaaclab/source/*` after the hist5_act3 eval run temporarily pointed it at the worktree (`feedback_editable_install_namespace` rule triggered: a partial reinstall from the worktree collided with an in-flight student training on GPU1 which silently died during namespace swap).
+
+### Open Questions
+
+- **Would `encoder_latent_dim=16` unlock hist10's gains on axes other than vz?** The latent bottleneck hypothesis predicts yes. Cheap to test: clone r13a_hist10 branch, bump latent_dim, rerun.
+- **Would a symmetric critic (privileged removed) flip the result?** Expensive but the critic-info-leakage hypothesis says history extension would start paying off in axes beyond vz.
+- **DR-switching seg1-9 peak_roll depends on cascade PID `Kp_pos/Kp_yaw=0.5`**. Different policies have different closed-loop dynamics; the seg0 metric sidesteps this, but absolute seg1-9 comparison across runs is only ordinally trustworthy. A `Kp_*` sweep per policy would quantify the artifact, but cost is ~5× eval time — deferred.
+
+
+---
+
 ## [2026-04-21] R13 A/B Deep Analysis + DR-Switching Eval Mode + R14 Final Design
 
 ### Context
