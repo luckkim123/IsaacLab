@@ -177,7 +177,39 @@ Building asymmetric student encoder via behavior cloning from frozen r13_A teach
 - **Yaw overshoot r13_A 17.6% (vs r11_emabias 11.1%)**: caused by cumulative addition of `ocean_current_strength_range=(0,1)` HardDR between r12 and r13. Latent=9 cannot absorb this transient as well as latent=16. Choosing latent=16 (r14 = r13_B) directly addresses this.
 - **latent=12 worse than latent=9 for yaw transient** (r12_latent12 data). Dimension effect is non-linear. Between latent=9 and 16 is NOT a safe interpolation for all axes.
 
+### Evening addendum: GRU deep-head / capacity sweep and LN(9) diagnostic
 
+Follow-up on Decision #3 (GRU architectural ceiling deferred). Hypothesis tested: the loss_latent=0.113 floor is head capacity or output-normalization structure, not information ceiling.
+
+**Diagnostic infrastructure added.** `scripts/analysis/diagnose_student_latent.py` logs per-step (l_hat, l_true) tensors for each DR level. `analyze_student_latent.py` decomposes MSE into bias² + variance and per-dim stds. Applied to TCN H=9 and GRU v2 ckpts.
+
+**Per-dim std verification (from latent_log_*.npz, hard DR):**
+- teacher per-dim std: `[0.47, 0.43, 0.42, 0.47, 0.46, 0.35, 0.18, 0.17, 0.29]`
+- TCN student per-dim std: `[0.46, 0.46, 0.37, 0.51, 0.40, 0.31, 0.23, 0.17, 0.17]` — matches teacher in range
+- GRU v2 student per-dim std: `[0.032, 0.031, 0.021, 0.019, 0.007, 0.014, 0.002, 0.003, 0.007]` — **10-100x smaller, near-constant**
+
+**Bias²/variance breakdown (GRU v2):** none DR bias²=96% (output essentially constant), soft=54%, medium=14%, hard=5%. Confirms GRU output variance collapse, while TCN reaches bias²=8-51% (variance-dominated at higher DR).
+
+**Structural asymmetry identified:** TCN head ends at `Linear(flat,128)→ELU→LN(128)→Linear(128,9)→softsign` (no LN on 9D output). GRU head ends at `Linear(h,64)→ELU→LN(64)→Linear(64,9)→LN(9)→softsign`. Per-sample LN across 9 dims normalizes to unit std across dims; when the 9 predictions are near-constant, this amounts to dividing by ~0 and destroys whatever signal remained.
+
+**Failed runs (all hit identical loss_latent=0.11 plateau by iter ~30 regardless of capacity):**
+- **v3 `student_gru_h9v3_deephead`** (deep head 128→64→9, hidden 128, BPTT 24): Q1 loss_latent=0.114, final ~0.108 (5% improvement over v2, within noise).
+- **v4 `student_gru_h9v4_h256_bptt48`** (hidden 256, deep head, BPTT 48, num_envs 2048): killed at iter 399. Slope over iter 200-399: -0.006/1000iter. loss_latent = 0.112 (identical to v2/v3), grad_norm already dropped 0.46→0.04 by iter 100. **Capacity doubling + BPTT doubling = zero asymptote change.**
+- **v5 `student_gru_h9v5_noLN_h256_bptt48`** (v4 config minus final LN(9)): iter 220 loss_latent=0.113, grad_norm sustained at 0.21-0.27 (3x higher than v4's 0.08 at same iter). LN removal does free gradient flow, but loss floor unmoved. Training in-flight to iter 999.
+
+**Information-theoretic floor argument.** At hard DR, teacher latent per-dim variance sum ≈ 1.28 → mean-predictor baseline MSE = 0.143. Observed loss_latent = 0.11 is only 20% improvement over predicting the mean. The 9-step proprioceptive window appears to bottleneck on mutual information with DR params; no architectural tweak changes this budget.
+
+### Decisions (addendum)
+
+- **Architectural tuning for GRU is a dead-end.** TCN (no output LN, matches teacher std) and GRU (output LN, near-constant output) form a clean natural experiment. Even after matching structure (v5) and capacity-doubling (v4), the loss_latent floor at 0.11-0.12 is unchanged. The floor is an observability/data limit, not a capacity limit.
+- **Don't chase loss_latent below 0.10 via architecture.** v2 eval results already proved loss is a weak proxy for downstream action quality. The 20% gap to mean-predictor is likely all the signal 9-step proprio obs can carry.
+- **Next intervention direction shifts to information/distribution, not architecture.** Candidates: DAGGER (student rollouts re-labeled by teacher, fixes covariate shift), extended obs window (proprio >9 steps), or explicit DR-parameter regression auxiliary. Architecture sweeps discontinued.
+
+### Open Questions (addendum)
+
+- Is v5 final eval meaningfully better than v2 despite identical training loss? If output std is restored (no LN collapse) even at the same MSE, downstream actor may decode better. Verification pending v5 eval_dr + diagnostic npz.
+- Why does TCN reach loss_latent=0.026 (4x below GRU floor) with same 87D obs? Differential architecture effect vs observability: TCN sees explicit 9-step window; GRU accumulates via hidden state. If hidden state initialization or regularization is destroying info, that's a separate fix path worth one experiment.
+- Can teacher action noise floor (loss_action=0.057 ≈ teacher σ²=0.0625) be driven lower by noise-aware BC loss (KL against stochastic teacher distribution instead of L2 to mean)?
 
 ### Context
 
