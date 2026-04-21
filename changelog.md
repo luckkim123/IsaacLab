@@ -22,6 +22,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-21] TCN v1 Diag + TCN Sweep v2/v3/v4 Launch
+
+### Context
+TCN v1 (r13_A DR, normfix) finished with BC action loss 0.011 — 8x lower than GRU
+v6's 0.084. Yet eval_dr hard attitude stayed at 1.68° (teacher 1.08°), vz 0.043
+(teacher 0.018), yaw 0.006 rad/s (teacher 0.002). BC loss is NOT the bottleneck
+for hard-DR deployment; latent diagnostic points to an information/capacity limit
+at H=9 (0.18s window at 50Hz).
+
+### Experiments
+- **TCN v1 latent diagnostic** (`latent_summary.json` at 2026-04-21_21-01-27):
+  - hard DR: `l_hat_envvar` 0.012 vs `l_true_envvar` 0.121 — student recovers only
+    ~10% of per-env latent variance. At none DR `l_hat_envvar` is already 0.007,
+    meaning the encoder is emitting time-variation unrelated to env conditioning.
+  - per-dim MSE worst dims at hard: dim 5 (0.56), dim 3 (0.46), dim 2 (0.36) —
+    half of softsign's [-1,1] range unrecovered on these dims.
+  - Verdict: 0.18s temporal window can resolve short-horizon dynamics but is
+    insufficient to invert hydrodynamic signatures (added mass, drag, current).
+    Longer receptive field is the dominant improvement axis.
+- **TCN v1 play (HardDR, cascade PID)** confirmed stable hovering at att ~0.6°,
+  lv_err ~0.02, thr_util ~0.10 across 4600 steps (num_envs=4, livestream=2) on
+  GPU 1. The attitude/velocity metrics match eval_dr so degradation is not
+  stochastic eval artifact.
+
+### Decisions
+- **Added TCN dilation + LR-schedule knobs to StudentCfg/train_student.py**:
+  - `tcn_conv_dilations` field (default (1,1,1) = no change), wired through
+    `StudentEncoderTCN.__init__` with output-length guard.
+  - CLI overrides: `--tcn_history`, `--tcn_channels`, `--tcn_kernels`,
+    `--tcn_strides`, `--tcn_dilations`, `--lr_schedule`, `--lr_warmup_iters`,
+    `--lr_min`. None of these change v1 defaults when unspecified.
+  - `_set_lr_for_iter()` in `StudentRunner.learn()` applies linear warmup
+    (lr*0.1 → lr) then cosine decay (lr → lr_min). 'none' mode is a no-op.
+- **Queued sweep (sequential, GPU 1, `launch_tcn_v2_v3_v4_gpu1.sh`)**:
+  - **v2_h27_dilated**: H=27, kernels (3,3,3), dilations (1,2,4). Output seq_len=13,
+    flatten=1664, per-output RF=15 steps. Tests the info-limit hypothesis directly.
+  - **v3_lambda5**: `lambda_latent=1→5`. Biases the loss toward matching teacher's
+    latent rather than imitating teacher's action; orthogonal to capacity.
+  - **v4_lr_cosine**: `cosine 5e-4→5e-5`, 50-iter warmup. Tests whether v1's flat
+    LR left convergence on the table after step ~700.
+- Each run: train (1000 iters) → eval_dr → switching → diag. ~1h per variant.
+  Baseline for all comparisons: r13_A teacher (ignore r14-era runs).
+
+### Open Questions
+- If v2 still leaves `l_hat_envvar < l_true_envvar/2` at hard, the gap is not
+  temporal-window but something deeper (obs contains insufficient info for env
+  inference, or teacher's privileged encoder extracts non-recoverable features).
+  Next round would examine which obs channels move most under per-env dynamics.
+- If v3 collapses `l_hat` without improving eval_dr, the latent geometry is
+  correct but the action manifold is fragile — pointing to actor sensitivity,
+  not encoder capacity.
+
+---
+
 ## [2026-04-21] v6 Result Analysis + TCN Normfix + v6 Post-Eval Rerun Queue
 
 ### Context
