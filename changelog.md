@@ -22,6 +22,86 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [2026-04-22] TCN Sweep v2/v3/v4 Results — v1 Confirmed as Baseline
+
+### Context
+Ran three TCN variants sequentially on GPU 1 to probe v1's (H=9) apparent
+deployment ceiling: att hard 1.68° vs teacher 1.08° (55% gap). Hypothesis
+was that a longer temporal window would recover more env variance and close
+the gap. Also a `StudentInLoopPolicy` eval-time bug surfaced mid-sweep and
+was fixed.
+
+### Experiments
+All trained with 4096 envs × 1000 iters under r13_A DR on GPU 1. BC losses
+averaged over last 100 iters; eval_dr summaries pulled from
+`enhanced_summary.json`; latent diagnostic at hard DR.
+
+| run | BC total | BC latent | hard att | hard vz | hard peak_roll (switch) | latent recovery | overall MSE |
+|-----|---------|-----------|----------|---------|------------------------|-----------------|-------------|
+| teacher r13_A | — | — | 1.08° | 0.018 | 8.34° | — | — |
+| **v1 H=9** | 0.0124 | 0.00938 | **1.68°** | **0.043** | **9.23°** | 9.7% | 0.271 |
+| v2 H=27 dilated (1,2,4) | 0.0065 | 0.00512 | 1.77° | 0.051 | 9.31° | 11.1% | 0.235 |
+| v3 λ_latent=5 | 0.040* | 0.00756 | 1.77° | 0.039 | 9.16° | 5.3% | 0.237 |
+| v4 cosine LR 5e-4→5e-5 | 0.0113 | 0.00883 | 1.74° | 0.034 | 9.22° | 8.2% | 0.263 |
+
+*v3 `loss_total = action + λ·latent` so raw action loss 0.00262 is close to v1.
+
+**v2 (H=27 dilated, RF=15 steps)**: BC loss halved and latent MSE dropped 13%,
+but hard eval_dr att went 1.68° → 1.77° (5% worse) and vz 0.043 → 0.051
+(19% worse). Head flatten grew 384 → 1664 (4.3x) — plausibly overfits to
+teacher-generated rollouts and generalizes worse to the student's own
+closed-loop obs distribution. **BC loss is saturated at v1 for this
+distillation setup.**
+
+**v3 (λ_latent=5)**: mean-collapse. Latent recovery went 9.7% → 5.3% *despite*
+stronger latent-supervision: the encoder minimizes MSE by shrinking `l_hat`
+toward the teacher's mean rather than spreading it to capture per-env
+variance. Same failure mode as GRU v5. Deployment att identical to v3 and v1.
+
+**v4 (cosine LR)**: modest help on vz only (0.043 → 0.034, 20% ↓) at no cost
+to BC; att is ~equal. Cosine schedule lets the model refine but does not
+overcome the H=9 ceiling.
+
+**Switching peak_roll/pitch at hard DR (10 × 5 s DR re-samples)**: all four
+students sit in a tight cluster (peak_roll 9.16–9.31°, peak_pitch 4.01–4.16°)
+versus teacher 8.34°/3.97°. The switching gap is architectural, not
+loss-dependent.
+
+**StudentInLoopPolicy eval bug (found during v2 eval)**: eval.py built
+`StudentEncoderTCN` with the default `StudentCfg` (H=9) even when the
+checkpoint was trained with H=27 + dilations, triggering a head.0.weight
+size mismatch and silent abort of all three eval steps. The checkpoint
+already saves `vars(cfg)`; fix auto-restores `tcn_history / input_channels /
+conv_channels / conv_kernels / conv_strides / conv_dilations / head_hidden`
+before `make_student_encoder`. v3/v4 used H=9 default so were unaffected.
+Re-ran v2 eval after the fix (queued via `reeval_v2_after_sweep.sh`).
+
+### Decisions
+- **Baseline locked: TCN v1 (H=9, default config)**. v2/v3/v4 all fail to
+  beat it on eval_dr hard attitude; further BC-level tuning is not
+  cost-effective given the ~5% expected delta.
+- **λ_latent stays at 1.0**. λ=5 reliably reproduces mean collapse across
+  both TCN and GRU paths; treat as a confirmed anti-pattern.
+- **H=27 dilated reverted as deployment config**. Kept the code path
+  (dilation arg, CLI overrides) because it may be useful for future
+  experiments with a richer teacher or RL fine-tuning, but deployment uses
+  H=9. Capacity ≠ deployment robustness under closed-loop drift.
+- **Cosine LR kept as an optional lever** (not on by default) — helps vz
+  marginally but bundled together with H=27 in a hypothetical v5 the
+  aggregate gain would be <5%.
+
+### Open Questions
+- The hard-DR gap (teacher 1.08° → student 1.68°) appears to be a **closed-loop
+  distribution-shift problem**, not a BC capacity problem. The BC loss
+  translates cleanly to in-distribution (none DR) performance (v1 student
+  matches teacher there) but fails under hard DR where the student's own
+  trajectories drift off the teacher's support.
+- Next tractable step: **RMA Phase 3 RL fine-tuning** of the student encoder
+  + actor with env rewards, so the encoder sees its own closed-loop obs
+  distribution during training. BC alone is unlikely to close the remaining gap.
+
+---
+
 ## [2026-04-21] TCN v1 Diag + TCN Sweep v2/v3/v4 Launch
 
 ### Context
