@@ -7,9 +7,5 @@
 Direct workflow environments.
 """
 
-import gymnasium as gym
-
 # Import UUV environments to register them with gymnasium
 from . import bluerov  # noqa: F401
-from . import constrained_albc  # noqa: F401
-from . import hero_agent  # noqa: F401
