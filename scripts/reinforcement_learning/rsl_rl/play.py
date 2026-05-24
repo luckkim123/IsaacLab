@@ -58,6 +58,18 @@ parser.add_argument(
     default=None,
     help="FullDOF-TRPO only: uniform yaw init noise in degrees (override env_cfg.play_init_yaw_noise_deg).",
 )
+parser.add_argument(
+    "--show_payload_viz",
+    action="store_true",
+    default=False,
+    help="FullDOF-TRPO only: render payload CoG sphere (mass-scaled) and attachment->CoG bar.",
+)
+parser.add_argument(
+    "--env_spacing",
+    type=float,
+    default=None,
+    help="Override scene.env_spacing (meters). Smaller = envs packed closer.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -190,6 +202,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if args_cli.env_spacing is not None:
+        env_cfg.scene.env_spacing = args_cli.env_spacing
+        print(f"[PLAY] env_spacing override = {args_cli.env_spacing}", flush=True)
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -211,6 +226,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.play_init_yaw_deg is not None and hasattr(env_cfg, "play_init_yaw_noise_deg"):
             env_cfg.play_init_yaw_noise_deg = args_cli.play_init_yaw_deg
     print(f"[PLAY] play_mode set. env_cfg.num_envs={env_cfg.scene.num_envs}", flush=True)
+
+    if args_cli.show_payload_viz and hasattr(env_cfg, "enable_payload_viz"):
+        env_cfg.enable_payload_viz = True
+        print("[PLAY] payload CoG visualization enabled.", flush=True)
 
     # FullDOF-TRPO: optional DR scale override (none=0 .. hard=1).
     # Interpolate between true nominal (scale=0) and HardDR (scale=1).

@@ -16,7 +16,7 @@ CUDA_VISIBLE_DEVICES=1 ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/tr
     --task Isaac-FullDOF-TRPO-v0 \
     --teacher_run_dir logs/rsl_rl/fulldof_albc/2026-04-20_20-08-38_r13_A \
     --teacher_checkpoint model_4999.pt \
-    --num_envs 4096 \
+    --num_envs 2048 \
     --max_iterations 1000 \
     --n_steps_per_rollout 24 \
     --n_epochs 5 \
