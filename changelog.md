@@ -51,16 +51,50 @@ All 11 envs (5 BlueROV + 6 FullDOF) re-register from the overlays inside a
 launched app, entry_points reading `marinelab.tasks.bluerov` /
 `constrained_albc.envs.*`. isaaclab imports cleanly with 0 UUV/albc envs leaking.
 
+### Decisions
+- **External-extension overlay over thin-patch fork.** marinelab/constrained-albc
+  self-register Gym envs via their own pyproject entry-points, so isaaclab core needs
+  zero registration edits — chosen so upstream rebase stays conflict-free (HORA/RMA-style
+  clean-fork convention). Rejected: keeping the registration __init__ edits as a documented
+  patch (would re-conflict on every upstream pull).
+- **Per-repo git history strategy:** constrained-albc preserved via `git filter-repo`
+  (research blame value high); marinelab clean-start (junior-facing deploy).
+- **Committed the 11 in-progress research files (5bb7bcd8fb) before re-extracting.** A first
+  filter-repo extract took isaaclab's COMMITTED tree, but the 11 research edits were
+  uncommitted working-tree → committed config.py passed `k_bias=` with no matching rewards.py →
+  import TypeError. Committing made committed==working so the re-extract captured the latest code.
+  Rationale: user confirmed working-tree is source of truth ("only the latest r13a/student code matters").
+- **Deleted r13a_hist5/10/act3/layernorm + feat/constrained-norbc branches (not migrated).**
+  Confirmed 2026-04-21 intermediate ablation snapshots: `diff main..r13a` is all-insertions (those
+  albc files absent from main since Phase 3 moved them), r13_A already baseline-locked in
+  experiments_index.json, final code lives in constrained-albc. isaaclab must stay a pure simulator
+  fork, so albc-research branches don't belong there. Not backed up elsewhere, but final code is safe.
+
+### Lessons
+- **git-lfs install has repo-wide side effects.** Installing git-lfs (for marinelab meshes) activated
+  isaaclab's pre-existing upstream LFS rules (`*.dae/*.obj/*.pt`). Old isaaclab main had 9 uuv meshes
+  committed as plain blobs ("should have been pointers"), blocking a branch fast-forward. Fix:
+  `GIT_LFS_SKIP_SMUDGE=1 git -c filter.lfs.smudge= ... reset --hard <target>` (meshes deleted there anyway).
+- **`git clone` of a multi-branch repo drags ALL branches.** constrained-albc (cloned from isaaclab for
+  filter-repo) inherited 9 isaaclab branches incl. a stale pre-migration `main`. Cleaned to single main:
+  deleted stale main + renamed work branch + dropped 7 unrelated branches.
+- Pre-split staging: the 4 student launchers were grouped under `scripts/student/` (d0c54a74) then their
+  internal paths re-fixed post-split (train_student.py → constrained-albc/scripts/, eval → analysis/,
+  sibling calls via BASH_SOURCE dir).
+
 ### Notes
-- Pre-split: the 11 in-progress research files (EMA-bias reward, payload viz, TDC
-  refinements) were committed (5bb7bcd8fb) so filter-repo captured the latest code
-  (a first extract had hit a committed-vs-working-tree mismatch).
 - **Retained fork couplings** (NOT removed): `isaaclab_rl` cfg fields
   (`state_dependent_std`, `weight_decay`) and the forked `rsl_rl` package —
   constrained-albc depends on both at runtime (documented in its docs/architecture.md).
 - 1 pre-existing isaaclab test bug (`test_update_buoyancy_force_subset`) carried over,
   not migration-induced.
-- All three repos are local-only (not pushed).
+- All three repos are now on a single `main` branch, local-only (not pushed).
+
+### Open Questions / next steps
+- Push all 3 repos (create GitHub repos; constrained-albc visibility=private). origin still has
+  isaaclab's old feat/encoder-tdc-integration + main remote branches — decide their fate on push.
+- Fresh-machine deploy must provide the forked rsl_rl + isaaclab_rl cfg edits, else constrained-albc fails.
+- marinelab/constrained-albc have no git remotes yet.
 
 ## [2026-04-22] Dead code purge after r13_A baseline lock
 
