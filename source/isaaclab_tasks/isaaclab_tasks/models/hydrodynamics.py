@@ -512,8 +512,18 @@ class HydrodynamicsModel:
         self,
         env_ids: torch.Tensor | Sequence[int],
         velocity: torch.Tensor | None = None,
+        strength: torch.Tensor | None = None,
     ) -> None:
-        """Set ocean current velocity for specified environments."""
+        """Set ocean current velocity for specified environments.
+
+        Args:
+            env_ids: Environment indices to update.
+            velocity: Explicit per-env (n, 6) velocity. If None, sampled uniformly from
+                [-max_velocity, +max_velocity] plus optional gaussian noise.
+            strength: Optional per-env scale in [0, 1] applied to the sampled velocity
+                (ignored when ``velocity`` is given). Used by DORAEMON to expand
+                ocean current difficulty from 0 (nominal) to 1 (full range).
+        """
         env_ids = self._to_env_ids(env_ids)
 
         if velocity is None:
@@ -523,6 +533,9 @@ class HydrodynamicsModel:
             if self._current_noise_scale.any():
                 noise = torch.randn(len(env_ids), 6, device=self.device) * self._current_noise_scale
                 velocity = velocity + noise
+
+            if strength is not None:
+                velocity = velocity * strength.unsqueeze(-1)
 
         self._current_velocity[env_ids] = velocity
 
