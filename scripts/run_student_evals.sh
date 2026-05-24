@@ -20,17 +20,17 @@ run() {
 }
 
 # 1. TCN switching (zero-cmd DR re-sample)
-run eval_tcn_switching ./isaaclab.sh -p scripts/analysis/eval_dr_switching.py \
+run eval_tcn_switching ./isaaclab.sh -p scripts/analysis/eval_dr.py segmented \
     --teacher_ckpt "$TEACHER" --student_ckpt "$TCN_CKPT" \
     --encoder_type tcn --num_envs 64 --headless
 
 # 2. GRU command-tracking DR sweep
-run eval_gru_dr ./isaaclab.sh -p scripts/analysis/eval_student_dr.py \
+run eval_gru_dr ./isaaclab.sh -p scripts/analysis/eval_student.py dr \
     --teacher_ckpt "$TEACHER" --student_ckpt "$GRU_CKPT" \
     --encoder_type gru --num_envs 64 --headless
 
 # 3. GRU switching
-run eval_gru_switching ./isaaclab.sh -p scripts/analysis/eval_dr_switching.py \
+run eval_gru_switching ./isaaclab.sh -p scripts/analysis/eval_dr.py segmented \
     --teacher_ckpt "$TEACHER" --student_ckpt "$GRU_CKPT" \
     --encoder_type gru --num_envs 64 --headless
 
