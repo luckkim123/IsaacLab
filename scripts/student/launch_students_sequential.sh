@@ -6,7 +6,7 @@ cd /workspace/isaaclab
 
 echo "[sequential $(date)] START — TCN first, then GRU"
 
-./scripts/launch_student_tcn.sh
+./scripts/student/launch_student_tcn.sh
 TCN_RC=$?
 echo "[sequential $(date)] TCN finished rc=${TCN_RC}"
 
@@ -15,7 +15,7 @@ if [ "$TCN_RC" -ne 0 ]; then
     exit "$TCN_RC"
 fi
 
-./scripts/launch_student_gru.sh
+./scripts/student/launch_student_gru.sh
 GRU_RC=$?
 echo "[sequential $(date)] GRU finished rc=${GRU_RC}"
 
