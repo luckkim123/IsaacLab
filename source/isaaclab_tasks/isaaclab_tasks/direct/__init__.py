@@ -7,5 +7,3 @@
 Direct workflow environments.
 """
 
-# Import UUV environments to register them with gymnasium
-from . import bluerov  # noqa: F401
