@@ -24,6 +24,44 @@ Per-round detail (Rounds 1-8, encoder ablation) lives in `docs/hero/experiments/
 <!-- Active entries go below. Previous session log archived to
      docs/hero/changelog_r9_to_student_v1.md on 2026-04-22. -->
 
+## [2026-05-25] Env repo 3-split: isaaclab / marinelab / constrained-albc
+
+### Context
+The single isaaclab tree mixed three concerns: upstream framework, a public
+underwater-environment layer (bluerov + UUV assets + shared marine physics),
+and private research (constrained ALBC + TDC + student). Split into three
+purpose-scoped repos with an external-extension overlay architecture so the
+isaaclab fork stays a zero-touch clean fork and juniors get a clean public
+deploy path. Design: `docs/superpowers/specs/2026-05-25-repo-3split-design.md`.
+Plan: `docs/superpowers/plans/2026-05-25-repo-3split.md`.
+
+### What moved
+- **marinelab** (`/workspace/marinelab`, public overlay): `models/` →
+  `marinelab/physics/` (Fossen hydro + thruster), uuv assets → `marinelab/assets/`
+  (Git LFS, 18 meshes), bluerov env → `marinelab/tasks/bluerov/`,
+  `isaaclab/utils/volume.py` → `marinelab/utils/`. Self-registers 5 Isaac-BlueROV-*.
+- **constrained-albc** (`/workspace/constrained-albc`, private, history preserved
+  via git filter-repo, 128 commits): constrained_full_albc + _tdc + student +
+  `scripts/analysis/` → `constrained_albc/analysis/`. Self-registers 6 Isaac-FullDOF-*.
+  Depends on marinelab. cli_args.py vendored into analysis/ (was a broken relative path).
+- **isaaclab**: reverted 3 registration __init__ edits + volume export → clean fork.
+
+### Verification
+All 11 envs (5 BlueROV + 6 FullDOF) re-register from the overlays inside a
+launched app, entry_points reading `marinelab.tasks.bluerov` /
+`constrained_albc.envs.*`. isaaclab imports cleanly with 0 UUV/albc envs leaking.
+
+### Notes
+- Pre-split: the 11 in-progress research files (EMA-bias reward, payload viz, TDC
+  refinements) were committed (5bb7bcd8fb) so filter-repo captured the latest code
+  (a first extract had hit a committed-vs-working-tree mismatch).
+- **Retained fork couplings** (NOT removed): `isaaclab_rl` cfg fields
+  (`state_dependent_std`, `weight_decay`) and the forked `rsl_rl` package —
+  constrained-albc depends on both at runtime (documented in its docs/architecture.md).
+- 1 pre-existing isaaclab test bug (`test_update_buoyancy_force_subset`) carried over,
+  not migration-induced.
+- All three repos are local-only (not pushed).
+
 ## [2026-04-22] Dead code purge after r13_A baseline lock
 
 ### Context
