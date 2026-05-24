@@ -4,22 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-## Historical changelogs
+## Experiment history
 
-- [R9 → Student v1](docs/hero/changelog_r9_to_student_v1.md) (2026-04-18 ~ 2026-04-22)
-- [Round 8: Error-Gated Integration](docs/hero/experiments/round8_gated_integral.md) (BEST POLICY)
-- [Round 7: Integral Observation + EpsSmooth](docs/hero/experiments/round7_integral_obs.md)
-- [Round 6: Axis-Specific Shape Calibration](docs/hero/experiments/round6_axis_calibration.md)
-- [Round 5: Constraint Budget Tuning](docs/hero/experiments/round5_constraint_tuning.md)
-- [Round 4: Saturating Penalty](docs/hero/experiments/round4_saturating_penalty.md)
-- [Round 3: SS Error Structural Fixes](docs/hero/experiments/round3_ss_structural.md)
-- [Round 2: PerDimEnt Validation](docs/hero/experiments/round2_perdiment_validation.md)
-- [Round 1: Per-Dim Noise Comparison](docs/hero/experiments/round1_noise_comparison.md)
-- [Pre-Round Infrastructure](docs/hero/experiments/pre_round_infrastructure.md) (2026-04-04 ~ 2026-04-13)
-- [Full ALBC early development](docs/hero/changelog_full_albc_early.md) (2026-03-31 ~ 2026-04-02)
-- [Constrained ALBC development](docs/hero/changelog_constrained_albc.md) (2026-03-27 ~ 2026-03-31)
-- [Legacy development](docs/hero/changelog_legacy.md) (2026-03-05 ~ 2026-03-26)
-- [Encoder ablation study](docs/hero/experiments/encoder_ablation.md) (Steps 0-19)
+**Searchable index:** [`docs/hero/experiments_index.json`](docs/hero/experiments_index.json) — 49 runs + 17 settled
+decisions, queryable with `jq` (e.g. `jq '.experiments[] | select(.verdict=="BASELINE")'`). Each entry's
+`source` field points to the full narrative in the archived changelogs below.
+
+Archived changelogs (full narrative, preserved in `docs/hero/archive/`):
+
+- [R9 → Student v1](docs/hero/archive/changelog_r9_to_student_v1.md) (2026-04-18 ~ 2026-04-22)
+- [Full ALBC early development](docs/hero/archive/changelog_full_albc_early.md) (2026-03-31 ~ 2026-04-02)
+- [Constrained ALBC development](docs/hero/archive/changelog_constrained_albc.md) (2026-03-27 ~ 2026-03-31, deprecated project)
+- [Legacy development](docs/hero/archive/changelog_legacy.md) (2026-03-05 ~ 2026-03-26)
+
+Per-round detail (Rounds 1-8, encoder ablation) lives in `docs/hero/experiments/`.
 
 ---
 
