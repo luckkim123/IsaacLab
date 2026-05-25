@@ -122,13 +122,6 @@ class RslRlPpoAlgorithmCfg:
     Otherwise, the advantage is normalized over the entire collected trajectories.
     """
 
-    weight_decay: float = 0.0
-    """Weight decay (L2 regularization) for Adam optimizer. Default is 0.0 (no decay).
-
-    Prevents encoder weight explosion that causes sigmoid/tanh saturation.
-    Recommended: 1e-4 for encoder-based architectures.
-    """
-
     rnd_cfg: RslRlRndCfg | None = None
     """The RND configuration. Default is None, in which case RND is not used."""
 
