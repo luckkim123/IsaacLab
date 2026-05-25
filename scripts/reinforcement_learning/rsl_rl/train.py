@@ -75,7 +75,6 @@ if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
 
 """Rest everything follows."""
 
-import importlib
 import logging
 import os
 import time
@@ -95,7 +94,7 @@ from isaaclab.envs import (
 from isaaclab.utils.dict import print_dict
 from isaaclab.utils.io import dump_yaml
 
-from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
+from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
@@ -121,6 +120,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
+
+    # handle deprecated configurations
+    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, installed_version)
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -195,25 +197,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    # Runner dispatch: custom runners are resolved by class_name via lazy import.
-    _RUNNER_MAP = {
-        "FullDOFConstraintEncoderRunner": (
-            "isaaclab_tasks.direct.constrained_full_albc.runners",
-            "ConstraintEncoderRunner",
-        ),
-        "OnPolicyDoraemonRunner": (
-            "isaaclab_tasks.direct.constrained_full_albc.runners",
-            "OnPolicyDoraemonRunner",
-        ),
-    }
-
-    if agent_cfg.class_name in _RUNNER_MAP:
-        module_path, cls_name = _RUNNER_MAP[agent_cfg.class_name]
-        module = importlib.import_module(module_path)
-        runner_cls = getattr(module, cls_name)
-        print(f"[INFO] Using {cls_name} for training.")
-        runner = runner_cls(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    elif agent_cfg.class_name == "OnPolicyRunner":
+    # create runner from rsl-rl
+    if agent_cfg.class_name == "OnPolicyRunner":
         runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
     elif agent_cfg.class_name == "DistillationRunner":
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
