@@ -24,6 +24,53 @@ Per-round detail (Rounds 1-8, encoder ablation) lives in `docs/hero/experiments/
 <!-- Active entries go below. Previous session log archived to
      docs/hero/changelog_r9_to_student_v1.md on 2026-04-22. -->
 
+## [2026-05-25] isaaclab pristine-restore: strip scripts/ contamination, overlay owns train entry
+
+### Context
+A FullDOF smoke run after the 3-split failed at runner creation
+(`ModuleNotFoundError: isaaclab_tasks.direct.constrained_full_albc`). Audit found
+isaaclab `scripts/` still carried our code: train.py + play.py held a hardcoded
+`_RUNNER_MAP` pointing at the defunct `constrained_full_albc` namespace, plus 9
+hero/full_dof demo scripts, a play_student.py, and an accidental `import gymnasium`
+deletion in `direct/__init__.py`. The split had left isaaclab non-pristine at the
+scripts layer.
+
+### Experiments / failures
+- **Restored scripts/ from `upstream/main` first — wrong baseline.** Our isaaclab_rl
+  is an OLD fork (fork point `cbf51abb`); upstream/main's train.py imports
+  `handle_deprecated_rsl_rl_cfg`, a symbol our fork lacks. Result: even stock
+  `Isaac-Cartpole-v0` died at import with `ImportError: cannot import name
+  'handle_deprecated_rsl_rl_cfg'`. (User caught this by running it directly.)
+- **Fix: restore from the fork point `cbf51abb`, not current upstream/main.** That tree
+  is contemporaneous with our isaaclab_rl and carries zero of our code. Verified: stock
+  Isaac-Cartpole trains via main train.py (0.48s); FullDOF trains via the overlay
+  launcher (`Using overlay runner ConstraintEncoderRunner` → iteration 0→1, 2.94s);
+  both exit 0.
+
+### Decisions
+- **"pristine" = our-code-free AND compatible with our forked isaaclab_rl** — NOT
+  "byte-identical to today's upstream/main". Restore baseline is the merge-base
+  `cbf51abb` (`git checkout cbf51abb -- scripts/...`). isaaclab_rl (`weight_decay`)
+  and the forked rsl_rl package stay an INTENTIONAL fork (architecture.md). Resolves
+  the conflict between `feedback-isaaclab-pristine` and the split design.
+- **Overlay owns its train entry**, not a runpy delegation. Upstream train.py hardcodes
+  only OnPolicyRunner/DistillationRunner; our two custom runners
+  (ConstraintEncoderRunner, OnPolicyDoraemonRunner) can't share one alias branch. So
+  `constrained-albc/scripts/train.py` replicates main() but owns its `_RUNNER_MAP` + a
+  one-shot import hook for gym.register. Rejected runpy delegation (cannot dispatch two
+  custom runners).
+- **Replicate against our forked isaaclab_rl, not upstream/main** — same `handle_deprecated`
+  lesson applied to the launcher: reconcile imports against
+  `HEAD:source/isaaclab_rl/.../rsl_rl/__init__.py`.
+- **Play entry deferred (YAGNI).** play.py restored; FullDOF play not re-created —
+  `eval_dr.py static` is the canonical Full-DOF eval tool and self-registers.
+
+### Open Questions
+- The 108-file `source/` diff vs upstream/main is mostly upstream's own post-fork changes,
+  not ours; a future rebase onto a newer upstream tag would reconcile them. Not urgent.
+- Design/plan: `constrained-albc/docs/superpowers/specs/2026-05-25-isaaclab-pristine-restore-design.md`,
+  `.../plans/2026-05-25-isaaclab-pristine-restore.md`.
+
 ## [2026-05-25] Env repo 3-split: isaaclab / marinelab / constrained-albc
 
 ### Context
