@@ -73,3 +73,7 @@ tests/
 # TacSL sensor
 **/tactile_record/*
 **/gelsight_r15_data/*
+
+# oh-my-claudecode / oh-my-experiments harness state (pristine fork -- never track)
+.omc/
+.omx/
